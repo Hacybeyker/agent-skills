@@ -14,6 +14,8 @@ metadata:
 
 Commits, push, PRs y ramas. Lo que diga el proyecto manda sobre esta skill.
 
+**Estándares:** [Conventional Commits 1.0.0](https://www.conventionalcommits.org/) con los tipos de `@commitlint/config-conventional`, las convenciones de mensajes de git (título corto, cuerpo a 72 columnas, trailers), GitHub Flow para ramas y PRs, y [Keep a Changelog 1.1.0](https://keepachangelog.com/) para el changelog.
+
 ## 1. Lee las reglas del proyecto
 
 Antes de tocar git, busca en `AGENTS.md` (y en `CLAUDE.md` si existe) lo que diga sobre commits, ramas, push o PRs. Lo que encuentres **prevalece** sobre todo lo de abajo. Fíjate sobre todo en:
@@ -49,7 +51,9 @@ Si el proyecto no define otro, usa **Conventional Commits sin emoji**:
 | `chore` | Mantenimiento |
 | `revert` | Revierte un commit |
 
-- Título en imperativo y en presente, de 72 caracteres como máximo.
+- Título en imperativo y sin punto final: idealmente hasta 50 caracteres, como máximo 72.
+- Cuerpo separado por una línea en blanco, con líneas de hasta 72 caracteres. Explica **qué** cambió y **por qué**, no cómo.
+- Footers como trailers de git: `Closes #12`, `Refs #34`, `BREAKING CHANGE: ...`.
 - `scope` = el módulo, la capa o la feature afectada (`auth`, `data`, `ci`).
 - Cambio incompatible: `!` tras el type (`feat!: ...`) y footer `BREAKING CHANGE: ...`.
 - **Emojis** solo si el proyecto los pide o su historial los usa de forma consistente: `✨ feat`, `🐛 fix`, `⚡ perf`, `♻️ refactor`, `💄 style`, `✅ test`, `📝 docs`, `📦 build`, `👷 ci`, `🔧 chore`, `⏪ revert`, `💥` para breaking.
@@ -78,28 +82,40 @@ Si el proyecto no define otro, usa **Conventional Commits sin emoji**:
 
 Solo si existe `CHANGELOG.md` con una sección `## [Unreleased]`, o si `AGENTS.md` pide documentar cada cambio:
 
-| Commit | Sección |
+Usa las seis secciones estándar de Keep a Changelog:
+
+| Cambio | Sección |
 | --- | --- |
 | `feat` | `Added` |
 | `fix` | `Fixed` |
-| `perf`, o un `refactor` que el usuario note | `Changed` (o `Enhancement` si el proyecto la usa) |
+| `perf`, o un `refactor` que el usuario note | `Changed` |
+| Algo que se va a quitar | `Deprecated` |
+| Algo que se quitó | `Removed` |
 | Seguridad | `Security` |
 | `docs`, `test`, `build`, `ci`, `chore` | No van, salvo que sean relevantes |
 
-Usa las secciones, el idioma y el estilo que ya tenga el archivo. Una línea por cambio, en lenguaje claro.
+Usa el idioma y el estilo del archivo. Una línea por cambio, en lenguaje claro. Si el archivo usa una sección que no es estándar (por ejemplo `Enhancement`), avisa y propone pasarla a `Changed`.
 
 ## 5. Push y pull request
 
 - **Pide confirmación antes de `git push`**, salvo que el usuario ya lo haya pedido en este mismo mensaje.
-- Si el proyecto trabaja con PR, no hagas push a la rama principal: crea una rama `<type>/<descripcion-corta>` (`feat/login-biometrico`).
+- Si el proyecto trabaja con PR, no hagas push a la rama principal: crea una rama de vida corta `<type>/<issue>-<descripcion>` (`feat/123-login-biometrico`, o sin número si no hay issue).
+- **PRs pequeños y de un solo propósito.** Si superan unas 400 líneas cambiadas o mezclan objetivos, propón dividirlos.
+- **El título del PR sigue Conventional Commits**: al hacer *squash and merge* se convierte en el commit de la rama principal. Usa *squash and merge* salvo que el proyecto diga otra cosa.
+- Si aún no está listo para revisión, ábrelo como borrador (`--draft`).
 - PR con `gh` (verifica antes con `gh auth status`):
   ```bash
   gh pr create --title "<título con formato de commit>" --body "$(cat <<'MSG'
   ## Qué cambia
   - ...
 
+  ## Por qué
+  - ...
+
   ## Cómo se verificó
   - ...
+
+  ## Capturas (si cambia la UI)
 
   Closes #N
   MSG

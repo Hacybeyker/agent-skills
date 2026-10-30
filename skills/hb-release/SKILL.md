@@ -14,6 +14,8 @@ metadata:
 
 De `[Unreleased]` a una versión publicada. Lo que diga el proyecto manda sobre esta skill.
 
+**Estándares:** [Semantic Versioning 2.0.0](https://semver.org/), [Keep a Changelog 1.1.0](https://keepachangelog.com/), tags `vX.Y.Z`, y el cálculo de versión desde Conventional Commits que usan herramientas como release-please y semantic-release.
+
 ## 1. Lee las reglas del proyecto
 
 Busca en `AGENTS.md` las secciones de versionado, release o publicación. Prevalecen sobre todo lo de abajo. Fíjate en:
@@ -44,11 +46,15 @@ Calcula SemVer a partir de `[Unreleased]` y de los commits:
 | Alguna funcionalidad nueva (`feat`, `Added`) | MINOR |
 | Solo correcciones o mejoras internas | PATCH |
 
+- Pre-releases con identificadores SemVer: `1.3.0-alpha.1`, `1.3.0-beta.1`, `1.3.0-rc.1`.
+- La primera versión pública es `1.0.0`. Antes de eso, el proyecto vive en `0.y.z`.
+
 Si `AGENTS.md` define otra regla, usa esa. **Propón la versión y espera confirmación** antes de cambiar archivos.
 
 ## 4. Actualiza el CHANGELOG
 
-- Si `[Unreleased]` está vacío pero hay commits, arma las entradas desde los commits: `feat` → `Added`, `fix` → `Fixed`, mejoras → `Changed` (o `Enhancement` si el proyecto la usa), seguridad → `Security`. Omite `docs`, `test`, `build`, `ci` y `chore` salvo que importen.
+- Usa las seis secciones estándar: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed` y `Security`. Si el archivo usa otra (por ejemplo `Enhancement`), avisa y propone pasarla a `Changed`.
+- Si `[Unreleased]` está vacío pero hay commits, arma las entradas desde los commits: `feat` → `Added`, `fix` → `Fixed`, mejoras → `Changed`, seguridad → `Security`. Omite `docs`, `test`, `build`, `ci` y `chore` salvo que importen.
 - Cambia `## [Unreleased]` por `## [x.y.z] - AAAA-MM-DD` y agrega uno nuevo y vacío encima. Copia el estilo de los encabezados que ya existen: el separador, el formato de fecha y si llevan emoji.
 - Si las versiones anteriores abren con un párrafo de resumen, escribe uno.
 - Si al final hay enlaces de comparación (`[1.2.0]: .../compare/v1.1.0...v1.2.0`), actualízalos.
@@ -72,7 +78,7 @@ El código de build (`versionCode` y equivalentes) sube de 1 en 1 y nunca baja.
 ## 6. Commit y tag
 
 1. Commit con las reglas de **hb-commit** (formato e idioma del proyecto). Por ejemplo, `chore(release): v1.2.0`.
-2. Tag anotado con el **mismo formato que los tags existentes**: `git tag -a v1.2.0 -m "v1.2.0"`, o `1.2.0` si el proyecto no usa la `v`. Si el tag lo crea CI, omite este paso.
+2. Tag anotado `vX.Y.Z`: `git tag -a v1.2.0 -m "v1.2.0"`. Si el proyecto ya tiene tags sin `v`, mantén su formato para no romper la secuencia, y avisa de que el estándar es `vX.Y.Z`. Si el tag lo crea CI, omite este paso.
 
 ## 7. Publica (solo con confirmación)
 
