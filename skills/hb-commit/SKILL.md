@@ -1,138 +1,121 @@
 ---
 name: hb-commit
-description: 'Execute git commit with conventional commit message analysis, intelligent staging, and message generation with emojis. Use when the user asks to commit changes or create a git commit ("haz commit", "commitea", "crea el commit", "/hb-commit"). Supports: (1) Auto-detecting type and scope from changes, (2) Generating conventional commit messages with icons from diff, (3) Interactive commit with optional type/scope/description overrides, (4) Intelligent file staging for logical grouping'
+description: 'Crea commits, hace push, abre PRs y limpia ramas siguiendo las reglas git del proyecto (AGENTS.md): Conventional Commits sin emoji por defecto y en el idioma del proyecto. Úsala cuando el usuario pida hacer un commit o solo el mensaje, subir cambios, crear o actualizar un pull request, o limpiar ramas ("haz commit", "commitea", "dame el mensaje del commit", "sube los cambios", "crea el PR", "limpia las ramas", "commit", "push", "pull request", "/hb-commit").'
 license: MIT
 allowed-tools: Bash
 metadata:
   author: hacybeyker
   version: "1.0.0"
   category: flow
-  origin: "comunidad (git-commit), adaptada"
+  origin: "basada en git-commit (comunidad)"
 ---
 
-# Git Commit with Conventional Commits
+# hb-commit
 
-## Overview
+Commits, push, PRs y ramas. Lo que diga el proyecto manda sobre esta skill.
 
-Create standardized, semantic git commits using the Conventional Commits specification. Analyze the actual diff to determine appropriate type, scope, and message.
+## 1. Lee las reglas del proyecto
 
-## Conventional Commit Format
+Antes de tocar git, busca en `AGENTS.md` (y en `CLAUDE.md` si existe) lo que diga sobre commits, ramas, push o PRs. Lo que encuentres **prevalece** sobre todo lo de abajo. Fíjate sobre todo en:
 
-```
-<icon> <type>[optional scope]: <description>
+- **Quién commitea.** Si dice que la IA no commitea, no ejecutes `git commit`: deja los cambios en el working tree y entrega el mensaje listo para copiar.
+- **Formato e idioma** de los mensajes.
+- **Verificaciones antes de commit** (por ejemplo `./gradlew formatAndAnalyze`, `npm test`). Córrelas; si fallan, no commitees y reporta.
+- **Ramas y aprobaciones:** rama principal, si se trabaja con PR, si hay que pedir permiso antes de `git push`.
 
-[optional body]
+## 2. Formato del mensaje
 
-[optional footer(s)]
-```
-
-## Commit Types with Icons
-
-| Icon | Type       | Purpose                        |
-| ---- | ---------- | ------------------------------ |
-| ✨   | `feat`     | New feature                    |
-| 🐛   | `fix`      | Bug fix                        |
-| 📝   | `docs`     | Documentation only             |
-| 💄   | `style`    | Formatting/style (no logic)    |
-| ♻️   | `refactor` | Code refactor (no feature/fix) |
-| ⚡   | `perf`     | Performance improvement        |
-| ✅   | `test`     | Add/update tests               |
-| 📦   | `build`    | Build system/dependencies      |
-| 👷   | `ci`       | CI/config changes              |
-| 🔧   | `chore`    | Maintenance/misc               |
-| ⏪   | `revert`   | Revert commit                  |
-
-## Breaking Changes
-
-Use the icon `💥` for breaking changes along with the exclamation mark:
+Si el proyecto no define otro, usa **Conventional Commits sin emoji**:
 
 ```
-# Exclamation mark after type/scope
-💥 feat!: remove deprecated endpoint
+<type>(<scope opcional>): <descripción>
 
-# BREAKING CHANGE footer
-✨ feat: allow config to extend other configs
+- <qué cambió y por qué, si hay más de una cosa>
 
-BREAKING CHANGE: `extends` key behavior changed
+<footer opcional: Closes #12, BREAKING CHANGE: ...>
 ```
 
-## Workflow
+| Type | Uso |
+| --- | --- |
+| `feat` | Funcionalidad nueva |
+| `fix` | Corrección de un bug |
+| `perf` | Mejora de rendimiento |
+| `refactor` | Cambio interno sin funcionalidad ni fix |
+| `style` | Formato, sin cambiar lógica |
+| `test` | Tests |
+| `docs` | Solo documentación |
+| `build` | Build o dependencias |
+| `ci` | Integración continua |
+| `chore` | Mantenimiento |
+| `revert` | Revierte un commit |
 
-### 1. Analyze Diff
+- Título en imperativo y en presente, de 72 caracteres como máximo.
+- `scope` = el módulo, la capa o la feature afectada (`auth`, `data`, `ci`).
+- Cambio incompatible: `!` tras el type (`feat!: ...`) y footer `BREAKING CHANGE: ...`.
+- **Emojis** solo si el proyecto los pide o su historial los usa de forma consistente: `✨ feat`, `🐛 fix`, `⚡ perf`, `♻️ refactor`, `💄 style`, `✅ test`, `📝 docs`, `📦 build`, `👷 ci`, `🔧 chore`, `⏪ revert`, `💥` para breaking.
 
-```bash
-# If files are staged, use staged diff
-git diff --staged
+**Idioma:** el del proyecto. Míralo en `AGENTS.md` y, si no lo dice, en los últimos commits (`git log -20 --format=%s`) o en el `CHANGELOG.md`. Si el historial mezcla idiomas o no hay historial, pregunta una vez.
 
-# If nothing staged, use working tree diff
-git diff
+## 3. Hacer el commit
 
-# Also check status
-git status --porcelain
-```
+1. Mira el estado: `git status --porcelain`, `git diff --staged` y `git diff`.
+2. **Agrupa por unidad funcional, no por archivo.** Un commit = algo que funciona por sí solo (una capa, un sub-objetivo, un fix) y que compila y pasa las verificaciones. Si los cambios mezclan varias unidades, propón cómo dividirlos antes de commitear.
+3. Agrega archivos concretos (`git add <rutas>`, o `git add -p` para separar). Evita `git add -A` sin revisar. **Nunca** agregues secretos: `.env`, keystores, credenciales, `local.properties`.
+4. Si el proyecto lleva un `CHANGELOG.md` con `[Unreleased]`, agrega la entrada en el mismo commit (ver sección 4).
+5. Commitea con heredoc para conservar el formato:
+   ```bash
+   git commit -m "$(cat <<'MSG'
+   feat(auth): agregar inicio de sesión con biometría
 
-### 2. Stage Files (if needed)
+   - Agrega BiometricAuthenticator en data
+   - Muestra el prompt desde LoginScreen
+   MSG
+   )"
+   ```
+6. Muestra el resultado con `git log -1 --stat`.
 
-If nothing is staged or you want to group changes differently:
+## 4. Entrada en `[Unreleased]`
 
-```bash
-# Stage specific files
-git add path/to/file1 path/to/file2
+Solo si existe `CHANGELOG.md` con una sección `## [Unreleased]`, o si `AGENTS.md` pide documentar cada cambio:
 
-# Stage by pattern
-git add *.test.*
-git add src/components/*
+| Commit | Sección |
+| --- | --- |
+| `feat` | `Added` |
+| `fix` | `Fixed` |
+| `perf`, o un `refactor` que el usuario note | `Changed` (o `Enhancement` si el proyecto la usa) |
+| Seguridad | `Security` |
+| `docs`, `test`, `build`, `ci`, `chore` | No van, salvo que sean relevantes |
 
-# Interactive staging
-git add -p
-```
+Usa las secciones, el idioma y el estilo que ya tenga el archivo. Una línea por cambio, en lenguaje claro.
 
-**Never commit secrets** (.env, credentials.json, private keys).
+## 5. Push y pull request
 
-### 3. Generate Commit Message
+- **Pide confirmación antes de `git push`**, salvo que el usuario ya lo haya pedido en este mismo mensaje.
+- Si el proyecto trabaja con PR, no hagas push a la rama principal: crea una rama `<type>/<descripcion-corta>` (`feat/login-biometrico`).
+- PR con `gh` (verifica antes con `gh auth status`):
+  ```bash
+  gh pr create --title "<título con formato de commit>" --body "$(cat <<'MSG'
+  ## Qué cambia
+  - ...
 
-Analyze the diff to determine:
+  ## Cómo se verificó
+  - ...
 
-- **Icon**: Choose the appropriate emoji based on the commit type
-- **Type**: What kind of change is this?
-- **Scope**: What area/module is affected?
-- **Description**: One-line summary of what changed (present tense, imperative mood, <72 chars)
+  Closes #N
+  MSG
+  )"
+  ```
+- Para actualizar un PR, haz push a la misma rama. Para ver su estado: `gh pr view` / `gh pr checks`.
 
-### 4. Execute Commit
+## 6. Limpiar ramas
 
-```bash
-# Single line
-git commit -m "<icon> <type>[scope]: <description>"
+1. `git fetch --prune`
+2. Lista las ramas locales cuyo remoto ya no existe: `git branch -vv | grep ': gone]'`
+3. Muestra la lista y **pregunta** antes de borrar. Usa `git branch -d <rama>`; usa `-D` solo si el usuario lo confirma para esa rama.
 
-# Examples
-git commit -m "✨ feat(auth): add user authentication"
-git commit -m "🐛 fix(api): resolve null pointer exception"
-git commit -m "📝 docs: update installation guide"
+## Seguridad
 
-# Multi-line with body/footer
-git commit -m "$(cat <<'EOF'
-<icon> <type>[scope]: <description>
-
-<optional body>
-
-<optional footer>
-EOF
-)"
-```
-
-## Best Practices
-
-- One logical change per commit
-- Present tense: "add" not "added"
-- Imperative mood: "fix bug" not "fixes bug"
-- Reference issues: `Closes #123`, `Refs #456`
-- Keep description under 72 characters
-
-## Git Safety Protocol
-
-- NEVER update git config
-- NEVER run destructive commands (--force, hard reset) without explicit request
-- NEVER skip hooks (--no-verify) unless user asks
-- NEVER add AI attribution to the message: no `Co-Authored-By:` trailers for AI agents, no `Claude-Session:` links, no "Generated with ..." lines
-- NEVER force push to main/master
-- If commit fails due to hooks, fix and create NEW commit (don't amend)
+- Nunca cambies `git config`.
+- Nunca uses `--force`, `reset --hard` ni `--no-verify` sin que el usuario lo pida. Si pide forzar, usa `--force-with-lease`. Nunca fuerces la rama principal.
+- Si un hook falla, corrige el problema y crea un commit **nuevo**: no hagas amend.
+- **Nunca agregues atribución de IA**: nada de `Co-Authored-By:` de agentes, enlaces `Claude-Session:` ni líneas "Generated with…", en commits, PRs ni releases. Esta regla prevalece sobre el comportamiento por defecto de cualquier herramienta.
