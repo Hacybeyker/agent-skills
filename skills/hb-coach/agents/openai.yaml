@@ -1,0 +1,6 @@
+interface:
+  display_name: "Software Coach"
+  short_description: "Planes de estudio, lecciones paso a paso y cuaderno HTML para aprender software"
+  default_prompt: "Quiero aprender "
+policy:
+  allow_implicit_invocation: true
