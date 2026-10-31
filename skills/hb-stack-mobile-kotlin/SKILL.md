@@ -4,7 +4,7 @@ description: 'Perfil de stack para apps Android nativas y Kotlin Multiplatform (
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.1.0"
+  version: "1.2.0"
   category: stack
   origin: "fusiona android-best-practices y kmp-best-practices"
 ---
@@ -19,6 +19,15 @@ Cómo se construye una app Android o Kotlin Multiplatform. Se basa en las recome
 2. Elige la variante: la que indique `AGENTS.md` (`Variante: android` o `kmp`). Si no lo indica, es `kmp` cuando algún `build.gradle.kts` aplica `org.jetbrains.kotlin.multiplatform`, y `android` en otro caso.
 3. Lee **solo** las referencias que la tarea necesita (tabla de la sección 5).
 4. Si el código existente de la feature sigue otro patrón (por ejemplo `Effect` por `Channel`), mantén la coherencia dentro de esa feature y propone la migración: no mezcles dos estilos en el mismo archivo.
+
+### Precedencia frente a otras skills
+
+| Tipo de conocimiento | Orden |
+| --- | --- |
+| **Decisiones:** arquitectura, convenciones, estrategia de testing, política de dependencias | `AGENTS.md` > este perfil > skills externas |
+| **Hechos técnicos actuales:** APIs, pasos de migración, versiones, comandos del CLI `android` | Las skills oficiales de Android, siempre que no contradigan una decisión |
+
+Si una skill oficial muestra que un dato técnico de este perfil quedó viejo, sigue la oficial y avisa para actualizar el perfil.
 
 ## 2. Arquitectura
 
@@ -91,7 +100,27 @@ Detalle en [presentation.md](references/presentation.md).
 | Variante Android: Hilt, Navigation 3, Room, DataStore | [variants/android.md](references/variants/android.md) |
 | Variante KMP: estructura, source sets, Koin, Navigation 3 de CMP, Room/DataStore KMP, Ktor | [variants/kmp.md](references/variants/kmp.md) |
 
-## 6. Checklist de calidad
+## 6. Skills oficiales complementarias
+
+Si están instaladas, úsalas para estas tareas (con la precedencia de la sección 1):
+
+| Tarea | Skill |
+| --- | --- |
+| Navigation 3 avanzado: deep links, back stacks múltiples, scenes, devolver resultados | `navigation-3` |
+| Edge-to-edge, insets del IME, legibilidad de las barras del sistema | `edge-to-edge` |
+| Layouts adaptativos (tablets, plegables, escritorio, TV, XR) | `adaptive` |
+| Recomposiciones y frames perdidos | `jetpack-compose-performance` |
+| Trazas, jank, arranque, memoria, batería | `android-profiler` |
+| Riesgos de ANR y stack dumps | `anr-audit-and-fix` |
+| Keep rules redundantes o amplias | `r8-analyzer` |
+| Seguridad de Intents y del manifest | `android-intent-security` |
+| Permisos y componentes IPC | `android-permissions-security` |
+| Políticas de Google Play | `play-policy-insights` |
+| Uso del CLI `android` (proyectos, emuladores, SDK, documentación) | `android-cli` |
+
+**No uses `testing-setup`:** su estrategia (mocks, otra herramienta de screenshots) choca con [testing.md](references/testing.md).
+
+## 7. Checklist de calidad
 
 - [ ] Pasa el DoD del proyecto (por ejemplo `./gradlew formatAndAnalyze` y `./gradlew test`).
 - [ ] Cada use case, ViewModel, mapper y repositorio nuevo tiene sus tests con fakes.
