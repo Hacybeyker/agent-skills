@@ -61,6 +61,7 @@ Se sincronizan a Claude Code. Para no cargarlas en Claude Code: `"syncClaudeAiSk
 | --- | --- | --- |
 | Sin atribución de IA en commits y PRs | `~/.claude/settings.json` | `"attribution": { "commit": "", "pr": "", "sessionUrl": false }` |
 | GitHub desde la terminal | CLI `gh` | Autenticado con token, protocolo SSH |
+| Leer las skills sin preguntar en cada proyecto | `~/.claude/settings.json` | `permissions.additionalDirectories` con `~/.claude/skills`, `~/.agents/skills` y los destinos de sus enlaces |
 
 ## Retirado
 
