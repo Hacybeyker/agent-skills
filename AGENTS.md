@@ -53,7 +53,7 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 ## Versionado y release
 
 - Cada skill tiene su propia versión SemVer en `metadata.version`. El repo no tiene versión global, tags ni `CHANGELOG.md`.
-- Integrar a `main` equivale a publicar: de ahí toman los cambios `git pull` en las máquinas enlazadas y `npx skills update` en las demás.
+- Integrar a `main` equivale a publicar: de ahí toman los cambios `git pull` en las máquinas enlazadas y `pnpm dlx skills update -g` en las demás (con pnpm, nunca npm).
 
 ## Seguridad
 

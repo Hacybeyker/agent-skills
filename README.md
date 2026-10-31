@@ -58,20 +58,35 @@ Lo que edites en el clon se ve al instante, y `git pull` trae los cambios de otr
 
 ### Solo para usarlas (otra máquina u otra persona)
 
-Con la CLI de [skills.sh](https://skills.sh), sin clonar:
+Con la CLI de [skills.sh](https://skills.sh) y **pnpm**, sin clonar. Usa pnpm, no npm: por defecto no ejecuta los scripts de instalación de los paquetes, así que reduce el riesgo de ataques a la cadena de suministro.
+
+Requisitos: Node.js y pnpm (`brew install pnpm`, o `corepack enable pnpm`).
 
 ```bash
-# Todas, globales, para Claude Code y para los agentes que leen ~/.agents/skills
-npx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill '*' -y
+# Ver las skills disponibles, sin instalar nada
+pnpm dlx skills add Hacybeyker/agent-skills --list
 
-# Solo una
-npx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill hb-implement
+# Instalar todas
+pnpm dlx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill '*' -y
 
-npx skills update -g                        # actualizar
-npx skills remove -g --skill hb-implement   # quitar
+# Instalar solo algunas (los nombres van separados por espacio)
+pnpm dlx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill hb-implement hb-review -y
+
+# Ver las instaladas
+pnpm dlx skills ls -g
+
+# Actualizar todas, o solo una
+pnpm dlx skills update -g
+pnpm dlx skills update -g hb-implement
+
+# Quitar una, o todas las instaladas con la CLI (incluidas las de otros repos)
+pnpm dlx skills remove -g --skill hb-implement -y
+pnpm dlx skills remove -g --skill '*' -y
 ```
 
-La CLI **copia** las skills: los cambios llegan con `npx skills update`, no al instante.
+- `-g` instala para tu usuario (en todos tus proyectos). Sin `-g`, se instala solo en el proyecto actual.
+- `-a claude-code universal` elige los agentes: `claude-code` → `~/.claude/skills`; `universal` → `~/.agents/skills` (Gemini en Android Studio, Junie, Codex).
+- La CLI guarda **una copia** en `~/.agents/skills` y un enlace en `~/.claude/skills`. Los cambios del repo llegan con `pnpm dlx skills update -g`, no al instante.
 
 ### Qué no instala ninguna de las dos
 
