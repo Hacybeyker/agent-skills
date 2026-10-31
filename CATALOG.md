@@ -38,6 +38,8 @@ No llevan `hb-` y no se copian a este repo: cada una se actualiza con su propio 
 | `feature-dev` | Anthropic | Flujo genérico de features para proyectos sin `AGENTS.md` |
 | `warp` | Warp | Notificaciones de Warp cuando Claude Code necesita input |
 
+Instalar uno: `claude plugin install <plugin>@claude-plugins-official` (para Warp: `warp@claude-code-warp`, con su marketplace agregado; el origen está en `extraKnownMarketplaces` de `~/.claude/settings.json`).
+
 **Quitados:** `code-review` (redundante con `pr-review-toolkit` y `hb-review`), `commit-commands` (chocaba con el commit propio; lo cubre `hb-commit`), `github` (lo cubre el CLI `gh`), `claude-code-setup` (de uso único), `swift-lsp` (casi no se escribe Swift).
 
 **Cuando hagan falta:** `typescript-lsp` y `pyright-lsp` (web y backend), `jdtls-lsp` (Spring Boot en Java), `plugin-dev` (si se empaquetan skills como plugin).

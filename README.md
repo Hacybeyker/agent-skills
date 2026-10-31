@@ -38,19 +38,42 @@ El mapa completo del entorno (skills externas, plugins y MCP) está en [CATALOG.
 
 ## Instalación
 
+Hay dos formas. Usa **una sola** por máquina.
+
+### Para editar las skills (máquina principal)
+
 ```bash
 git clone git@github.com:Hacybeyker/agent-skills.git ~/Claude/agent-skills
 ~/Claude/agent-skills/install.sh
 ```
 
-`install.sh` crea enlaces simbólicos en:
+`install.sh` **no copia**: crea enlaces simbólicos hacia el clon, así que el clon tiene que quedarse en su lugar. Los enlaces van a:
 
 - `~/.claude/skills/` → Claude Code
 - `~/.agents/skills/` → Gemini en Android Studio, Junie, Codex y otros agentes
 
-Como son enlaces, `git pull` actualiza todo sin reinstalar. Para quitarlos: `./install.sh --uninstall`.
+Lo que edites en el clon se ve al instante, y `git pull` trae los cambios de otra máquina. Solo hay que volver a correrlo al agregar o quitar una skill. Para deshacerlo: `./install.sh --uninstall`.
 
-Para instalar estas skills en otros agentes con la CLI de Vercel: `npx skills add Hacybeyker/agent-skills`.
+### Solo para usarlas (otra máquina u otra persona)
+
+Con la CLI de [skills.sh](https://skills.sh), sin clonar:
+
+```bash
+# Todas, globales, para Claude Code y para los agentes que leen ~/.agents/skills
+npx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill '*' -y
+
+# Solo una
+npx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill hb-implement
+
+npx skills update -g                        # actualizar
+npx skills remove -g --skill hb-implement   # quitar
+```
+
+La CLI **copia** las skills: los cambios llegan con `npx skills update`, no al instante.
+
+### Qué no instala ninguna de las dos
+
+Los plugins de Claude Code, los MCP y la configuración de `~/.claude/settings.json`. Están listados en [CATALOG.md](CATALOG.md) con su comando de instalación.
 
 ## Proyectos
 
