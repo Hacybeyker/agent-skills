@@ -23,8 +23,35 @@ No llevan `hb-` y no se copian a este repo: cada una se actualiza con su propio 
 | Skill | Proveedor | Cómo se mantiene |
 | --- | --- | --- |
 | `testigo-flows` | Hacybeyker (publicada en [testigo](https://github.com/Hacybeyker/testigo)) | Enlace a tu clon de testigo; `testigo setup` la instala para otros usuarios |
-| `android-cli` | Google | `android init` la instala y la actualiza |
-| Skills oficiales de Android | Google ([android/skills](https://github.com/android/skills)) | `android skills add --skill=<nombre>`, solo si hacen falta |
+| `android-cli` | Google | `android init` la instala y la actualiza. Queda en `~/.android-studio/skills` y en `~/.agents/skills`, y Android Studio lee las dos carpetas, así que puede verla duplicada |
+| Skills oficiales de Android | Google ([android/skills](https://github.com/android/skills)) | Selección de la tabla siguiente |
+
+### Skills oficiales de Android (selección)
+
+Se instalan globales para Claude Code y para `~/.agents/skills`:
+
+```bash
+android skills add --agent=claude-code,common <skill>
+```
+
+- La skill va como argumento posicional. `--agent` recibe una lista separada por comas: `claude-code` → `~/.claude/skills`, `common` → `~/.agents/skills`. **Sin `--agent`, instala en todos los agentes que detecte.**
+- `android skills list` muestra todas las disponibles y para qué agentes está instalada cada una. Android Studio ya trae las oficiales.
+- Precedencia: las reglas del proyecto (`AGENTS.md`) y el perfil `hb-stack-*` mandan en arquitectura, convenciones, testing y dependencias; las skills oficiales mandan en hechos técnicos actuales (APIs, migraciones, herramientas).
+
+| Skill | Para qué |
+| --- | --- |
+| `navigation-3` | Navigation 3: migración, deep links, back stacks múltiples, scenes, Hilt y ViewModel |
+| `edge-to-edge` | Edge-to-edge adaptativo, insets del IME y legibilidad de las barras del sistema |
+| `adaptive` | UI adaptativa a teléfonos, tablets, plegables, escritorio, TV y XR |
+| `jetpack-compose-performance` | Diagnosticar y reducir recomposiciones y frames perdidos |
+| `android-profiler` | Grabar y analizar trazas (Perfetto): jank, ANR, arranque, memoria, batería |
+| `anr-audit-and-fix` | Auditar riesgos de ANR y diagnosticar sus stack dumps |
+| `r8-analyzer` | Detectar keep rules redundantes o demasiado amplias |
+| `android-intent-security` | Seguridad de Intents y componentes del manifest |
+| `android-permissions-security` | Permisos, componentes IPC y flujos de permisos en runtime |
+| `play-policy-insights` | Auditar la app contra las políticas de Google Play |
+
+**Se omite `testing-setup`:** choca con el perfil (fakes, Roborazzi, Kover).
 
 ## Plugins de Claude Code
 
