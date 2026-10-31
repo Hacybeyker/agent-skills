@@ -23,8 +23,8 @@ ln -s /tmp "$HOME/.agents/skills/ajena-enlace"
 "$REPO/install.sh" > /dev/null
 "$REPO/install.sh" > /dev/null
 
-[ "$(count_links "$HOME/.claude/skills")" -eq "$expected" ] || fail "~/.claude/skills no tiene $expected enlaces"
-[ "$(count_links "$HOME/.agents/skills")" -eq "$((expected + 1))" ] || fail "~/.agents/skills no tiene $expected enlaces más el ajeno"
+[ "$(count_links "$HOME/.claude/skills")" -eq "$expected" ] || fail "no hay $expected enlaces en .claude/skills"
+[ "$(count_links "$HOME/.agents/skills")" -eq "$((expected + 1))" ] || fail "no hay $expected enlaces, más el ajeno, en .agents/skills"
 for link in "$HOME"/.claude/skills/* "$HOME"/.agents/skills/hb-*; do
   [ -L "$link" ] && { [ -e "$link" ] || fail "enlace roto: $link"; }
 done
