@@ -65,7 +65,7 @@ actualizado: 2026-09-15
   - Dominio: identifica qué componente atiende a cada punto de entrada.
 - [ ] **2.3 Inyección por constructor con `@Inject`** — Dejar que Hilt construya las clases propias.
   - Objetivo: anotar constructores y seguir la cadena de dependencias.
-  - Práctica: anotar `OrdersRepositoryImpl` y sus dependencias.
+  - Práctica: anotar `OfflineFirstOrdersRepository` y sus dependencias.
   - Dominio: el grafo compila sin el contenedor manual.
 - [ ] **2.4 Módulos: `@Module`, `@InstallIn`, `@Provides` y `@Binds`** — Enseñar a Hilt a crear interfaces y tipos de terceros como Retrofit o Room.
   - Objetivo: elegir entre `@Provides` y `@Binds` con criterio.

@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Agentes compatibles con Agent Skills (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, Android Studio y otros). Scripts opcionales con Python 3.8+ o Node 18+. Internet opcional para consultar documentación oficial."
 metadata:
   author: hacybeyker
-  version: "2.0.0"
+  version: "2.0.1"
   category: personal
   idioma: es
 ---

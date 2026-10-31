@@ -17,7 +17,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ASSETS = path.join(SKILL_DIR, "assets");
 const TEMPLATES = path.join(ASSETS, "plantillas");

@@ -67,7 +67,7 @@ Empieza con un módulo y paquetes. Pasa a módulos Gradle cuando aparezca alguna
 - Son la única puerta a los datos y la **fuente única de verdad** de su tipo de dato.
 - Lecturas: `Flow<T>`. Escrituras: funciones `suspend`. Las funciones `suspend` son *main-safe*: el repositorio cambia de dispatcher, no quien lo llama.
 - Offline-first cuando la app necesita funcionar sin red: la UI lee de la base local y la sincronización escribe en ella.
-- Nombres: `OfflineFirstXRepository`, `DefaultXRepository` si no hay un nombre mejor, `FakeXRepository` en tests.
+- Nombres: por lo que respalda la implementación (`OfflineFirstXRepository`, `RoomXRepository`, `InMemoryXRepository`), o `DefaultXRepository` si no hay un nombre mejor. **Nunca el sufijo `Impl`**: no dice nada de la implementación. Los dobles de test: `FakeXRepository`.
 
 ## Use cases
 
@@ -98,6 +98,10 @@ suspend fun <T> suspendRunCatching(block: suspend () -> T): Result<T> =
 - Inyecta los `CoroutineDispatcher`. Nada de `Dispatchers.IO` fijo dentro de las clases.
 - `viewModelScope` en ViewModels; un `CoroutineScope` inyectado para trabajo que debe sobrevivir a la pantalla.
 - `Flow` frío hacia arriba y `stateIn` en el ViewModel.
+
+## Comentarios
+
+Por defecto, ninguno: los nombres explican el qué. Comenta solo el porqué, una decisión o una advertencia. KDoc en las APIs públicas de módulos que otros consumen.
 
 ## Principios y patrones de diseño
 

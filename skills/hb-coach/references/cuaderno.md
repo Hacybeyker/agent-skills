@@ -110,7 +110,7 @@ Elige el tipo según lo que quieras enseñar:
 
 Reglas para que renderice a la primera y se lea bien:
 
-- Ids de nodo simples, sin espacios ni acentos (`repo`, `vm`, `api`); el texto visible va entre comillas: `repo["OrdersRepositoryImpl"]`.
+- Ids de nodo simples, sin espacios ni acentos (`repo`, `vm`, `api`); el texto visible va entre comillas: `repo["OfflineFirstOrdersRepository"]`.
 - **Etiquetas de 24 caracteres como máximo**: si no cabe, corta con `<br/>` o acorta el texto. Las etiquetas largas estiran el diagrama y lo vuelven ilegible en el móvil (`check` lo avisa).
 - Pon entre comillas cualquier etiqueta con paréntesis, dos puntos, `@`, `/`, `<` o `>`: `A["onCreate(savedState)"]`.
 - No uses `end` en minúsculas como id ni como texto suelto.

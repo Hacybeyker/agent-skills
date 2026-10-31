@@ -4,7 +4,7 @@ description: 'Implementa features, bugfixes, mejoras y refactors en proyectos co
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.0.0"
+  version: "1.1.0"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -67,6 +67,7 @@ Si el proyecto lleva `CHANGELOG.md` con `[Unreleased]`, o `AGENTS.md` pide docum
 - Corre los comandos de `## DoD`, en orden.
 - Si un paso falla, corrige y repite desde ese paso. **Si el mismo paso falla tres veces, detente** y reporta el error con tu diagnóstico.
 - Un paso que el entorno no permite (por ejemplo, compilar iOS sin macOS) se marca `skipped` con el motivo. Nunca cuenta como `pass`.
+- **Nunca debilites un gate para que pase**: nada de desactivar reglas, bajar umbrales de cobertura, `ignoreFailures`, `abortOnError = false` ni `@Suppress` sin motivo. Arregla la causa.
 - Si `AGENTS.md` no define DoD, usa las tareas estándar del stack (Gradle: lint, test y build; npm: `lint`, `test` y `build`; Python: `ruff` y `pytest`) y propone agregarlas a `AGENTS.md`.
 
 ## 5. Reporte HTML

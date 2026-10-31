@@ -9,12 +9,12 @@ Se instalan con `install.sh` en `~/.claude/skills` y `~/.agents/skills`.
 | Skill | Tipo | Versión | Reemplaza a |
 | --- | --- | --- | --- |
 | `hb-setup` | Flujo | 1.0.0 | — (nueva) |
-| `hb-implement` | Flujo | 1.0.0 | `feature-implementation` (Android y KMP) |
+| `hb-implement` | Flujo | 1.1.0 | `feature-implementation` (Android y KMP) |
 | `hb-review` | Flujo | 1.0.0 | `code-reviewer` |
 | `hb-commit` | Flujo | 1.0.0 | `git-commit` y el plugin `commit-commands` |
 | `hb-release` | Flujo | 1.0.0 | `changelog-generator` |
-| `hb-stack-mobile-kotlin` | Perfil | 1.0.0 | `android-best-practices` y `kmp-best-practices` |
-| `hb-coach` | Personal | 2.0.0 | `software-coach` |
+| `hb-stack-mobile-kotlin` | Perfil | 1.1.0 | `android-best-practices` y `kmp-best-practices` |
+| `hb-coach` | Personal | 2.0.1 | `software-coach` |
 
 ## Skills externas
 
