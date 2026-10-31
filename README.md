@@ -88,9 +88,14 @@ Cada push y cada PR pasan por el workflow `Validate`:
 Para correrlo en local:
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install skills-ref
-PATH="$PWD/.venv/bin:$PATH" python3 scripts/check_conventions.py
+python3 -m venv .venv && .venv/bin/pip install skills-ref==0.1.1
+export PATH="$PWD/.venv/bin:$PATH"
+for skill in skills/*/; do agentskills validate "$skill"; done
+python3 scripts/check_conventions.py
+shellcheck install.sh   # brew install shellcheck
 ```
+
+Son los mismos pasos del DoD de `AGENTS.md` y del workflow.
 
 ## Proyectos
 
