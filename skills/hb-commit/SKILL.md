@@ -65,7 +65,7 @@ Si el proyecto no define otro, usa **Conventional Commits sin emoji**:
 1. Mira el estado: `git status --porcelain`, `git diff --staged` y `git diff`.
 2. **Agrupa por unidad funcional, no por archivo.** Un commit = algo que funciona por sí solo (una capa, un sub-objetivo, un fix) y que compila y pasa las verificaciones. Si los cambios mezclan varias unidades, propón cómo dividirlos antes de commitear.
 3. Agrega archivos concretos (`git add <rutas>`, o `git add -p` para separar). Evita `git add -A` sin revisar. **Nunca** agregues secretos: `.env`, keystores, credenciales, `local.properties`.
-4. Si el proyecto lleva un `CHANGELOG.md` con `[Unreleased]`, agrega la entrada en el mismo commit (ver sección 4).
+4. Si el proyecto lleva un `CHANGELOG.md` con `[Unreleased]` y el cambio aún no tiene su entrada, agrégala en el mismo commit (ver sección 4).
 5. Commitea con heredoc para conservar el formato:
    ```bash
    git commit -m "$(cat <<'MSG'

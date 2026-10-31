@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>{{PROJECT_NAME}} — Implementation Report</title>
+    <style>
+        /* ─── Design Tokens ─────────────────────────────────────── */
+        :root {
+          --bg-primary:    #0d1117;
+          --bg-secondary:  #161b22;
+          --bg-card:       #21262d;
+          --bg-hover:      #2d333b;
+          --border:        #30363d;
+          --border-subtle: #21262d;
+
+          --text-primary:   #e6edf3;
+          --text-secondary: #8b949e;
+          --text-muted:     #6e7681;
+
+          --accent-blue:   #2f81f7;
+          --accent-green:  #3fb950;
+          --accent-red:    #f85149;
+          --accent-orange: #d29922;
+          --accent-purple: #a371f7;
+          --accent-teal:   #39d353;
+
+          --badge-feature:     #1f6feb; /* blue */
+          --badge-bugfix:      #b62324; /* red */
+          --badge-enhancement: #6e40c9; /* purple */
+          --badge-refactor:    #9e6a03; /* yellow */
+
+          --diff-add-bg:     rgba(63, 185, 80, 0.12);
+          --diff-add-border: #3fb950;
+          --diff-del-bg:     rgba(248, 81, 73, 0.12);
+          --diff-del-border: #f85149;
+          --diff-hunk-bg:    rgba(47, 129, 247, 0.08);
+
+          --code-bg:  #161b22;
+          --radius-sm: 6px;
+          --radius-md: 8px;
+          --radius-lg: 12px;
+        }
+
+        /* ─── Reset & Base ──────────────────────────────────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans',
+                       Helvetica, Arial, sans-serif;
+          background: var(--bg-primary);
+          color: var(--text-primary);
+          font-size: 14px;
+          line-height: 1.6;
+          min-height: 100vh;
+        }
+        a { color: var(--accent-blue); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code, pre {
+          font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+          font-size: 12px;
+        }
+
+        /* ─── Layout ─────────────────────────────────────────────── */
+        .container { max-width: 1100px; margin: 0 auto; padding: 0 24px 64px; }
+
+        /* ─── Top Bar ────────────────────────────────────────────── */
+        .topbar {
+          background: var(--bg-secondary);
+          border-bottom: 1px solid var(--border);
+          padding: 0 24px;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          height: 56px;
+          position: sticky;
+          top: 0;
+          z-index: 100;
+        }
+        .topbar-logo {
+          font-size: 18px;
+          font-weight: 700;
+          color: var(--text-primary);
+          letter-spacing: -0.3px;
+        }
+        .topbar-sep { color: var(--border); font-size: 20px; }
+        .topbar-title { color: var(--text-secondary); font-size: 13px; }
+        .topbar-spacer { flex: 1; }
+        .topbar-date { color: var(--text-muted); font-size: 12px; }
+
+        /* ─── Hero ───────────────────────────────────────────────── */
+        .hero {
+          padding: 40px 0 32px;
+          border-bottom: 1px solid var(--border);
+          margin-bottom: 32px;
+        }
+        .hero-eyebrow {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 12px;
+        }
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          padding: 3px 10px;
+          border-radius: 20px;
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        }
+        .badge-feature     { background: rgba(31,111,235,.25); color: #58a6ff; border: 1px solid rgba(31,111,235,.4); }
+        .badge-bugfix      { background: rgba(182,35,36,.25);  color: #ff7b72; border: 1px solid rgba(182,35,36,.4); }
+        .badge-enhancement { background: rgba(110,64,201,.25); color: #c6a0fc; border: 1px solid rgba(110,64,201,.4); }
+        .badge-refactor    { background: rgba(158,106,3,.25);  color: #e3b341; border: 1px solid rgba(158,106,3,.4); }
+
+        .hero-title {
+          font-size: 28px;
+          font-weight: 700;
+          letter-spacing: -0.5px;
+          color: var(--text-primary);
+          margin-bottom: 8px;
+        }
+        .hero-desc { color: var(--text-secondary); font-size: 15px; max-width: 720px; }
+
+        /* ─── Stats Row ──────────────────────────────────────────── */
+        .stats-row {
+          display: flex;
+          gap: 16px;
+          flex-wrap: wrap;
+          margin-top: 24px;
+        }
+        .stat-card {
+          background: var(--bg-card);
+          border: 1px solid var(--border);
+          border-radius: var(--radius-md);
+          padding: 14px 20px;
+          min-width: 130px;
+        }
+        .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .stat-value { font-size: 22px; font-weight: 700; color: var(--text-primary); }
+        .stat-value.green  { color: var(--accent-green); }
+        .stat-value.red    { color: var(--accent-red); }
+        .stat-value.orange { color: var(--accent-orange); }
+
+        /* ─── Section ────────────────────────────────────────────── */
+        .section { margin-bottom: 40px; }
+        .section-header {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 16px;
+          padding-bottom: 10px;
+          border-bottom: 1px solid var(--border);
+        }
+        .section-icon { font-size: 16px; }
+        .section-title {
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--text-primary);
+        }
+        .section-count {
+          background: var(--bg-card);
+          border: 1px solid var(--border);
+          color: var(--text-secondary);
+          border-radius: 20px;
+          padding: 1px 8px;
+          font-size: 11px;
+        }
+
+        /* ─── File Entry ─────────────────────────────────────────── */
+        .file-entry {
+          background: var(--bg-secondary);
+          border: 1px solid var(--border);
+          border-radius: var(--radius-lg);
+          margin-bottom: 16px;
+          overflow: hidden;
+        }
+        .file-header {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 12px 16px;
+          cursor: pointer;
+          user-select: none;
+          background: var(--bg-card);
+          border-bottom: 1px solid var(--border);
+        }
+        .file-header:hover { background: var(--bg-hover); }
+        .file-status {
+          font-size: 10px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          padding: 2px 7px;
+          border-radius: 4px;
+        }
+        .status-new      { background: rgba(63,185,80,.2);  color: #3fb950; }
+        .status-modified { background: rgba(47,129,247,.2); color: #58a6ff; }
+        .status-deleted  { background: rgba(248,81,73,.2);  color: #f85149; }
+
+        .file-path {
+          font-family: 'SFMono-Regular', Consolas, monospace;
+          font-size: 12px;
+          color: var(--text-primary);
+          flex: 1;
+        }
+        .file-toggle {
+          color: var(--text-muted);
+          font-size: 12px;
+          transition: transform 0.2s;
+        }
+        .file-entry.open .file-toggle { transform: rotate(180deg); }
+        .file-body { display: none; padding: 0; }
+        .file-entry.open .file-body { display: block; }
+
+        /* ─── Code Panels ────────────────────────────────────────── */
+        .panel-tabs {
+          display: flex;
+          border-bottom: 1px solid var(--border);
+        }
+        .panel-tab {
+          padding: 8px 16px;
+          font-size: 12px;
+          font-weight: 500;
+          color: var(--text-secondary);
+          cursor: pointer;
+          border-bottom: 2px solid transparent;
+          margin-bottom: -1px;
+        }
+        .panel-tab.active {
+          color: var(--text-primary);
+          border-bottom-color: var(--accent-blue);
+        }
+        .panel-content { display: none; }
+        .panel-content.active { display: block; }
+
+        pre.code-block {
+          margin: 0;
+          padding: 16px;
+          background: var(--code-bg);
+          overflow-x: auto;
+          font-size: 12px;
+          line-height: 1.6;
+          color: var(--text-primary);
+          tab-size: 4;
+        }
+        pre.code-block .line-num {
+          display: inline-block;
+          width: 36px;
+          color: var(--text-muted);
+          text-align: right;
+          padding-right: 12px;
+          user-select: none;
+        }
+
+        /* ─── Diff view ──────────────────────────────────────────── */
+        .diff-block {
+          font-size: 12px;
+          line-height: 1.6;
+          background: var(--code-bg);
+          overflow-x: auto;
+        }
+        .diff-line {
+          display: flex;
+          align-items: stretch;
+          white-space: pre;
+          font-family: 'SFMono-Regular', Consolas, monospace;
+        }
+        .diff-line .gutter {
+          width: 40px;
+          min-width: 40px;
+          text-align: right;
+          padding: 0 8px;
+          color: var(--text-muted);
+          user-select: none;
+          border-right: 1px solid var(--border);
+        }
+        .diff-line .content { padding: 0 12px; flex: 1; }
+        .diff-line.add   { background: var(--diff-add-bg); }
+        .diff-line.add   .gutter { border-right-color: var(--diff-add-border); color: var(--accent-green); }
+        .diff-line.del   { background: var(--diff-del-bg); }
+        .diff-line.del   .gutter { border-right-color: var(--diff-del-border); color: var(--accent-red); }
+        .diff-line.hunk  { background: var(--diff-hunk-bg); color: var(--accent-blue); }
+
+        /* ─── DoD Table ──────────────────────────────────────────── */
+        .dod-grid {
+          display: grid;
+          grid-template-columns: auto 1fr auto auto;
+          gap: 0;
+          border: 1px solid var(--border);
+          border-radius: var(--radius-lg);
+          overflow: hidden;
+        }
+        .dod-row {
+          display: contents;
+        }
+        .dod-row > div {
+          padding: 12px 16px;
+          border-bottom: 1px solid var(--border-subtle);
+          background: var(--bg-secondary);
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .dod-row:last-child > div { border-bottom: none; }
+        .dod-row:hover > div { background: var(--bg-card); }
+        .dod-row > div:first-child { font-size: 18px; justify-content: center; width: 48px; }
+        .dod-row > div:nth-child(2) { font-weight: 500; flex: 1; }
+        .dod-row > div:nth-child(3) { font-family: monospace; font-size: 11px; color: var(--text-muted); max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .dod-row > div:last-child   { width: 90px; justify-content: center; }
+
+        .dod-header > div {
+          background: var(--bg-card) !important;
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          color: var(--text-muted);
+        }
+        .pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 3px 10px;
+          border-radius: 20px;
+          font-size: 11px;
+          font-weight: 600;
+        }
+        .pill-pass    { background: rgba(63,185,80,.2);  color: #3fb950; }
+        .pill-fail    { background: rgba(248,81,73,.2);  color: #f85149; }
+        .pill-skipped { background: rgba(110,110,110,.2); color: #8b949e; }
+
+        /* ─── Footer ─────────────────────────────────────────────── */
+        .footer {
+          border-top: 1px solid var(--border);
+          padding: 24px 0;
+          margin-top: 48px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          color: var(--text-muted);
+          font-size: 12px;
+        }
+        .footer-brand { font-weight: 600; color: var(--text-secondary); }
+
+        /* ─── Change Summary ────────────────────────────────────── */
+        .change-summary {
+          display: flex;
+          border-bottom: 1px solid var(--border);
+        }
+        .change-summary-item {
+          flex: 1;
+          padding: 10px 16px;
+          font-size: 12px;
+          line-height: 1.6;
+          color: var(--text-secondary);
+        }
+        .change-summary-item + .change-summary-item {
+          border-left: 1px solid var(--border);
+        }
+        .change-summary-before {
+          background: rgba(248, 81, 73, 0.05);
+          border-left: 3px solid var(--accent-red);
+        }
+        .change-summary-after {
+          background: rgba(63, 185, 80, 0.05);
+          border-left: 3px solid var(--accent-green);
+        }
+        .change-summary-label {
+          font-size: 10px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          margin-bottom: 4px;
+        }
+        .change-summary-before .change-summary-label { color: var(--accent-red); }
+        .change-summary-after  .change-summary-label { color: var(--accent-green); }
+
+        /* ─── Utilities ──────────────────────────────────────────── */
+        .tag {
+          background: var(--bg-card);
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          padding: 1px 6px;
+          font-size: 11px;
+          font-family: monospace;
+          color: var(--text-secondary);
+        }
+        .empty-state {
+          color: var(--text-muted);
+          font-style: italic;
+          font-size: 13px;
+          padding: 16px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════
+     TOP BAR
+════════════════════════════════════════════════════════════ -->
+<div class="topbar">
+    <span class="topbar-logo">{{PROJECT_NAME}}</span>
+    <span class="topbar-sep">/</span>
+    <span class="topbar-title">Implementation Report</span>
+    <div class="topbar-spacer"></div>
+    <span class="topbar-date">{{DATE}}</span>
+</div>
+
+<div class="container">
+
+    <!-- ══════════════════════════════════════════════════════════
+         HERO
+    ══════════════════════════════════════════════════════════ -->
+    <div class="hero">
+        <div class="hero-eyebrow">
+            <!-- TASK TYPE: use ONE of: badge-feature | badge-bugfix | badge-enhancement | badge-refactor -->
+            <span class="badge badge-feature">✨ Feature</span>
+            <span class="tag">{{FEATURE_SCOPE}}</span>
+        </div>
+        <h1 class="hero-title">{{TASK_TITLE}}</h1>
+        <p class="hero-desc">{{TASK_DESCRIPTION}}</p>
+
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-label">Archivos Nuevos</div>
+                <div class="stat-value green">{{COUNT_NEW}}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Archivos Modificados</div>
+                <div class="stat-value" style="color:var(--accent-blue)">{{COUNT_MODIFIED}}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Archivos Eliminados</div>
+                <div class="stat-value red">{{COUNT_DELETED}}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">DoD</div>
+                <!-- PASS / FAIL -->
+                <div class="stat-value green">PASS</div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         SECTION: ARCHIVOS NUEVOS
+         Repite un bloque .file-entry por cada archivo nuevo.
+    ══════════════════════════════════════════════════════════ -->
+    <div class="section">
+        <div class="section-header">
+            <span class="section-icon">🆕</span>
+            <span class="section-title">Archivos Nuevos</span>
+            <span class="section-count">{{COUNT_NEW}}</span>
+        </div>
+
+        <!-- ── Ejemplo: archivo nuevo ── -->
+        <div class="file-entry open">
+            <div class="file-header" onclick="toggleFile(this)">
+                <span class="file-status status-new">New</span>
+                <span class="file-path">app/src/main/java/com/example/app/feature/userprofile/domain/entity/UserProfile.kt</span>
+                <span class="file-toggle">▼</span>
+            </div>
+            <div class="file-body">
+                <!-- Descripción del aporte de este archivo nuevo -->
+                <div class="change-summary">
+                    <div class="change-summary-item change-summary-after">
+                        <div class="change-summary-label">✅ Por qué se crea</div>
+                        Define la entidad de dominio <code>UserProfile</code>. Al ser un data class puro sin
+                        dependencias de framework, garantiza que la lógica de negocio sea testeable sin emulador y
+                        fácilmente testeable sin infraestructura.
+                    </div>
+                </div>
+                <pre class="code-block"><span class="line-num">1</span>package com.example.app.feature.userprofile.domain.entity
+<span class="line-num">2</span>
+<span class="line-num">3</span>data class UserProfile(
+<span class="line-num">4</span>    val id: String,
+<span class="line-num">5</span>    val displayName: String,
+<span class="line-num">6</span>    val avatarUrl: String?,
+<span class="line-num">7</span>)</pre>
+            </div>
+        </div>
+
+        <!-- ── Repite .file-entry para cada archivo nuevo ── -->
+
+    </div><!-- /section new files -->
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         SECTION: ARCHIVOS MODIFICADOS
+         Usa la vista de ANTES / DESPUÉS con tabs.
+    ══════════════════════════════════════════════════════════ -->
+    <div class="section">
+        <div class="section-header">
+            <span class="section-icon">✏️</span>
+            <span class="section-title">Archivos Modificados</span>
+            <span class="section-count">{{COUNT_MODIFIED}}</span>
+        </div>
+
+        <!-- ── Ejemplo: archivo modificado ── -->
+        <div class="file-entry open">
+            <div class="file-header" onclick="toggleFile(this)">
+                <span class="file-status status-modified">Modified</span>
+                <span class="file-path">app/src/main/java/com/example/app/navigation/AppNavHost.kt</span>
+                <span class="file-toggle">▼</span>
+            </div>
+            <div class="file-body">
+                <!-- Resumen del cambio: qué afectaba antes y qué beneficia ahora -->
+                <div class="change-summary">
+                    <div class="change-summary-item change-summary-before">
+                        <div class="change-summary-label">⚠️ Antes</div>
+                        El grafo de navegación solo registraba <code>Home</code>. La nueva pantalla de perfil no era
+                        alcanzable desde ninguna ruta de la app.
+                    </div>
+                    <div class="change-summary-item change-summary-after">
+                        <div class="change-summary-label">✅ Después</div>
+                        Se registra el <code>NavKey</code> <code>UserProfile</code> y su entrada en
+                        <code>AppNavHost</code>. La pantalla se resuelve vía Hilt (<code>hiltViewModel()</code>) y se
+                        navega con type-safety desde Home.
+                    </div>
+                </div>
+                <!-- Tabs: Antes / Después / Diff -->
+                <div class="panel-tabs" id="tabs-navhost-kt">
+                    <div class="panel-tab" onclick="switchTab('navhost-kt','before')">Antes</div>
+                    <div class="panel-tab active" onclick="switchTab('navhost-kt','after')">Después</div>
+                    <div class="panel-tab" onclick="switchTab('navhost-kt','diff')">Diff</div>
+                </div>
+
+                <!-- ANTES -->
+                <div class="panel-content" id="navhost-kt-before">
+          <pre class="code-block"><span class="line-num">1</span>entryProvider = entryProvider {
+<span class="line-num">2</span>    entry&lt;Home&gt; { HomeScreen() }
+<span class="line-num">3</span>}</pre>
+                </div>
+
+                <!-- DESPUÉS -->
+                <div class="panel-content active" id="navhost-kt-after">
+          <pre class="code-block"><span class="line-num">1</span>entryProvider = entryProvider {
+<span class="line-num">2</span>    entry&lt;Home&gt; {
+<span class="line-num">3</span>        HomeScreen(onOpenProfile = { backStack.add(UserProfile) })
+<span class="line-num">4</span>    }
+<span class="line-num">5</span>    entry&lt;UserProfile&gt; {
+<span class="line-num">6</span>        UserProfileScreen(onBack = { backStack.removeLastOrNull() })
+<span class="line-num">7</span>    }
+<span class="line-num">8</span>}</pre>
+                </div>
+
+                <!-- DIFF -->
+                <div class="panel-content" id="navhost-kt-diff">
+                    <div class="diff-block">
+                        <div class="diff-line hunk">
+                            <div class="gutter">···</div>
+                            <div class="content">@@ -1,3 +1,8 @@</div>
+                        </div>
+                        <div class="diff-line">
+                            <div class="gutter">1</div>
+                            <div class="content"> entryProvider = entryProvider {</div>
+                        </div>
+                        <div class="diff-line del">
+                            <div class="gutter">−</div>
+                            <div class="content">- entry&lt;Home&gt; { HomeScreen() }</div>
+                        </div>
+                        <div class="diff-line add">
+                            <div class="gutter">+</div>
+                            <div class="content">+ entry&lt;Home&gt; { HomeScreen(onOpenProfile = { backStack.add(UserProfile) }) }</div>
+                        </div>
+                        <div class="diff-line add">
+                            <div class="gutter">+</div>
+                            <div class="content">+ entry&lt;UserProfile&gt; { UserProfileScreen(onBack = { backStack.removeLastOrNull() }) }</div>
+                        </div>
+                        <div class="diff-line">
+                            <div class="gutter">3</div>
+                            <div class="content"> }</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Repite .file-entry para cada archivo modificado ── -->
+
+    </div><!-- /section modified files -->
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         SECTION: ARCHIVOS ELIMINADOS
+         Solo si existen. Omitir la sección si COUNT_DELETED = 0.
+    ══════════════════════════════════════════════════════════ -->
+    <div class="section">
+        <div class="section-header">
+            <span class="section-icon">🗑️</span>
+            <span class="section-title">Archivos Eliminados</span>
+            <span class="section-count">{{COUNT_DELETED}}</span>
+        </div>
+
+        <!-- ── Ejemplo: archivo eliminado ── -->
+        <div class="file-entry">
+            <div class="file-header" onclick="toggleFile(this)">
+                <span class="file-status status-deleted">Deleted</span>
+                <span class="file-path">app/src/main/java/com/example/app/Greeting.kt</span>
+                <span class="file-toggle">▼</span>
+            </div>
+            <div class="file-body">
+                <!-- Descripción de por qué se elimina -->
+                <div class="change-summary">
+                    <div class="change-summary-item change-summary-before">
+                        <div class="change-summary-label">🗑️ Por qué se elimina</div>
+                        Era el archivo de ejemplo generado por el scaffolding. Su presencia en producción añadía código
+                        muerto sin valor funcional. Se elimina para mantener el módulo limpio antes de implementar la
+                        feature real.
+                    </div>
+                </div>
+                <pre class="code-block" style="opacity:.6"><span class="line-num">1</span>// Este archivo fue eliminado.
+<span class="line-num">2</span>// Contenido anterior mostrado para referencia.</pre>
+            </div>
+        </div>
+
+        <!-- Si no hay archivos eliminados, usa: -->
+        <!-- <div class="empty-state">Ningún archivo fue eliminado.</div> -->
+
+    </div><!-- /section deleted files -->
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         SECTION: DEFINITION OF DONE
+    ══════════════════════════════════════════════════════════ -->
+    <div class="section">
+        <div class="section-header">
+            <span class="section-icon">✅</span>
+            <span class="section-title">Definition of Done</span>
+        </div>
+
+        <div class="dod-grid">
+            <!-- Header row -->
+            <div class="dod-row dod-header">
+                <div></div>
+                <div>Tarea</div>
+                <div>Comando</div>
+                <div>Resultado</div>
+            </div>
+
+            <!-- ── Paso 1: formatAndAnalyze ── -->
+            <div class="dod-row">
+                <div>🎨</div>
+                <div>ktlint + detekt + Android Lint</div>
+                <div>./gradlew formatAndAnalyze</div>
+                <div><span class="pill pill-pass">✅ PASS</span></div>
+            </div>
+
+            <!-- ── Paso 2: Tests Android ── -->
+            <div class="dod-row">
+                <div>🧪</div>
+                <div>Tests Android (JVM)</div>
+                <div>./gradlew test</div>
+                <div><span class="pill pill-pass">✅ PASS</span></div>
+            </div>
+
+            <!-- ── Paso 3: Compilación Android ── -->
+            <div class="dod-row">
+                <div>🤖</div>
+                <!-- Cambiar pill a pill-pass / pill-fail / pill-skipped según corresponda -->
+                <div>Compilación Android (debug)</div>
+                <div>./gradlew assembleDebug</div>
+                <div><span class="pill pill-pass">✅ PASS</span></div>
+            </div>
+
+        </div><!-- /dod-grid -->
+    </div><!-- /section dod -->
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         FOOTER
+    ══════════════════════════════════════════════════════════ -->
+    <div class="footer">
+        <div>
+            <span class="footer-brand">{{PROJECT_NAME}}</span>
+            &nbsp;·&nbsp; Generado el {{DATE}}
+        </div>
+        <div>Generado con <strong>hb-implement</strong> · No hacer commit sin revisión manual</div>
+    </div>
+
+</div><!-- /container -->
+
+<!-- ════════════════════════════════════════════════════════════
+     SCRIPTS
+════════════════════════════════════════════════════════════ -->
+<script>
+    /* Toggle collapsible file entries */
+    function toggleFile(headerEl) {
+      const entry = headerEl.closest('.file-entry');
+      entry.classList.toggle('open');
+    }
+
+    /* Tab switching within a file entry (before/after/diff) */
+    function switchTab(fileId, tab) {
+      const tabsEl = document.getElementById('tabs-' + fileId);
+      if (!tabsEl) return;
+
+      // Update tab active state
+      tabsEl.querySelectorAll('.panel-tab').forEach((el, i) => {
+        const labels = ['before', 'after', 'diff'];
+        el.classList.toggle('active', labels[i] === tab);
+      });
+
+      // Show correct panel
+      ['before', 'after', 'diff'].forEach(t => {
+        const panel = document.getElementById(fileId + '-' + t);
+        if (panel) panel.classList.toggle('active', t === tab);
+      });
+    }
+
+    /* Expand all file entries on load (optional — remove to collapse by default) */
+    document.querySelectorAll('.file-entry').forEach(el => el.classList.add('open'));
+</script>
+
+</body>
+</html>
+
+<!--
+═══════════════════════════════════════════════════════════════════
+  GUÍA DE USO (para el agente que genera el reporte real)
+═══════════════════════════════════════════════════════════════════
+
+REEMPLAZOS GLOBALES:
+  {{PROJECT_NAME}}    → nombre del proyecto (ej. "MyApp")
+  {{DATE}}            → fecha ISO (ej. "2026-06-12")
+  {{TASK_TITLE}}      → título de la tarea (ej. "Implementar User Profile Feature")
+  {{TASK_DESCRIPTION}}→ descripción en 1-2 oraciones
+  {{FEATURE_SCOPE}}   → nombre del módulo/feature (ej. "feature/userprofile")
+  {{COUNT_NEW}}       → número de archivos nuevos
+  {{COUNT_MODIFIED}}  → número de archivos modificados
+  {{COUNT_DELETED}}   → número de archivos eliminados
+
+BADGE DEL TIPO DE TAREA (elige uno):
+  Feature:     class="badge badge-feature"     → "✨ Feature"
+  Bug Fix:     class="badge badge-bugfix"      → "🐛 Bug Fix"
+  Enhancement: class="badge badge-enhancement" → "⚡ Enhancement"
+  Refactor:    class="badge badge-refactor"    → "♻️ Refactor"
+
+STAT "DoD" al inicio:
+  Si todos los pasos pasan:   class="stat-value green"  → "PASS"
+  Si alguno falla:            class="stat-value red"    → "FAIL"
+  Si hay pasos skipped:       class="stat-value orange" → "PARTIAL"
+
+RESUMEN DE CAMBIO (.change-summary):
+  Cada archivo debe incluir un bloque .change-summary justo dentro de .file-body,
+  antes del código / tabs, explicando el impacto del cambio en lenguaje natural.
+
+  Archivo NUEVO — solo columna "Después":
+    <div class="change-summary">
+      <div class="change-summary-item change-summary-after">
+        <div class="change-summary-label">✅ Por qué se crea</div>
+        Explicación de qué aporta este archivo al diseño.
+      </div>
+    </div>
+
+  Archivo MODIFICADO — columnas "Antes" y "Después":
+    <div class="change-summary">
+      <div class="change-summary-item change-summary-before">
+        <div class="change-summary-label">⚠️ Antes</div>
+        Cómo afectaba la ausencia de este cambio (limitación, deuda técnica, riesgo).
+      </div>
+      <div class="change-summary-item change-summary-after">
+        <div class="change-summary-label">✅ Después</div>
+        Qué mejora aporta el cambio (beneficio concreto, no solo descripción).
+      </div>
+    </div>
+
+  Archivo ELIMINADO — solo columna "Antes":
+    <div class="change-summary">
+      <div class="change-summary-item change-summary-before">
+        <div class="change-summary-label">🗑️ Por qué se elimina</div>
+        Razón de la eliminación (código muerto, reemplazado por X, etc.).
+      </div>
+    </div>
+
+ARCHIVOS NUEVOS:
+  - Pon el .change-summary antes del <pre class="code-block">
+  - Añade números de línea con <span class="line-num">N</span>
+
+ARCHIVOS MODIFICADOS:
+  - Pon el .change-summary antes de .panel-tabs
+  - Usa las 3 tabs: Antes / Después / Diff
+  - Tab ID único por archivo: reemplaza "app-kt" por un slug del path
+  - El Diff muestra solo las líneas cambiadas con contexto (±3 líneas)
+  - Prefijo "+" para añadidas (class="add"), "-" para eliminadas (class="del")
+
+ARCHIVOS ELIMINADOS:
+  - Pon el .change-summary antes del <pre class="code-block">
+  - Si no hay archivos eliminados, elimina toda la sección o pon:
+    <div class="empty-state">Ningún archivo fue eliminado.</div>
+
+DoD PILLS:
+  ✅ PASS    → class="pill pill-pass"
+  ❌ FAIL    → class="pill pill-fail"
+  ⏭️ SKIPPED → class="pill pill-skipped"
+
+IDs DE TABS: para cada archivo modificado, elige un slug único basado en su nombre,
+  ej. "app/src/.../AppNavHost.kt" → id "navhost-kt", luego usa:
+  id="tabs-app-kt", id="app-kt-before", id="app-kt-after", id="app-kt-diff"
+  y en onclick: switchTab('app-kt', 'before|after|diff')
+═══════════════════════════════════════════════════════════════════
+-->
