@@ -13,7 +13,7 @@ Se instalan con `install.sh` en `~/.claude/skills` y `~/.agents/skills`.
 | `hb-review` | Flujo | 1.0.0 | `code-reviewer` |
 | `hb-commit` | Flujo | 1.0.0 | `git-commit` y el plugin `commit-commands` |
 | `hb-release` | Flujo | 1.0.0 | `changelog-generator` |
-| `hb-stack-mobile-kotlin` | Perfil | 1.1.0 | `android-best-practices` y `kmp-best-practices` |
+| `hb-stack-mobile-kotlin` | Perfil | 1.2.0 | `android-best-practices` y `kmp-best-practices` |
 | `hb-coach` | Personal | 2.0.1 | `software-coach` |
 
 ## Skills externas
