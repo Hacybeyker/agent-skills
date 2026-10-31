@@ -23,18 +23,20 @@ No llevan `hb-` y no se copian a este repo: cada una se actualiza con su propio 
 | Skill | Proveedor | Cómo se mantiene |
 | --- | --- | --- |
 | `testigo-flows` | Hacybeyker (publicada en [testigo](https://github.com/Hacybeyker/testigo)) | Enlace a tu clon de testigo; `testigo setup` la instala para otros usuarios |
-| `android-cli` | Google | `android init` la instala y la actualiza. Queda en `~/.android-studio/skills` y en `~/.agents/skills`, y Android Studio lee las dos carpetas, así que puede verla duplicada |
+| `android-cli` | Google | `android skills add --agent=claude-code android-cli` la instala para Claude Code y `android skills update --agent=claude-code android-cli` la actualiza. Android Studio trae la suya. No uses `android init`: instala la skill en todos los agentes que detecta y deja en `~/.agents/skills` una copia que nadie actualiza |
 | Skills oficiales de Android | Google ([android/skills](https://github.com/android/skills)) | Selección de la tabla siguiente |
 
 ### Skills oficiales de Android (selección)
 
-Se instalan globales para Claude Code y para `~/.agents/skills`:
+Se instalan globales, solo para Claude Code:
 
 ```bash
-android skills add --agent=claude-code,common <skill>
+android skills add --agent=claude-code <skill>      # instalar
+android skills update --agent=claude-code <skill>   # actualizar
 ```
 
-- La skill va como argumento posicional. `--agent` recibe una lista separada por comas: `claude-code` → `~/.claude/skills`, `common` → `~/.agents/skills`. **Sin `--agent`, instala en todos los agentes que detecte.**
+- **Solo `claude-code`:** Android Studio ya trae todas las oficiales en `~/.android-studio/skills` y también lee `~/.agents/skills` (el agente `common`); si se instalan ahí, las ve dos veces.
+- La skill va como argumento posicional y `--agent` recibe una lista separada por comas. **Sin `--agent`, instala en todos los agentes que detecte.**
 - `android skills list` muestra todas las disponibles y para qué agentes está instalada cada una. Android Studio ya trae las oficiales.
 - Precedencia: las reglas del proyecto (`AGENTS.md`) y el perfil `hb-stack-*` mandan en arquitectura, convenciones, testing y dependencias; las skills oficiales mandan en hechos técnicos actuales (APIs, migraciones, herramientas).
 
