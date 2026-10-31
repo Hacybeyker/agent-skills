@@ -1,5 +1,7 @@
 # agent-skills
 
+[![Validate](https://github.com/Hacybeyker/agent-skills/actions/workflows/validate.yml/badge.svg)](https://github.com/Hacybeyker/agent-skills/actions/workflows/validate.yml)
+
 Skills personales para agentes de IA (Claude Code, Gemini en Android Studio, Junie, Codex y otros compatibles con [Agent Skills](https://agentskills.io/)). Siguen los estándares de la industria: Conventional Commits, SemVer, Keep a Changelog, GitHub Flow y las guías oficiales de cada plataforma.
 
 ## Cómo está organizado
@@ -74,6 +76,21 @@ La CLI **copia** las skills: los cambios llegan con `npx skills update`, no al i
 ### Qué no instala ninguna de las dos
 
 Los plugins de Claude Code, los MCP y la configuración de `~/.claude/settings.json`. Están listados en [CATALOG.md](CATALOG.md) con su comando de instalación.
+
+## Validación
+
+Cada push y cada PR pasan por el workflow `Validate`:
+
+- `agentskills validate` (de [skills-ref](https://pypi.org/project/skills-ref/), la referencia oficial) contra la especificación de Agent Skills.
+- `scripts/check_conventions.py` con las convenciones de este repo: prefijo `hb-`, metadata, SemVer, máximo de 500 líneas por `SKILL.md`, enlaces rotos, scripts ejecutables y con sintaxis válida, y que `README.md` y `CATALOG.md` estén al día.
+- `shellcheck install.sh`.
+
+Para correrlo en local:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install skills-ref
+PATH="$PWD/.venv/bin:$PATH" python3 scripts/check_conventions.py
+```
 
 ## Proyectos
 

@@ -7,3 +7,6 @@ __pycache__/
 
 # Node
 node_modules/
+
+# Python venv local
+.venv/
