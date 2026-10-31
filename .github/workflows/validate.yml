@@ -10,14 +10,18 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Instalar el validador de Agent Skills
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Instalar las herramientas de validación
         run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --quiet skills-ref==0.1.1
+          python -m venv .venv
+          .venv/bin/pip install --quiet skills-ref==0.1.1 shellcheck-py==0.11.0.1
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Validar cada skill contra la especificación
@@ -27,7 +31,10 @@ jobs:
           done
 
       - name: Validar las convenciones del repo
-        run: python3 scripts/check_conventions.py
+        run: python scripts/check_conventions.py
 
-      - name: Analizar install.sh
-        run: shellcheck install.sh
+      - name: Probar el contrato de install.sh
+        run: scripts/test_install.sh
+
+      - name: Analizar los scripts de shell
+        run: shellcheck install.sh scripts/test_install.sh

@@ -13,17 +13,19 @@ Skills personales para agentes de IA (Claude Code, Gemini en Android Studio, Jun
 
 | Para | Comando |
 | --- | --- |
-| Preparar el validador | `python3 -m venv .venv && .venv/bin/pip install skills-ref==0.1.1` |
+| Preparar las herramientas de validación | `python3 -m venv .venv && .venv/bin/pip install skills-ref==0.1.1 shellcheck-py==0.11.0.1` |
 | Enlazar las skills en esta máquina | `./install.sh` |
 | Quitar los enlaces | `./install.sh --uninstall` |
+| Probar el contrato de `install.sh` (en un `HOME` temporal) | `scripts/test_install.sh` |
 
 ## DoD
 
-Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH` y `shellcheck` instalado (son los pasos del workflow `Validate`):
+Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH`, que trae `agentskills` y `shellcheck` con las mismas versiones del CI (son los pasos del workflow `Validate`):
 
 1. `for skill in skills/*/; do agentskills validate "$skill"; done`
 2. `python3 scripts/check_conventions.py`
-3. `shellcheck install.sh`
+3. `scripts/test_install.sh` (contrato de `install.sh`: `dev-setup` depende de su interfaz)
+4. `shellcheck install.sh scripts/test_install.sh`
 
 ## Arquitectura
 

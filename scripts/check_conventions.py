@@ -4,7 +4,7 @@
 - Nombre con prefijo hb- y metadata (author, version SemVer, category).
 - SKILL.md de 500 líneas como máximo.
 - Enlaces relativos entre archivos .md que existan (fuera de assets/, que tiene plantillas).
-- Scripts ejecutables y con sintaxis válida (Python, Bash, JavaScript).
+- Scripts ejecutables y con sintaxis válida (Python, Bash, JavaScript), incluidos install.sh y scripts/.
 - README.md y CATALOG.md listan cada skill, y el catálogo con su versión actual.
 
 Uso: python3 scripts/check_conventions.py   (necesita el CLI `agentskills` de skills-ref en el PATH)
@@ -97,6 +97,12 @@ def check_scripts(skill):
                 error(script, f"sintaxis de JavaScript inválida: {r.stderr.strip()}")
 
 
+def check_repo_scripts():
+    for script in [ROOT / "install.sh", *sorted((ROOT / "scripts").iterdir())]:
+        if script.is_file() and script.suffix in {".sh", ".py"} and not os.access(script, os.X_OK):
+            error(script, "no es ejecutable (chmod +x)")
+
+
 def check_docs(found):
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     catalog = (ROOT / "CATALOG.md").read_text(encoding="utf-8")
@@ -123,6 +129,7 @@ def main():
         check_links(skill)
         check_scripts(skill)
         found[props.get("name", skill.name)] = str((props.get("metadata") or {}).get("version", ""))
+    check_repo_scripts()
     check_docs(found)
     if errors:
         print("\n".join(f"✖ {e}" for e in errors))
