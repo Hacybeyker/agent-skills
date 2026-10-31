@@ -24,7 +24,7 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 
 1. `for skill in skills/*/; do agentskills validate "$skill"; done`
 2. `python3 scripts/check_conventions.py`
-3. `scripts/test_install.sh` (contrato de `install.sh`: `dev-setup` depende de su interfaz)
+3. `scripts/test_install.sh` (contrato de `install.sh`: es la interfaz pública que usan los instaladores externos)
 4. `shellcheck install.sh scripts/test_install.sh`
 
 ## Arquitectura
