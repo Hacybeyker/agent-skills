@@ -6,7 +6,7 @@ Skills para agentes de IA (Claude Code, Copilot, Gemini en Android Studio, Junie
 
 - Perfil: ninguno. No es una app: el producto son instrucciones en Markdown que otros agentes cargan.
 - Markdown con frontmatter, según la [especificación de Agent Skills](https://agentskills.io/specification).
-- Bash en `install.sh`, Python 3 en `scripts/check_conventions.py`, y Python o Node en los scripts de cada skill.
+- Bash en `install.sh`, Python 3 en `scripts/check_conventions.py`, y Python 3 (solo librería estándar) en los scripts de cada skill.
 - CI con GitHub Actions (`.github/workflows/validate.yml`) y Dependabot para las actions.
 
 ## Comandos

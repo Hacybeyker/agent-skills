@@ -4,7 +4,6 @@
 
 Gestiona el espacio de aprendizaje de un proyecto (por defecto ./aprendizaje):
 plan de estudio, notas de lecciones, glosario, dudas y el cuaderno HTML.
-Existe una versión equivalente para Node 18+: coach.mjs (misma salida).
 
 Ejemplos:
   python3 coach.py init hilt --tema "Hilt: inyección de dependencias en Android" --area android
@@ -25,7 +24,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "2.0.1"
+VERSION = "3.0.0"
 SKILL_DIR = Path(__file__).resolve().parent.parent
 ASSETS = SKILL_DIR / "assets"
 TEMPLATES = ASSETS / "plantillas"
@@ -1164,7 +1163,7 @@ def cmd_vendor(pos, opts):
             failures += 1
             out("  \u2716 %s: %s" % (lib["file"], e))
     if failures:
-        out("\u2716 %d descarga(s) fallaron. Revisa tu conexión o prueba con la otra versión del script (coach.py / coach.mjs)." % failures)
+        out("\u2716 %d descarga(s) fallaron. Revisa tu conexión y vuelve a intentarlo." % failures)
         return 1
     out("\u2714 Librerías en %s: el cuaderno funciona sin conexión." % rel(vdir))
     return 0

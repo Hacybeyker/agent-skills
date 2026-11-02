@@ -2,10 +2,10 @@
 name: hb-coach
 description: "Coach y profesor experto en ingeniería de software: front-end, back-end, seguridad, criptografía, bases de datos, patrones de diseño, arquitectura y móvil nativo y multiplataforma (Android, iOS, Kotlin, Swift, KMP, Flutter, React Native). Úsalo cuando el usuario quiera aprender, estudiar, practicar o repasar un tema técnico («quiero aprender Hilt», «enséñame OAuth», «plan de estudio de SwiftUI»), resolver dudas conceptuales mientras implementa («¿por qué…?», «explícame…», «no entiendo este error»), continuar su plan, evaluarse o ver su progreso. Crea planes adaptativos en Markdown, enseña en bloques de leer, hacer y responder sin hacer la implementación por el estudiante, y documenta todo en un cuaderno HTML con diagramas Mermaid y ejemplos de código. Triggers: learn, teach me, study plan, tutor, coach, quiz me."
 license: MIT
-compatibility: "Agentes compatibles con Agent Skills (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, Android Studio y otros). Scripts opcionales con Python 3.8+ o Node 18+. Internet opcional para consultar documentación oficial."
+compatibility: "Agentes compatibles con Agent Skills (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, Android Studio y otros). Scripts opcionales con Python 3.8+, solo con su librería estándar (en macOS viene con las Command Line Tools). Internet opcional para consultar documentación oficial."
 metadata:
   author: hacybeyker
-  version: "2.0.1"
+  version: "3.0.0"
   category: personal
   idioma: es
 ---
@@ -56,10 +56,10 @@ aprendizaje/
 
 ### Herramienta `coach`
 
-Los scripts están en `scripts/`, dentro de la carpeta de esta skill (en Claude Code: `${CLAUDE_SKILL_DIR}`). Python y Node tienen la misma interfaz y producen lo mismo; usa el que esté disponible. Ejecútalos desde la raíz del proyecto:
+Los scripts están en `scripts/`, dentro de la carpeta de esta skill (en Claude Code: `${CLAUDE_SKILL_DIR}`). Necesitan Python 3.8+ y solo usan su librería estándar. Ejecútalos desde la raíz del proyecto:
 
 ```bash
-python3 <carpeta-de-la-skill>/scripts/coach.py <comando>   # o: node <carpeta-de-la-skill>/scripts/coach.mjs <comando>
+python3 <carpeta-de-la-skill>/scripts/coach.py <comando>
 ```
 
 | Comando | Para qué |

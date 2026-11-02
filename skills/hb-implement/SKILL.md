@@ -2,9 +2,10 @@
 name: hb-implement
 description: 'Implementa features, bugfixes, mejoras y refactors en proyectos con AGENTS.md: lee las reglas y el stack del proyecto, carga su perfil hb-stack-*, implementa por capas con tests, corre el DoD del proyecto y genera un reporte HTML desde git. Úsala cuando el usuario pida crear o implementar una feature, corregir un bug o un issue, mejorar algo o refactorizar ("crea la feature X", "implementa Y", "corrige el bug Z", "resuelve el issue #N", "mejora X", "refactoriza Y", "/hb-implement").'
 license: MIT
+compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools)."
 metadata:
   author: hacybeyker
-  version: "1.1.0"
+  version: "1.1.1"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---

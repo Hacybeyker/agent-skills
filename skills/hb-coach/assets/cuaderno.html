@@ -904,7 +904,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     return libPromises[id];
   }
 
-  // ------------------------------------------------------------------ formato (mismo que coach.py / coach.mjs)
+  // ------------------------------------------------------------------ formato (mismo que coach.py)
   var LESSON_RE = /^\s*[-*+]\s+\[([ xX])\]\s+\*\*([0-9]+(?:\.[0-9]+)+)\.?\s+(.+?)\*\*(.*)$/;
   var HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
   var FENCE_RE = /^\s*(```|~~~)/;
@@ -1515,7 +1515,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       h("h1", null, "Cuaderno de aprendizaje"),
       h("p", null, "Este archivo es la plantilla del cuaderno y todavía no tiene datos. Puedes usarlo de dos formas:"),
       h("ol", null,
-        h("li", null, "Pide al coach que genere tu cuaderno: escribe ", h("code", null, "coach.py build"), " (o ", h("code", null, "coach.mjs build"), ") y abre ", h("code", null, "aprendizaje/cuaderno.html"), "."),
+        h("li", null, "Pide al coach que genere tu cuaderno: escribe ", h("code", null, "coach.py build"), " y abre ", h("code", null, "aprendizaje/cuaderno.html"), "."),
         h("li", null, "O pulsa ", h("strong", null, "Abrir carpeta"), " y elige la carpeta ", h("code", null, "aprendizaje"), " de tu proyecto para leer los archivos directamente.")),
       h("p", null, h("button", { class: "btn primary", type: "button", onclick: pickFolder }, icon("folder"), "Abrir carpeta aprendizaje")));
     return { el: el, title: "Cuaderno", grid: true };

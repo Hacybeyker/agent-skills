@@ -24,5 +24,5 @@ Esta carpeta la gestiona el **Software Coach** (creada el {{FECHA}}). Es tu mate
 
 ## Si el cuaderno no se actualiza
 
-El coach lo regenera con `coach.py build` (o `coach.mjs build`). También puedes abrir `cuaderno.html` y pulsar **Abrir carpeta** para leer los archivos directamente.
+El coach lo regenera con `coach.py build`. También puedes abrir `cuaderno.html` y pulsar **Abrir carpeta** para leer los archivos directamente.
 Para usarlo sin conexión, pide al coach que ejecute `vendor`: descargará las librerías en `.vendor/`.
