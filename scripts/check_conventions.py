@@ -21,7 +21,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SKILLS = ROOT / "skills"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
-CATEGORIES = {"flow", "stack", "personal"}
+CATEGORIES = {"flow", "stack", "tool"}
 MAX_LINES = 500
 errors = []
 

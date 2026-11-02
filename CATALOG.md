@@ -14,7 +14,7 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 | `hb-commit` | Flujo | 1.0.0 |
 | `hb-release` | Flujo | 1.0.0 |
 | `hb-stack-mobile-kotlin` | Perfil | 1.2.0 |
-| `hb-coach` | Personal | 3.0.0 |
+| `hb-coach` | Herramienta | 3.0.1 |
 
 ## Skills externas
 

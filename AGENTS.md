@@ -30,7 +30,7 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 ## Arquitectura
 
 - `skills/<nombre>/`: una carpeta por skill, con un `SKILL.md` corto y, si hacen falta, `references/`, `assets/`, `scripts/` y `agents/`.
-- Tipos en `metadata.category`: `flow` (`hb-<verbo>`), `stack` (`hb-stack-<familia>`) y `personal` (`hb-<herramienta>`).
+- Tipos en `metadata.category`: `flow` (`hb-<verbo>`), `stack` (`hb-stack-<familia>`) y `tool` (`hb-<herramienta>`).
 - `assets/` guarda plantillas y ejemplos: `check_conventions.py` no revisa sus enlaces porque son ilustrativos.
 - `install.sh` crea enlaces simbólicos en `~/.claude/skills` y `~/.agents/skills`: lo que se edita en `skills/` queda activo al instante para los agentes de esta máquina.
 - `README.md` documenta las convenciones y la instalación; `CATALOG.md`, las skills externas y los complementos recomendados. Lo propio de cada máquina (plugins elegidos, cuenta, configuración personal) no va en este repo.
