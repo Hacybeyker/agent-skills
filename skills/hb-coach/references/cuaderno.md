@@ -37,7 +37,7 @@ El cuaderno lee **todos** los `.md` de la carpeta (menos los ocultos), así que 
 
 ## 2. Herramienta `coach`
 
-Ejecuta desde la raíz del proyecto `python3 <skill>/scripts/coach.py …` o `node <skill>/scripts/coach.mjs …` (salida idéntica).
+Ejecuta desde la raíz del proyecto `python3 <skill>/scripts/coach.py …`.
 
 | Comando | Efecto | Cuándo |
 |---|---|---|
