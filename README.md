@@ -58,6 +58,12 @@ Si tu agente solo lee su propia carpeta (por ejemplo, Kiro o Continue), usa la s
 
 Lo que edites en el clon se ve al instante, y `git pull` trae los cambios de otra máquina. Solo hay que volver a correrlo al agregar o quitar una skill. Para deshacerlo: `./install.sh --uninstall`.
 
+Para actualizar, y recoger también las skills nuevas o quitadas:
+
+```bash
+git -C ~/Claude/agent-skills pull && ~/Claude/agent-skills/install.sh
+```
+
 No pisa nada: si ya existe algo con el nombre de una skill (una carpeta, o un enlace a otro sitio como un clon anterior), lo deja como está y te avisa. Bórralo tú si ya no lo usas y vuelve a correrlo.
 
 ### Solo para usarlas (otra máquina u otra persona)
@@ -79,6 +85,9 @@ pnpm dlx skills add Hacybeyker/agent-skills -g -a claude-code universal --skill 
 # Ver las instaladas
 pnpm dlx skills ls -g
 
+# Ver si hay cambios en el repo, sin instalar nada
+pnpm dlx skills check -g
+
 # Actualizar todas, o solo una
 pnpm dlx skills update -g
 pnpm dlx skills update -g hb-implement
@@ -91,7 +100,7 @@ pnpm dlx skills remove -g --skill '*' -y
 - `-g` instala para tu usuario (en todos tus proyectos). Sin `-g`, se instala solo en el proyecto actual.
 - `-a claude-code universal` elige los agentes: `claude-code` → `~/.claude/skills`; `universal` → `~/.agents/skills` (Gemini en Android Studio, Copilot, Junie, Codex).
 - **¿Usas otros agentes?** Quita `-a` y `-y`: la CLI detecta los agentes que tienes y te deja elegir. **No uses `-y` sin `-a`:** instala en todos los agentes que conoce, incluidos los que no usas.
-- La CLI guarda **una copia** en `~/.agents/skills` y un enlace en `~/.claude/skills`. Los cambios del repo llegan con `pnpm dlx skills update -g`, no al instante.
+- La CLI guarda **una copia** en `~/.agents/skills` y un enlace en `~/.claude/skills`. Los cambios del repo llegan con `pnpm dlx skills update -g`, no al instante. `check` compara una huella de cada skill con el repo, así que detecta cualquier cambio aunque la versión de la skill no haya subido.
 
 ### Qué no instala ninguna de las dos
 
