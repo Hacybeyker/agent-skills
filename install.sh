@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Instala las skills de este repo como enlaces simbólicos en los directorios globales de los agentes:
 #   ~/.claude/skills  → Claude Code (respeta CLAUDE_CONFIG_DIR)
-#   ~/.agents/skills  → Android Studio (Gemini), Junie, Codex y otros agentes compatibles con Agent Skills
+#   ~/.agents/skills  → Android Studio (Gemini), Copilot, Junie, Codex y otros agentes compatibles con Agent Skills
 #
 # Uso:
 #   ./install.sh               instala o actualiza los enlaces
