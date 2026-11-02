@@ -23,21 +23,23 @@ No llevan `hb-` y no se copian a este repo: cada una se actualiza con su propio 
 | Skill | Proveedor | Cómo se mantiene |
 | --- | --- | --- |
 | `testigo-flows` | Hacybeyker (publicada en [testigo](https://github.com/Hacybeyker/testigo)) | Enlace a tu clon de testigo; `testigo setup` la instala para otros usuarios |
-| `android-cli` | Google | `android skills add --agent=claude-code android-cli` la instala para Claude Code y `android skills update --agent=claude-code android-cli` la actualiza. Android Studio trae la suya. No uses `android init`: instala la skill en todos los agentes que detecta y deja en `~/.agents/skills` una copia que nadie actualiza |
+| `android-cli` | Google | Igual que las oficiales (sección siguiente): `android skills add --agent=<agentes> android-cli`. Android Studio trae la suya. No uses `android init`: copia la skill a cada agente que detecta, incluidos los que no usas, y nadie actualiza esas copias. La de `~/.agents/skills` además duplica la que cada agente ya tiene en su carpeta |
 | Skills oficiales de Android | Google ([android/skills](https://github.com/android/skills)) | Selección de la tabla siguiente |
 
 ### Skills oficiales de Android (selección)
 
-Se instalan globales, solo para Claude Code:
+Se instalan globales, solo para los agentes que uses:
 
 ```bash
-android skills add --agent=claude-code <skill>      # instalar
-android skills update --agent=claude-code <skill>   # actualizar
+android skills add --agent=<agentes> <skill>      # instalar
+android skills update --agent=<agentes> <skill>   # actualizar
 ```
 
-- **Solo `claude-code`:** Android Studio ya trae todas las oficiales en `~/.android-studio/skills` y también lee `~/.agents/skills` (el agente `common`); si se instalan ahí, las ve dos veces.
+- **`<agentes>`:** los que uses; por ejemplo, `claude-code,github-copilot` para Claude Code y Copilot. Si empiezas a usar otro agente, agrégalo y vuelve a instalar la selección.
+- **Nunca `android-studio`:** ya trae todas las oficiales en `~/.android-studio/skills`.
+- **`common` (`~/.agents/skills`) solo si tu agente no tiene nombre propio en la CLI:** Android Studio también lee esa carpeta y vería las oficiales dos veces.
 - La skill va como argumento posicional y `--agent` recibe una lista separada por comas. **Sin `--agent`, instala en todos los agentes que detecte.**
-- `android skills list` muestra todas las disponibles y para qué agentes está instalada cada una. Android Studio ya trae las oficiales.
+- `android skills list` muestra todas las disponibles y para qué agentes está instalada cada una, con el nombre que va en `--agent`.
 - Precedencia: las reglas del proyecto (`AGENTS.md`) y el perfil `hb-stack-*` mandan en arquitectura, convenciones, testing y dependencias; las skills oficiales mandan en hechos técnicos actuales (APIs, migraciones, herramientas).
 
 | Skill | Para qué |

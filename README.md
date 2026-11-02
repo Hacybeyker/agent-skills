@@ -52,7 +52,9 @@ git clone git@github.com:Hacybeyker/agent-skills.git ~/Claude/agent-skills
 `install.sh` **no copia**: crea enlaces simbólicos hacia el clon, así que el clon tiene que quedarse en su lugar. Los enlaces van a:
 
 - `~/.claude/skills/` → Claude Code
-- `~/.agents/skills/` → Gemini en Android Studio, Junie, Codex y otros agentes
+- `~/.agents/skills/` → Gemini en Android Studio, Copilot, Junie, Codex y otros agentes
+
+Si tu agente solo lee su propia carpeta (por ejemplo, Kiro o Continue), usa la segunda forma: te deja elegir el agente.
 
 Lo que edites en el clon se ve al instante, y `git pull` trae los cambios de otra máquina. Solo hay que volver a correrlo al agregar o quitar una skill. Para deshacerlo: `./install.sh --uninstall`.
 
@@ -85,7 +87,8 @@ pnpm dlx skills remove -g --skill '*' -y
 ```
 
 - `-g` instala para tu usuario (en todos tus proyectos). Sin `-g`, se instala solo en el proyecto actual.
-- `-a claude-code universal` elige los agentes: `claude-code` → `~/.claude/skills`; `universal` → `~/.agents/skills` (Gemini en Android Studio, Junie, Codex).
+- `-a claude-code universal` elige los agentes: `claude-code` → `~/.claude/skills`; `universal` → `~/.agents/skills` (Gemini en Android Studio, Copilot, Junie, Codex).
+- **¿Usas otros agentes?** Quita `-a` y `-y`: la CLI detecta los agentes que tienes y te deja elegir. **No uses `-y` sin `-a`:** instala en todos los agentes que conoce, incluidos los que no usas.
 - La CLI guarda **una copia** en `~/.agents/skills` y un enlace en `~/.claude/skills`. Los cambios del repo llegan con `pnpm dlx skills update -g`, no al instante.
 
 ### Qué no instala ninguna de las dos
