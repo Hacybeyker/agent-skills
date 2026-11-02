@@ -43,6 +43,10 @@ install() {
         echo "⚠️  $link existe y no es un enlace: no lo toco"
         continue
       fi
+      if [ -L "$link" ] && ! points_to_repo "$link"; then
+        echo "⚠️  $link apunta a $(readlink "$link"), no a este repo: no lo toco"
+        continue
+      fi
       ln -sfn "$skill" "$link" && echo "✔ $link"
     done
   done

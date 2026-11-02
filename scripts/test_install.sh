@@ -3,7 +3,7 @@
 #   - Sin argumentos instala un enlace por skill en ~/.claude/skills y ~/.agents/skills.
 #   - Se puede correr varias veces sin romper nada.
 #   - --uninstall quita solo los enlaces que apuntan a este repo.
-#   - Nunca toca carpetas reales ni enlaces ajenos.
+#   - Nunca toca carpetas reales ni enlaces ajenos, aunque tengan el nombre de una skill.
 #   - Respeta CLAUDE_CONFIG_DIR: Claude Code permite mover su carpeta de configuración.
 # Corre en un HOME temporal: no toca tu máquina.
 set -euo pipefail
@@ -49,5 +49,14 @@ export CLAUDE_CONFIG_DIR="$HOME/otra-config"
 [ "$(count_links "$CLAUDE_CONFIG_DIR/skills")" -eq 0 ] || fail "--uninstall no respeta CLAUDE_CONFIG_DIR"
 [ -L "$HOME/.agents/skills/ajena-enlace" ] || fail "--uninstall borró un enlace ajeno"
 unset CLAUDE_CONFIG_DIR
+
+# Un enlace ajeno con el nombre de una skill (de otro clon o de otro instalador) no se reemplaza ni se borra
+first="$(basename "$(dirname "$(find "$REPO/skills" -mindepth 2 -maxdepth 2 -name SKILL.md | sort | head -1)")")"
+ln -s /tmp "$HOME/.agents/skills/$first"
+"$REPO/install.sh" > /dev/null
+[ "$(readlink "$HOME/.agents/skills/$first")" = /tmp ] || fail "install.sh reemplazó un enlace ajeno con el nombre de $first"
+[ -L "$HOME/.claude/skills/$first" ] || fail "un enlace ajeno en .agents/skills impidió instalar en .claude/skills"
+"$REPO/install.sh" --uninstall > /dev/null
+[ "$(readlink "$HOME/.agents/skills/$first")" = /tmp ] || fail "--uninstall borró un enlace ajeno con el nombre de $first"
 
 echo "✔ install.sh cumple su contrato ($expected skills, también con CLAUDE_CONFIG_DIR)"

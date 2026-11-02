@@ -58,6 +58,8 @@ Si tu agente solo lee su propia carpeta (por ejemplo, Kiro o Continue), usa la s
 
 Lo que edites en el clon se ve al instante, y `git pull` trae los cambios de otra máquina. Solo hay que volver a correrlo al agregar o quitar una skill. Para deshacerlo: `./install.sh --uninstall`.
 
+No pisa nada: si ya existe algo con el nombre de una skill (una carpeta, o un enlace a otro sitio como un clon anterior), lo deja como está y te avisa. Bórralo tú si ya no lo usas y vuelve a correrlo.
+
 ### Solo para usarlas (otra máquina u otra persona)
 
 Con la CLI de [skills.sh](https://skills.sh) y **pnpm**, sin clonar. Usa pnpm, no npm: por defecto no ejecuta los scripts de instalación de los paquetes, así que reduce el riesgo de ataques a la cadena de suministro.
