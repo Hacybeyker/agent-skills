@@ -2,7 +2,7 @@
 
 [![Validate](https://github.com/Hacybeyker/agent-skills/actions/workflows/validate.yml/badge.svg)](https://github.com/Hacybeyker/agent-skills/actions/workflows/validate.yml)
 
-Skills personales para agentes de IA (Claude Code, Gemini en Android Studio, Junie, Codex y otros compatibles con [Agent Skills](https://agentskills.io/)). Siguen los estándares de la industria: Conventional Commits, SemVer, Keep a Changelog, GitHub Flow y las guías oficiales de cada plataforma.
+Skills para agentes de IA (Claude Code, Copilot, Gemini en Android Studio, Junie, Codex y otros compatibles con [Agent Skills](https://agentskills.io/)). Siguen los estándares de la industria: Conventional Commits, SemVer, Keep a Changelog, GitHub Flow y las guías oficiales de cada plataforma.
 
 ## Cómo está organizado
 
@@ -28,7 +28,7 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | [`hb-stack-mobile-kotlin`](skills/hb-stack-mobile-kotlin) | Perfil | Android y KMP con Clean Architecture + MVVM (UDF) por features |
 | [`hb-coach`](skills/hb-coach) | Personal | Coach para aprender temas de software paso a paso, con plan y cuaderno |
 
-El mapa completo del entorno (skills externas, plugins y MCP) está en [CATALOG.md](CATALOG.md).
+Las skills externas y los plugins que las complementan están en [CATALOG.md](CATALOG.md).
 
 ## Convenciones
 
@@ -42,31 +42,31 @@ El mapa completo del entorno (skills externas, plugins y MCP) está en [CATALOG.
 
 Hay dos formas. Usa **una sola** por máquina.
 
-### Para editar las skills (máquina principal)
+### Con un clon (para editarlas o contribuir)
 
 ```bash
-git clone git@github.com:Hacybeyker/agent-skills.git ~/Claude/agent-skills
-~/Claude/agent-skills/install.sh
+git clone https://github.com/Hacybeyker/agent-skills.git
+./agent-skills/install.sh
 ```
 
-`install.sh` **no copia**: crea enlaces simbólicos hacia el clon, así que el clon tiene que quedarse en su lugar. Los enlaces van a:
+Clónalo en la carpeta que prefieras. `install.sh` **no copia**: crea enlaces simbólicos hacia el clon, así que el clon tiene que quedarse en su lugar. Los enlaces van a:
 
 - `~/.claude/skills/` → Claude Code
 - `~/.agents/skills/` → Gemini en Android Studio, Copilot, Junie, Codex y otros agentes
 
 Si tu agente solo lee su propia carpeta (por ejemplo, Kiro o Continue), usa la segunda forma: te deja elegir el agente.
 
-Lo que edites en el clon se ve al instante, y `git pull` trae los cambios de otra máquina. Solo hay que volver a correrlo al agregar o quitar una skill. Para deshacerlo: `./install.sh --uninstall`.
+Lo que edites en el clon se ve al instante, y `git pull` trae los cambios publicados en el repo. Solo hay que volver a correrlo al agregar o quitar una skill. Para deshacerlo: `./install.sh --uninstall`.
 
-Para actualizar, y recoger también las skills nuevas o quitadas:
+Para actualizar, y recoger también las skills nuevas o quitadas, desde la carpeta donde lo clonaste:
 
 ```bash
-git -C ~/Claude/agent-skills pull && ~/Claude/agent-skills/install.sh
+git -C agent-skills pull && ./agent-skills/install.sh
 ```
 
 No pisa nada: si ya existe algo con el nombre de una skill (una carpeta, o un enlace a otro sitio como un clon anterior), lo deja como está y te avisa. Bórralo tú si ya no lo usas y vuelve a correrlo.
 
-### Solo para usarlas (otra máquina u otra persona)
+### Sin clonar (solo para usarlas)
 
 Con la CLI de [skills.sh](https://skills.sh) y **pnpm**, sin clonar. Usa pnpm, no npm: por defecto no ejecuta los scripts de instalación de los paquetes, así que reduce el riesgo de ataques a la cadena de suministro.
 
@@ -104,7 +104,7 @@ pnpm dlx skills remove -g --skill '*' -y
 
 ### Qué no instala ninguna de las dos
 
-Los plugins de Claude Code, los MCP y la configuración de `~/.claude/settings.json`. Están listados en [CATALOG.md](CATALOG.md) con su comando de instalación.
+Ni las skills externas, ni los plugins de Claude Code, ni ajustes de configuración: los recomendados están en [CATALOG.md](CATALOG.md), con cómo instalarlos.
 
 ## Validación
 

@@ -1,6 +1,6 @@
 # agent-skills
 
-Skills personales para agentes de IA (Claude Code, Gemini en Android Studio, Junie, Codex y otros compatibles con [Agent Skills](https://agentskills.io/)). El repo es público: cualquiera puede instalarlas.
+Skills para agentes de IA (Claude Code, Copilot, Gemini en Android Studio, Junie, Codex y otros compatibles con [Agent Skills](https://agentskills.io/)). El repo es público y lo debe poder usar cualquier programador, de forma simple y sin que rompa ni modifique lo que ya funciona en su máquina.
 
 ## Stack
 
@@ -33,11 +33,12 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 - Tipos en `metadata.category`: `flow` (`hb-<verbo>`), `stack` (`hb-stack-<familia>`) y `personal` (`hb-<herramienta>`).
 - `assets/` guarda plantillas y ejemplos: `check_conventions.py` no revisa sus enlaces porque son ilustrativos.
 - `install.sh` crea enlaces simbólicos en `~/.claude/skills` y `~/.agents/skills`: lo que se edita en `skills/` queda activo al instante para los agentes de esta máquina.
-- `README.md` documenta las convenciones y la instalación; `CATALOG.md`, todo el entorno de agentes.
+- `README.md` documenta las convenciones y la instalación; `CATALOG.md`, las skills externas y los complementos recomendados. Lo propio de cada máquina (plugins elegidos, cuenta, configuración personal) no va en este repo.
 
 ## Reglas del proyecto
 
 - Las skills se escriben en español.
+- Nada invasivo: los instaladores nunca pisan ni borran lo que no crearon, y todo lo externo es opcional.
 - Todo lo propio lleva el prefijo `hb-`. Una skill externa no se copia a este repo: se lista en `CATALOG.md`.
 - Al cambiar una skill, sube su `metadata.version` (SemVer) y refleja la misma versión en `CATALOG.md`. El validador detecta si no coinciden, pero no si olvidaste subirla.
 - Al agregar o quitar una skill, actualiza `README.md` y `CATALOG.md` y vuelve a correr `./install.sh`.

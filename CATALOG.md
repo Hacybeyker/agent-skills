@@ -1,20 +1,20 @@
-# Catálogo del entorno
+# Catálogo
 
-Mapa de todo lo que usan los agentes: qué es, quién lo mantiene y por qué está. Actualízalo cuando agregues o quites algo.
+Lo que complementa a las skills de este repo: skills externas, plugins de Claude Code y un ajuste recomendado. Todo es opcional: instala solo lo que uses.
 
 ## Skills propias (este repo)
 
-Se instalan con `install.sh` en `~/.claude/skills` y `~/.agents/skills`.
+Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](README.md).
 
-| Skill | Tipo | Versión | Reemplaza a |
-| --- | --- | --- | --- |
-| `hb-setup` | Flujo | 1.0.0 | — (nueva) |
-| `hb-implement` | Flujo | 1.1.0 | `feature-implementation` (Android y KMP) |
-| `hb-review` | Flujo | 1.0.0 | `code-reviewer` |
-| `hb-commit` | Flujo | 1.0.0 | `git-commit` y el plugin `commit-commands` |
-| `hb-release` | Flujo | 1.0.0 | `changelog-generator` |
-| `hb-stack-mobile-kotlin` | Perfil | 1.2.0 | `android-best-practices` y `kmp-best-practices` |
-| `hb-coach` | Personal | 2.0.1 | `software-coach` |
+| Skill | Tipo | Versión |
+| --- | --- | --- |
+| `hb-setup` | Flujo | 1.0.0 |
+| `hb-implement` | Flujo | 1.1.0 |
+| `hb-review` | Flujo | 1.0.0 |
+| `hb-commit` | Flujo | 1.0.0 |
+| `hb-release` | Flujo | 1.0.0 |
+| `hb-stack-mobile-kotlin` | Perfil | 1.2.0 |
+| `hb-coach` | Personal | 2.0.1 |
 
 ## Skills externas
 
@@ -22,7 +22,7 @@ No llevan `hb-` y no se copian a este repo: cada una se actualiza con su propio 
 
 | Skill | Proveedor | Cómo se mantiene |
 | --- | --- | --- |
-| `testigo-flows` | Hacybeyker (publicada en [testigo](https://github.com/Hacybeyker/testigo)) | Enlace a tu clon de testigo; `testigo setup` la instala para otros usuarios |
+| `testigo-flows` | Hacybeyker ([testigo](https://github.com/Hacybeyker/testigo)) | `testigo setup`, si usas testigo para pruebas E2E con Maestro |
 | `android-cli` | Google | Igual que las oficiales (sección siguiente): `android skills add --agent=<agentes> android-cli`. Android Studio trae la suya. No uses `android init`: copia la skill a cada agente que detecta, incluidos los que no usas, y nadie actualiza esas copias. La de `~/.agents/skills` además duplica la que cada agente ya tiene en su carpeta |
 | Skills oficiales de Android | Google ([android/skills](https://github.com/android/skills)) | Selección de la tabla siguiente |
 
@@ -57,7 +57,9 @@ android skills update --agent=<agentes> <skill>   # actualizar
 
 **Se omite `testing-setup`:** choca con el perfil (fakes, Roborazzi, Kover).
 
-## Plugins de Claude Code
+## Plugins de Claude Code recomendados
+
+Complementan a las skills `hb-*`. Se instalan con `claude plugin install <plugin>@claude-plugins-official`.
 
 | Plugin | Proveedor | Para qué |
 | --- | --- | --- |
@@ -67,37 +69,10 @@ android skills update --agent=<agentes> <skill>   # actualizar
 | `security-guidance` | Anthropic | Avisos de seguridad al editar y revisión del diff al terminar cada turno (consume tokens) |
 | `claude-md-management` | Anthropic | Auditar y mejorar `CLAUDE.md` / `AGENTS.md` |
 | `feature-dev` | Anthropic | Flujo genérico de features para proyectos sin `AGENTS.md` |
-| `warp` | Warp | Notificaciones de Warp cuando Claude Code necesita input |
 
-Instalar uno: `claude plugin install <plugin>@claude-plugins-official` (para Warp: `warp@claude-code-warp`, con su marketplace agregado; el origen está en `extraKnownMarketplaces` de `~/.claude/settings.json`).
+- **Según tu stack:** `typescript-lsp` y `pyright-lsp` (web y backend), `jdtls-lsp` (Java), `swift-lsp` (Swift).
+- **Mejor no instalar:** `commit-commands` (choca con `hb-commit`) y `code-review` (lo cubren `hb-review` y `pr-review-toolkit`).
 
-**Quitados:** `code-review` (redundante con `pr-review-toolkit` y `hb-review`), `commit-commands` (chocaba con el commit propio; lo cubre `hb-commit`), `github` (lo cubre el CLI `gh`), `claude-code-setup` (de uso único), `swift-lsp` (casi no se escribe Swift).
+## Ajuste recomendado para Claude Code
 
-**Cuando hagan falta:** `typescript-lsp` y `pyright-lsp` (web y backend), `jdtls-lsp` (Spring Boot en Java), `plugin-dev` (si se empaquetan skills como plugin).
-
-**Descartado:** el MCP de Maestro, porque `testigo-flows` exige usar Maestro solo con su entorno local.
-
-## Cuenta de Claude (claude.ai)
-
-Se sincronizan a Claude Code. Para no cargarlas en Claude Code: `"syncClaudeAiSkills": false` o `"syncClaudeAiPlugins": false` en `~/.claude/settings.json`.
-
-| Tipo | Elementos | Proveedor |
-| --- | --- | --- |
-| Skills | `docx`, `xlsx`, `pptx`, `pdf`, `docs`, `google-workspace`, `deep-research`, `skill-creator`, `computer-use`, `chrome-browser`, `built-in-browser`, `morning`, `import-memory` | Anthropic |
-| Plugins | `engineering`, `cowork-plugin-management` (este solo sirve para crear plugins de Cowork) | Anthropic |
-
-## Configuración
-
-| Qué | Dónde | Valor |
-| --- | --- | --- |
-| Sin atribución de IA en commits y PRs | `~/.claude/settings.json` | `"attribution": { "commit": "", "pr": "", "sessionUrl": false }` |
-| GitHub desde la terminal | CLI `gh` | Autenticado con token, protocolo SSH |
-| Leer las skills sin preguntar en cada proyecto | `~/.claude/settings.json` | `permissions.additionalDirectories` con `~/.claude/skills`, `~/.agents/skills` y los destinos de sus enlaces |
-
-## Retirado
-
-| Antes | Ahora |
-| --- | --- |
-| Copias de skills en `.agents/skills` de cada proyecto, con symlinks por editor | Instalación global con `install.sh` |
-| `skill-linker` y los scripts `link-skill.sh` / `sync-skills.sh` | `install.sh` |
-| Copias antiguas de `skill-creator` en los proyectos | `skill-creator` de la cuenta de Claude |
+Para que Claude Code lea las skills sin pedir permiso en cada proyecto, agrega a `permissions.additionalDirectories` de `~/.claude/settings.json` las carpetas `~/.claude/skills` y `~/.agents/skills`. Si instalaste con `install.sh`, agrega también la carpeta `skills/` de tu clon: los enlaces apuntan ahí.
