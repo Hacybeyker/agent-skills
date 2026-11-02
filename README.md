@@ -37,8 +37,15 @@ Las skills externas y los plugins que las complementan están en [CATALOG.md](CA
 - **Frontmatter** con `metadata.author: hacybeyker`, `metadata.version` (SemVer) y `metadata.category` (`flow`, `stack` o `personal`).
 - Las skills siguen la [especificación de Agent Skills](https://agentskills.io/specification): `SKILL.md` corto y el detalle en `references/`.
 - Un perfil nuevo se crea cuando hay un proyecto real en ese stack.
+- **Sin atribución de IA:** `hb-commit` y `hb-release` nunca agregan `Co-Authored-By:` de agentes, enlaces de sesión ni líneas "Generated with" en commits, PRs, tags ni releases. Si usas Claude Code, desactívala también en `~/.claude/settings.json` para que no la agregue por su cuenta: `"attribution": { "commit": "", "pr": "", "sessionUrl": false }`.
 
 ## Instalación
+
+**Requisitos:** macOS (principal) o Linux. En Windows, usa WSL: `install.sh` crea enlaces simbólicos.
+
+- `git` y `bash`, para instalar con un clon. En macOS vienen con las Command Line Tools (`xcode-select --install`); en Linux, con el gestor de paquetes.
+- Node.js y pnpm, para instalar sin clonar (detalle en esa sección).
+- `python3`, solo con su librería estándar, para los scripts de `hb-implement` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
 
 Hay dos formas. Usa **una sola** por máquina.
 
@@ -70,7 +77,7 @@ No pisa nada: si ya existe algo con el nombre de una skill (una carpeta, o un en
 
 Con la CLI de [skills.sh](https://skills.sh) y **pnpm**, sin clonar. Usa pnpm, no npm: por defecto no ejecuta los scripts de instalación de los paquetes, así que reduce el riesgo de ataques a la cadena de suministro.
 
-Requisitos: Node.js y pnpm (`brew install pnpm`). Node.js ya no trae Corepack desde la versión 25.
+Requisitos: Node.js y pnpm. Para instalar pnpm: `brew install pnpm` en macOS, o el script oficial en macOS y Linux, `curl -fsSL https://get.pnpm.io/install.sh | sh -` ([otras formas](https://pnpm.io/installation)). Node.js ya no trae Corepack desde la versión 25.
 
 ```bash
 # Ver las skills disponibles, sin instalar nada
