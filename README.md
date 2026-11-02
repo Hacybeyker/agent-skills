@@ -26,15 +26,15 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
 | [`hb-stack-mobile-kotlin`](skills/hb-stack-mobile-kotlin) | Perfil | Android y KMP con Clean Architecture + MVVM (UDF) por features |
-| [`hb-coach`](skills/hb-coach) | Personal | Coach para aprender temas de software paso a paso, con plan y cuaderno |
+| [`hb-coach`](skills/hb-coach) | Herramienta | Coach para aprender temas de software paso a paso, con plan y cuaderno |
 
 Las skills externas y los plugins que las complementan están en [CATALOG.md](CATALOG.md).
 
 ## Convenciones
 
 - **Prefijo `hb-`** en todo lo propio. Lo que no lo tiene es externo y lo mantiene su propio instalador.
-- **Nombres:** `hb-<verbo>` para flujos, `hb-stack-<familia>` para perfiles, `hb-<herramienta>` para las personales.
-- **Frontmatter** con `metadata.author: hacybeyker`, `metadata.version` (SemVer) y `metadata.category` (`flow`, `stack` o `personal`).
+- **Nombres:** `hb-<verbo>` para flujos, `hb-stack-<familia>` para perfiles, `hb-<herramienta>` para las herramientas.
+- **Frontmatter** con `metadata.author: hacybeyker`, `metadata.version` (SemVer) y `metadata.category` (`flow`, `stack` o `tool`).
 - Las skills siguen la [especificación de Agent Skills](https://agentskills.io/specification): `SKILL.md` corto y el detalle en `references/`.
 - Un perfil nuevo se crea cuando hay un proyecto real en ese stack.
 - **Sin atribución de IA:** `hb-commit` y `hb-release` nunca agregan `Co-Authored-By:` de agentes, enlaces de sesión ni líneas "Generated with" en commits, PRs, tags ni releases. Si usas Claude Code, desactívala también en `~/.claude/settings.json` para que no la agregue por su cuenta: `"attribution": { "commit": "", "pr": "", "sessionUrl": false }`.

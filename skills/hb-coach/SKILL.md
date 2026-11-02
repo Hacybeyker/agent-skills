@@ -5,8 +5,8 @@ license: MIT
 compatibility: "Agentes compatibles con Agent Skills (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, Android Studio y otros). Scripts opcionales con Python 3.8+, solo con su librería estándar (en macOS viene con las Command Line Tools). Internet opcional para consultar documentación oficial."
 metadata:
   author: hacybeyker
-  version: "3.0.0"
-  category: personal
+  version: "3.0.1"
+  category: tool
   idioma: es
 ---
 

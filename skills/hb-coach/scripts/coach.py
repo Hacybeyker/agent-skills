@@ -24,7 +24,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 SKILL_DIR = Path(__file__).resolve().parent.parent
 ASSETS = SKILL_DIR / "assets"
 TEMPLATES = ASSETS / "plantillas"
