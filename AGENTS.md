@@ -7,7 +7,8 @@ Skills para agentes de IA (Claude Code, Copilot, Gemini en Android Studio, Junie
 - Perfil: ninguno. No es una app: el producto son instrucciones en Markdown que otros agentes cargan.
 - Markdown con frontmatter, según la [especificación de Agent Skills](https://agentskills.io/specification).
 - Bash en `install.sh`, Python 3 en `scripts/check_conventions.py`, y Python 3 (solo librería estándar) en los scripts de cada skill.
-- CI con GitHub Actions (`.github/workflows/validate.yml`) y Dependabot para las actions.
+- CI con GitHub Actions (`.github/workflows/validate.yml`), en Ubuntu y en macOS, y Dependabot para las actions.
+- Tests con `unittest` de Python, sin dependencias, en `tests/`.
 
 ## Comandos
 
@@ -17,6 +18,8 @@ Skills para agentes de IA (Claude Code, Copilot, Gemini en Android Studio, Junie
 | Enlazar las skills en esta máquina | `./install.sh` |
 | Quitar los enlaces | `./install.sh --uninstall` |
 | Probar el contrato de `install.sh` (en un `HOME` temporal) | `scripts/test_install.sh` |
+| Correr los tests de los scripts | `python3 -m unittest discover -s tests` |
+| Comprobar que las skills cambiadas suben su versión | `scripts/check_version_bump.py` (compara con `origin/main`) |
 
 ## DoD
 
@@ -24,8 +27,10 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 
 1. `for skill in skills/*/; do agentskills validate "$skill"; done`
 2. `python3 scripts/check_conventions.py`
-3. `scripts/test_install.sh` (contrato de `install.sh`: es la interfaz pública que usan los instaladores externos)
-4. `shellcheck install.sh scripts/test_install.sh`
+3. `scripts/check_version_bump.py` (compara con `origin/main`: haz `git fetch` antes)
+4. `python3 -m unittest discover -s tests`
+5. `scripts/test_install.sh` (contrato de `install.sh`: es la interfaz pública que usan los instaladores externos)
+6. `shellcheck install.sh scripts/test_install.sh`
 
 ## Arquitectura
 
@@ -40,10 +45,11 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 - Las skills se escriben en español.
 - Nada invasivo: los instaladores nunca pisan ni borran lo que no crearon, y todo lo externo es opcional.
 - Todo lo propio lleva el prefijo `hb-`. Una skill externa no se copia a este repo: se lista en `CATALOG.md`.
-- Al cambiar una skill, sube su `metadata.version` (SemVer) y refleja la misma versión en `CATALOG.md`. El validador detecta si no coinciden, pero no si olvidaste subirla.
+- Al cambiar una skill, sube su `metadata.version` (SemVer) y refleja la misma versión en `CATALOG.md`. `check_conventions.py` detecta si no coinciden y `check_version_bump.py`, si olvidaste subirla.
 - Al agregar o quitar una skill, actualiza `README.md` y `CATALOG.md` y vuelve a correr `./install.sh`.
 - Un `SKILL.md` tiene 500 líneas como máximo: el detalle va a `references/`.
 - Los archivos de `skills/*/scripts/` deben ser ejecutables, porque el CI falla sin ese permiso.
+- Todo script nuevo o cambiado (`skills/*/scripts/` o `scripts/`) llega con sus tests en `tests/` y funciona con Python 3.8, que es lo mínimo que traen las Command Line Tools de macOS.
 - Un perfil `hb-stack-*` nuevo se crea solo cuando hay un proyecto real en ese stack.
 
 ## Git

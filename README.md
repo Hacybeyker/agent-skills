@@ -119,10 +119,12 @@ Cada push y cada PR pasan por el workflow `Validate`:
 
 - `agentskills validate` (de [skills-ref](https://pypi.org/project/skills-ref/), la referencia oficial) contra la especificación de Agent Skills.
 - `scripts/check_conventions.py` con las convenciones de este repo: prefijo `hb-`, metadata, SemVer, máximo de 500 líneas por `SKILL.md`, enlaces rotos, scripts ejecutables y con sintaxis válida, y que `README.md` y `CATALOG.md` estén al día.
+- `scripts/check_version_bump.py`, en cada PR: toda skill cambiada sube su `metadata.version` (SemVer) respecto de la rama base.
+- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `report.py` de `hb-implement`, `coach.py` de `hb-coach` y `check_version_bump.py`.
 - `scripts/test_install.sh`: test de contrato de `install.sh` en un `HOME` temporal (instala dos veces, desinstala y comprueba que no toca carpetas ni enlaces ajenos). Es la interfaz pública que usan los instaladores externos, así que no cambia.
 - `shellcheck` sobre los scripts de shell.
 
-El CI corre en `ubuntu-26.04` con todas las herramientas en versiones fijas (actions por SHA, Python 3.13, `skills-ref` 0.1.1, ShellCheck 0.11.0), así que no depende de lo que traiga la imagen.
+El CI corre en `ubuntu-26.04` con todas las herramientas en versiones fijas (actions por SHA, Python 3.13, `skills-ref` 0.1.1, ShellCheck 0.11.0), así que no depende de lo que traiga la imagen. También corre en `macos-26` con el Bash 3.2 y el Python 3 del sistema, los de una Mac recién configurada, para probar `install.sh` y los scripts.
 
 Para correrlo en local:
 
@@ -131,6 +133,8 @@ python3 -m venv .venv && .venv/bin/pip install skills-ref==0.1.1 shellcheck-py==
 export PATH="$PWD/.venv/bin:$PATH"
 for skill in skills/*/; do agentskills validate "$skill"; done
 python3 scripts/check_conventions.py
+scripts/check_version_bump.py   # compara con origin/main: haz git fetch antes
+python3 -m unittest discover -s tests
 scripts/test_install.sh
 shellcheck install.sh scripts/test_install.sh
 ```
