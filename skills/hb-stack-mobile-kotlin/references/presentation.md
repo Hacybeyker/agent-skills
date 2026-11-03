@@ -91,7 +91,7 @@ fun EditProfileScreen(onSaved: () -> Unit, viewModel: EditProfileViewModel = /* 
 ```
 
 - Si el destino queda en el back stack después de navegar, confirma ese estado con una acción (como con los mensajes) para que no se repita al volver.
-- El `NavKey` de la feature y su función de registro viven en `ui/XNavigation.kt`. El shell de la app solo los junta ([variants/android.md](variants/android.md), [variants/kmp.md](variants/kmp.md)).
+- El `NavKey` de la feature vive en `ui/XNavKey.kt` y su entry builder en `ui/XNavigation.kt`. El shell de la app solo junta los entry builders ([variants/android.md](variants/android.md), [variants/kmp.md](variants/kmp.md)).
 
 ## Screen y Content
 

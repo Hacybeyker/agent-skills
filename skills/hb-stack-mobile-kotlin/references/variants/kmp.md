@@ -69,11 +69,14 @@ val profileModule = module {
 
 Igual que en Android, pero en iOS no hay serialización por reflexión: cada `NavKey` se registra.
 
+Cada `NavKey` va en `ui/XNavKey.kt` y su entry builder en `ui/XNavigation.kt`, como en Android.
+
 ```kotlin
-// feature/profile/ui/ProfileNavigation.kt
+// feature/profile/ui/ProfileNavKey.kt
 @Serializable
 data class ProfileNavKey(val userId: String) : NavKey
 
+// feature/profile/ui/ProfileNavigation.kt
 fun EntryProviderScope<NavKey>.profileEntry(onBack: () -> Unit) {
     entry<ProfileNavKey> { key ->
         ProfileScreen(onBack = onBack, viewModel = koinViewModel { parametersOf(key.userId) })
