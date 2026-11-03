@@ -8,6 +8,7 @@ Uso:
   python3 -I report.py --meta reports/meta.json [--base HEAD] [--out reports] [--repo .]
 """
 import argparse
+import base64
 import datetime
 import difflib
 import html
@@ -31,6 +32,7 @@ PILLS = {
     "skipped": ("pill-skipped", "⏭️ SKIPPED"),
 }
 MAX_LINES = 2000
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 e = html.escape
 
 
@@ -173,6 +175,32 @@ def dod_section(steps):
             f'{"".join(outputs)}</div>')
 
 
+def preview_figure(repo, preview, missing):
+    path = pathlib.Path(preview.get("image", ""))
+    path = path if path.is_absolute() else repo / path
+    name, note = e(preview.get("name", path.stem)), e(preview.get("note", ""))
+    caption = f'<figcaption style="margin-top:8px;color:var(--text-secondary)"><strong>{name}</strong>{" · " + note if note else ""}</figcaption>'
+    mime = IMAGE_TYPES.get(path.suffix.lower())
+    if mime and path.is_file():
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+        body = (f'<img src="data:{mime};base64,{data}" alt="{name}" '
+                f'style="width:100%;max-width:360px;border:1px solid var(--border);border-radius:var(--radius-md)">')
+    else:
+        missing.append(str(path))
+        body = f'<div class="empty-state">No se encontró la imagen: {e(str(path))}</div>'
+    return f'<figure style="margin:0">{body}{caption}</figure>'
+
+
+def previews_section(repo, previews, missing):
+    """Imágenes incrustadas en base64: el reporte sigue siendo un solo archivo que se puede compartir."""
+    if not previews:
+        return ""
+    figures = "".join(preview_figure(repo, p, missing) for p in previews)
+    return (f'<div class="section"><div class="section-header"><span class="section-icon">🖼️</span>'
+            f'<span class="section-title">Previews de UI</span><span class="section-count">{len(previews)}</span></div>'
+            f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px">{figures}</div></div>')
+
+
 def dod_stat(steps):
     statuses = {s.get("status") for s in steps}
     if not steps:
@@ -218,6 +246,8 @@ def main():
     dod = meta.get("dod", [])
     dod_value, dod_color = dod_stat(dod)
     scope = f'<span class="tag">{e(meta["scope"])}</span>' if meta.get("scope") else ""
+    missing_previews = []
+    previews = previews_section(repo, meta.get("previews", []), missing_previews)
 
     page = f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -235,6 +265,7 @@ def main():
 <div class="stat-card"><div class="stat-label">Archivos Eliminados</div><div class="stat-value red">{len(groups["D"])}</div></div>
 <div class="stat-card"><div class="stat-label">DoD</div><div class="stat-value {dod_color}">{dod_value}</div></div>
 </div></div>
+{previews}
 {section("🆕", "Archivos Nuevos", groups["A"], "No hay archivos nuevos.")}
 {section("✏️", "Archivos Modificados", groups["M"], "No hay archivos modificados.")}
 {section("🗑️", "Archivos Eliminados", groups["D"], "Ningún archivo fue eliminado.")}
@@ -252,6 +283,8 @@ def main():
     print(f"📄 Reporte generado: {out.relative_to(repo)}")
     if not ignored:
         print(f"⚠️  {args.out}/ no está en .gitignore", file=sys.stderr)
+    for path in missing_previews:
+        print(f"⚠️  Preview sin imagen: {path}", file=sys.stderr)
     missing = [f["path"] for f in files if f["path"] not in infos]
     if missing:
         print("ℹ️  Archivos sin explicación en meta.json: " + ", ".join(missing), file=sys.stderr)

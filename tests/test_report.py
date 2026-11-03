@@ -1,4 +1,5 @@
 """Tests del reporte HTML de hb-implement (skills/hb-implement/scripts/report.py)."""
+import base64
 import json
 import re
 import sys
@@ -94,6 +95,36 @@ class ReportTest(unittest.TestCase):
     def test_al_regenerar_no_se_incluye_a_si_mismo(self):
         self.html()
         self.assertEqual(self.stat(self.html(), "Archivos Nuevos"), "2")
+
+    def with_previews(self, previews):
+        self.meta.write_text(json.dumps(dict(META, previews=previews)), encoding="utf-8")
+
+    def test_sin_previews_no_hay_seccion_de_previews(self):
+        self.assertNotIn("Previews de UI", self.html())
+
+    def test_incrusta_los_previews_y_no_los_cuenta_como_archivos(self):
+        png = b"\x89PNG\r\n\x1a\nfalso"
+        image = self.repo / "reports" / "previews" / "home.png"
+        image.parent.mkdir(parents=True)
+        image.write_bytes(png)
+        absolute = Path(self.tmp.name) / "fuera.png"
+        absolute.write_bytes(png)
+        self.with_previews([
+            {"name": "HomeContentPreview", "image": "reports/previews/home.png", "note": "Saludo <inicial>"},
+            {"name": "Otra", "image": str(absolute)},
+        ])
+        html = self.html()
+        self.assertIn("Previews de UI", html)
+        self.assertEqual(html.count("data:image/png;base64,%s" % base64.b64encode(png).decode("ascii")), 2)
+        self.assertIn("Saludo &lt;inicial&gt;", html)
+        self.assertEqual(self.stat(html, "Archivos Nuevos"), "2")
+
+    def test_un_preview_sin_imagen_avisa_sin_fallar(self):
+        self.with_previews([{"name": "Falta", "image": "reports/previews/no-existe.png"}])
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Preview sin imagen", result.stderr)
+        self.assertIn("No se encontró la imagen", self.out.read_text(encoding="utf-8"))
 
     def test_un_meta_invalido_termina_con_error(self):
         self.meta.write_text("{no es json", encoding="utf-8")
