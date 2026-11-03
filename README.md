@@ -21,7 +21,7 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | Skill | Tipo | Qué hace |
 | --- | --- | --- |
 | [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack y las convenciones del proyecto y crea o migra su `AGENTS.md` al estándar |
-| [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD y reporte HTML |
+| [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD, previews de UI (Compose) y reporte HTML |
 | [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments |
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
