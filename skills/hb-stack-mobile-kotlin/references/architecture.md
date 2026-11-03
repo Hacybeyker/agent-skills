@@ -33,7 +33,8 @@ feature/<nombre>/
 │   ├── ProfileViewModel.kt
 │   ├── ProfileUiState.kt
 │   ├── ProfileAction.kt
-│   └── ProfileNavigation.kt  (NavKey + entry de navegación)
+│   ├── ProfileNavKey.kt      (NavKey: el contrato para navegar a la feature)
+│   └── ProfileNavigation.kt  (entry builder: registra la pantalla para ese NavKey)
 └── di/
     └── ProfileModule.kt
 core/
@@ -51,7 +52,7 @@ core/
 
 Empieza con un módulo y paquetes. Pasa a módulos Gradle cuando aparezca alguna de estas señales: varias personas trabajando en paralelo, builds lentos, features que se quieren aislar o reutilizar. Entonces sigue el esquema de Now in Android:
 
-- `:feature:<x>:api`: lo que otras features necesitan (por ejemplo el `NavKey`). `:feature:<x>:impl`: todo lo demás.
+- `:feature:<x>:api`: lo que otras features necesitan (por ejemplo el `NavKey`). `:feature:<x>:impl`: todo lo demás, incluido el entry builder. Como `XNavKey.kt` y `XNavigation.kt` ya son archivos separados, cada uno pasa a su módulo sin cambios.
 - Un `impl` solo depende de `api` de otras features. Ningún `api` depende de otra feature.
 - `:core:<x>` no depende de features ni de `:app`.
 - La configuración común va en *convention plugins* (`build-logic/`).

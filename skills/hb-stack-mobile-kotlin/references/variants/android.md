@@ -59,13 +59,18 @@ class ProfileViewModel @AssistedInject constructor(
 
 ## Navigation 3
 
-Cada feature declara su `NavKey` y su entry. El shell de la app solo arma el back stack y las junta.
+Cada feature declara su `NavKey` y su entry builder, en archivos separados. El shell de la app solo arma el back stack y junta los entry builders.
+
+- `XNavKey.kt` es el contrato: lo que otra feature importa para navegar aquí. En un proyecto modularizado va en `:feature:x:api`.
+- `XNavigation.kt` es la implementación: registra la pantalla para ese `NavKey`. Va en `:feature:x:impl`.
+- Separarlos también cumple la convención de nombres de Kotlin: un archivo con una sola clase se llama como ella, y uno con solo funciones se nombra por su contenido. Así `MatchingDeclarationName` de detekt pasa sin excepciones ni trucos de orden.
 
 ```kotlin
-// feature/profile/ui/ProfileNavigation.kt
+// feature/profile/ui/ProfileNavKey.kt
 @Serializable
 data class ProfileNavKey(val userId: String) : NavKey
 
+// feature/profile/ui/ProfileNavigation.kt
 fun EntryProviderScope<NavKey>.profileEntry(onBack: () -> Unit) {
     entry<ProfileNavKey> { key ->
         ProfileScreen(

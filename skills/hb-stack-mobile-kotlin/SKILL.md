@@ -4,7 +4,7 @@ description: 'Perfil de stack para apps Android nativas y Kotlin Multiplatform (
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.2.0"
+  version: "1.3.0"
   category: stack
   origin: "fusiona android-best-practices y kmp-best-practices"
 ---
