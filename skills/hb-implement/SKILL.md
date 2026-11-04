@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose."
 metadata:
   author: hacybeyker
-  version: "1.2.0"
+  version: "1.3.0"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -73,11 +73,15 @@ Si el proyecto lleva `CHANGELOG.md` con `[Unreleased]`, o `AGENTS.md` pide docum
 
 ## 5. Previews de UI (opcional)
 
-Solo si se cumplen las tres condiciones: el cambio toca UI de Jetpack Compose (un `XContent.kt` o los composables que usa), el proyecto es Android (en KMP aún no está probado) y existe la CLI `android`. No reemplaza a los tests de screenshots del proyecto: esos siguen siendo la regresión.
+Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XContent.kt` o los composables que usa), el proyecto es Android o KMP con un módulo de app Android, y existe la CLI `android`. No reemplaza a los tests de screenshots del proyecto: esos siguen siendo la regresión.
 
-1. Lista los `@Preview` del módulo y quédate con los de los archivos que cambiaste. Pasa la carpeta del módulo (por ejemplo `app`): sin ella la CLI toma el proyecto raíz y falla.
+1. Lista los `@Preview` del módulo y quédate con los de los archivos que cambiaste. Pasa la carpeta del módulo de la app (por ejemplo `app`): sin ella la CLI toma el proyecto raíz y falla.
    ```bash
    android preview list app --format json
+   ```
+   **En KMP** la CLI no reconoce el módulo compartido (`shared`, con `com.android.kotlin.multiplatform.library`): pasa el de la app Android (`androidApp`) con `--all`, que incluye los previews de sus dependencias, entre ellos los de `commonMain`. En `render` usa también `androidApp`.
+   ```bash
+   android preview list androidApp --all --format json
    ```
 2. Dibújalos en `reports/previews` (cada `--fqn` es un nombre que devolvió `list`):
    ```bash
@@ -86,7 +90,7 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Jetpack Compose (u
    La primera vez la CLI descarga su paquete de render (unos 300 MB). Con `--daemon`, los renders siguientes son más rápidos.
 3. **Mira cada imagen** y compárala con los criterios de aceptación: textos, orden, estados y tema. Si algo no coincide, corrige y vuelve a dibujar. Para datos exactos, agrega `--component-tree`: el JSON trae bounds, semántica y el archivo y la línea de cada componente.
 4. Agrega cada imagen a `previews` en `meta.json`, con lo que muestra y qué criterio verifica.
-5. Si falta la CLI, el proyecto no es Android o el render falla, agrega al DoD del reporte un paso `Previews de UI` en `skipped` con el motivo, y sigue: no bloquea la entrega.
+5. Si falta la CLI, el proyecto no tiene un módulo de app Android o el render falla, agrega al DoD del reporte un paso `Previews de UI` en `skipped` con el motivo, y sigue: no bloquea la entrega.
 
 ## 6. Reporte HTML
 
