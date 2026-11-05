@@ -2,7 +2,7 @@
   "paquete": "com.ejemplo.app",
   "hz": 60,
   "config": "base",
-  "principales": ["jank_app_pct", "hilo_slices_sobre_presupuesto", "home_hasta_datos_ms"],
+  "principales": ["home_hasta_datos_ms", "jank_app_pct", "hilo_slices_sobre_presupuesto"],
   "flujos": {
     "home-recarga": {
       "pasos": [
@@ -20,7 +20,23 @@
           "hasta": {"marca": "HTTP GET */home*", "punto": "fin", "cual": "ultima"},
           "familia": "e2e"
         }
-      ]
+      ],
+      "familias": {},
+      "metricas_sql": []
     }
-  }
+  },
+  "mejoras": [
+    {
+      "id": "M1",
+      "hallazgo": "H1",
+      "titulo": "Una sola carga del historial al volver a Home",
+      "flujo": "home-recarga",
+      "metrica": "red_solapadas",
+      "esperado": "0 llamadas",
+      "prioridad": "alta",
+      "esfuerzo": "bajo",
+      "riesgo": "bajo",
+      "estado": "propuesta"
+    }
+  ]
 }

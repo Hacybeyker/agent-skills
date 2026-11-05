@@ -8,11 +8,9 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 
-/**
- * SCREEN <Clase> <evento>: cuánto duran onCreate, onStart y onResume de cada actividad (callbacks pre y post,
- * Android 10+) y el onCreate de cada fragment, más marcas instantáneas en onViewCreated y onResume de los
- * fragments. No toca el código de las pantallas: lo registra PerfInstaller.
- */
+// SCREEN <Class> <event>: how long onCreate, onStart and onResume of each activity take (pre and post callbacks,
+// Android 10+) and the onCreate of each fragment, plus instant marks on fragment onViewCreated and onResume.
+// Registered by PerfInstaller, so screen code stays untouched.
 class ScreenTraceCallbacks(private val tracer: SectionTracer = PlatformSectionTracer) :
     Application.ActivityLifecycleCallbacks {
 

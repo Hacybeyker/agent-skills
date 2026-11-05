@@ -1,55 +1,75 @@
 # Sesión 2 · Diagnóstico
 
-Cruza las métricas con el código para encontrar las causas. Es la sesión donde vale la pena gastar tokens: el resto ya lo resolvió el script. Termina con **una sola aprobación**: los hallazgos y la elección de mejoras, juntos.
+Cruza la evidencia con el código para encontrar las causas y propone un plan de mejoras. Es la sesión donde vale la pena razonar: las consultas ya las corrió el script. Termina con el **reporte inicial** y una **decisión del usuario** sobre qué mejoras se aplican.
 
 ## 1. Punto de partida
 
-Lee `estado.md`: ficha, mapa, hipótesis y "Métricas". No vuelvas a recorrer el proyecto: abre solo los archivos del mapa que cada hipótesis necesita, por rangos.
+1. Lee `estado.md` (ficha, mapa, hipótesis, "Métricas") y **`diagnostico.md` entero**: tiene las consultas listas sobre la corrida mediana y la peor. No vuelvas a correr esas consultas. Si no existe, el primer paso es `perf.py diagnostico --carpeta <carpeta>`.
+2. Si no hay mapa (investigación creada con una receta), arma uno mínimo del camino medido, de 15 líneas como máximo. En el arranque: `Application`, content providers e inicializadores, la primera actividad, la primera pantalla, su ViewModel o presenter y su fuente de datos.
+3. Carga solo los patrones del stack ([patrones/](patrones/)); en el arranque, [arranque.md](patrones/arranque.md).
 
-## 2. Consultas acotadas
-
-Elige una o dos trazas representativas del estado inicial (por ejemplo, la de la mediana y la peor) y consúltalas con `perf.py consulta`, que limita las filas y el ancho:
-
-```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py consulta <carpeta>/antes/<flujo>_3.perfetto-trace.gz hilo_principal_top.sql --paquete <applicationId>
-```
-
-Consultas listas en `assets/queries/diagnostico/` de esta skill:
+## 2. Qué responde cada consulta de `diagnostico.md`
 
 | Consulta | Responde |
 | --- | --- |
-| `hilo_principal_top.sql` | Los 20 slices más largos del hilo principal y cuándo ocurren |
-| `hijos_mas_largos.sql` | Qué hay adentro de esos slices |
-| `linea_de_tiempo.sql` | Orden de `SCREEN`, `NAV`, `HTTP` y `TTFB`: qué precede a cada llamada |
-| `llamadas_solapadas.sql` | Pares de llamadas al mismo endpoint en vuelo a la vez (carga duplicada) |
-| `inflate_tras_http.sql` | Ráfagas de inflate después de cada respuesta (vistas o adapters recreados) |
-| `jank_por_tipo.sql` | Frames por tipo de jank |
-| `binder_hilo_principal.sql` | IPC síncrono que bloquea el hilo principal |
+| `arranque_hitos` | Lanzamiento del sistema (TTID), `bindApplication`, actividad, primeros frames, `NAV` y `reportFullyDrawn`, en ms desde que nace el proceso |
+| `linea_hilo_principal` | El hilo principal en orden, con las marcas propias |
+| `hilo_principal_top` | Los slices más largos del hilo principal |
+| `estado_hilo_principal` | Si el hilo principal corre, espera CPU o duerme |
+| `hijos_mas_largos` | Qué hay adentro de los slices largos |
+| `dormido_en_frames_largos` | Dónde duerme el hilo principal dentro de los frames más largos (la plataforma o la app) |
+| `estado_primeros_frames` | Los dos primeros frames: estado del hilo principal y qué otros hilos compiten por CPU |
+| `frames_por_tramo` | Frames y jank por tramo: cuánto dura un spinner o una ráfaga |
+| `cpu_por_tramo` | CPU por tramo del hilo principal, el RenderThread y el resto: qué trabaja mientras el usuario espera |
+| `cpu_por_hilo` | CPU, espera y sueño por grupo de hilos (base de datos, red, dispatchers) |
+| `contencion_locks` | Hilos que esperan un lock, con su dueño y el lugar |
+| `binder_hilo_principal` | IPC síncrono que bloquea el hilo principal |
+| `jank_por_tipo` | Frames por tipo de jank |
+| `linea_de_tiempo` | Marcas propias en orden: qué precede a cada llamada |
+| `llamadas_solapadas`, `inflate_tras_http` | Cargas duplicadas y vistas recreadas con cada respuesta (si hay red) |
 
-Para una pregunta puntual, `--sql "<consulta>"` con `LIMIT`. Nunca pidas una tabla entera.
+## 3. Una pregunta puntual
 
-## 3. Cuándo usar `android-profiler`
+Solo para lo que `diagnostico.md` no responde, sobre una traza concreta y con `LIMIT`:
 
-Solo para lo que las consultas no responden, y sobre una traza concreta: heap dumps y fugas, muestreo de CPU (funciones calientes cuando un slice no tiene nombre suficiente) o el triage guiado de una traza anómala. Su documentación es extensa: cárgala una vez, para esa pregunta.
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py consulta <carpeta>/antes/<flujo>_<n>.perfetto-trace.gz --sql "<consulta> LIMIT 20"
+```
 
-Para Compose, `jetpack-compose-performance`. Para ANR, `anr-audit-and-fix`.
+`consulta` toma el paquete del `plan.json` de la carpeta y acepta los nombres de las consultas de la skill y `--param CLAVE=valor`. Si escribes una consulta propia que vale la pena repetir, guárdala en `<carpeta>/diagnostico/` y, si mide algo por corrida, súmala a `metricas_sql` del plan.
 
-## 4. Leer la red
+## 4. Qué función gasta el CPU
+
+Cuando un hilo gasta CPU y su slice no dice por qué (una base de datos, criptografía, parseo), una captura con muestreo:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --prueba --config cpu
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py consulta <carpeta>/prueba/<flujo>_1.perfetto-trace.gz cpu_por_libreria --param HILO='<prefijo-del-hilo>*'
+```
+
+Las librerías nativas sin símbolos muestran la librería y no la función; el código Java o Kotlin sale ofuscado por R8: desofúscalo con el mapping de profiling.
+
+`android-profiler` queda para heap dumps y fugas, o el triage guiado de una traza anómala; su documentación es extensa: cárgala una vez, para esa pregunta. Para Compose, `jetpack-compose-performance`. Para ANR, `anr-audit-and-fix`.
+
+## 5. Leer la red
 
 - **Duplicados:** `red_solapadas` o `red_repetidas_2s` mayores que 0, o más llamadas que las esperadas en el mapa.
-- **Servidor o cliente:** si `ttfb_ms` es casi todo `ms`, el tiempo es del servidor: es evidencia para el equipo de backend, no algo que se arregle en la app. Si `cliente_ms` es alto, la respuesta es grande o la lectura es lenta.
+- **Servidor o cliente:** si `ttfb_ms` es casi todo `ms`, el tiempo es del servidor: es evidencia para el equipo de backend. Si `cliente_ms` es alto, la respuesta es grande o la lectura es lenta.
 - **Huecos:** antes de la llamada, con el hilo principal ocupado, la app tarda en dispararla; después, antes de que cambie la UI, el parseo o el mapeo es pesado.
 
-## 5. Patrones
+## 6. Entregable
 
-Usa solo los del stack, ya identificados en la ficha ([patrones/](patrones/)). Si encuentras una causa que no está en ninguno, anótala en "Patrones conocidos" de `## Rendimiento`.
-
-## Entregable
-
-En `estado.md`:
-
-- **Hallazgos**, ordenados por impacto, con evidencia (métrica, traza o consulta y `archivo:línea`). Separa los **bugs** de lo **mejorable pero intencional**: lo intencional se decide con el negocio.
-- **Pendientes** con receta completa (causa, `archivo:línea`, cambio, test, métrica y commit sugerido), para aplicarlos después sin repetir el diagnóstico.
-- **Siguiente paso:** sesión 3, con las mejoras que el usuario eligió.
-
-Muestra los hallazgos y espera **una** aprobación con la elección de mejoras.
+1. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo", separa los **bugs** de lo **mejorable pero intencional** (se decide con el negocio) y de las **consecuencias** de otro hallazgo. Lo que salga de consultas y no de una métrica lleva "sin veredicto estadístico".
+2. **`mejoras` en `plan.json`**, una por cambio que se pueda commitear solo:
+   ```json
+   {"id": "M1", "hallazgo": "H1", "titulo": "...", "flujo": "<flujo>", "metrica": "<métrica que debería moverse>",
+    "esperado": "<valor o rango, por ejemplo ≤ 500 ms o -30 %>", "prioridad": "alta", "esfuerzo": "bajo",
+    "riesgo": "bajo", "estado": "propuesta"}
+   ```
+   Si la métrica que la demuestra no es principal ni existe, dilo: puede hacer falta una marca o una métrica propia antes de medir después.
+3. **Pendientes** con receta completa (causa, `archivo:línea`, cambio, test, métrica y commit sugerido), para aplicarlos sin repetir el diagnóstico.
+4. **Reporte inicial**, que también dibuja el plan en `estado.md`:
+   ```bash
+   cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --inicial --html
+   ```
+5. **Siguiente paso:** "decisión del usuario". Pide que elija las mejoras; registra la decisión en "Decisiones" y en `estado` de cada mejora (`aprobada` o `descartada`). Después, una sesión 3 por mejora, cada una en un chat nuevo. Detente.

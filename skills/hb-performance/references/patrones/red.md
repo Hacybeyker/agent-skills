@@ -30,6 +30,7 @@ Una `HTTP` empieza recién cuando termina la anterior, aunque no necesita su res
 | --- | --- |
 | `ttfb_ms` es casi todo `ms` | El tiempo es del servidor (o de la red): evidencia para el equipo de backend |
 | `cliente_ms` alto (`ms` mucho mayor que `ttfb_ms`) | Respuesta grande o lectura lenta del body: revisar paginación, campos innecesarios, compresión (`gzip`) |
+| `cliente_ms` alto en todas las llamadas, o CPU alto en los hilos de red | Un interceptor de logging en nivel `BODY` (o un inspector de tráfico) activo fuera de debug: lee, copia y escribe cada respuesta completa. Solo en debug; en release, `NONE` o `BASIC` |
 | Hueco antes del `HTTP`, con el hilo principal ocupado | La app tarda en disparar el request: trabajo previo en el hilo principal |
 | Hueco después del `HTTP`, antes de que cambie la UI | Parseo o mapeo pesado al recibir: moverlo fuera del hilo principal o reducirlo |
 

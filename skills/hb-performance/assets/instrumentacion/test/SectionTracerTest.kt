@@ -1,40 +1,56 @@
 package {{PAQUETE}}
 
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class SectionTracerTest {
+    @After
+    fun restoreTracer() {
+        NavigationTrace.tracer = PlatformSectionTracer
+    }
+
     @Test
-    fun sectionNameRecortaA127Caracteres() {
+    fun sectionNameIsCappedAt127Characters() {
         assertEquals(MAX_SECTION_NAME, sectionName("x".repeat(300)).length)
         assertEquals("HTTP GET items", sectionName("HTTP GET items"))
     }
 
     @Test
-    fun navigationTraceAbreYCierraUnaMarca() {
-        val tracer = FakeTracer()
+    fun navigationMarkOpensAndClosesOneSection() {
+        val tracer = RecordingTracer()
         NavigationTrace.tracer = tracer
         NavigationTrace.mark("Detail")
         assertEquals(listOf("begin NAV Detail", "end"), tracer.events)
     }
-}
 
-class FakeTracer : SectionTracer {
-    val events = mutableListOf<String>()
-
-    override fun beginSection(name: String) {
-        events += "begin $name"
+    @Test
+    fun destinationNameDropsArgumentsAndIds() {
+        assertEquals("movie/{movieId}", NavigationTrace.destinationName("movie/{movieId}?from=home"))
+        assertEquals("Detail", NavigationTrace.destinationName(Detail(id = 42)))
     }
 
-    override fun endSection() {
-        events += "end"
-    }
+    private data class Detail(val id: Int)
 
-    override fun beginAsyncSection(name: String, cookie: Int) {
-        events += "beginAsync $name"
-    }
+    private class RecordingTracer : SectionTracer {
+        val events = mutableListOf<String>()
 
-    override fun endAsyncSection(name: String, cookie: Int) {
-        events += "endAsync $name"
+        override fun beginSection(name: String) {
+            events += "begin $name"
+        }
+
+        override fun endSection() {
+            events += "end"
+        }
+        // hb-perf:red>
+
+        override fun beginAsyncSection(name: String, cookie: Int) {
+            events += "beginAsync $name"
+        }
+
+        override fun endAsyncSection(name: String, cookie: Int) {
+            events += "endAsync $name"
+        }
+        // <hb-perf:red
     }
 }

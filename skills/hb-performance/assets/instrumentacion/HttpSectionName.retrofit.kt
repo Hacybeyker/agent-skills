@@ -11,10 +11,8 @@ import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.PUT
 
-/**
- * "GET items/{id}": método y ruta como plantilla, sin IDs, query ni body. La plantilla sale de la anotación
- * de Retrofit; sin Retrofit (o con @Url), se normalizan los segmentos que parecen IDs.
- */
+// "GET items/{id}": method and path template, without ids, query or body. The template comes from the Retrofit
+// annotation; without Retrofit (or with @Url), path segments that look like ids are normalized.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(
         "/(\\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" +

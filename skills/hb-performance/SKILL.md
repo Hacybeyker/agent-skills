@@ -1,63 +1,71 @@
 ---
 name: hb-performance
-description: 'Investiga problemas de rendimiento en apps Android (incluido el target Android de KMP), con cualquier arquitectura y stack: jank y frames perdidos, lags, hilo principal, red (llamadas duplicadas, lentas o en cascada), memoria y fugas, y arranque. Mide antes y después con scripts, diagnostica con trazas y código, aplica mejoras con tests y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens. Úsala cuando el usuario pida analizar o mejorar el rendimiento de una pantalla, un flujo, una feature o un módulo ("la pantalla X va lenta", "hay jank al hacer scroll", "llama dos veces al servicio", "analiza el rendimiento de Y", "sigue hb-performance con estado.md", "/hb-performance").'
+description: 'Investiga problemas de rendimiento en apps Android (incluido el target Android de KMP), con cualquier arquitectura y stack: arranque en frío (TTID y TTFD), jank y frames perdidos, lags, hilo principal, red (llamadas duplicadas, lentas o en cascada) y memoria. Mide antes y después con scripts, arma el diagnóstico con consultas listas sobre las trazas, propone un plan de mejoras que el usuario decide, las aplica con tests y demuestra el resultado con estadística, en sesiones cortas para gastar pocos tokens. Úsala cuando el usuario pida analizar o mejorar el rendimiento de una pantalla, un flujo, una feature, un módulo o el arranque ("la app tarda en abrir", "la pantalla X va lenta", "hay jank al hacer scroll", "llama dos veces al servicio", "analiza el rendimiento de Y", "sigue hb-performance con estado.md", "/hb-performance").'
 license: MIT
-compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Usa la skill oficial android-profiler en el diagnóstico. Opcional: testigo para automatizar los recorridos."
+compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Opcional: android-profiler para heap dumps, testigo para automatizar recorridos."
 metadata:
   author: hacybeyker
-  version: "0.1.0"
+  version: "0.2.0"
   category: flow
 ---
 
 # hb-performance
 
-Investiga un problema de rendimiento acotado a **una pantalla, un flujo, una feature o un módulo**: mide el estado inicial, diagnostica, aplica mejoras y demuestra el resultado con números. Sirve con cualquier arquitectura, UI o asincronía porque **mide la plataforma, no el framework**; el stack solo decide qué patrones revisar.
+Investiga un problema de rendimiento acotado a **una pantalla, un flujo, una feature, un módulo o el arranque**: mide el estado inicial, diagnostica, propone un plan, aplica lo que el usuario elige y demuestra el resultado con números. Sirve con cualquier arquitectura, UI o asincronía porque **mide la plataforma, no el framework**; el stack solo decide qué patrones revisar.
 
-**Lo que cuesta son los tokens:** cada paso reenvía todo el contexto. Por eso la investigación va en **sesiones cortas** que se pasan el trabajo por `estado.md`, y todo lo determinista (capturar, consultar, calcular, comparar, reportar) lo hace `scripts/perf.py`. El modelo lee resúmenes e interpreta.
+## Lo que cuesta son los tokens
+
+Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones llega a cientos de miles de tokens por paso y multiplica el costo; uno nuevo por sesión arranca con unos pocos miles. Por eso:
+
+- Todo lo determinista lo hace `scripts/perf.py`: crear la investigación, capturar, consultar las trazas, calcular, comparar y reportar. El modelo lee resúmenes cortos e interpreta.
+- Las mediciones las corre el usuario en su terminal, sin chat: cuestan cero tokens.
+- Cada sesión vive en **su propio chat** y se pasa el trabajo por `estado.md`.
 
 ## Reglas
 
 1. **Alcance estricto.** Analiza y cambia solo lo indicado. Si la causa está fuera, repórtala con evidencia y pregunta.
 2. **Medir antes de cambiar**, con las mismas condiciones antes y después ([medicion.md](references/medicion.md)).
-3. **Evidencia o nada:** métrica + traza + `archivo:línea`. Lo que no se pueda confirmar va como **⚠ Por confirmar**.
-4. **Los números los calcula `perf.py`.** Nunca calcules ni transcribas medianas, porcentajes o veredictos.
-5. **Salidas acotadas.** Nunca vuelques al contexto salidas completas (`dumpsys`, SQL, Gradle, tests). Gradle con `-q`, tests solo del módulo, logs a `<carpeta>/logs/` y al contexto solo el resumen. Lee archivos por rangos y con `grep`.
-6. **Lo que depende de una edición corre después de ella**, nunca en paralelo.
-7. **Instrumentación permanente solo en debug y profiling**, sin efecto en release. Las secciones temporales se quitan antes del commit.
-8. **Git:** no hagas commit, push, merge, rebase ni cambies de rama salvo que el usuario lo pida y `AGENTS.md` lo permita. Propón un commit por mejora, con las reglas de `hb-commit`.
-9. **Datos:** la evidencia cruda se usa sin enmascarar, salvo que `## Rendimiento` pida otra cosa. Vive en una carpeta ignorada por git y nunca va a commits, PRs ni al reporte.
-10. **Comandos para el usuario:** uno por paso, que empiece con `cd <ruta absoluta> && ...`.
+3. **Evidencia o nada:** métrica + consulta o traza + `archivo:línea`. Lo que no se pueda confirmar va como **⚠ Por confirmar**.
+4. **Los números con veredicto los calcula `perf.py`.** Nunca calcules medianas, porcentajes ni veredictos. Un valor que solo sale de una consulta se cita tal cual y rotulado "sin veredicto estadístico".
+5. **Salidas acotadas.** Nunca vuelques al chat salidas completas (`dumpsys`, logcat, SQL, Gradle, tests, diffs). Logs a `<carpeta>/logs/` y al chat solo el resumen o `grep -m1 -A20`. No leas `perf.py`: usa `--help`. Lee archivos por rangos.
+6. **Una sesión por chat, y al terminar te detienes.** Actualiza "Siguiente paso" en `estado.md`, da al usuario el texto para el chat nuevo y no sigas con la sesión siguiente aunque te diga "sigue": explícale que en este chat cuesta varias veces más.
+7. **Presupuesto de pasos** por sesión (tabla de abajo). Si se acaba, guarda el estado en `estado.md`, dilo y detente.
+8. **Lo que depende de una edición corre después de ella**, nunca en paralelo.
+9. **Instrumentación permanente solo en debug y profiling**, sin efecto en release. Lo temporal se quita antes del commit.
+10. **Git:** no hagas commit, push, merge, rebase ni cambies de rama salvo que el usuario lo pida y `AGENTS.md` lo permita. Propón un commit por mejora, con las reglas de `hb-commit`.
+11. **Datos:** la evidencia cruda se usa sin enmascarar, salvo que `AGENTS.md` pida otra cosa. Vive en una carpeta ignorada por git y nunca va a commits, PRs ni al reporte.
+12. **Comandos para el usuario:** uno por paso, que empiece con `cd <ruta absoluta> && ...`.
 
 ## Sesiones
 
-Cada sesión es **un chat nuevo** que lee `estado.md` (si existe) y **solo** la referencia de su sesión. Al terminar, actualiza "Siguiente paso" en `estado.md` con el comando o el texto para el chat siguiente y el modelo sugerido ([modelos.md](references/modelos.md)).
+| Paso | Quién | Lee | Hace | Termina con | Pasos máx. |
+| --- | --- | --- | --- | --- | --- |
+| 0 · Setup, una vez por proyecto | Agente | [setup.md](references/setup.md) | Build de profiling, `perf.py instrumentar`, cableado, `reportFullyDrawn` y prueba de humo | Aprobación del diff | 40 |
+| 1 · Ficha y plan | Agente; con receta, `perf.py nuevo` sin chat | [ficha.md](references/ficha.md) | `plan.json`, `estado.md` y corrida de prueba | Aprobación de ficha y plan | 15 |
+| Medición antes y control | Usuario, sin chat | [medicion.md](references/medicion.md) | `perf.py capturar` y `perf.py diagnostico` | — | — |
+| 2 · Diagnóstico | Agente | [diagnostico.md](references/diagnostico.md) | Lee `diagnostico.md` y el código; hallazgos, plan de mejoras y reporte inicial | **Decisión del usuario:** qué mejoras se aplican | 25 |
+| 3 · Mejora | Agente, un chat por mejora | [mejoras.md](references/mejoras.md) | Una mejora, su test y el DoD | Commit propuesto | 30 |
+| Medición después | Usuario, sin chat | [medicion.md](references/medicion.md) | `perf.py capturar --fase despues` | — | — |
+| 4 · Cierre | Agente | [cierre.md](references/cierre.md) | `perf.py comparar`, lectura, resumen ejecutivo y reporte final | Entrega | 10 |
 
-| Sesión | Lee | Hace | Aprobación |
-| --- | --- | --- | --- |
-| 0 · Setup, una vez por proyecto | [setup.md](references/setup.md) | Build de profiling, `perf.py instrumentar`, cableado y prueba de humo | El diff del setup |
-| 1 · Ficha y plan | [ficha.md](references/ficha.md) | Contexto, stack, mapa, hipótesis, `plan.json`, `estado.md` y corrida de prueba | Ficha y plan, juntos |
-| Medición antes | [medicion.md](references/medicion.md), solo si la corre el agente | `perf.py capturar --fase antes` | — |
-| 2 · Diagnóstico | [diagnostico.md](references/diagnostico.md) | Métricas, código y consultas acotadas; `android-profiler` solo si hace falta | Hallazgos y mejoras elegidas, juntos |
-| 3 · Mejoras | [mejoras.md](references/mejoras.md) | Una mejora a la vez, con su test y el DoD | Cada commit propuesto |
-| Medición después | [medicion.md](references/medicion.md) | `perf.py capturar --fase despues` | — |
-| 4 · Cierre | [cierre.md](references/cierre.md) | `perf.py comparar` y `reporte`; el modelo redacta el resumen ejecutivo | — |
-
-- **Retomar:** si te pasan un `estado.md`, léelo y sigue la sesión de "Siguiente paso". Sin `estado.md`, empieza por la 1; por la 0 si `## Rendimiento` del `AGENTS.md` no dice que el setup está listo.
-- **Modos:** *guiado* por defecto (el usuario corre los comandos y las mediciones no gastan tokens) o *autónomo* (el agente corre `perf.py`, con el modelo más económico). El recorrido es manual (Enter entre corridas), con testigo o con Macrobenchmark.
-- **Profundidad:** *riguroso* por defecto. *Triage*: sesión 1 con una corrida de prueba y directo al diagnóstico; los hallazgos llevan "⚠ sin línea base".
+- **Retomar:** si te pasan un `estado.md`, léelo y sigue la sesión de "Siguiente paso", y solo esa. Sin `estado.md`: la 0 si `AGENTS.md` no dice que el setup está listo; si no, la 1.
+- **Recetas:** el arranque en frío no necesita la sesión 1. `perf.py nuevo --receta arranque-frio` arma `plan.json` y `estado.md` listos para medir (TTID, TTFD y el hilo principal).
+- **Modos:** *guiado* por defecto: el agente corre en su terminal todo lo que no necesita el dispositivo en la mano (`perf.py` salvo `capturar`, Gradle, DoD, instalar) y el usuario corre las capturas. *Autónomo*: el agente también captura, con el modelo más económico y solo si el recorrido es automático (`arranque-frio`, un comando o testigo).
+- **Profundidad:** *riguroso* por defecto (antes, control y después, 10 corridas con recorrido automático). *Triage*: una corrida de prueba y directo al diagnóstico; los hallazgos llevan "⚠ sin línea base".
+- **Modelo y costo:** [modelos.md](references/modelos.md). Al cerrar cada sesión, pide al usuario el costo (`/cost` o lo que muestre su herramienta) y anótalo en "Consumo".
 
 ## Herramientas
 
-- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `capturar`, `consulta`, `resumen`, `comparar`, `har`, `reporte` e `instrumentar` (cada uno con `--help`). Usa `adb` y `trace_processor`.
-- Otras skills, por intención y sin depender de sus archivos: `android-profiler` (diagnóstico profundo: heap dumps, CPU, triage de una traza), `jetpack-compose-performance`, `anr-audit-and-fix` y `r8-analyzer`.
+- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `nuevo`, `capturar`, `diagnostico`, `consulta`, `resumen`, `comparar`, `har`, `reporte` e `instrumentar` (cada uno con `--help`). Usa `adb` y `trace_processor`.
+- Otras skills, por intención y sin depender de sus archivos: `android-profiler` (heap dumps y fugas), `jetpack-compose-performance`, `anr-audit-and-fix` y `r8-analyzer`.
 
 ## Checklist
 
-- [ ] Cada sesión en un chat nuevo, con `estado.md` y solo su referencia.
-- [ ] Setup listo y registrado en `## Rendimiento`; prueba de humo correcta.
-- [ ] Ficha y plan aprobados juntos, con las métricas principales fijadas antes de medir.
-- [ ] Corrida de prueba antes de medir; al menos 5 corridas válidas por fase.
-- [ ] Hallazgos con evidencia, bugs separados de lo intencional; pendientes con receta.
-- [ ] Una mejora por commit propuesto, con su test y el DoD en verde.
-- [ ] Veredictos de `perf.py`; e2e marcado como dependiente del backend.
+- [ ] Cada sesión en su chat, con `estado.md` y solo su referencia; se detuvo al terminar.
+- [ ] Setup listo y registrado en `AGENTS.md`; prueba de humo correcta.
+- [ ] Métricas principales fijadas antes de medir, al menos una de punta a punta (TTFD o una métrica de usuario).
+- [ ] Corrida de prueba antes de medir; al menos 5 corridas válidas por fase (10 con recorrido automático).
+- [ ] Hallazgos con evidencia; mejoras en `plan.json` con su métrica y lo esperado; decisión del usuario registrada.
+- [ ] Una mejora por chat y por commit propuesto, con su test y el DoD en verde.
+- [ ] Veredictos de `perf.py`, lectura de la comparación escrita; e2e marcado como dependiente del backend.
 - [ ] Nada de evidencia cruda en commits, PRs ni en el reporte.

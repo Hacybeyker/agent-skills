@@ -1,25 +1,32 @@
-# Sesión 3 · Mejoras
+# Sesión 3 · Mejora
 
-Aplica las mejoras elegidas en la sesión 2. Lee de `estado.md` los hallazgos elegidos y su receta; abre solo los archivos que tocan.
+Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazgo y la receta, y de `plan.json` la mejora con `estado: aprobada`; abre solo los archivos que toca.
+
+## Antes de tocar código
+
+- **Frescura de la línea base:** mira `antes` en `fases.json` (fecha y commit). Si pasaron más de 14 días, si `git merge-base --is-ancestor <commit> HEAD` falla o si entraron otros cambios al alcance desde entonces, la línea base ya no representa este código: vuelve a medir `antes` (y `control`) antes de aplicar la mejora.
+- **Una mejora por sesión.** Si el usuario aprobó varias, esta sesión hace la primera y "Siguiente paso" apunta a la siguiente en un chat nuevo. Se pueden medir juntas en `despues`, pero cada una lleva su commit.
 
 ## Reglas
 
-- **Una mejora a la vez**, mínima y dentro del alcance. Si exige tocar algo fuera, detente y pregunta.
+- **Mínima y dentro del alcance.** Si exige tocar algo fuera, detente y pregunta.
 - **Un test que fije la mejora**, además de los existentes en verde. Por ejemplo:
   - una carga duplicada: el servidor falso (o el fake del repositorio) recibe una sola llamada por recorrido;
   - trabajo pesado fuera del hilo principal: el dispatcher o el scheduler de prueba confirma dónde corre;
-  - una vista que se recreaba: el adapter se configura una sola vez por vista.
-- **DoD con la salida acotada:** los comandos de `## DoD` del proyecto, con Gradle en `-q`, primero los tests del módulo afectado (`--tests`) y el log completo en `<carpeta>/logs/`. Al contexto llegan solo el conteo de tests y los fallos:
+  - una vista que se recreaba: el adapter se configura una sola vez por vista;
+  - una migración de datos: un test que parte del formato viejo y termina con los datos intactos.
+- **Tests instrumentados solo en un emulador:** `connectedAndroidTest` desinstala la app del dispositivo y se pierden los datos de prueba.
+- **DoD con la salida acotada:** los comandos de `## DoD`, con Gradle en `-q`, primero los tests del módulo afectado y el log completo en `<carpeta>/logs/`. Al chat llegan solo el conteo de tests y los fallos:
   ```bash
-  cd <raíz-del-proyecto> && ./gradlew -q :<modulo>:testDebugUnitTest > <carpeta>/logs/tests-h1.log 2>&1; echo "exit $?"; grep -E "tests completed|FAILED|BUILD" <carpeta>/logs/tests-h1.log | tail -20
+  cd <raíz-del-proyecto> && ./gradlew -q :<modulo>:testDebugUnitTest > <carpeta>/logs/tests-m1.log 2>&1; echo "exit $?"; grep -E "tests completed|FAILED|BUILD" <carpeta>/logs/tests-m1.log | tail -20
   ```
-- **Secciones temporales** agregadas para confirmar una hipótesis: quítalas antes de proponer el commit.
-- No dejes una edición y el comando que depende de ella en paralelo.
+- **Lo temporal** (una sección agregada para confirmar una hipótesis) se quita antes de proponer el commit.
+- No dejes una edición y el comando que depende de ella en paralelo. No vuelques el diff al chat: lista los archivos y qué cambió en cada uno.
 
 ## Entregable
 
-En `estado.md`:
+En `estado.md` y `plan.json`:
 
-- **Mejoras aplicadas:** por cada una, los archivos, el test que la fija, el resultado del DoD y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`).
+- **Mejoras aplicadas:** archivos, el test que la fija, el resultado del DoD y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`). En `plan.json`, `estado: aplicada`.
 - **Pendientes** actualizados.
-- **Siguiente paso:** la medición después, con el comando exacto (el mismo de antes con `--fase despues`), después de instalar el build de profiling con los cambios.
+- **Siguiente paso:** la siguiente mejora aprobada (chat nuevo) o, si era la última, la medición después: instalar el build de profiling con los cambios, abrir la app una vez si hubo migración, y el comando exacto de `capturar --fase despues` (el mismo de antes). Detente.

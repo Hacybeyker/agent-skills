@@ -124,6 +124,18 @@ class CompareTest(PerfBase):
         self.assertIn("| antes | f | jank_app_pct |", state)
         self.assertIn("mejora", state)
 
+    def test_frames_distintos_vuelven_no_comparables_las_metricas_de_frame(self):
+        data = self.comparison(rows("antes", "f", "frames", [220, 230, 210, 225, 221], "frames", family="info")
+                               + rows("despues", "f", "frames", [8, 7, 8, 7, 8], "frames", family="info")
+                               + rows("antes", "f", "frame_p90_ms", [30, 31, 30, 29, 30])
+                               + rows("despues", "f", "frame_p90_ms", [118, 120, 119, 117, 118])
+                               + rows("antes", "f", "ttid_ms", [400, 410, 405, 395, 402])
+                               + rows("despues", "f", "ttid_ms", [300, 310, 305, 295, 302]))
+        by = {r["metrica"]: r for r in data["resultados"]}
+        self.assertEqual(by["frame_p90_ms"]["veredicto"], "no comparable")
+        self.assertIn("frames distintos", by["frame_p90_ms"]["avisos"])
+        self.assertEqual(by["ttid_ms"]["veredicto"], "mejora")
+
     def test_validaciones_del_csv(self):
         write(self.csv, "fase,flujo,valor\nantes,f,1\n")
         self.assertEqual(self.perf("resumen", self.csv).returncode, 2)
@@ -154,7 +166,8 @@ class TraceMetricsTest(unittest.TestCase):
         m, invalid, _ = self.metrics(frames)
         self.assertIsNone(invalid)
         self.assertEqual(m["jank_app_pct"][1], 20)
-        self.assertEqual(m["jank_total_pct"][1], 30)
+        self.assertEqual(m["jank_total_pct"][1], 20)  # Buffer Stuffing solo no cuenta
+        self.assertEqual(m["jank_total_pct"][3], "info")
         self.assertEqual(m["frames"][3], "info")
 
     def test_hilo_principal_cuenta_solo_slices_de_nivel_superior(self):
@@ -229,6 +242,40 @@ class TraceMetricsTest(unittest.TestCase):
         self.assertEqual(parsed[1], ("frame", 10, 20, 0, "App Deadline Missed, Buffer Stuffing"))
         self.assertEqual(parsed[2][2], -1)
 
+    def test_arranque_ttid_ttfd_bind_y_hz_de_la_traza(self):
+        rows = [("vsync", 0, 11_000_000, 0, ""), ("lanzamiento", 1000 * MS, 400 * MS, 0, "launching: " + PKG),
+                ("hilo", 1050 * MS, 80 * MS, 0, "bindApplication"), ("hilo", 1300 * MS, 12 * MS, 0, "doFrame"),
+                ("seccion", 1900 * MS, 1 * MS, 2, "reportFullyDrawn() for {%s/.Main}" % PKG),
+                ("frame", 1300 * MS, 30 * MS, 0, "App Deadline Missed")]
+        flow = {"familias": {"frame_p*": "info", "ttfd_ms": "e2e"}}
+        m, invalid, info = self.metrics(rows, flow=flow, hz=None)
+        self.assertIsNone(invalid)
+        self.assertEqual(info["hz"], 90)
+        self.assertEqual(m["ttid_ms"][1], 400)
+        self.assertEqual(m["ttfd_ms"][1], 900)
+        self.assertEqual(m["ttfd_ms"][3], "e2e")
+        self.assertEqual(m["bind_application_ms"][1], 80)
+        self.assertEqual(m["frame_p90_ms"][3], "info")
+        self.assertEqual(m["hilo_slices_sobre_presupuesto"][1], 2)  # 12 ms supera los 11,1 ms de 90 Hz
+
+    def test_marcas_de_usuario_aceptan_slices_del_hilo_y_el_lanzamiento(self):
+        rows = [("lanzamiento", 0, 300 * MS, 0, "launching: " + PKG), ("hilo", 500 * MS, 20 * MS, 0, "Choreographer#doFrame 1"),
+                ("frame", 0, 16 * MS, 0, "None")]
+        flow = {"metricas_usuario": [{"nombre": "hasta_primer_frame_ms", "desde": {"marca": "launching: *"},
+                                      "hasta": {"marca": "Choreographer#doFrame*", "cual": "primera"}, "familia": "app"}]}
+        m, _, _ = self.metrics(rows, flow=flow)
+        self.assertEqual(m["hasta_primer_frame_ms"][1], 520)
+
+    def test_parsea_la_salida_markdown_del_modo_agente(self):
+        sets = perf.parse_result_sets("| tipo | ts |\n|---|---|\n| proceso | 0 |\n| hilo | [NULL] |\n\n| x |\n|---|\n| 1 |\n")
+        self.assertEqual(sets[0], (["tipo", "ts"], [["proceso", "0"], ["hilo", None]]))
+        self.assertEqual(sets[1][1], [["1"]])
+
+    def test_hz_desde_el_periodo_esperado(self):
+        self.assertEqual(perf.hz_from_vsync(16_666_666), 60)
+        self.assertEqual(perf.hz_from_vsync(8_333_333), 120)
+        self.assertIsNone(perf.hz_from_vsync(0))
+
     def test_parsea_gfxinfo_y_meminfo(self):
         gfx = dict((m[0], m[1]) for m in perf.parse_gfxinfo("Janky frames: 12 (5.43%)\n90th percentile: 19ms\n"))
         self.assertEqual(gfx, {"gfx_jank_pct": 5.43, "gfx_p90_ms": 19.0})
@@ -252,12 +299,17 @@ if args[0] == "pull":
     pathlib.Path(args[2]).write_bytes(b"x" * 4096)
     sys.exit(0)
 cmd = " ".join(args[1:])
-if cmd.startswith("getprop"):
+if cmd.startswith("getprop ro.build.version.sdk"):
     print(os.environ.get("FAKE_SDK", "34"))
+elif cmd.startswith("getprop ro.product.model"):
+    print("Pixel Test")
+elif cmd.startswith("getprop ro.build.version.release"):
+    print("14")
 elif cmd.startswith("pm path"):
     print("package:/data/app/base.apk")
 elif cmd.startswith("dumpsys package"):
-    print("    flags=[ HAS_CODE ALLOW_BACKUP ]")
+    print("    versionCode=7 minSdk=26 targetSdk=36\n    versionName=1.0\n    flags=[ HAS_CODE ALLOW_BACKUP ]\n"
+          "    lastUpdateTime=" + os.environ.get("FAKE_UPDATED", "2026-11-05 10:00:00"))
 elif cmd.startswith("dumpsys thermalservice"):
     print("Thermal Status: " + os.environ.get("FAKE_THERMAL", "0"))
 elif cmd.startswith("dumpsys battery"):
@@ -266,6 +318,19 @@ elif cmd.startswith("dumpsys activity activities"):
     print("  topResumedActivity=ActivityRecord{{1 u0 com.ejemplo.app/.MainActivity t5}}")
 elif cmd.startswith("cmd package compile"):
     print("Success")
+elif cmd.startswith("cmd package resolve-activity"):
+    print("priority=0 preferredOrder=0 match=0x108000\ncom.ejemplo.app/.MainActivity")
+elif cmd.startswith("am start"):
+    print("Starting: Intent {{ cmp=com.ejemplo.app/.MainActivity }}\nStatus: ok\nLaunchState: "
+          + os.environ.get("FAKE_LAUNCH", "COLD") + "\nActivity: com.ejemplo.app/.MainActivity\nTotalTime: 456\nComplete")
+elif cmd.startswith("pidof"):
+    if os.environ.get("FAKE_DEAD"):
+        sys.exit(1)
+    print("1234")
+elif cmd.startswith("logcat -b crash"):
+    print("11-05 10:00:01.000  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
+          "11-05 10:00:01.000  1234  1234 E AndroidRuntime: Process: com.ejemplo.app, PID: 1234\n"
+          "11-05 10:00:01.000  1234  1234 E AndroidRuntime: java.lang.IllegalStateException: boom")
 elif cmd.startswith("perfetto"):
     sys.stdin.read()
     print("4242")
@@ -276,14 +341,31 @@ elif cmd.startswith("dumpsys meminfo"):
 '''
 
 FAKE_TP = r'''#!{python}
-import os, sys
-assert sys.argv[1:3] == ["query", "-f"], sys.argv
-path = os.environ["FAKE_TP_OUT"]
+import os, re, sys
+args = sys.argv[1:]
+if args[:2] == ["query", "--help"]:
+    print("Usage: trace_processor query -f FILE TRACE" if os.environ.get("FAKE_TP_VIEJO") else
+          "Usage: trace_processor query [--format csv|markdown] -f FILE TRACE")
+    sys.exit(0)
+if args[:3] == ["query", "--format", "csv"]:
+    args = ["query"] + args[3:]
+assert args[:2] == ["query", "-f"], sys.argv
+sql = open(args[2]).read()
+open(os.environ["FAKE_TP_SQL"], "a").write(sql + "\n-----\n")
 counter = os.environ["FAKE_TP_COUNTER"]
 n = int(open(counter).read()) if os.path.exists(counter) else 0
 open(counter, "w").write(str(n + 1))
-outputs = open(path).read().split("===\n")
-sys.stdout.write(outputs[min(n, len(outputs) - 1)])
+outputs = open(os.environ["FAKE_TP_OUT"]).read().split("===\n")
+out = outputs[min(n, len(outputs) - 1)]
+names = re.findall(r"SELECT '([^']+)' AS hbperf_marker;", sql)
+if not names:
+    sys.stdout.write(out)
+else:
+    chunks = []
+    for name in names:
+        chunks.append('"hbperf_marker"\n"%s"\n' % name)
+        chunks.append(out if name == "metricas" else os.environ.get("FAKE_TP_OTRA", '"nombre","valor"\n"x",1\n'))
+    sys.stdout.write("\n".join(c.rstrip("\n") + "\n" for c in chunks))
 '''
 
 GOOD = '"tipo","ts","dur","prof","nombre"\n"proceso",0,0,0,"com.ejemplo.app"\n"limites",0,5000000000,0,""\n' + \
@@ -295,7 +377,7 @@ LOGIN = '"tipo","ts","dur","prof","nombre"\n"proceso",0,0,0,"com.ejemplo.app"\n"
     '"seccion",0,1000,0,"SCREEN LoginActivity onCreate"\n'
 
 
-class CaptureTest(PerfBase):
+class DeviceBase(PerfBase):
     def setUp(self):
         super().setUp()
         bin_dir = self.dir / "bin"
@@ -307,7 +389,8 @@ class CaptureTest(PerfBase):
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
         self.env.update({"PATH": "%s%s%s" % (bin_dir, os.pathsep, os.environ.get("PATH", "")),
                          "FAKE_LOG": str(self.dir / "adb.log"), "FAKE_TP_OUT": str(self.dir / "tp.txt"),
-                         "FAKE_TP_COUNTER": str(self.dir / "tp.count"), "HB_PERF_ESPERA": "0"})
+                         "FAKE_TP_COUNTER": str(self.dir / "tp.count"), "FAKE_TP_SQL": str(self.dir / "tp.sql"),
+                         "HB_PERF_ESPERA": "0"})
         self.env.pop("TRACE_PROCESSOR", None)
         self.env.pop("ADB", None)
         self.plan = self.dir / "inv" / "plan.json"
@@ -317,6 +400,8 @@ class CaptureTest(PerfBase):
     def tp_outputs(self, *outputs):
         write(self.dir / "tp.txt", "===\n".join(outputs))
 
+
+class CaptureTest(DeviceBase):
     def test_captura_corridas_validas_escribe_csv_comprime_y_resume(self):
         self.tp_outputs(GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
@@ -399,6 +484,108 @@ class CaptureTest(PerfBase):
         self.assertIn("| xxxxxxxxxx | 0 |", out)
         self.assertIn("25 filas más", out)
 
+    def startup_plan(self, **extra):
+        flow = {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 0}}
+        flow.update(extra)
+        write(self.plan, json.dumps({"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": flow}}))
+
+    def test_arranque_en_frio_detiene_la_app_antes_de_grabar_y_valida_el_estado(self):
+        self.startup_plan()
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0",
+                      "--sin-compilar")
+        self.assertIn("TTID 456 ms", out)  # sin lanzamiento en la traza, el TTID sale de am start -W
+        self.assertIn("No hace falta pegar", out)
+        log = [json.loads(line) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()]
+        commands = [" ".join(a[3:]) if a[:1] == ["-s"] else " ".join(a[1:]) for a in log]
+        stop = commands.index("am force-stop " + PKG)
+        trace = next(i for i, c in enumerate(commands) if c.startswith("perfetto"))
+        start = commands.index("am start -W -n %s/.MainActivity" % PKG)
+        self.assertLess(stop, trace)
+        self.assertLess(trace, start)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["instalada"], "2026-11-05 10:00:00")
+        self.assertEqual(phases["antes"]["version"], "1.0 (7)")
+
+    def test_arranque_tibio_invalida_la_corrida(self):
+        self.startup_plan()
+        self.tp_outputs(GOOD)
+        self.env["FAKE_LAUNCH"] = "WARM"
+        result = self.perf("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0",
+                           "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("WARM", result.stdout)
+
+    def test_app_caida_invalida_la_corrida_y_muestra_el_crash(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_DEAD"] = "1"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("IllegalStateException: boom", result.stdout)
+        self.assertIn("retrace", result.stdout)
+
+    def test_despues_con_el_mismo_build_de_antes_se_detiene(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                "--calentamiento", "0", "--sin-compilar")
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "despues", "--corridas", "1",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("mismo que midió antes", result.stderr)
+        self.env["FAKE_UPDATED"] = "2026-11-06 09:00:00"
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "despues", "--corridas", "1",
+                "--calentamiento", "0", "--sin-compilar")
+        self.ok("comparar", self.plan.parent / "metricas.csv")
+        self.assertIn("## Builds medidos", (self.plan.parent / "comparacion.md").read_text(encoding="utf-8"))
+
+    def test_metricas_propias_desde_sql(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["metricas_sql"] = [{"archivo": "datos.sql"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(self.plan.parent / "datos.sql", "SELECT 'datos_ms' AS nombre, 812 AS valor, 'ms' AS unidad -- {{PAQUETE}}")
+        self.env["FAKE_TP_OTRA"] = '"nombre","valor","unidad","familia"\n"datos_ms",812,"ms","e2e"\n'
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                "--calentamiento", "0", "--sin-compilar")
+        row = self.read_csv_at(self.plan.parent / "metricas.csv")[("antes", "datos_ms", "1")]
+        self.assertEqual((row["valor"], row["unidad"], row["familia"]), ("812", "ms", "e2e"))
+        self.assertIn("-- " + PKG, (self.dir / "tp.sql").read_text(encoding="utf-8"))
+
+    def test_trace_processor_viejo_usa_query_sin_format(self):
+        self.env["FAKE_TP_VIEJO"] = "1"
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+
+    def test_consulta_completa_parametros_y_toma_el_paquete_del_plan(self):
+        self.tp_outputs('"a"\n1\n')
+        trace = self.plan.parent / "antes" / "home_1.perfetto-trace.gz"
+        write(trace, "x")
+        query = self.dir / "q.sql"
+        write(query, "SELECT 1 AS a FROM process WHERE name = '{{PAQUETE}}' AND x > {{UMBRAL}} -- {{TRAMO_MS}}")
+        self.ok("consulta", trace, query, "--param", "UMBRAL=5")
+        sql = (self.dir / "tp.sql").read_text(encoding="utf-8")
+        self.assertIn("name = '%s' AND x > 5 -- 250" % PKG, sql)
+        result = self.perf("consulta", trace, query)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--param UMBRAL", result.stderr)
+
+    def test_diagnostico_escribe_mediana_y_peor_con_las_consultas_del_escenario(self):
+        self.startup_plan()
+        folder = self.plan.parent
+        write(folder / "metricas.csv", HEADER + rows("antes", "arranque-frio", "ttid_ms", [400, 500, 450, 420, 480]))
+        for run in range(1, 6):
+            write(folder / "antes" / ("arranque-frio_%d.perfetto-trace.gz" % run), "x")
+        self.env["FAKE_TP_OTRA"] = '"slice","ms"\n"Choreographer#doFrame 1",12.500000\n'
+        self.tp_outputs('"x"\n1\n')
+        out = self.ok("diagnostico", "--carpeta", folder)
+        self.assertIn("corrida 3, corrida 2", out)  # mediana 450 (corrida 3) y peor 500 (corrida 2)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("arranque_hitos", md)
+        self.assertIn("## Corrida 2 (peor)", md)
+        self.assertIn("| Choreographer#doFrame 1 | 12.5 |", md)
+        self.assertNotIn("llamadas_solapadas", md)  # sin red no corre el grupo red
+        self.assertNotIn("{{", (self.dir / "tp.sql").read_text(encoding="utf-8"))
+
     def read_csv_at(self, path):
         with Path(path).open(newline="", encoding="utf-8") as f:
             return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
@@ -462,8 +649,55 @@ class ReportTest(PerfBase):
         self.assertIn("<svg", page)
         self.assertNotIn("{{", page)
 
+    def test_reporte_inicial_con_plan_y_final_con_propuesto_contra_logrado(self):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", "# Rendimiento · Arranque · 2026-11-05\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n"
+                                    "| Alcance | Arranque en frío |\n| Precondiciones | set fijo secreto |\n"
+                                    "| Dispositivo | Pixel |\n\n### Set fijo\n\n| # | dato |\n| --- | --- |\n| 1 | x |\n\n"
+                                    "## Plan de mejoras\n\n<!-- perf:mejoras -->\n<!-- /perf:mejoras -->\n\n"
+                                    "## Lectura de la comparación\n\nEl TTID bajó.\n")
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"a": {}},
+                                                "mejoras": [{"id": "M1", "titulo": "Clave raw", "hallazgo": "H0",
+                                                             "metrica": "ttid_ms", "esperado": "-20 %",
+                                                             "prioridad": "alta", "estado": "aprobada"}]}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "a", "ttid_ms", [400, 410, 405, 395, 402]))
+        self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
+        initial = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertIn("## Plan de mejoras", initial)
+        self.assertIn("| M1 | Clave raw | H0 | ttid_ms | 402 ms | -20 % | alta |", initial)
+        self.assertIn("Arranque en frío", initial)
+        self.assertNotIn("secreto", initial)
+        self.assertNotIn("Set fijo", initial)
+        self.assertIn("| M1 | Clave raw |", (folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertTrue((folder / "reporte-inicial.html").is_file())
+        write(folder / "metricas.csv", HEADER + rows("antes", "a", "ttid_ms", [400, 410, 405, 395, 402])
+              + rows("despues", "a", "ttid_ms", [300, 310, 305, 295, 302]))
+        self.ok("reporte", "--carpeta", folder)
+        final = (folder / "reporte.md").read_text(encoding="utf-8")
+        self.assertIn("## Propuesto contra logrado", final)
+        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | -24.88 % | mejora | aprobada |", final)
+        self.assertIn("El TTID bajó.", final)
+
     def test_reporte_exige_estado(self):
         self.assertEqual(self.perf("reporte", "--carpeta", self.dir).returncode, 2)
+
+
+class NuevoTest(DeviceBase):
+    def test_receta_arranque_frio_arma_plan_y_estado_listos_para_medir(self):
+        folder = self.dir / "reports" / "perf" / "arranque" / "2026-11-05"
+        out = self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--receta", "arranque-frio", "--red")
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        flow = plan["flujos"]["arranque-frio"]
+        self.assertEqual(flow["recorrido"], {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 5})
+        self.assertEqual(flow["familias"]["ttfd_ms"], "e2e")
+        self.assertEqual(plan["principales"], ["ttid_ms", "ttfd_ms", "hilo_max_ms"])
+        self.assertNotIn("hz", plan)
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("arranque en frío", state)
+        self.assertIn("Pixel Test · Android 14 (API 34)", state)
+        self.assertNotIn("{{", state)
+        self.assertIn("--fase control --corridas 10", out)
+        self.assertEqual(self.perf("nuevo", "--carpeta", folder, "--paquete", PKG).returncode, 2)
 
 
 class InstrumentTest(PerfBase):
@@ -482,6 +716,9 @@ class InstrumentTest(PerfBase):
         self.assertIn("package com.ejemplo.app.perf", listener)
         self.assertNotIn("{{PAQUETE}}", listener)
         self.assertTrue((module / "src/testDebug/kotlin/com/ejemplo/app/perf/TraceEventListenerTest.kt").is_file())
+        tracer_test = (module / "src/testDebug/kotlin/com/ejemplo/app/perf/SectionTracerTest.kt").read_text(encoding="utf-8")
+        self.assertIn("beginAsyncSection", tracer_test)
+        self.assertNotIn("hb-perf:red", tracer_test)
 
     def test_sin_red_no_copia_lo_de_okhttp_y_valida_el_paquete(self):
         module = self.dir / "app"
@@ -490,6 +727,11 @@ class InstrumentTest(PerfBase):
         base = module / "src/perf/kotlin/com/ejemplo/perf"
         self.assertFalse((base / "TraceEventListener.kt").exists())
         self.assertIn("FragmentManager", (base / "ScreenTraceCallbacks.kt").read_text(encoding="utf-8"))
+        tracer = (base / "SectionTracer.kt").read_text(encoding="utf-8")
+        self.assertNotIn("beginAsyncSection", tracer)
+        self.assertNotIn("android.os.Build", tracer)
+        self.assertNotIn("hb-perf:red", tracer)
+        self.assertNotIn("\n\n\n", tracer)
         self.assertEqual(self.perf("instrumentar", "--modulo", module, "--paquete", "Com.Malo").returncode, 2)
         self.assertEqual(self.perf("instrumentar", "--modulo", self.dir, "--paquete", "com.a.b").returncode, 2)
 
