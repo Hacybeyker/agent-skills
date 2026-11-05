@@ -1,0 +1,26 @@
+{
+  "paquete": "com.ejemplo.app",
+  "hz": 60,
+  "config": "base",
+  "principales": ["jank_app_pct", "hilo_slices_sobre_presupuesto", "home_hasta_datos_ms"],
+  "flujos": {
+    "home-recarga": {
+      "pasos": [
+        "Partir en Home con la sesión iniciada",
+        "Abrir el detalle del primer ítem",
+        "Volver a Home y esperar a que cargue"
+      ],
+      "inicio": "MainActivity",
+      "invalidar_si": ["SCREEN *Login*"],
+      "recorrido": "manual",
+      "metricas_usuario": [
+        {
+          "nombre": "home_hasta_datos_ms",
+          "desde": {"marca": "SCREEN MainActivity onResume", "punto": "inicio", "cual": "ultima"},
+          "hasta": {"marca": "HTTP GET */home*", "punto": "fin", "cual": "ultima"},
+          "familia": "e2e"
+        }
+      ]
+    }
+  }
+}

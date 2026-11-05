@@ -1,0 +1,67 @@
+package {{PAQUETE}}
+
+import android.app.Activity
+import android.app.Application
+import android.os.Bundle
+import android.view.View
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
+
+/**
+ * SCREEN <Clase> <evento>: cuánto duran onCreate, onStart y onResume de cada actividad (callbacks pre y post,
+ * Android 10+) y el onCreate de cada fragment, más marcas instantáneas en onViewCreated y onResume de los
+ * fragments. No toca el código de las pantallas: lo registra PerfInstaller.
+ */
+class ScreenTraceCallbacks(private val tracer: SectionTracer = PlatformSectionTracer) :
+    Application.ActivityLifecycleCallbacks {
+
+    private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentPreCreated(fm: FragmentManager, f: Fragment, savedInstanceState: Bundle?) =
+            tracer.beginSection(screen(f, "onCreate"))
+
+        override fun onFragmentCreated(fm: FragmentManager, f: Fragment, savedInstanceState: Bundle?) =
+            tracer.endSection()
+
+        override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?) =
+            mark(screen(f, "onViewCreated"))
+
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = mark(screen(f, "onResume"))
+    }
+
+    override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) =
+        tracer.beginSection(screen(activity, "onCreate"))
+
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        (activity as? FragmentActivity)?.supportFragmentManager?.registerFragmentLifecycleCallbacks(fragments, true)
+    }
+
+    override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) = tracer.endSection()
+
+    override fun onActivityPreStarted(activity: Activity) = tracer.beginSection(screen(activity, "onStart"))
+
+    override fun onActivityPostStarted(activity: Activity) = tracer.endSection()
+
+    override fun onActivityPreResumed(activity: Activity) = tracer.beginSection(screen(activity, "onResume"))
+
+    override fun onActivityPostResumed(activity: Activity) = tracer.endSection()
+
+    override fun onActivityStarted(activity: Activity) = Unit
+
+    override fun onActivityResumed(activity: Activity) = Unit
+
+    override fun onActivityPaused(activity: Activity) = Unit
+
+    override fun onActivityStopped(activity: Activity) = Unit
+
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+
+    override fun onActivityDestroyed(activity: Activity) = Unit
+
+    private fun screen(owner: Any, event: String) = "SCREEN ${owner.javaClass.simpleName} $event"
+
+    private fun mark(name: String) {
+        tracer.beginSection(name)
+        tracer.endSection()
+    }
+}
