@@ -2,7 +2,8 @@
 -- de trace_processor. perf.py reemplaza {{PAQUETE}} y calcula las métricas a partir de estas filas.
 -- La app es la última instancia del proceso: en un arranque en frío, la que nace durante la traza.
 -- tipo: proceso | limites | vsync (período esperado de frame) | frame (FrameTimeline) | hilo (hilo principal)
---       | seccion (HTTP, TTFB, SCREEN, NAV y reportFullyDrawn) | lanzamiento (launching: del sistema = TTID)
+--       | seccion (HTTP, TTFB, QUEUE, CONN, SCREEN, NAV y reportFullyDrawn) | lanzamiento (launching: del sistema = TTID)
+--       | jit (tiempo de compilación JIT de la app: delata una compilación de ART distinta entre fases)
 WITH app AS (SELECT upid, pid, name FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1)
 SELECT 'proceso' AS tipo, 0 AS ts, 0 AS dur, 0 AS prof, name AS nombre FROM app
 UNION ALL
@@ -23,7 +24,14 @@ WHERE (s.depth = 0 AND s.dur >= 5000000) OR s.name = 'inflate'
 UNION ALL
 SELECT 'seccion', ts, dur, depth, name
 FROM slice
-WHERE name GLOB 'HTTP *' OR name GLOB 'TTFB *' OR name GLOB 'SCREEN *' OR name GLOB 'NAV *'
-   OR name GLOB 'reportFullyDrawn*'
+WHERE name GLOB 'HTTP *' OR name GLOB 'TTFB *' OR name GLOB 'QUEUE *' OR name GLOB 'CONN *'
+   OR name GLOB 'SCREEN *' OR name GLOB 'NAV *' OR name GLOB 'reportFullyDrawn*'
 UNION ALL
-SELECT 'lanzamiento', ts, dur, 0, name FROM slice WHERE name = 'launching: {{PAQUETE}}';
+SELECT 'lanzamiento', ts, dur, 0, name FROM slice WHERE name = 'launching: {{PAQUETE}}'
+UNION ALL
+SELECT 'jit', 0, IFNULL(SUM(s.dur), 0), COUNT(*), ''
+FROM slice s
+JOIN thread_track tt ON s.track_id = tt.id
+JOIN thread t ON t.utid = tt.utid
+JOIN app ON t.upid = app.upid
+WHERE s.name GLOB 'JIT compiling*';

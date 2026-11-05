@@ -11,15 +11,22 @@ import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.PUT
 
-// "GET items/{id}": method and path template, without ids, query or body. The template comes from the Retrofit
-// annotation; without Retrofit (or with @Url), path segments that look like ids are normalized.
+// "GET items/{id} #1a2b": method, path template and a hash of the query; no ids, query values or body. The template
+// comes from the Retrofit annotation; without Retrofit (or with @Url), path segments that look like ids are normalized.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(
         "/(\\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" +
             "|[0-9a-fA-F]{16,})(?=/|$)"
     )
 
-    fun endpoint(request: Request): String = "${request.method} ${template(request)}"
+    fun endpoint(request: Request): String = "${request.method} ${template(request)}${queryTag(request)}"
+
+    // " #1a2b": a short hash of the query, so loads of the same endpoint with other parameters (another page or
+    // filter) do not count as duplicates. perf.py drops it from the per-endpoint metrics; the values never show up.
+    fun queryTag(request: Request): String {
+        val query = request.url.encodedQuery ?: return ""
+        return " #" + Integer.toHexString(query.hashCode() and 0xFFFF).padStart(4, '0')
+    }
 
     fun sanitize(path: String): String = path.replace(ID_SEGMENT, "/{id}")
 

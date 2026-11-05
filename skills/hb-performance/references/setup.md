@@ -9,7 +9,7 @@ Deja el proyecto listo para medir. Las investigaciones siguientes lo reutilizan 
 | Build type `profiling` (`profileable`, no `debuggable`, R8 como release) | Sí | Sin él solo valen los conteos de red y las fugas |
 | `reportFullyDrawn` en la primera pantalla | Recomendada | TTFD: el arranque hasta el contenido visible, no solo hasta el primer frame. También lo usa Android vitals |
 | Secciones `SCREEN` (ciclo de vida de actividades y fragments) | Recomendada | Cuánto dura cada `onCreate`/`onResume` y qué pantalla precede a cada llamada |
-| Secciones `HTTP` y `TTFB` | Si la app usa OkHttp (Retrofit, Ktor con motor OkHttp, Apollo) | Tiempos por endpoint, duplicados y separar servidor de cliente |
+| Secciones `HTTP`, `QUEUE`, `CONN` y `TTFB` | Si la app usa OkHttp (Retrofit, Ktor con motor OkHttp, Apollo) | Tiempos por endpoint, duplicados (con un hash de la query) y separar cola, conexión, servidor y cliente |
 | Marcas `NAV` | Si la navegación no cambia de actividad (Compose, Navigation 3) | Saber en qué pantalla está el flujo |
 
 Detecta el stack con una búsqueda y sin recorrer el proyecto:
@@ -51,7 +51,7 @@ android {
 
 Revisa antes de proponerlo:
 
-- **Firma:** la misma del build que ya está instalado en el dispositivo de pruebas (debug o el de QA). Con otra firma no se instala encima y se pierden los datos. Si no hay nada instalado, `install` es una instalación nueva y Android puede restaurar el backup de la nube: si la app se cae al abrir, revisa `firstInstallTime` y las exclusiones de backup.
+- **Firma e `applicationId`:** dos opciones. Sin sufijo, con la firma del build que ya está instalado en el dispositivo de pruebas, se instala encima y conserva los datos (sesión, base). Con `applicationIdSuffix = ".profiling"`, convive con los demás builds pero arranca sin datos: el `paquete` del plan es el id con el sufijo. Si no hay nada instalado, `install` es una instalación nueva y Android puede restaurar el backup de la nube: si la app se cae al abrir, revisa `firstInstallTime` y las exclusiones de backup.
 - **Backend o mocks:** si el proyecto tiene un modo con datos simulados (un flag de `BuildConfig`, un interceptor de mocks), pregunta si el build de profiling lo usa: saca el backend de la medición y las métricas de usuario pasan a familia `app`. Sin mocks, con backend real, quedan en `e2e`.
 - **Claves y secretos:** `initWith(release)` hereda los `buildConfigField` de release; confirma que las claves del ambiente estén en `local.properties` o en variables de entorno de esa máquina.
 - **Firebase o Google Services:** si el plugin está aplicado, el build de profiling puede necesitar su propio `google-services.json` en `src/profiling/`.
@@ -89,17 +89,18 @@ Después, **una vez**, el formateador del proyecto (`ktlintFormat`, `spotlessApp
 
 ## Prueba de humo
 
-Instala el build de profiling y usa la receta de arranque en frío, que valida todo de una vez (`SCREEN`, `NAV`, `HTTP`, TTID y TTFD):
+La prueba de humo es el primer paso de la investigación de arranque: la receta valida todo de una vez (`SCREEN`, `NAV`, `HTTP`, TTID y TTFD) y deja lista la carpeta para medir. La corre el usuario, con el dispositivo conectado; tú solo le das los comandos.
+
+Si hay más de un dispositivo conectado (`adb devices`), el serial va en la instalación y en `nuevo --serial`, que lo guarda en el plan para todas las capturas.
 
 ```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId> --carpeta reports/perf/setup
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capturar --plan reports/perf/setup/plan.json --prueba
+cd <raíz-del-proyecto> && adb -s <serial> install -r <módulo>/build/outputs/apk/profiling/<apk-de-profiling>.apk && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId-instalado> --serial <serial> --carpeta reports/perf/arranque-frio/<AAAA-MM-DD> --instalar "<comando que instala el build de profiling>" [--red]
 ```
 
-Si falta algo: el paquete instalado, Android 10 o superior, el manifest de `profiling` fusionado, que el código principal pase por los ganchos y, sin `ttfd_ms`, el `reportFullyDrawn`.
+`nuevo` imprime los comandos que siguen (y los deja en "Siguiente paso" de `estado.md`); el primero es la corrida de prueba. Si falla: el paquete instalado (con su sufijo), Android 10 o superior, el manifest de `profiling` fusionado, que el código principal pase por los ganchos y, sin `ttfd_ms`, el `reportFullyDrawn`.
 
 ## Cierre del setup
 
 - Agrega a `AGENTS.md` una sección con el encabezado en el idioma del archivo (`## Performance` o `## Rendimiento`), de 10 líneas como máximo: `applicationId`, cómo instalar el build de profiling, qué secciones hay, dónde está el `reportFullyDrawn` y "setup listo". Sin `AGENTS.md`, propón crearlo solo con esa sección (u ofrece `hb-setup`).
 - Propón commitearlo en **su propio PR** (por ejemplo `build(perf): agregar el build de profiling y la instrumentación de rendimiento`). Si el equipo no acepta herramientas de medición en el repo, guárdalo como parche en una carpeta no versionada y aplícalo con `git apply` al investigar.
-- **Siguiente paso** (en el chat, porque `estado.md` todavía no existe): para el arranque, el comando de `perf.py nuevo --receta arranque-frio`; para otro flujo, "Sigue hb-performance: <alcance>" en un chat nuevo.
+- **Siguiente paso**, al final de tu respuesta y como último bloque: el comando de instalación y `nuevo` de la prueba de humo, completo y listo para copiar. Para otro flujo que no sea el arranque, además, "Sigue hb-performance: <alcance>" para un chat nuevo. Nunca mandes al usuario a seguir con un `estado.md` de prueba.

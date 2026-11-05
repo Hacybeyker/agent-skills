@@ -1,12 +1,12 @@
 # Sesión 2 · Diagnóstico
 
-Cruza la evidencia con el código para encontrar las causas y propone un plan de mejoras. Es la sesión donde vale la pena razonar: las consultas ya las corrió el script. Termina con el **reporte inicial** y una **decisión del usuario** sobre qué mejoras se aplican.
+Cruza la evidencia con el código para encontrar las causas y propone un plan de mejoras. Es la sesión donde vale la pena razonar: las consultas ya las corrió el script. Termina con el **reporte inicial** y el comando con el que el usuario decide, sin chat, qué mejoras se aplican.
 
 ## 1. Punto de partida
 
 1. Lee `estado.md` (ficha, mapa, hipótesis, "Métricas") y **`diagnostico.md` entero**: tiene las consultas listas sobre la corrida mediana y la peor. No vuelvas a correr esas consultas. Si no existe, el primer paso es `perf.py diagnostico --carpeta <carpeta>`.
 2. Si no hay mapa (investigación creada con una receta), arma uno mínimo del camino medido, de 15 líneas como máximo. En el arranque: `Application`, content providers e inicializadores, la primera actividad, la primera pantalla, su ViewModel o presenter y su fuente de datos.
-3. Carga solo los patrones del stack ([patrones/](patrones/)); en el arranque, [arranque.md](patrones/arranque.md).
+3. Carga solo los patrones del stack ([patrones/](patrones/)): en el arranque, [arranque.md](patrones/arranque.md); si hay métricas `red`, siempre [red.md](patrones/red.md).
 
 ## 2. Qué responde cada consulta de `diagnostico.md`
 
@@ -53,8 +53,8 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
 
 ## 5. Leer la red
 
-- **Duplicados:** `red_solapadas` o `red_repetidas_2s` mayores que 0, o más llamadas que las esperadas en el mapa.
-- **Servidor o cliente:** si `ttfb_ms` es casi todo `ms`, el tiempo es del servidor: es evidencia para el equipo de backend. Si `cliente_ms` es alto, la respuesta es grande o la lectura es lenta.
+- **Duplicados:** `red_solapadas` o `red_repetidas_2s` mayores que 0 (la misma plantilla **y** la misma query), o más llamadas que las esperadas en el mapa.
+- **Dónde se va el tiempo de una llamada:** `ms` = `cola_ms` (cola del dispatcher e interceptores) + conexión nueva (`red_conexion_ms`: DNS, TCP y TLS) + `ttfb_ms` (servidor y red) + `cliente_ms` (envío, lectura del body y conversión). La lectura de cada una está en [red.md](patrones/red.md).
 - **Huecos:** antes de la llamada, con el hilo principal ocupado, la app tarda en dispararla; después, antes de que cambie la UI, el parseo o el mapeo es pesado.
 
 ## 6. Entregable
@@ -66,10 +66,12 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
     "esperado": "<valor o rango, por ejemplo ≤ 500 ms o -30 %>", "prioridad": "alta", "esfuerzo": "bajo",
     "riesgo": "bajo", "estado": "propuesta"}
    ```
-   Si la métrica que la demuestra no es principal ni existe, dilo: puede hacer falta una marca o una métrica propia antes de medir después.
+   - `metrica` tiene que medir **lo mismo** antes y después. Si la mejora mueve la marca en la que termina (adelanta `reportFullyDrawn`, cambia una marca de usuario), la métrica cambia de definición y su veredicto no prueba nada: elige otra o agrega antes la marca que la mida igual en las dos fases.
+   - Si la métrica no es principal ni existe, dilo: puede hacer falta una marca o una métrica propia antes de medir después.
+   - `estado` siempre `propuesta`; el resto lo escribe `perf.py decidir`: `aprobada`, `descartada` o `pendiente` (la decisión del usuario) y `aplicada` (al terminar la sesión 3).
 3. **Pendientes** con receta completa (causa, `archivo:línea`, cambio, test, métrica y commit sugerido), para aplicarlos sin repetir el diagnóstico.
 4. **Reporte inicial**, que también dibuja el plan en `estado.md`:
    ```bash
    cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --inicial --html
    ```
-5. **Siguiente paso:** "decisión del usuario". Pide que elija las mejoras; registra la decisión en "Decisiones" y en `estado` de cada mejora (`aprobada` o `descartada`). Después, una sesión 3 por mejora, cada una en un chat nuevo. Detente.
+5. **Siguiente paso:** `reporte --inicial` imprime el comando `perf.py decidir` y lo deja en `estado.md`. Muéstrale al usuario las mejoras en una tabla corta (id, título, métrica y esperado) y ese comando, y detente: decide en su terminal, sin chat, y `decidir` le da el chat de la sesión 3.

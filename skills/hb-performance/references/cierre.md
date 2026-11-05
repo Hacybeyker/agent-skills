@@ -18,7 +18,9 @@ Imprime las métricas principales, las de usuario, las centrales y cualquier mej
 | `no comparable` | Métrica de frames y la cantidad de frames cambió más de 50 %: el porcentaje o el percentil mide otra cosa |
 | `sin cambio` | Cualquier otro caso |
 
-Con avisos (`pocas corridas`, `inestable`), el veredicto se presenta con el aviso, nunca como resultado firme. Los de familia `e2e` dependen del backend: son orientativos. Si `comparar` avisa que antes y después midieron el mismo build, la comparación no prueba nada: hay que medir después con el build nuevo.
+Sin mejoras aplicadas (todas descartadas o pendientes) no hay fase después: salta la comparación, escribe el resumen con el estado inicial y genera el reporte, que documenta el diagnóstico y los pendientes.
+
+Con avisos (`pocas corridas`, `inestable`), el veredicto se presenta con el aviso, nunca como resultado firme. Los de familia `e2e` dependen del backend: son orientativos. Si `comparar` avisa que antes y después midieron el mismo build, o con distinta compilación de ART, la comparación no prueba nada: repite las fases afectadas con `--rehacer` antes de escribir la lectura.
 
 ## 2. Lectura de la comparación
 
@@ -48,3 +50,4 @@ Propón cómo proteger la mejora: el test de la sesión 3 y, si el flujo es crí
 - Cómo validarlo en campo después del release (Android vitals: TTID y TTFD si la app llama a `reportFullyDrawn`).
 - Limpieza, cuando se mergee: las trazas (`antes/`, `control/`, `despues/`, `prueba/`) y los heap dumps se borran; `metricas.csv`, los `.md` y el reporte se pueden conservar.
 - El costo de la investigación en "Consumo", con el de esta sesión.
+- `perf.py reporte` deja "Siguiente paso" como investigación cerrada.

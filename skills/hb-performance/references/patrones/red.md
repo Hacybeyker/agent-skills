@@ -4,7 +4,9 @@ Aplica a cualquier cliente (OkHttp, Retrofit, Ktor, Apollo, Volley) y a cualquie
 
 ## Llamadas duplicadas
 
-`red_solapadas` (la misma plantilla en vuelo a la vez) o `red_repetidas_2s` mayores que 0, o más llamadas que las esperadas según el mapa del alcance. Las solapadas son la señal más clara.
+`red_solapadas` (la misma plantilla y la misma query en vuelo a la vez) o `red_repetidas_2s` mayores que 0, o más llamadas que las esperadas según el mapa del alcance. Las solapadas son la señal más clara.
+
+La instrumentación agrega al nombre un hash corto de la query (`GET discover/movie #1a2b`): dos llamadas a la misma plantilla con otros parámetros (otra página, otro filtro) no son duplicadas. Las métricas por endpoint lo quitan. Si la query lleva un valor que cambia en cada llamada (un timestamp, un nonce), las duplicadas no se ven por el hash: compáralas por tiempo en `llamadas_solapadas`.
 
 | Causa típica | Arreglo |
 | --- | --- |
@@ -26,10 +28,14 @@ Una `HTTP` empieza recién cuando termina la anterior, aunque no necesita su res
 
 ## Llamadas lentas
 
+Con las secciones de la skill, una llamada se reparte en `cola_ms` + `red_conexion_ms` + `ttfb_ms` + `cliente_ms`:
+
 | Evidencia | Lectura |
 | --- | --- |
 | `ttfb_ms` es casi todo `ms` | El tiempo es del servidor (o de la red): evidencia para el equipo de backend |
-| `cliente_ms` alto (`ms` mucho mayor que `ttfb_ms`) | Respuesta grande o lectura lenta del body: revisar paginación, campos innecesarios, compresión (`gzip`) |
+| `cola_ms` alto con varias llamadas al mismo host | El dispatcher de OkHttp admite 5 por host (`maxRequestsPerHost`): las demás esperan. Menos llamadas en el arranque (un endpoint que agregue, priorizar lo visible) o, si el servidor lo soporta, subir el límite |
+| `red_conexiones` igual a la cantidad de llamadas, o `red_conexion_ms` alto en el arranque | Cada llamada abre su conexión (DNS, TCP y TLS): con HTTP/2 deberían compartir una. Un solo `OkHttpClient` para la app; precalentar la conexión si la primera pantalla la necesita |
+| `cliente_ms` alto (`ms` mucho mayor que `ttfb_ms`) | Respuesta grande, lectura lenta del body o conversión pesada: revisar paginación, campos innecesarios, compresión (`gzip`) y el parser |
 | `cliente_ms` alto en todas las llamadas, o CPU alto en los hilos de red | Un interceptor de logging en nivel `BODY` (o un inspector de tráfico) activo fuera de debug: lee, copia y escribe cada respuesta completa. Solo en debug; en release, `NONE` o `BASIC` |
 | Hueco antes del `HTTP`, con el hilo principal ocupado | La app tarda en disparar el request: trabajo previo en el hilo principal |
 | Hueco después del `HTTP`, antes de que cambie la UI | Parseo o mapeo pesado al recibir: moverlo fuera del hilo principal o reducirlo |

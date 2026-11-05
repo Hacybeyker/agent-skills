@@ -1,49 +1,84 @@
 package {{PAQUETE}}
 
 import java.io.IOException
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Call
+import okhttp3.Connection
 import okhttp3.EventListener
+import okhttp3.Protocol
 import okhttp3.Request
 
 // HTTP <endpoint>: the whole call, body read included (callStart to callEnd or callFailed).
+// QUEUE <endpoint>: from callStart until the call reaches a connection: the wait in the dispatcher queue
+// (maxRequestsPerHost) plus the application interceptors.
+// CONN <endpoint>: a new connection (DNS, TCP and TLS), from dnsStart or connectStart to connectEnd.
 // TTFB <endpoint>: from the end of the request headers to the first response byte (server plus network).
 // Async sections, so concurrent calls show up overlapped. Needs OkHttp 4+. Register it with
 // builder.eventListenerFactory(TraceEventListener.FACTORY); OkHttp takes a single factory.
 class TraceEventListener(call: Call, private val tracer: SectionTracer = PlatformSectionTracer) : EventListener() {
     private val endpoint = HttpSectionName.endpoint(call.request())
-    private val callName = "HTTP $endpoint"
-    private val ttfbName = "TTFB $endpoint"
-    private val callCookie = COOKIES.incrementAndGet()
-    private var ttfbCookie = 0
-    private var open = false
+    private val http = Section("HTTP")
+    private val queue = Section("QUEUE")
+    private val conn = Section("CONN")
+    private val ttfb = Section("TTFB")
 
     override fun callStart(call: Call) {
-        open = true
-        tracer.beginAsyncSection(callName, callCookie)
+        http.begin()
+        queue.begin()
+    }
+
+    override fun dnsStart(call: Call, domainName: String) = startConnecting()
+
+    override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) = startConnecting()
+
+    override fun connectEnd(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?) =
+        conn.end()
+
+    override fun connectionAcquired(call: Call, connection: Connection) {
+        queue.end() // a pooled connection: no DNS or connect
+        conn.end()
     }
 
     override fun requestHeadersEnd(call: Call, request: Request) {
-        endTtfb() // a redirect or a retry closes the previous TTFB
-        ttfbCookie = COOKIES.incrementAndGet()
-        tracer.beginAsyncSection(ttfbName, ttfbCookie)
+        queue.end()
+        ttfb.end() // a redirect or a retry closes the previous TTFB
+        ttfb.begin()
     }
 
-    override fun responseHeadersStart(call: Call) = endTtfb()
+    override fun responseHeadersStart(call: Call) = ttfb.end()
 
     override fun callEnd(call: Call) = finish()
 
     override fun callFailed(call: Call, ioe: IOException) = finish()
 
-    private fun finish() {
-        endTtfb()
-        if (open) tracer.endAsyncSection(callName, callCookie)
-        open = false
+    private fun startConnecting() {
+        queue.end()
+        if (!conn.open) conn.begin() // a failed route retries inside the same CONN
     }
 
-    private fun endTtfb() {
-        if (ttfbCookie != 0) tracer.endAsyncSection(ttfbName, ttfbCookie)
-        ttfbCookie = 0
+    private fun finish() {
+        queue.end()
+        conn.end()
+        ttfb.end()
+        http.end()
+    }
+
+    private inner class Section(prefix: String) {
+        private val name = "$prefix $endpoint"
+        private var cookie = 0
+        val open: Boolean get() = cookie != 0
+
+        fun begin() {
+            cookie = COOKIES.incrementAndGet()
+            tracer.beginAsyncSection(name, cookie)
+        }
+
+        fun end() {
+            if (cookie != 0) tracer.endAsyncSection(name, cookie)
+            cookie = 0
+        }
     }
 
     companion object {

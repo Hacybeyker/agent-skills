@@ -23,9 +23,23 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 
 Si una sesión llega a su tope de pasos, guarda el estado y se detiene: seguir en el mismo chat cuesta cada vez más por paso.
 
+## Costos de referencia
+
+Una investigación de arranque en frío real (app mediana con red, 10 corridas por fase, una mejora aplicada), con los modelos de la tabla:
+
+| Sesión | Costo aproximado |
+| --- | --- |
+| 0 · Setup (intermedio) | 1,4 USD |
+| 2 · Diagnóstico (intermedio, alto) | 0,8 USD |
+| 3 · Mejora (intermedio, medio) | 1 USD |
+| 4 · Cierre (económico, bajo) | 0,02 USD |
+| Mediciones y decisión (terminal) | 0 |
+
+Una sesión que cuesta varias veces esto suele estar explorando: SQL a mano, leyendo scripts, volcando logs o encadenada con otra en el mismo chat.
+
 ## Cómo aplicarlo
 
-- **Sin configurar nada:** un chat nuevo por sesión, eligiendo el modelo y el razonamiento en el selector antes de escribir. El texto para el chat nuevo está en "Siguiente paso".
+- **Sin configurar nada:** un chat nuevo por sesión, eligiendo el modelo y el razonamiento en el selector antes de escribir. El texto y el modelo para el chat nuevo están en "Siguiente paso" (los escribe `perf.py siguiente`).
 - **Con un agente por sesión:** un agente personalizado con su modelo, sus herramientas limitadas (por ejemplo, que el de mediciones no pueda editar código) y la instrucción de seguir esta skill en su sesión.
   - **Claude Code:** subagentes en `.claude/agents/*.md`, con `model` en el frontmatter.
   - **Copilot en VS Code:** archivos `.agent.md`, con `model` y `tools`. Verifica si el traspaso entre agentes conserva la conversación: si la conserva, ahorra menos que un chat nuevo.

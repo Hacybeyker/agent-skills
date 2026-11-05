@@ -27,6 +27,11 @@ Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazg
 
 En `estado.md` y `plan.json`:
 
-- **Mejoras aplicadas:** archivos, el test que la fija, el resultado del DoD y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`). En `plan.json`, `estado: aplicada`.
+- **Mejoras aplicadas:** archivos, el test que la fija, el resultado del DoD y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`).
 - **Pendientes** actualizados.
-- **Siguiente paso:** la siguiente mejora aprobada (chat nuevo) o, si era la última, la medición después: instalar el build de profiling con los cambios, abrir la app una vez si hubo migración, y el comando exacto de `capturar --fase despues` (el mismo de antes). Detente.
+- **`instalar` en `plan.json`:** si falta, agrégalo con el comando que compila e instala el build de profiling (el de `AGENTS.md`, por ejemplo `./gradlew :app:installProfiling`), para que la medición después no dependa de recordarlo.
+- **Al final**, marca la mejora aplicada; el comando imprime el siguiente paso (la siguiente mejora aprobada en un chat nuevo, o instalar y medir después) y lo deja en `estado.md`:
+  ```bash
+  cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --aplicada <id>
+  ```
+  Pásale esos pasos al usuario tal cual; si hubo migración de datos, agrega "abre la app una vez" antes de medir. Detente.

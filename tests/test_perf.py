@@ -200,6 +200,35 @@ class TraceMetricsTest(unittest.TestCase):
         self.assertEqual(m["red GET items/{id} ms"][3], "e2e")
         self.assertEqual(m["red GET items/{id} cliente_ms"][3], "app")
 
+    def test_la_marca_de_la_query_separa_cargas_distintas_del_mismo_endpoint(self):
+        secs = [("seccion", 0, 300 * MS, 0, "HTTP GET discover/movie #1a2b"),
+                ("seccion", 10 * MS, 300 * MS, 0, "HTTP GET discover/movie #3c4d"),
+                ("seccion", 20 * MS, 300 * MS, 0, "HTTP GET discover/movie #3c4d")]
+        m, _, _ = self.metrics(secs + [("frame", 0, 16 * MS, 0, "None")])
+        self.assertEqual(m["red_solapadas"][1], 1)  # solo las dos con la misma query
+        self.assertEqual(m["red_repetidas_2s"][1], 1)
+        self.assertEqual(m["red GET discover/movie llamadas"][1], 3)
+        self.assertNotIn("red GET discover/movie #1a2b llamadas", m)
+
+    def test_ttfb_se_asigna_uno_a_uno_entre_llamadas_concurrentes(self):
+        secs = [("seccion", 0, 300 * MS, 0, "HTTP GET a"), ("seccion", 50 * MS, 350 * MS, 0, "HTTP GET a"),
+                ("seccion", 60 * MS, 100 * MS, 0, "TTFB GET a"), ("seccion", 70 * MS, 200 * MS, 0, "TTFB GET a")]
+        m, _, _ = self.metrics(secs + [("frame", 0, 16 * MS, 0, "None")])
+        self.assertEqual(m["red GET a ttfb_ms"][1], 150)
+        self.assertEqual(m["red GET a cliente_ms"][1], 175)
+
+    def test_cola_y_conexion_salen_del_cliente(self):
+        secs = [("seccion", 0, 500 * MS, 0, "HTTP GET a #00ff"), ("seccion", 0, 100 * MS, 0, "QUEUE GET a #00ff"),
+                ("seccion", 100 * MS, 150 * MS, 0, "CONN GET a #00ff"), ("seccion", 260 * MS, 200 * MS, 0, "TTFB GET a #00ff")]
+        m, _, _ = self.metrics(secs + [("frame", 0, 16 * MS, 0, "None")])
+        self.assertEqual(m["red GET a cliente_ms"][1], 50)
+        self.assertEqual(m["red GET a cola_ms"][1], 100)
+        self.assertEqual(m["red GET a cola_ms"][3], "app")
+        self.assertEqual(m["red_conexiones"][1], 1)
+        self.assertEqual(m["red_conexion_ms"][1], 150)
+        self.assertEqual(m["red_conexion_ms"][3], "e2e")
+        self.assertEqual(m["red_llamadas"][1], 1)
+
     def test_sin_red_no_escribe_metricas_de_red_salvo_que_ya_existan(self):
         m, _, _ = self.metrics([("frame", 0, 16 * MS, 0, "None")])
         self.assertNotIn("red_llamadas", m)
@@ -271,6 +300,10 @@ class TraceMetricsTest(unittest.TestCase):
         self.assertEqual(sets[0], (["tipo", "ts"], [["proceso", "0"], ["hilo", None]]))
         self.assertEqual(sets[1][1], [["1"]])
 
+    def test_jit_de_la_app_es_informativo(self):
+        m, _, _ = self.metrics([("jit", 0, 450 * MS, 107, ""), ("frame", 0, 16 * MS, 0, "None")])
+        self.assertEqual(m["jit_ms"][1:], (450, "ms", "info"))
+
     def test_hz_desde_el_periodo_esperado(self):
         self.assertEqual(perf.hz_from_vsync(16_666_666), 60)
         self.assertEqual(perf.hz_from_vsync(8_333_333), 120)
@@ -293,7 +326,7 @@ with open(os.environ["FAKE_LOG"], "a") as f:
 if args[:1] == ["-s"]:
     args = args[2:]
 if args == ["devices"]:
-    print("List of devices attached\nemulator-5554\tdevice\n")
+    print("List of devices attached\n" + "".join("%s\tdevice\n" % d for d in os.environ.get("FAKE_DEVICES", "emulator-5554").split(",")))
     sys.exit(0)
 if args[0] == "pull":
     pathlib.Path(args[2]).write_bytes(b"x" * 4096)
@@ -318,6 +351,9 @@ elif cmd.startswith("dumpsys activity activities"):
     print("  topResumedActivity=ActivityRecord{{1 u0 com.ejemplo.app/.MainActivity t5}}")
 elif cmd.startswith("cmd package compile"):
     print("Success")
+elif cmd.startswith("am broadcast"):
+    print("Broadcasting: Intent {{ act=androidx.profileinstaller.action.INSTALL_PROFILE }}\nBroadcast completed: result="
+          + os.environ.get("FAKE_PROFILE", "1"))
 elif cmd.startswith("cmd package resolve-activity"):
     print("priority=0 preferredOrder=0 match=0x108000\ncom.ejemplo.app/.MainActivity")
 elif cmd.startswith("am start"):
@@ -393,6 +429,7 @@ class DeviceBase(PerfBase):
                          "HB_PERF_ESPERA": "0"})
         self.env.pop("TRACE_PROCESSOR", None)
         self.env.pop("ADB", None)
+        self.env.pop("ANDROID_SERIAL", None)
         self.plan = self.dir / "inv" / "plan.json"
         write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["jank_app_pct"], "flujos": {
             "home": {"inicio": "MainActivity", "invalidar_si": ["SCREEN *Login*"], "recorrido": "true"}}}))
@@ -413,7 +450,7 @@ class CaptureTest(DeviceBase):
         self.assertTrue((self.plan.parent / "antes" / "home_1.perfetto-trace.gz").is_file())
         self.assertTrue((self.plan.parent / "resumen.md").is_file())
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
-        self.assertIn("cmd package compile -f -m speed-profile %s" % PKG, log)
+        self.assertIn("cmd package compile -f -m speed %s" % PKG, log)
         self.assertIn("kill -TERM 4242", log)
 
     def test_corrida_invalida_se_guarda_aparte_y_se_repite(self):
@@ -506,6 +543,89 @@ class CaptureTest(DeviceBase):
         phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
         self.assertEqual(phases["antes"]["instalada"], "2026-11-05 10:00:00")
         self.assertEqual(phases["antes"]["version"], "1.0 (7)")
+
+    def test_actividad_sin_paquete_se_completa_con_el_paquete_instalado(self):
+        self.assertEqual(perf.component_of("com.a.profiling", "com.a.MainActivity"), "com.a.profiling/com.a.MainActivity")
+        self.assertEqual(perf.component_of("com.a", ".Main"), "com.a/.Main")
+        self.assertEqual(perf.component_of("com.a", "com.b/.Main"), "com.b/.Main")
+        self.assertEqual(perf.component_of("com.a", ""), "")
+
+    def test_varios_dispositivos_usan_el_serial_del_plan_o_android_serial(self):
+        self.env["FAKE_DEVICES"] = "emulator-5554,NJ4"
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("nuevo --serial", result.stderr)
+        self.env["ANDROID_SERIAL"] = "NJ4"
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        del self.env["ANDROID_SERIAL"]
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["serial"] = "NJ4"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertIn('["-s", "NJ4", "shell", "perfetto', (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.assertIn("--fase antes --corridas 10", out)
+
+    def test_cada_fase_indica_el_paso_siguiente(self):
+        self.startup_plan()
+        self.tp_outputs(GOOD)
+        common = ["capturar", "--plan", self.plan, "--corridas", "1", "--calentamiento", "0", "--sin-compilar"]
+        self.assertIn("--fase control --corridas 10", self.ok(*(common + ["--fase", "antes"])))
+        self.assertIn("diagnostico --carpeta", self.ok(*(common + ["--fase", "control"])))
+        self.env["FAKE_UPDATED"] = "2026-11-06 09:00:00"
+        out = self.ok(*(common + ["--fase", "despues"]))
+        self.assertIn("sesión 4 · cierre", out)
+        self.assertIn('Chat nuevo (económico, razonamiento bajo): "Sigue hb-performance con ', out)
+
+    def commands(self):
+        return [" ".join(json.loads(line)[3:]) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()
+                if json.loads(line)[:1] == ["-s"]]
+
+    def test_compilacion_completa_por_defecto_y_registrada(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                      "--calentamiento", "0")
+        self.assertIn("completa (speed)", out)
+        self.assertIn("cmd package compile -f -m speed " + PKG, self.commands())
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["compilacion"], "completa (speed)")
+
+    def test_compilacion_con_perfil_instala_el_baseline_profile_o_se_detiene(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                "--calentamiento", "0", "--compilacion", "perfil")
+        log = self.commands()
+        reset = log.index("cmd package compile --reset " + PKG)
+        install = next(i for i, c in enumerate(log) if c.startswith("am broadcast -a androidx.profileinstaller"))
+        self.assertLess(reset, install)
+        self.assertLess(install, log.index("cmd package compile -f -m speed-profile " + PKG))
+        self.env["FAKE_PROFILE"] = "0"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1",
+                           "--calentamiento", "0", "--compilacion", "perfil")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("--compilacion completa", result.stderr)
+
+    def test_comparar_avisa_si_cambia_la_compilacion_o_el_jit(self):
+        write(self.plan.parent / "metricas.csv", HEADER + rows("antes", "f", "jit_ms", [25, 26, 24, 25, 27], family="info")
+              + rows("despues", "f", "jit_ms", [450, 460, 440, 455, 470], family="info"))
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {"compilacion": "completa (speed)"},
+                                                           "despues": {"compilacion": "perfil (Baseline Profile + speed-profile)"}}))
+        out = self.ok("comparar", self.plan.parent / "metricas.csv")
+        self.assertIn("JIT de 25 ms en antes y 455 ms en después", out)
+        self.assertIn("distinta compilación de ART", out)
+
+    def test_rehacer_descarta_la_fase_y_la_mide_de_nuevo(self):
+        self.tp_outputs(GOOD)
+        common = ["capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--calentamiento", "0",
+                  "--sin-compilar"]
+        self.ok(*(common + ["--corridas", "2"]))
+        out = self.ok(*(common + ["--corridas", "1", "--rehacer"]))
+        self.assertIn("filas de 'antes' fuera del CSV", out)
+        runs = {k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}
+        self.assertEqual(runs, {"1"})
+        self.assertTrue(any(p.name.startswith("antes-descartada-") for p in self.plan.parent.iterdir()))
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["corridas"], 1)
 
     def test_arranque_tibio_invalida_la_corrida(self):
         self.startup_plan()
@@ -691,13 +811,140 @@ class NuevoTest(DeviceBase):
         self.assertEqual(flow["recorrido"], {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 5})
         self.assertEqual(flow["familias"]["ttfd_ms"], "e2e")
         self.assertEqual(plan["principales"], ["ttid_ms", "ttfd_ms", "hilo_max_ms"])
+        self.assertEqual(plan["compilacion"], "completa")
         self.assertNotIn("hz", plan)
         state = (folder / "estado.md").read_text(encoding="utf-8")
         self.assertIn("arranque en frío", state)
         self.assertIn("Pixel Test · Android 14 (API 34)", state)
         self.assertNotIn("{{", state)
         self.assertIn("--fase control --corridas 10", out)
+        self.assertIn("1. `cd ", state)
+        self.assertIn("diagnostico --carpeta", state)
         self.assertEqual(self.perf("nuevo", "--carpeta", folder, "--paquete", PKG).returncode, 2)
+        other = self.dir / "otra"
+        out = self.ok("nuevo", "--carpeta", other, "--paquete", PKG, "--flujo", "detalle",
+                      "--instalar", "./gradlew :app:installProfiling")
+        self.assertEqual(json.loads((other / "plan.json").read_text(encoding="utf-8"))["instalar"],
+                         "./gradlew :app:installProfiling")
+        self.assertIn("perf.py siguiente", out)
+
+    def test_con_varios_dispositivos_avisa_y_guarda_el_serial_elegido(self):
+        self.env["FAKE_DEVICES"] = "emulator-5554,NJ4"
+        out = self.ok("nuevo", "--carpeta", self.dir / "a", "--paquete", PKG, "--receta", "arranque-frio")
+        self.assertIn("Sin dispositivo", out)
+        self.assertEqual(json.loads((self.dir / "a" / "plan.json").read_text(encoding="utf-8"))
+                         ["flujos"]["arranque-frio"]["recorrido"]["actividad"], "")
+        self.ok("nuevo", "--carpeta", self.dir / "b", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "NJ4")
+        plan = json.loads((self.dir / "b" / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["serial"], "NJ4")
+        self.assertEqual(plan["flujos"]["arranque-frio"]["recorrido"]["actividad"], PKG + "/.MainActivity")
+
+
+class NextStepTest(PerfBase):
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main", "espera_s": 5}}}, "mejoras": []}
+        self.save()
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+
+    def save(self):
+        write(self.folder / "plan.json", json.dumps(self.plan))
+
+    def phases(self, *names):
+        write(self.folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in names}))
+
+    def step(self):
+        return perf.next_steps(self.folder, self.plan)
+
+    def test_recorre_las_fases_desde_la_ultima_hacia_atras(self):
+        title, steps = self.step()
+        self.assertEqual(title, "medición antes y control (sin chat)")
+        self.assertEqual(len(steps), 5)  # prueba, antes, control, diagnostico y el chat de la sesión 2
+        self.assertTrue(all(s.startswith("cd ") for s in steps[:4]))
+        self.assertIn("--prueba", steps[0])
+        write(self.folder / "prueba" / "arranque-frio_1.perfetto-trace.gz", "x")
+        self.assertIn("--fase antes --corridas 10", self.step()[1][0])
+        self.phases("antes")
+        self.assertIn("--fase control", self.step()[1][0])
+        self.phases("antes", "control")
+        self.assertIn("diagnostico --carpeta", self.step()[1][0])
+        write(self.folder / "diagnostico.md", "x")
+        self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}, {"id": "M2", "titulo": "b", "estado": "propuesta"}]
+        title, steps = self.step()
+        self.assertEqual(title, "decisión del usuario (sin chat)")
+        self.assertIn("decidir --carpeta", steps[0])
+        self.assertIn("--aprobar M1,M2", steps[0])
+        self.plan["mejoras"][1]["estado"] = "aprobada"
+        self.assertIn("sesión 3, aplica M2", self.step()[1][0])
+        self.plan["mejoras"][1]["estado"] = "aplicada"
+        title, steps = self.step()
+        self.assertEqual(title, "medición después (sin chat)")
+        self.assertIn("guarda el comando como 'instalar'", steps[0])
+        self.plan["instalar"] = "./gradlew :app:installProfiling"
+        steps = self.step()[1]
+        self.assertTrue(steps[0].endswith("&& ./gradlew :app:installProfiling"))
+        self.assertIn("--fase despues --corridas 10", steps[1])
+        self.phases("antes", "control", "despues")
+        self.assertEqual(self.step()[0], "sesión 4 · cierre")
+        write(self.folder / "reporte.md", "x")
+        self.assertEqual(self.step()[0], "investigación cerrada")
+
+    def test_sin_mejoras_aprobadas_va_al_cierre(self):
+        self.phases("antes", "control")
+        write(self.folder / "diagnostico.md", "x")
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "descartada"},
+                                {"id": "M2", "titulo": "b", "estado": "pendiente"}]
+        self.assertEqual(self.step()[0], "sesión 4 · cierre sin mejoras aplicadas")
+        write(self.folder / "reporte.html", "x")
+        self.assertEqual(self.step(), ("investigación cerrada", ["Reporte: %s" % (self.folder / "reporte.html").resolve()]))
+
+    def test_siguiente_escribe_el_paso_en_estado(self):
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Siguiente · medición antes y control", out)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("- **Paso:** medición antes y control (sin chat)", state)
+        self.assertIn("  1. `cd ", state)
+        self.assertIn("## Ficha", state)
+        self.phases("antes", "control")
+        self.ok("siguiente", "--carpeta", self.folder)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertNotIn("--prueba", state)
+        self.assertEqual(state.count("- **Paso:**"), 1)
+
+    def test_decidir_registra_la_decision_y_la_aplicacion(self):
+        self.phases("antes", "control")
+        self.plan["mejoras"] = [{"id": i, "titulo": i, "estado": "propuesta"} for i in ("M1", "M2", "M3")]
+        self.save()
+        out = self.ok("decidir", "--carpeta", self.folder, "--aprobar", "M1", "--descartar", "M2", "--pendiente", "M3")
+        self.assertIn("sesión 3, aplica M1", out)
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual([m["estado"] for m in plan["mejoras"]], ["aprobada", "descartada", "pendiente"])
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("aprobadas M1; descartadas M2; pendientes M3 (perf.py decidir)", state)
+        self.assertNotIn("<AAAA-MM-DD", state)
+        self.assertIn("| M2 | M2 |", state)
+        out = self.ok("decidir", "--carpeta", self.folder, "--aplicada", "M1")
+        self.assertIn("medición después", out)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertLess(state.index("aprobadas M1"), state.index("aplicadas M1"))
+        result = self.perf("decidir", "--carpeta", self.folder, "--aprobar", "M9")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("M9", result.stderr)
+        self.assertEqual(self.perf("decidir", "--carpeta", self.folder, "--aprobar", "-").returncode, 2)
+
+    def test_plan_valida_estados_e_instalar(self):
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "lista"}]
+        self.save()
+        result = self.perf("siguiente", "--carpeta", self.folder)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("propuesta, aprobada", result.stderr)
+        self.plan["mejoras"] = []
+        self.plan["instalar"] = ["./gradlew"]
+        self.save()
+        self.assertEqual(self.perf("siguiente", "--carpeta", self.folder).returncode, 2)
 
 
 class InstrumentTest(PerfBase):
