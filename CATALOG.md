@@ -11,6 +11,7 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 | `hb-setup` | Flujo | 1.0.0 |
 | `hb-implement` | Flujo | 1.3.0 |
 | `hb-review` | Flujo | 1.0.0 |
+| `hb-performance` | Flujo | 0.1.0 |
 | `hb-commit` | Flujo | 1.0.0 |
 | `hb-release` | Flujo | 1.0.0 |
 | `hb-stack-mobile-kotlin` | Perfil | 1.3.0 |
@@ -48,7 +49,7 @@ android skills update --agent=<agentes> <skill>   # actualizar
 | `edge-to-edge` | Edge-to-edge adaptativo, insets del IME y legibilidad de las barras del sistema |
 | `adaptive` | UI adaptativa a teléfonos, tablets, plegables, escritorio, TV y XR |
 | `jetpack-compose-performance` | Diagnosticar y reducir recomposiciones y frames perdidos |
-| `android-profiler` | Grabar y analizar trazas (Perfetto): jank, ANR, arranque, memoria, batería |
+| `android-profiler` | Grabar y analizar trazas (Perfetto): jank, ANR, arranque, memoria, batería. `hb-performance` la usa en el diagnóstico |
 | `anr-audit-and-fix` | Auditar riesgos de ANR y diagnosticar sus stack dumps |
 | `r8-analyzer` | Detectar keep rules redundantes o demasiado amplias |
 | `android-intent-security` | Seguridad de Intents y componentes del manifest |

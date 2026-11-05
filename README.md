@@ -23,6 +23,7 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack y las convenciones del proyecto y crea o migra su `AGENTS.md` al estándar |
 | [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD, previews de UI (Compose) y reporte HTML |
 | [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments |
+| [`hb-performance`](skills/hb-performance) | Flujo | Investiga problemas de rendimiento en apps Android con cualquier stack (jank, hilo principal, red, memoria, arranque): mide antes y después con scripts, diagnostica con trazas y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens |
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
 | [`hb-stack-mobile-kotlin`](skills/hb-stack-mobile-kotlin) | Perfil | Android y KMP con Clean Architecture + MVVM (UDF) por features |
@@ -45,7 +46,7 @@ Las skills externas y los plugins que las complementan están en [CATALOG.md](CA
 
 - `git` y `bash`, para instalar con un clon. En macOS vienen con las Command Line Tools (`xcode-select --install`); en Linux, con el gestor de paquetes.
 - Node.js y pnpm, para instalar sin clonar (detalle en esa sección).
-- `python3`, solo con su librería estándar, para los scripts de `hb-implement` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
+- `python3`, solo con su librería estándar, para los scripts de `hb-implement`, `hb-performance` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
 
 Hay dos formas. Usa **una sola** por máquina.
 
@@ -120,7 +121,7 @@ Cada push y cada PR pasan por el workflow `Validate`:
 - `agentskills validate` (de [skills-ref](https://pypi.org/project/skills-ref/), la referencia oficial) contra la especificación de Agent Skills.
 - `scripts/check_conventions.py` con las convenciones de este repo: prefijo `hb-`, metadata, SemVer, máximo de 500 líneas por `SKILL.md`, enlaces rotos, scripts ejecutables y con sintaxis válida, y que `README.md` y `CATALOG.md` estén al día.
 - `scripts/check_version_bump.py`, en cada PR: toda skill cambiada sube su `metadata.version` (SemVer) respecto de la rama base.
-- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `report.py` de `hb-implement`, `coach.py` de `hb-coach` y `check_version_bump.py`.
+- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `coach.py` de `hb-coach` y `check_version_bump.py`.
 - `scripts/test_install.sh`: test de contrato de `install.sh` en un `HOME` temporal (instala dos veces, desinstala y comprueba que no toca carpetas ni enlaces ajenos). Es la interfaz pública que usan los instaladores externos, así que no cambia.
 - `shellcheck` sobre los scripts de shell.
 
