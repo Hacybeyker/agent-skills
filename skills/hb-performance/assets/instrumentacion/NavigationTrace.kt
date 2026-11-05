@@ -1,14 +1,19 @@
 package {{PAQUETE}}
 
-/**
- * NAV <destino>: una marca por cambio de destino. Se llama desde el punto único donde el proyecto navega,
- * a través de un gancho que en release no hace nada (ver references/setup.md de hb-performance).
- */
+// NAV <destination>: one instant mark per destination change, fed by a hook in the main code that does nothing in
+// release (see references/setup.md of hb-performance).
 object NavigationTrace {
     var tracer: SectionTracer = PlatformSectionTracer
 
-    fun mark(destination: String) {
-        tracer.beginSection("NAV $destination")
+    fun mark(destination: Any) {
+        tracer.beginSection("NAV ${destinationName(destination)}")
         tracer.endSection()
+    }
+
+    // Route templates ("movie/{id}") and data class or data object names ("Detail(id=1)" -> "Detail") survive R8
+    // and carry no ids.
+    fun destinationName(destination: Any): String = when (destination) {
+        is String -> destination.substringBefore('?')
+        else -> destination.toString().substringBefore('(').substringBefore('@')
     }
 }

@@ -6,10 +6,8 @@ import android.content.ContentValues
 import android.database.Cursor
 import android.net.Uri
 
-/**
- * Registra ScreenTraceCallbacks al arrancar la app, sin tocar la Application: Android crea los content
- * providers antes de Application.onCreate. Se declara solo en los manifests de debug y profiling.
- */
+// Registers ScreenTraceCallbacks without touching the Application: Android creates content providers before
+// Application.onCreate. Declared only in the debug and profiling manifests.
 class PerfInstaller : ContentProvider() {
     override fun onCreate(): Boolean {
         (context?.applicationContext as? Application)?.registerActivityLifecycleCallbacks(ScreenTraceCallbacks())
@@ -30,10 +28,5 @@ class PerfInstaller : ContentProvider() {
 
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
 
-    override fun update(
-        uri: Uri,
-        values: ContentValues?,
-        selection: String?,
-        selectionArgs: Array<out String>?
-    ): Int = 0
+    override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
 }

@@ -2,7 +2,7 @@ package {{PAQUETE}}
 
 import okhttp3.Request
 
-/** "GET /items/{id}": método y ruta con los segmentos que parecen IDs normalizados; sin query ni body. */
+// "GET /items/{id}": method and path with the segments that look like ids normalized; no query or body.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(
         "/(\\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" +

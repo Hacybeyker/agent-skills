@@ -23,7 +23,7 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack y las convenciones del proyecto y crea o migra su `AGENTS.md` al estándar |
 | [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD, previews de UI (Compose) y reporte HTML |
 | [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments |
-| [`hb-performance`](skills/hb-performance) | Flujo | Investiga problemas de rendimiento en apps Android con cualquier stack (jank, hilo principal, red, memoria, arranque): mide antes y después con scripts, diagnostica con trazas y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens |
+| [`hb-performance`](skills/hb-performance) | Flujo | Investiga problemas de rendimiento en apps Android con cualquier stack (arranque en frío, jank, hilo principal, red, memoria): mide antes y después con scripts, arma el diagnóstico con consultas listas sobre las trazas, propone un plan que decides tú y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens |
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
 | [`hb-stack-mobile-kotlin`](skills/hb-stack-mobile-kotlin) | Perfil | Android y KMP con Clean Architecture + MVVM (UDF) por features |

@@ -6,12 +6,10 @@ import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.Request
 
-/**
- * HTTP <endpoint>: la llamada completa, incluida la lectura del body (de callStart a callEnd o callFailed).
- * TTFB <endpoint>: del fin de los headers del request al primer byte de la respuesta (≈ servidor + red).
- * Secciones asíncronas: las llamadas concurrentes se ven solapadas. Requiere OkHttp 4 o superior.
- * Se registra con builder.eventListenerFactory(TraceEventListener.FACTORY); OkHttp admite un solo factory.
- */
+// HTTP <endpoint>: the whole call, body read included (callStart to callEnd or callFailed).
+// TTFB <endpoint>: from the end of the request headers to the first response byte (server plus network).
+// Async sections, so concurrent calls show up overlapped. Needs OkHttp 4+. Register it with
+// builder.eventListenerFactory(TraceEventListener.FACTORY); OkHttp takes a single factory.
 class TraceEventListener(call: Call, private val tracer: SectionTracer = PlatformSectionTracer) : EventListener() {
     private val endpoint = HttpSectionName.endpoint(call.request())
     private val callName = "HTTP $endpoint"
@@ -26,7 +24,7 @@ class TraceEventListener(call: Call, private val tracer: SectionTracer = Platfor
     }
 
     override fun requestHeadersEnd(call: Call, request: Request) {
-        endTtfb() // una redirección o un reintento cierra el TTFB anterior
+        endTtfb() // a redirect or a retry closes the previous TTFB
         ttfbCookie = COOKIES.incrementAndGet()
         tracer.beginAsyncSection(ttfbName, ttfbCookie)
     }

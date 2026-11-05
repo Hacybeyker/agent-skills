@@ -4,11 +4,9 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 
-/**
- * SCREEN <Clase> <evento>: cuánto duran onCreate, onStart y onResume de cada actividad (callbacks pre y post,
- * Android 10+). Para apps sin fragments; las pantallas de Compose se marcan con NavigationTrace.
- * No toca el código de las pantallas: lo registra PerfInstaller.
- */
+// SCREEN <Class> <event>: how long onCreate, onStart and onResume of each activity take (pre and post callbacks,
+// Android 10+). For apps without fragments; Compose screens are marked with NavigationTrace. Registered by
+// PerfInstaller, so screen code stays untouched.
 class ScreenTraceCallbacks(private val tracer: SectionTracer = PlatformSectionTracer) :
     Application.ActivityLifecycleCallbacks {
 

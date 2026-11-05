@@ -1,0 +1,50 @@
+# Base más muestreo de CPU con pila (linux.perf, 1000 muestras por segundo y por CPU) para saber qué función
+# gasta el CPU de un hilo. Solo para el diagnóstico (capturar --prueba --config cpu): el muestreo altera los
+# tiempos. La app tiene que ser profileable; sin símbolos (librerías nativas o R8) se ve la librería, no la
+# función: desofusca con el mapping de profiling.
+buffers { size_kb: 65536 fill_policy: RING_BUFFER }
+buffers { size_kb: 4096 fill_policy: RING_BUFFER }
+buffers { size_kb: 131072 fill_policy: RING_BUFFER }
+data_sources {
+  config {
+    name: "linux.ftrace"
+    ftrace_config {
+      ftrace_events: "sched/sched_switch"
+      ftrace_events: "sched/sched_process_exit"
+      ftrace_events: "sched/sched_process_free"
+      ftrace_events: "task/task_newtask"
+      ftrace_events: "task/task_rename"
+      atrace_categories: "gfx"
+      atrace_categories: "view"
+      atrace_categories: "am"
+      atrace_categories: "wm"
+      atrace_categories: "dalvik"
+      atrace_categories: "input"
+      atrace_categories: "res"
+      atrace_apps: "{{PAQUETE}}"
+    }
+  }
+}
+data_sources { config { name: "android.surfaceflinger.frametimeline" } }
+data_sources {
+  config {
+    name: "linux.process_stats"
+    target_buffer: 1
+    process_stats_config { scan_all_processes_on_start: true }
+  }
+}
+data_sources {
+  config {
+    name: "linux.perf"
+    target_buffer: 2
+    perf_event_config {
+      timebase { counter: SW_CPU_CLOCK frequency: 1000 }
+      callstack_sampling { kernel_frames: false }
+    }
+  }
+}
+write_into_file: true
+file_write_period_ms: 2500
+flush_period_ms: 10000
+max_file_size_bytes: 1000000000
+duration_ms: 600000
