@@ -5,10 +5,10 @@ En modo guiado las corre el usuario en su terminal, sin chat: **cero tokens**. E
 ## Receta: arranque en frío
 
 ```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId> --carpeta reports/perf/arranque-frio/<AAAA-MM-DD>
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId> --carpeta reports/perf/arranque-frio/<AAAA-MM-DD> --instalar "<comando que instala el build de profiling>"
 ```
 
-Arma `plan.json` (principales `ttid_ms`, `ttfd_ms` y `hilo_max_ms`; los frames como informativos) y `estado.md`, busca la actividad de inicio en el dispositivo e imprime los comandos que siguen. Con `--red`, si la primera pantalla carga datos del backend, `ttfd_ms` pasa a `e2e`. En cada corrida, `perf.py` detiene la app **antes** de grabar, abre la actividad con `am start -W`, espera `espera_s` y exige `LaunchState: COLD`: si algo despertó la app antes (un widget, WorkManager, un push), la corrida no vale.
+Arma `plan.json` (principales `ttid_ms`, `ttfd_ms` y `hilo_max_ms`; los frames como informativos) y `estado.md`, busca la actividad de inicio en el dispositivo e imprime los comandos que siguen. `--instalar` guarda el comando de instalación, que aparece en la medición después. Con `--red`, si la primera pantalla carga datos del backend, `ttfd_ms` pasa a `e2e`. En cada corrida, `perf.py` detiene la app **antes** de grabar, abre la actividad con `am start -W`, espera `espera_s` y exige `LaunchState: COLD`: si algo despertó la app antes (un widget, WorkManager, un push), la corrida no vale.
 
 ## El comando
 
@@ -19,7 +19,11 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 Qué hace, en orden:
 
 1. **Controles previos:** un solo dispositivo (o `--serial`), Android 10 o superior, app instalada, aviso si el build es `debuggable`, temperatura (se detiene si está caliente), batería, espacio libre y `trace_processor`. En `despues`, se detiene si el build instalado es el mismo que midió `antes`, y avisa si la línea base es vieja o de otro commit.
-2. **Compilación de ART fija** (`speed-profile`) y **calentamiento** (una corrida que no cuenta).
+2. **Compilación de ART igual en todas las fases** (`compilacion` del plan o `--compilacion`):
+   - `completa` (por defecto): todo compilado antes de correr, como `CompilationMode.Full` de Macrobenchmark. No depende de perfiles ni de librerías: es la que sirve para comparar un cambio de código.
+   - `perfil`: borra los perfiles, instala el Baseline Profile del APK con `profileinstaller` y compila con `speed-profile` (`CompilationMode.Partial`). Más parecida a una instalación de Play; para medir un Baseline Profile. Si el perfil no se instala, se detiene.
+
+   Sin esto, un build recién instalado corre con JIT y parece una regresión que no existe. Con `completa`, el TTID suele salir algo más alto que con `perfil` (un ejecutable más grande que cargar): sirve para comparar fases entre sí, no como el TTID que verá el usuario de Play. Cada corrida guarda `jit_ms` (informativa) y `comparar` avisa si la compilación o el JIT cambiaron entre fases. Después, el **calentamiento** (una corrida que no cuenta).
 3. **Por cada corrida:** valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
 4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase).
 
@@ -33,9 +37,19 @@ Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), 
 | `--config cpu` | Una captura con muestreo de CPU, solo para el diagnóstico (con `--prueba`) |
 | `--memoria` | `dumpsys meminfo` después de cada corrida: PSS, heaps, actividades y vistas vivas |
 | `--prueba` | Una corrida que imprime las métricas y no escribe el CSV |
+| `--rehacer` | Descarta lo medido en esa fase (filas del CSV y trazas, que quedan aparte) y la mide de nuevo |
+| `--compilacion completa \| perfil` | Cómo se compila la app antes de medir; la misma en todas las fases |
 | `--serial`, `--hz`, `--tp`, `--forzar` | Dispositivo, tasa de refresco, ruta de `trace_processor` y seguir pese a un aviso que detiene |
 
 Códigos de salida: 2 uso o datos, 3 precondición (dispositivo, app, herramientas, pantalla de inicio, build repetido), 4 captura fallida, 5 sin las corridas válidas pedidas.
+
+## El paso siguiente
+
+Cada comando de `perf.py` termina con el paso siguiente, completo y en orden, y lo deja en "Siguiente paso" de `estado.md`. Si hace falta recalcularlo:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py siguiente --carpeta <carpeta>
+```
 
 ## Después de medir antes (y control)
 
@@ -68,8 +82,8 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 
 | Familia | Métricas | Lectura |
 | --- | --- | --- |
-| `app` | `ttid_ms`, `ttfd_ms` sin red, `bind_application_ms`, slices del hilo principal, jank de la app, inflates, conteos de red, `cliente_ms` (= HTTP − TTFB), memoria | Dependen de la app: comparables con 5 corridas |
-| `e2e` | Duración `HTTP`, `ttfb_ms`, métricas de usuario y `ttfd_ms` con red | Incluyen el backend: su veredicto es orientativo |
+| `app` | `ttid_ms`, `ttfd_ms` sin red, `bind_application_ms`, slices del hilo principal, jank de la app, inflates, conteos de red, `cola_ms`, `cliente_ms` (= HTTP − cola − conexión − TTFB), memoria | Dependen de la app: comparables con 5 corridas |
+| `e2e` | Duración `HTTP`, `ttfb_ms`, `red_conexion_ms`, métricas de usuario y `ttfd_ms` con red | Incluyen el backend: su veredicto es orientativo |
 | `info` | `frames` (denominador), `jank_total_pct` (incluye el del sistema) y lo que el plan marque | Sin veredicto |
 
 - `ttid_ms`: del intent al primer frame, según el sistema (`launching: <paquete>`; sin él, el `TotalTime` de `am start -W`). `ttfd_ms`: hasta `reportFullyDrawn`. `bind_application_ms`: `Application.onCreate` y los content providers.

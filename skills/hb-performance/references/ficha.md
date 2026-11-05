@@ -42,7 +42,7 @@ Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después in
 ## 5. `plan.json` y `estado.md`
 
 ```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --paquete <applicationId> --carpeta <evidencias>/<alcance>/<AAAA-MM-DD> --flujo <nombre> --alcance "<alcance>"
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --paquete <applicationId> --carpeta <evidencias>/<alcance>/<AAAA-MM-DD> --flujo <nombre> --alcance "<alcance>" --instalar "<comando que instala el build de profiling>"
 ```
 
 Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), avisa si git no la ignora y deja las plantillas. Complétalas:
@@ -52,6 +52,8 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), avisa si 
 | `paquete` | `applicationId` instalado |
 | `hz` | Opcional: tasa de refresco fija. Sin él, `perf.py` la lee de cada traza |
 | `config` | `base` (por defecto), `completa` (más pesada, para entender una corrida) o la ruta de una propia |
+| `compilacion` | `completa` (por defecto, para comparar cambios de código) o `perfil` (Baseline Profile; para medir uno) |
+| `instalar` | Comando que compila e instala el build de profiling (`nuevo --instalar`): aparece en la medición después |
 | `principales` | Las métricas principales |
 | `flujos.<nombre>.pasos` | Los pasos exactos en el dispositivo |
 | `flujos.<nombre>.inicio` | Parte del nombre de la actividad donde empieza: si es otra, no se graba |
@@ -60,9 +62,9 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), avisa si 
 | `flujos.<nombre>.metricas_usuario` | `nombre`, `desde` y `hasta` (cada una con `marca`, `punto`: `inicio` o `fin`, y `cual`: `primera` o `ultima`) y `familia` |
 | `flujos.<nombre>.familias` | Cambia la familia de una métrica (nombre o patrón), por ejemplo `{"ttfd_ms": "e2e"}` |
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
-| `mejoras` | Vacío: lo completa la sesión 2 |
+| `mejoras` | Vacío: lo completa la sesión 2; `estado` lo cambia `perf.py decidir` |
 
-Las marcas se buscan entre las secciones propias (`HTTP`, `TTFB`, `SCREEN`, `NAV`), `reportFullyDrawn`, el lanzamiento (`launching: <paquete>`) y los slices de primer nivel del hilo principal de más de 5 ms. `hasta` se busca después de `desde`.
+Las marcas se buscan entre las secciones propias (`HTTP`, `QUEUE`, `CONN`, `TTFB`, `SCREEN`, `NAV`), `reportFullyDrawn`, el lanzamiento (`launching: <paquete>`) y los slices de primer nivel del hilo principal de más de 5 ms. `hasta` se busca después de `desde`.
 
 **Recorrido por comando:** si el flujo se puede reproducir con adb (`input tap`, `input keyevent`, `am start` con un deep link), es mejor que el manual: 10 corridas sin costo humano y siempre iguales.
 
@@ -76,4 +78,4 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 
 ## Entregable
 
-`estado.md` con la ficha, el mapa, las hipótesis y "Siguiente paso" apuntando a la medición: los comandos exactos de `capturar --fase antes` y, en modo riguroso, `--fase control` justo después y con el mismo build, y después `perf.py diagnostico`. Muestra la ficha y el plan, espera **una** aprobación y detente.
+`estado.md` con la ficha, el mapa y las hipótesis. Muestra la ficha y el plan y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2. Pásaselos al usuario tal cual y detente.

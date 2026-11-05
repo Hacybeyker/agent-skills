@@ -2,14 +2,23 @@ package {{PAQUETE}}
 
 import okhttp3.Request
 
-// "GET /items/{id}": method and path with the segments that look like ids normalized; no query or body.
+// "GET /items/{id} #1a2b": method, path with the segments that look like ids normalized and a hash of the query;
+// no query values or body.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(
         "/(\\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" +
             "|[0-9a-fA-F]{16,})(?=/|$)"
     )
 
-    fun endpoint(request: Request): String = "${request.method} ${sanitize(request.url.encodedPath)}"
+    fun endpoint(request: Request): String =
+        "${request.method} ${sanitize(request.url.encodedPath)}${queryTag(request)}"
+
+    // " #1a2b": a short hash of the query, so loads of the same endpoint with other parameters (another page or
+    // filter) do not count as duplicates. perf.py drops it from the per-endpoint metrics; the values never show up.
+    fun queryTag(request: Request): String {
+        val query = request.url.encodedQuery ?: return ""
+        return " #" + Integer.toHexString(query.hashCode() and 0xFFFF).padStart(4, '0')
+    }
 
     fun sanitize(path: String): String = path.replace(ID_SEGMENT, "/{id}")
 }

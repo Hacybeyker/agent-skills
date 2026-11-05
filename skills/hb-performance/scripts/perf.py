@@ -12,7 +12,9 @@ Comandos (cada uno con --help):
   comparar      antes contra después, con veredicto por métrica
   har           métricas de red desde los HAR de testigo
   reporte       reporte inicial (diagnóstico y plan) o final (propuesto contra logrado), en markdown y HTML
-  instrumentar  copia la instrumentación genérica (secciones HTTP, TTFB, SCREEN y NAV) a un módulo Android
+  decidir       registra qué mejoras se aprueban, se descartan o quedan pendientes (sin chat)
+  siguiente     el paso que sigue, con sus comandos completos; también lo escribe en estado.md
+  instrumentar  copia la instrumentación genérica (secciones HTTP, QUEUE, CONN, TTFB, SCREEN y NAV) a un módulo
 
 Códigos de salida: 0 bien · 2 uso o datos inválidos · 3 precondición (dispositivo, app o herramientas) ·
 4 captura fallida · 5 no se juntaron las corridas válidas pedidas.
@@ -36,7 +38,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -50,7 +52,7 @@ REMOTE_DIR = "/data/misc/perfetto-traces"
 DUPLICATE_WINDOW_NS = 2_000_000_000
 MAIN_SLICE_MIN_NS = 5_000_000
 LONG_SLICE_NS = 100_000_000
-CORE = ["ttid_ms", "ttfd_ms", "bind_application_ms", "jank_app_pct", "frame_p90_ms", "hilo_slices_sobre_presupuesto",
+CORE = ["ttid_ms", "ttfd_ms", "bind_application_ms", "jit_ms", "jank_app_pct", "frame_p90_ms", "hilo_slices_sobre_presupuesto",
         "hilo_slices_100ms", "hilo_max_ms", "inflate_cantidad", "inflate_ms", "red_llamadas", "red_solapadas",
         "red_repetidas_2s", "gfx_jank_pct", "gfx_p90_ms", "pss_mb", "java_heap_mb", "activities", "views"]
 FRAME_METRICS = ("jank_app_pct", "jank_total_pct", "frame_p50_ms", "frame_p90_ms", "frame_p99_ms")
@@ -65,6 +67,8 @@ ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
 MARKER = "hbperf_marker"
+ESTADOS = ("propuesta", "aprobada", "descartada", "pendiente", "aplicada")
+QUERY_TAG = re.compile(r" #[0-9a-f]{4,8}$")
 e = html.escape
 
 
@@ -409,6 +413,11 @@ def load_plan(path):
     for item in plan.get("mejoras", []):
         if not isinstance(item, dict) or not item.get("id") or not item.get("titulo"):
             raise PerfError("%s: cada mejora necesita al menos 'id' y 'titulo'" % path)
+        if item.get("estado", "propuesta") not in ESTADOS:
+            raise PerfError("%s: la mejora %s tiene estado '%s': usa %s" % (path, item["id"], item.get("estado"),
+                                                                           ", ".join(ESTADOS)))
+    if plan.get("instalar") is not None and not isinstance(plan["instalar"], str):
+        raise PerfError("%s: 'instalar' es el comando que compila e instala el build de profiling (texto)" % path)
     return plan
 
 
@@ -472,22 +481,47 @@ def trace_rows(header, body):
              row[index["nombre"]] or "") for row in body]
 
 
-def endpoint_of(section_name):
+def call_key(section_name):
+    """Lo que sigue al prefijo (HTTP, TTFB, QUEUE, CONN): método, plantilla y la marca de la query si la hay."""
     return section_name.split(" ", 1)[1] if " " in section_name else section_name
 
 
+def endpoint_of(section_name):
+    """Método y plantilla, sin la marca de la query: la clave de las métricas por endpoint."""
+    return QUERY_TAG.sub("", call_key(section_name))
+
+
+def assign(calls, subs):
+    """Duración de las sub-secciones (TTFB, QUEUE, CONN) por llamada. Cada una va a una llamada con la misma clave
+    que la contiene: primero a la más antigua que todavía no tiene una; si todas tienen (redirección o reintento),
+    se suma a la que empezó más recientemente."""
+    owned, taken = [0] * len(calls), [False] * len(calls)
+    for sub in sorted(subs, key=lambda s: s[1]):
+        if sub[2] <= 0:
+            continue
+        owners = [i for i, c in enumerate(calls) if call_key(c[4]) == call_key(sub[4]) and c[2] > 0
+                  and c[1] <= sub[1] <= c[1] + c[2]]
+        if not owners:
+            continue
+        free = [i for i in owners if not taken[i]]
+        chosen = min(free, key=lambda i: calls[i][1]) if free else max(owners, key=lambda i: calls[i][1])
+        owned[chosen] += sub[2]
+        taken[chosen] = True
+    return owned
+
+
 def network_metrics(sections, known_endpoints, force):
-    """Llamadas, solapadas, repetidas y, por endpoint: llamadas, duración, TTFB y tiempo de cliente."""
+    """Llamadas, solapadas, repetidas, conexiones y, por endpoint: llamadas, duración, TTFB, cola y cliente."""
     calls = [s for s in sections if s[4].startswith("HTTP ")]
-    ttfbs = [s for s in sections if s[4].startswith("TTFB ")]
     if not calls and not known_endpoints and not force:
         return []
+    subs = {kind: [s for s in sections if s[4].startswith(kind + " ")] for kind in ("TTFB", "QUEUE", "CONN")}
     out = [("red_llamadas", len(calls), "llamadas", "app")]
-    by_endpoint = {}
+    by_key = {}
     for s in calls:
-        by_endpoint.setdefault(endpoint_of(s[4]), []).append(s)
+        by_key.setdefault(call_key(s[4]), []).append(s)
     overlapped = repeated = 0
-    for items in by_endpoint.values():
+    for items in by_key.values():  # la misma plantilla y la misma query: una carga duplicada
         items.sort(key=lambda s: s[1])
         for i, s in enumerate(items):
             if any(p[2] > 0 and p[1] < s[1] < p[1] + p[2] for p in items[:i]):
@@ -496,30 +530,29 @@ def network_metrics(sections, known_endpoints, force):
                 repeated += 1
     out.append(("red_solapadas", overlapped, "llamadas", "app"))
     out.append(("red_repetidas_2s", repeated, "llamadas", "app"))
+    if subs["CONN"]:
+        out.append(("red_conexiones", len(subs["CONN"]), "conexiones", "app"))
+        out.append(("red_conexion_ms", sum(max(c[2], 0) for c in subs["CONN"]) / 1e6, "ms", "e2e"))
+    owned = {kind: assign(calls, items) for kind, items in subs.items()}
+    by_endpoint = {}
+    for i, s in enumerate(calls):
+        by_endpoint.setdefault(endpoint_of(s[4]), []).append(i)
     for endpoint in sorted(set(by_endpoint) | set(known_endpoints)):
-        items = by_endpoint.get(endpoint, [])
-        out.append(("red %s llamadas" % endpoint, len(items), "llamadas", "app"))
-        # Cada TTFB pertenece a la llamada del mismo endpoint que lo contiene y empezó más recientemente.
-        owned = [0] * len(items)
-        for t in ttfbs:
-            if endpoint_of(t[4]) != endpoint or t[2] <= 0:
-                continue
-            owners = [i for i, s in enumerate(items) if s[2] > 0 and s[1] <= t[1] <= s[1] + s[2]]
-            if owners:
-                owned[max(owners, key=lambda i: items[i][1])] += t[2]
-        durations, ttfb_values, client = [], [], []
-        for s, ttfb in zip(items, owned):
-            if s[2] <= 0:
-                continue
-            durations.append(s[2] / 1e6)
-            if ttfb:
-                ttfb_values.append(ttfb / 1e6)
-                client.append(max(0.0, (s[2] - ttfb) / 1e6))
-        if durations:
-            out.append(("red %s ms" % endpoint, statistics.median(durations), "ms", "e2e"))
-        if ttfb_values:
-            out.append(("red %s ttfb_ms" % endpoint, statistics.median(ttfb_values), "ms", "e2e"))
+        indexes = [i for i in by_endpoint.get(endpoint, []) if calls[i][2] > 0]
+        out.append(("red %s llamadas" % endpoint, len(by_endpoint.get(endpoint, [])), "llamadas", "app"))
+        if not indexes:
+            continue
+        out.append(("red %s ms" % endpoint, statistics.median(calls[i][2] / 1e6 for i in indexes), "ms", "e2e"))
+        with_ttfb = [i for i in indexes if owned["TTFB"][i]]
+        if with_ttfb:
+            out.append(("red %s ttfb_ms" % endpoint, statistics.median(owned["TTFB"][i] / 1e6 for i in with_ttfb),
+                        "ms", "e2e"))
+            client = [max(0.0, (calls[i][2] - owned["TTFB"][i] - owned["QUEUE"][i] - owned["CONN"][i]) / 1e6)
+                      for i in with_ttfb]
             out.append(("red %s cliente_ms" % endpoint, statistics.median(client), "ms", "app"))
+            if subs["QUEUE"]:  # solo las que llegaron al servidor: con un hit de caché, QUEUE dura toda la llamada
+                out.append(("red %s cola_ms" % endpoint, statistics.median(owned["QUEUE"][i] / 1e6 for i in with_ttfb),
+                            "ms", "app"))
     return out
 
 
@@ -588,6 +621,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     launches = sorted((r for r in rows if r[0] == "lanzamiento"), key=lambda r: r[1])
     bounds = [r for r in rows if r[0] == "limites"]
     vsync = next((r[2] for r in rows if r[0] == "vsync" and r[2] > 0), 0)
+    jit = next((r for r in rows if r[0] == "jit"), None)
     info = {"frames": len(frames), "secciones": len(sections),
             "duracion_s": bounds[0][2] / 1e9 if bounds and bounds[0][2] > 0 else None,
             "nombres": {}, "hz_traza": hz_from_vsync(vsync), "arranque": bool(launches)}
@@ -630,6 +664,8 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     out += [("hilo_slices_sobre_presupuesto", sum(1 for r in top if r[2] > budget), "slices", "app"),
             ("hilo_slices_100ms", sum(1 for r in top if r[2] > LONG_SLICE_NS), "slices", "app"),
             ("hilo_max_ms", max((r[2] for r in top), default=0) / 1e6, "ms", "app")]
+    if jit is not None:
+        out.append(("jit_ms", max(jit[2], 0) / 1e6, "ms", "info"))
     inflates = merged_top_level([(r[1], r[2]) for r in main if r[4] == "inflate"])
     if inflates or "inflate_cantidad" in known:
         out += [("inflate_cantidad", len(inflates), "inflates", "app"),
@@ -783,6 +819,8 @@ class Adb:
 
 
 def select_device(serial):
+    """--serial, el 'serial' del plan o ANDROID_SERIAL; si no, el único dispositivo conectado."""
+    serial = serial or os.environ.get("ANDROID_SERIAL")
     result = subprocess.run([adb_binary(), "devices"], capture_output=True, text=True, timeout=60)
     devices = [line.split("\t")[0] for line in result.stdout.splitlines()[1:] if line.endswith("\tdevice")]
     if serial:
@@ -792,7 +830,8 @@ def select_device(serial):
     if not devices:
         raise Precondicion("no hay ningún dispositivo conectado con depuración USB autorizada (adb devices)")
     if len(devices) > 1:
-        raise Precondicion("hay %d dispositivos conectados: elige uno con --serial (%s)" % (len(devices), ", ".join(devices)))
+        raise Precondicion("hay %d dispositivos conectados (%s): elige uno con --serial, o guárdalo en el plan con "
+                           "'nuevo --serial'" % (len(devices), ", ".join(devices)))
     return devices[0]
 
 
@@ -900,9 +939,17 @@ def drive(recorrido, label):
     return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
 
 
+def component_of(package, activity):
+    """paquete/clase para am start -n: acepta "paquete/.Clase", "paquete/clase", ".Clase" o el nombre completo."""
+    activity = (activity or "").strip()
+    if not activity or "/" in activity:
+        return activity
+    return "%s/%s" % (package, activity)
+
+
 def launch(adb, package, spec):
     """Arranque en frío con am start -W (la app ya está detenida). Devuelve (motivo de invalidez o None, métricas)."""
-    component = spec.get("actividad") or launcher_activity(adb, package)
+    component = component_of(package, spec.get("actividad")) or launcher_activity(adb, package)
     if not component:
         return "no se encontró la actividad de inicio de %s: ponla en recorrido.actividad" % package, []
     result = adb.shell("am start -W -n %s" % component, timeout=180)
@@ -1037,6 +1084,82 @@ def check_build(folder, phase, build, commit, force):
     return notes
 
 
+PROFILE_RESULTS = {"0": "no recibido", "1": "instalado", "2": "ya estaba instalado",
+                   "6": "el APK no trae Baseline Profile"}
+COMPILATIONS = ("completa", "perfil")
+
+
+def install_baseline_profile(adb, package):
+    command = ("am broadcast -a androidx.profileinstaller.action.INSTALL_PROFILE "
+               "%s/androidx.profileinstaller.ProfileInstallReceiver" % package)
+    code = "?"
+    for attempt in range(2):
+        code = (re.findall(r"result=(-?\d+)", adb.shell(command, timeout=120).stdout) or ["?"])[-1]
+        if code in ("1", "2"):
+            break
+        settle(2)
+    return code
+
+
+def fix_compilation(adb, package, mode):
+    """Compilación de ART igual en todas las fases. Devuelve la descripción que queda en fases.json.
+
+    - completa: todo el código compilado antes de correr (Macrobenchmark CompilationMode.Full). No depende de
+      perfiles ni de librerías: es la opción para comparar un cambio de código.
+    - perfil: perfiles borrados, Baseline Profile del APK instalado con profileinstaller y speed-profile
+      (CompilationMode.Partial). Más parecido a una instalación de Play; para medir un Baseline Profile.
+
+    Sin esto, el resultado depende de la historia del dispositivo: un build recién instalado corre con JIT y uno
+    que ya se abrió varias veces, compilado con su perfil de uso.
+    """
+    adb.shell("am force-stop %s" % package)
+    if mode == "completa":
+        compiled = adb.shell("cmd package compile -f -m speed %s" % package, timeout=900)
+        if "Success" not in compiled.stdout:
+            raise Precondicion("no se pudo compilar la app (speed): %s" % (compiled.stdout + compiled.stderr).strip()[-200:])
+        print("✔ compilación de ART fijada: completa (speed), igual en todas las fases")
+        return "completa (speed)"
+    adb.shell("cmd package compile --reset %s" % package, timeout=600)
+    code = install_baseline_profile(adb, package)
+    adb.shell("am force-stop %s" % package)
+    if code not in ("1", "2"):
+        raise Precondicion("no se pudo instalar el Baseline Profile (%s): mide todas las fases con "
+                           "--compilacion completa" % PROFILE_RESULTS.get(code, "resultado %s" % code))
+    compiled = adb.shell("cmd package compile -f -m speed-profile %s" % package, timeout=600)
+    if "Success" not in compiled.stdout:
+        raise Precondicion("no se pudo compilar la app (speed-profile): %s"
+                           % (compiled.stdout + compiled.stderr).strip()[-200:])
+    print("✔ compilación de ART fijada: perfiles borrados, Baseline Profile instalado y speed-profile")
+    return "perfil (Baseline Profile + speed-profile)"
+
+
+def discard_phase(folder, csv_path, phase, flow):
+    """--rehacer: saca del CSV las filas de la fase y aparta sus trazas, para medirla de nuevo desde cero."""
+    stamp = datetime.datetime.now().strftime("%H%M%S")
+    if csv_path.is_file():
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames, kept, dropped = reader.fieldnames, [], 0
+            for row in reader:
+                if normalize_phase(row["fase"]) == phase and (row["flujo"] or "").strip() == flow:
+                    dropped += 1
+                else:
+                    kept.append(row)
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(kept)
+        print("✔ --rehacer: %d filas de '%s' fuera del CSV" % (dropped, phase))
+    old = folder / phase
+    if old.is_dir() and any(old.iterdir()):
+        old.rename(folder / ("%s-descartada-%s" % (phase, stamp)))
+        print("✔ --rehacer: trazas anteriores en %s-descartada-%s/" % (phase, stamp))
+    (folder / phase).mkdir(parents=True, exist_ok=True)
+    phases = read_phases(folder)
+    if phases.pop(phase, None) is not None:
+        (folder / "fases.json").write_text(json.dumps(phases, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def resolve_config(plan, folder, override):
     name = override or plan.get("config", "base")
     path = ASSETS / "perfetto" / ("%s.pbtx" % name)
@@ -1055,6 +1178,153 @@ def custom_queries(flow, folder, package):
             raise PerfError("no existe la consulta de métricas %s" % path)
         queries.append((spec["archivo"], fill_sql(path.read_text(encoding="utf-8"), package, {})))
     return queries
+
+
+def project_root(folder):
+    try:
+        result = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"], capture_output=True,
+                                text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            return pathlib.Path(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return pathlib.Path.cwd()
+
+
+def next_steps(folder, plan, flow=None):
+    """(título, [pasos]) del paso que sigue según fases.json, plan.json y los archivos de la carpeta.
+
+    Cada paso es un comando completo para la terminal (empieza con cd) o el texto para un chat nuevo. Es la única
+    fuente de los comandos de entrega: los agentes la copian en vez de inventarlos.
+    """
+    folder = folder.resolve()
+    root = project_root(folder).resolve()
+    state = folder / "estado.md"
+    try:  # cada comando empieza con cd a la raíz: dentro de ella, rutas relativas y más cortas
+        folder = folder.relative_to(root)
+    except ValueError:
+        pass
+
+    def command(*parts):
+        return "cd %s && python3 -I %s %s" % (root, HERE / "perf.py", " ".join(str(part) for part in parts))
+
+    def chat(text, model):
+        return "Chat nuevo (%s): \"%s\"" % (model, text)
+
+    flows = plan["flujos"]
+    flow = flow if flow in flows else next(iter(flows))
+    automatic = bool(startup_spec(flows[flow])) or flows[flow].get("recorrido", "manual") != "manual"
+    runs = 10 if automatic else 5
+    capture = ["capturar", "--plan", folder / "plan.json"] + (["--flujo", flow] if len(flows) > 1 else [])
+    phases = read_phases(root / folder)
+    mejoras = plan.get("mejoras", [])
+    estados = [m.get("estado", "propuesta") for m in mejoras]
+    session2 = chat("Sigue hb-performance con %s" % state, "intermedio, razonamiento alto")
+    session4 = chat("Sigue hb-performance con %s" % state, "económico, razonamiento bajo")
+    report = state.parent / ("reporte.html" if (state.parent / "reporte.html").is_file() else "reporte.md")
+    if report.is_file():
+        return "investigación cerrada", ["Reporte: %s" % report]
+    if "despues" in phases:
+        return "sesión 4 · cierre", [session4]
+    if "aplicada" in estados and "aprobada" not in estados:
+        install = plan.get("instalar")
+        return "medición después (sin chat)", [
+            "cd %s && %s" % (root, install) if install else
+            "cd %s && <compila e instala el build de profiling (guarda el comando como 'instalar' en plan.json)>" % root,
+            command(*(capture + ["--fase", "despues", "--corridas", runs])), session4]
+    if "aprobada" in estados:
+        first = next(m for m in mejoras if m.get("estado") == "aprobada")
+        return "sesión 3 · %s" % first["id"], [
+            chat("Sigue hb-performance con %s: sesión 3, aplica %s" % (state, first["id"]), "intermedio, razonamiento medio")]
+    if "propuesta" in estados:
+        ids = ",".join(m["id"] for m in mejoras if m.get("estado", "propuesta") == "propuesta")
+        return "decisión del usuario (sin chat)", [
+            command("decidir", "--carpeta", folder, "--aprobar", ids, "--descartar", "-", "--pendiente", "-")
+            + "   # deja en cada lista los ids que correspondan; - es ninguno"]
+    if mejoras:
+        return "sesión 4 · cierre sin mejoras aplicadas", [session4]
+    if (state.parent / "diagnostico.md").is_file():
+        return "sesión 2 · diagnóstico", [session2]
+    steps = []
+    if "antes" not in phases:
+        if not any((state.parent / "prueba").glob("*.perfetto-trace*")):
+            steps.append(command(*(capture + ["--prueba"])))
+        steps.append(command(*(capture + ["--fase", "antes", "--corridas", runs])))
+    if "control" not in phases:
+        steps.append(command(*(capture + ["--fase", "control", "--corridas", runs])))
+    steps += [command("diagnostico", "--carpeta", folder), session2]
+    return ("medición antes y control (sin chat)" if "antes" not in phases else
+            "control y diagnóstico (sin chat)" if "control" not in phases else "diagnóstico (sin chat)"), steps
+
+
+def write_next(folder, title, steps):
+    """Reescribe "## Siguiente paso" de estado.md con lo que dice next_steps."""
+    state = pathlib.Path(folder) / "estado.md"
+    if not state.is_file():
+        return
+    body = "\n".join(["- **Paso:** %s" % title, "- **En orden, uno a la vez** (los comandos van en la terminal):"]
+                     + ["  %d. %s" % (i, s if s.startswith("Chat nuevo") or s.startswith("Reporte") else "`%s`" % s)
+                        for i, s in enumerate(steps, start=1)]
+                     + ["- _Lo escribe `perf.py siguiente`: si algo cambió, vuelve a correrlo._", ""])
+    text = state.read_text(encoding="utf-8")
+    new, count = re.subn(r"(## Siguiente paso\n\n).*?(?=\n## )", lambda m: m.group(1) + body, text, count=1, flags=re.S)
+    if count:
+        state.write_text(new, encoding="utf-8")
+
+
+def print_next(folder, plan, flow=None):
+    title, steps = next_steps(pathlib.Path(folder), plan, flow)
+    print("Siguiente · %s (también en estado.md):" % title)
+    for i, step in enumerate(steps, start=1):
+        print("  %d. %s" % (i, step))
+    write_next(folder, title, steps)
+
+
+def cmd_siguiente(args):
+    folder = pathlib.Path(args.carpeta)
+    print_next(folder, load_plan(folder / "plan.json"), args.flujo)
+
+
+DECISIONS = (("aprobar", "aprobada", "aprobadas"), ("descartar", "descartada", "descartadas"),
+             ("pendiente", "pendiente", "pendientes"), ("aplicada", "aplicada", "aplicadas"))
+
+
+def cmd_decidir(args):
+    folder = pathlib.Path(args.carpeta)
+    plan_path = folder / "plan.json"
+    plan = load_plan(plan_path)
+    choices = {}
+    for option, estado, _ in DECISIONS:
+        for item in (getattr(args, option) or "").split(","):
+            if item.strip() and item.strip() != "-":
+                choices[item.strip()] = estado
+    if not choices:
+        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente o --aplicada")
+    known = [m["id"] for m in plan.get("mejoras", [])]
+    unknown = sorted(set(choices) - set(known))
+    if unknown:
+        raise PerfError("plan.json no tiene las mejoras %s (tiene: %s)" % (", ".join(unknown), ", ".join(known) or "ninguna"))
+    for item in plan["mejoras"]:
+        if item["id"] in choices:
+            item["estado"] = choices[item["id"]]
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    parts = ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
+             for _, estado, label in DECISIONS if estado in choices.values()]
+    line = "- %s: %s (perf.py decidir)" % (datetime.date.today().isoformat(), "; ".join(parts))
+    state = folder / "estado.md"
+    if state.is_file():
+        text = state.read_text(encoding="utf-8")
+
+        def append(match):
+            body = re.sub(r"- <AAAA-MM-DD:[^\n]*>\n?", "", match.group(2)).strip("\n")
+            return match.group(1) + (body + "\n" if body else "") + line + "\n"
+
+        state.write_text(re.sub(r"(## Decisiones\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S),
+                         encoding="utf-8")
+    rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
+    update_block(folder, "mejoras", markdown_table(PLAN_HEADERS, plan_rows(plan, rows)))
+    print("✔ %s" % line[2:])
+    print_next(folder, plan)
 
 
 def cmd_capturar(args):
@@ -1078,7 +1348,8 @@ def cmd_capturar(args):
     startup = None if args.recorrido else startup_spec(flow)
     recorrido = args.recorrido or (flow.get("recorrido") if not startup else None) or "manual"
     tp = find_tp(args.tp)
-    adb = Adb(select_device(args.serial))
+    serial = select_device(args.serial or plan.get("serial"))
+    adb = Adb(serial)
     sdk, warnings, build = preflight(adb, package, args.forzar)
     commit, dirty = git_info()
     if not args.prueba:
@@ -1111,12 +1382,12 @@ def cmd_capturar(args):
                 return
         raise Precondicion("la pantalla activa es '%s' y el flujo empieza en '%s'" % (current or "?", start_screen))
 
+    compilation = "sin fijar (--sin-compilar)"
     if not args.sin_compilar:
-        compiled = adb.shell("cmd package compile -f -m speed-profile %s" % package, timeout=600)
-        if "Success" in compiled.stdout:
-            print("✔ compilación de ART fijada (speed-profile)")
-        else:
-            print("⚠ no se pudo fijar la compilación de ART: %s" % (compiled.stdout + compiled.stderr).strip()[-200:])
+        compilation = fix_compilation(adb, package, args.compilacion or plan.get("compilacion", "completa"))
+    if args.rehacer and not args.prueba:
+        discard_phase(folder, csv_path, phase, flow_name)
+        known = known_metrics(csv_path, flow_name)
     warmups = 0 if args.prueba else args.calentamiento
     for i in range(warmups):
         if startup:
@@ -1194,6 +1465,8 @@ def cmd_capturar(args):
             if startup and "ttfd_ms" not in {m[0] for m in metrics}:
                 print("⚠ Sin ttfd_ms: la app no llama a reportFullyDrawn() (ver setup.md · Contenido visible)")
             print("Traza: %s" % saved)
+            if args.plan:
+                print_next(folder, plan, flow_name)
             return
         append_rows(csv_path, [metric_row(phase, flow_name, n, m[0], m[1], m[2], m[3]) for m in metrics])
         known |= {m[0] for m in metrics}
@@ -1209,7 +1482,7 @@ def cmd_capturar(args):
         print("⚠ La tasa de refresco cambió entre corridas (%s Hz): fíjala en el dispositivo o pon 'hz' en el plan"
               % "/".join(str(h) for h in sorted(seen_hz)))
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
-              "corridas": valid, "hz": hz or min(seen_hz, default=None)}
+              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation}
     record.update(build)
     write_phase(folder, phase, record)
     rows = read_rows(csv_path)
@@ -1217,6 +1490,8 @@ def cmd_capturar(args):
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
     write_summary(csv_path, rows, plan)
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
+    if args.plan:
+        print_next(folder, plan, flow_name)
 
 
 def write_summary(csv_path, rows, plan):
@@ -1382,7 +1657,7 @@ def cmd_diagnostico(args):
     target.write_text("\n".join(md) + "\n", encoding="utf-8")
     print("✔ %s: %d tablas de %s (%s)." % (target, len(printed), ", ".join("corrida %s" % r[1] for r in runs),
                                           ", ".join(sorted(groups - {"cpu"}))))
-    print("Léelo entero al empezar la sesión 2: reemplaza las consultas sueltas.")
+    print_next(folder, plan, flow_name)
 
 
 # ── resumen y comparar ───────────────────────────────────────────────────────
@@ -1401,21 +1676,39 @@ def cmd_resumen(args):
     write_summary(args.csv, rows, plan)
 
 
+def jit_note(rows):
+    """Aviso si una fase compiló con JIT mucho más que la otra: la compilación de ART no fue la misma."""
+    notes = []
+    for (flow, metric), entry in group(rows).items():
+        phases = entry["fases"]
+        if metric != "jit_ms" or "antes" not in phases or "despues" not in phases:
+            continue
+        before, after = statistics.median(phases["antes"]), statistics.median(phases["despues"])
+        if abs(after - before) > max(50.0, 2 * min(before, after)):
+            notes.append("%s: JIT de %s ms en antes y %s ms en después: la compilación de ART no fue la misma y los "
+                         "tiempos no son comparables; repite las fases con --rehacer" % (flow, fmt(before), fmt(after)))
+    return notes
+
+
 def builds_table(folder):
     phases = read_phases(folder)
     if not phases:
         return "", []
-    table = markdown_table(["Fase", "Fecha", "Commit", "Versión", "Instalada", "Hz", "Corridas"], [
+    table = markdown_table(["Fase", "Fecha", "Commit", "Versión", "Instalada", "Hz", "Compilación", "Corridas"], [
         [p, phases[p].get("fecha", "—"),
          (phases[p].get("commit") or "—") + (" (con cambios)" if phases[p].get("sucio") else ""),
          phases[p].get("version", "—"), phases[p].get("instalada") or "—", phases[p].get("hz") or "—",
-         phases[p].get("corridas", "—")] for p in FASES if p in phases])
+         phases[p].get("compilacion") or "—", phases[p].get("corridas", "—")] for p in FASES if p in phases])
     notes = []
     before, after = phases.get("antes"), phases.get("despues")
     if before and after and before.get("instalada") and before.get("instalada") == after.get("instalada"):
         notes.append("antes y después midieron el mismo build instalado: la comparación no prueba la mejora")
     if before and after and before.get("hz") and after.get("hz") and before["hz"] != after["hz"]:
         notes.append("antes y después se midieron a distinta tasa de refresco (%s y %s Hz)" % (before["hz"], after["hz"]))
+    if before and after and before.get("compilacion") != after.get("compilacion"):
+        notes.append("antes y después se midieron con distinta compilación de ART (%s · %s): los tiempos no son "
+                     "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
+                                                                      after.get("compilacion") or "sin registrar"))
     return table, notes
 
 
@@ -1461,6 +1754,7 @@ def cmd_comparar(args):
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
     folder = pathlib.Path(args.csv).parent
     builds, notes = builds_table(folder)
+    notes += jit_note(rows)
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -1734,6 +2028,8 @@ def cmd_reporte(args):
             print("✔ Reporte HTML: %s" % (folder / "reporte-inicial.html"))
         if not plan.get("mejoras"):
             print("⚠ plan.json no tiene 'mejoras': el reporte sale sin el plan de mejoras.")
+        if plan:
+            print_next(folder, plan)
         return
 
     results, unmatched = compare(rows)
@@ -1766,6 +2062,8 @@ def cmd_reporte(args):
         print("⚠ La métrica principal '%s' no tiene antes y después en el CSV." % m)
     if unmatched:
         print("⚠ %d métricas sin las dos fases (ver comparacion.md)." % len(unmatched))
+    if plan:
+        print_next(folder, plan)
 
 
 # ── nuevo ────────────────────────────────────────────────────────────────────
@@ -1774,10 +2072,11 @@ STARTUP_FAMILIES = {"jank_app_pct": "info", "frame_p50_ms": "info", "frame_p90_m
 
 
 def device_summary(serial, package, need_activity):
-    """(texto del dispositivo, actividad de inicio) si hay un dispositivo; ('', '') si no."""
+    """(texto del dispositivo, actividad de inicio) si hay un dispositivo; ('', '') si no, con el motivo."""
     try:
         adb = Adb(select_device(serial))
-    except PerfError:
+    except PerfError as error:
+        print("⚠ Sin dispositivo para completar la ficha y la actividad de inicio: %s" % error)
         return "", ""
     model = adb.shell("getprop ro.product.model").stdout.strip()
     release = adb.shell("getprop ro.build.version.release").stdout.strip()
@@ -1798,9 +2097,14 @@ def cmd_nuevo(args):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "logs").mkdir(exist_ok=True)
     plan = {"paquete": args.paquete}
+    if args.serial:
+        plan["serial"] = args.serial
     if args.hz:
         plan["hz"] = args.hz
     plan["config"] = "base"
+    plan["compilacion"] = "completa"
+    if args.instalar:
+        plan["instalar"] = args.instalar
     if startup:
         families = dict(STARTUP_FAMILIES)
         if args.red:
@@ -1831,16 +2135,11 @@ def cmd_nuevo(args):
             print("⚠ git no ignora %s: agrégala a .gitignore (o a .git/info/exclude) antes de capturar" % folder)
     except (OSError, subprocess.SubprocessError):
         pass
-    base = "python3 -I %s capturar --plan %s" % (HERE / "perf.py", folder / "plan.json")
     if startup:
-        print("Siguiente, sin chat: instala el build de profiling y corre, uno a la vez:")
-        print("  %s --prueba" % base)
-        print("  %s --fase antes --corridas 10" % base)
-        print("  %s --fase control --corridas 10" % base)
-        print("  python3 -I %s diagnostico --carpeta %s" % (HERE / "perf.py", folder))
-        print("Después, la sesión 2 en un chat nuevo: \"Sigue hb-performance con %s\"." % (folder / "estado.md"))
+        print_next(folder, plan)
     else:
-        print("Siguiente: la sesión 1 completa los pasos, las marcas y las métricas principales del plan.")
+        print("Siguiente: la sesión 1 completa los pasos, las marcas y las métricas principales del plan; al terminar, "
+              "perf.py siguiente da los comandos para medir.")
 
 
 # ── instrumentar ─────────────────────────────────────────────────────────────
@@ -1921,8 +2220,22 @@ def main(argv=None):
     p.add_argument("--espera", type=float, default=5, help="segundos de espera tras el arranque (receta arranque-frio)")
     p.add_argument("--red", action="store_true", help="la primera pantalla carga datos de la red: ttfd_ms pasa a e2e")
     p.add_argument("--hz", type=int, help="tasa de refresco fija del dispositivo (si no, se lee de cada traza)")
-    p.add_argument("--serial")
+    p.add_argument("--serial", help="dispositivo de medición; queda en el plan y lo usan todas las capturas")
+    p.add_argument("--instalar", help="comando que compila e instala el build de profiling (queda en el plan)")
     p.set_defaults(func=cmd_nuevo)
+
+    p = sub.add_parser("siguiente", help="el paso que sigue, con sus comandos completos (también en estado.md)")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--flujo")
+    p.set_defaults(func=cmd_siguiente)
+
+    p = sub.add_parser("decidir", help="registra la decisión del usuario sobre las mejoras del plan")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--aprobar", help="ids separados por coma (- es ninguno)")
+    p.add_argument("--descartar", help="ids separados por coma (- es ninguno)")
+    p.add_argument("--pendiente", help="ids separados por coma (- es ninguno)")
+    p.add_argument("--aplicada", help="ids que la sesión 3 ya aplicó (la usa el agente al terminar la mejora)")
+    p.set_defaults(func=cmd_decidir)
 
     p = sub.add_parser("capturar", help="calentamiento, compilación y N corridas con traza, consultas y CSV")
     p.add_argument("--plan", help="<carpeta>/plan.json")
@@ -1940,6 +2253,10 @@ def main(argv=None):
     p.add_argument("--sin-comprimir", action="store_true", help="deja las trazas sin gzip")
     p.add_argument("--prueba", action="store_true", help="una corrida que imprime las métricas y no escribe el CSV")
     p.add_argument("--forzar", action="store_true", help="sigue aunque el dispositivo esté caliente o el build no cambie")
+    p.add_argument("--rehacer", action="store_true", help="descarta lo medido en esta fase y la mide de nuevo")
+    p.add_argument("--compilacion", choices=COMPILATIONS,
+                   help="completa (por defecto: todo compilado, para comparar cambios de código) o perfil (Baseline "
+                        "Profile + speed-profile); si no, la del plan")
     p.add_argument("--paquete", help="con --prueba y sin plan")
     p.add_argument("--carpeta", help="con --prueba y sin plan")
     p.set_defaults(func=cmd_capturar)

@@ -2,10 +2,7 @@
 
 ## Siguiente paso
 
-- **Sesión:** <1 · ficha | medición antes | 2 · diagnóstico | decisión del usuario | 3 · mejora | medición después | 4 · cierre>
-- **Qué hacer:** <una o dos líneas>
-- **Comando o texto para el chat nuevo:** <el comando de perf.py, o "Sigue hb-performance con <ruta>/estado.md">
-- **Modelo sugerido:** <intermedio · razonamiento medio>
+- _Lo escribe `perf.py siguiente --carpeta <carpeta>` (y cada comando de perf.py al terminar)._
 
 ## Ficha
 
@@ -50,7 +47,7 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 ## Decisiones
 
-- <AAAA-MM-DD: qué aprobó el usuario, qué no y por qué>
+- <AAAA-MM-DD: lo escribe `perf.py decidir`; agrega aquí el porqué si el usuario lo dio>
 
 ## Mejoras aplicadas
 
