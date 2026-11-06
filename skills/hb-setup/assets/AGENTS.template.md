@@ -4,9 +4,16 @@
 
 ## Stack
 
+Lo que el proyecto tiene hoy, literal y con versiones. Los agentes trabajan con este stack; ver `## Modernización`.
+
 - Perfil: <hb-stack-mobile-kotlin | ninguno>
 - Variante: <android | kmp>
-- <Tecnologías clave que el perfil no indica.>
+- UI: <Compose | Views con ViewBinding | Views con DataBinding | mixto: dónde cada uno>
+- Presentación: <MVVM con UDF | MVVM con LiveData | MVP | MVI>
+- Asincronía: <corrutinas y Flow | RxJava 2/3 | callbacks>
+- DI: <Hilt | Dagger 2 | Koin | manual>
+- Navegación, red, persistencia, serialización, imágenes, tests: <librerías y versiones>
+- Build: <AGP, Kotlin, Gradle, KSP o kapt, minSdk/targetSdk>
 
 ## Comandos
 
@@ -26,9 +33,12 @@ Antes de dar una tarea por terminada, en este orden:
 
 ## Arquitectura
 
-Sigue el perfil. Particularidades de este proyecto:
+<Cómo está organizado el proyecto hoy: módulos, capas, features principales, dónde viven los contratos de presentación. Si coincide con el perfil, "sigue el perfil" y las excepciones con su motivo; si no, descríbela tal cual y los agentes la respetan.>
 
-- <Módulos, features principales, excepciones al perfil con su motivo.>
+## Modernización
+
+- <ninguna decidida | lista de decisiones tomadas por el usuario, cada una con alcance y fecha: "las pantallas nuevas van en Compose (2026-11)", "Rx se reemplaza por corrutinas solo al tocar una clase">
+- Los agentes no migran ni proponen migrar fuera de lo decidido aquí. Cuando una tarea toque una oportunidad clara, una línea al final del entregable, sin plan.
 
 ## Reglas del proyecto
 

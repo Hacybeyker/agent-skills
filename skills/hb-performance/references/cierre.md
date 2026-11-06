@@ -20,6 +20,8 @@ Imprime las métricas principales, las de usuario, las centrales y cualquier mej
 
 Sin mejoras aplicadas (todas descartadas o pendientes) no hay fase después: salta la comparación, escribe el resumen con el estado inicial y genera el reporte, que documenta el diagnóstico y los pendientes.
 
+Si `comparar` avisa que la **marca de fin de una métrica dejó de ser la última llamada de red** (`hasta_ultima_red_ms`), la métrica cambió de definición: su veredicto no prueba la mejora. Dilo en la lectura y usa la última llamada (o una marca de contenido visible, midiendo de nuevo) como evidencia.
+
 Con avisos (`pocas corridas`, `inestable`), el veredicto se presenta con el aviso, nunca como resultado firme. Los de familia `e2e` dependen del backend: son orientativos. Si `comparar` avisa que antes y después midieron el mismo build, o con distinta compilación de ART, la comparación no prueba nada: repite las fases afectadas con `--rehacer` antes de escribir la lectura.
 
 ## 2. Lectura de la comparación
@@ -49,5 +51,5 @@ Propón cómo proteger la mejora: el test de la sesión 3 y, si el flujo es crí
 - Pendientes y hallazgos fuera del alcance, para una próxima investigación.
 - Cómo validarlo en campo después del release (Android vitals: TTID y TTFD si la app llama a `reportFullyDrawn`).
 - Limpieza, cuando se mergee: las trazas (`antes/`, `control/`, `despues/`, `prueba/`) y los heap dumps se borran; `metricas.csv`, los `.md` y el reporte se pueden conservar.
-- El costo de la investigación en "Consumo", con el de esta sesión.
+- "Consumo" la completa el usuario con `perf.py consumo`; no se lo pidas. Si faltan filas, dilo en una línea con el comando.
 - `perf.py reporte` deja "Siguiente paso" como investigación cerrada.

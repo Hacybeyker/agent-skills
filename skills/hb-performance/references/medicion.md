@@ -34,6 +34,7 @@ Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), 
 | `--fase antes \| control \| despues` | `control` es el bloque A/A del estado inicial (modo riguroso), justo después de `antes` y con el mismo build: mide el ruido |
 | `--corridas 10` | Más potencia estadística, sin costo humano si el recorrido es automático |
 | `--recorrido "<comando>"` | Recorre el flujo con un comando en vez de lo que diga el plan |
+| (`ventana` del plan) | Frames, jank e hilo principal solo entre dos marcas del flujo (`ventana_ms` queda como informativa); sin ventana cubren toda la traza, lo que en un recorrido manual depende de cuánto tarda el usuario en presionar Enter |
 | `--config cpu` | Una captura con muestreo de CPU, solo para el diagnóstico (con `--prueba`) |
 | `--memoria` | `dumpsys meminfo` después de cada corrida: PSS, heaps, actividades y vistas vivas |
 | `--prueba` | Una corrida que imprime las métricas y no escribe el CSV |
@@ -45,7 +46,7 @@ Códigos de salida: 2 uso o datos, 3 precondición (dispositivo, app, herramient
 
 ## El paso siguiente
 
-Cada comando de `perf.py` termina con el paso siguiente, completo y en orden, y lo deja en "Siguiente paso" de `estado.md`. Si hace falta recalcularlo:
+Cada comando de `perf.py` termina con el paso siguiente, completo y en orden, y lo deja en "Siguiente paso" de `estado.md`: para cada paso, si es en la terminal o en un chat nuevo, qué hace, qué le toca hacer al usuario y, en los chats, el modelo y el esfuerzo (nombres de `modelos` en el plan). Si hace falta recalcularlo:
 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py siguiente --carpeta <carpeta>
@@ -84,9 +85,10 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 | --- | --- | --- |
 | `app` | `ttid_ms`, `ttfd_ms` sin red, `bind_application_ms`, slices del hilo principal, jank de la app, inflates, conteos de red, `cola_ms`, `cliente_ms` (= HTTP − cola − conexión − TTFB), memoria | Dependen de la app: comparables con 5 corridas |
 | `e2e` | Duración `HTTP`, `ttfb_ms`, `red_conexion_ms`, métricas de usuario y `ttfd_ms` con red | Incluyen el backend: su veredicto es orientativo |
-| `info` | `frames` (denominador), `jank_total_pct` (incluye el del sistema) y lo que el plan marque | Sin veredicto |
+| `info` | `frames` (denominador), `jank_total_pct` (incluye el del sistema), `ventana_ms`, `<métrica> hasta_ultima_red_ms` y lo que el plan marque | Sin veredicto |
 
 - `ttid_ms`: del intent al primer frame, según el sistema (`launching: <paquete>`; sin él, el `TotalTime` de `am start -W`). `ttfd_ms`: hasta `reportFullyDrawn`. `bind_application_ms`: `Application.onCreate` y los content providers.
+- `<métrica> hasta_ultima_red_ms`: para una métrica de usuario que termina en una llamada, cuánto hay desde su inicio hasta el fin de la última llamada de red. `comparar` avisa si se separan: la marca de fin dejó de ser la última llamada y la métrica cambió de definición.
 - El presupuesto de frame sale de `hz` (del plan o de la traza): 16,7 ms a 60 Hz, 11,1 ms a 90 Hz, 8,3 ms a 120 Hz.
 
 ## Con testigo

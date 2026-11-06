@@ -1,10 +1,10 @@
 ---
 name: hb-stack-mobile-kotlin
-description: 'Perfil de stack para apps Android nativas y Kotlin Multiplatform (Compose Multiplatform) con Clean Architecture + MVVM (UDF), organizadas por features: capas, contrato de presentación, Compose y Material 3, testing, seguridad (OWASP MASVS) y rendimiento. Variantes: android (Hilt, Navigation 3, Room) y kmp (Koin, Navigation 3 de CMP, Room KMP, Ktor). Úsala al implementar, revisar o diseñar código Kotlin/Compose en un proyecto Android o KMP: features, pantallas, ViewModels, repositorios, use cases, DI, navegación, tests o seguridad.'
+description: 'Perfil de stack para apps Android nativas y Kotlin Multiplatform (Compose Multiplatform) con Clean Architecture + MVVM (UDF), organizadas por features: capas, contrato de presentación, Compose y Material 3, testing, seguridad (OWASP MASVS) y rendimiento. Variantes: android (Hilt, Navigation 3, Room) y kmp (Koin, Navigation 3 de CMP, Room KMP, Ktor). Úsala al implementar, revisar o diseñar código Kotlin en un proyecto Android o KMP: features, pantallas, ViewModels, repositorios, use cases, DI, navegación, tests o seguridad. Respeta el stack que el proyecto ya tiene (también Views y XML, MVP, RxJava, Dagger 2, LiveData) y solo moderniza lo que el usuario decidió.'
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.3.0"
+  version: "1.4.0"
   category: stack
   origin: "fusiona android-best-practices y kmp-best-practices"
 ---
@@ -13,12 +13,15 @@ metadata:
 
 Cómo se construye una app Android o Kotlin Multiplatform. Se basa en las recomendaciones oficiales de arquitectura de Android, la app de referencia Now in Android, la documentación de Kotlin Multiplatform y OWASP MASVS.
 
+Es el **objetivo** para código nuevo en proyectos que ya siguen este stack. En un proyecto con otro stack (Views y XML, MVP, RxJava, Dagger 2, LiveData), lo que manda es `AGENTS.md`: se trabaja con lo que hay, con las equivalencias de [legacy.md](references/legacy.md), y se moderniza **solo lo decidido en `## Modernización`**.
+
 ## 1. Antes de escribir código
 
-1. Lee `AGENTS.md`. **Lo que diga el proyecto prevalece** sobre este perfil: stack, excepciones y comandos del DoD.
+1. Lee `AGENTS.md`. **Lo que diga el proyecto prevalece** sobre este perfil: stack, arquitectura, excepciones y comandos del DoD. Si `## Stack` describe algo distinto a este perfil, ese es el stack con el que trabajas; no lo trates como un desvío.
 2. Elige la variante: la que indique `AGENTS.md` (`Variante: android` o `kmp`). Si no lo indica, es `kmp` cuando algún `build.gradle.kts` aplica `org.jetbrains.kotlin.multiplatform`, y `android` en otro caso.
 3. Lee **solo** las referencias que la tarea necesita (tabla de la sección 5).
-4. Si el código existente de la feature sigue otro patrón (por ejemplo `Effect` por `Channel`), mantén la coherencia dentro de esa feature y propone la migración: no mezcles dos estilos en el mismo archivo.
+4. Si el código existente de la feature sigue otro patrón (por ejemplo `Effect` por `Channel`, un `Presenter`, `Single` de Rx), mantén la coherencia dentro de esa feature: no mezcles dos estilos en el mismo archivo ni en la misma feature.
+5. **No migres ni propongas migrar** salvo que el usuario lo pida o `## Modernización` de `AGENTS.md` lo haya decidido para ese alcance. Si ves una oportunidad clara, una línea al final del entregable, sin plan ni código. Una migración decidida se hace por partes (una pantalla, una clase), con sus tests, y conviviendo con lo viejo mientras dure.
 
 ### Precedencia frente a otras skills
 
@@ -31,7 +34,7 @@ Si una skill oficial muestra que un dato técnico de este perfil quedó viejo, s
 
 ## 2. Arquitectura
 
-**Clean Architecture + MVVM con flujo de datos unidireccional (UDF), organizada por features.**
+**Clean Architecture + MVVM con flujo de datos unidireccional (UDF), organizada por features**, para proyectos que la siguen o que la adoptaron en `## Modernización`. Para los demás, la estructura es la que describe `## Arquitectura` de `AGENTS.md`.
 
 ```
 feature/<nombre>/
@@ -99,6 +102,7 @@ Detalle en [presentation.md](references/presentation.md).
 | R8, Baseline Profiles, estabilidad de Compose, tiempo de arranque | [performance.md](references/performance.md) |
 | Variante Android: Hilt, Navigation 3, Room, DataStore | [variants/android.md](references/variants/android.md) |
 | Variante KMP: estructura, source sets, Koin, Navigation 3 de CMP, Room/DataStore KMP, Ktor | [variants/kmp.md](references/variants/kmp.md) |
+| El proyecto usa Views y XML, MVP, RxJava, LiveData o Dagger 2: cómo aplicar las reglas ahí y cómo migrar solo lo decidido | [legacy.md](references/legacy.md) |
 
 ## 6. Skills oficiales complementarias
 
@@ -123,6 +127,7 @@ Si están instaladas, úsalas para estas tareas (con la precedencia de la secci�
 ## 7. Checklist de calidad
 
 - [ ] Pasa el DoD del proyecto (por ejemplo `./gradlew formatAndAnalyze` y `./gradlew test`).
+- [ ] Se trabajó con el stack y la arquitectura de `AGENTS.md`; ninguna migración fuera de `## Modernización`.
 - [ ] Cada use case, ViewModel, mapper y repositorio nuevo tiene sus tests con fakes.
 - [ ] Cada `Content` nuevo o modificado tiene `@Preview` en claro y oscuro, y su screenshot test si es UI relevante.
 - [ ] El dominio no importa frameworks.

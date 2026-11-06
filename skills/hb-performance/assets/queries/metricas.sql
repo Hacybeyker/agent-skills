@@ -2,7 +2,7 @@
 -- de trace_processor. perf.py reemplaza {{PAQUETE}} y calcula las métricas a partir de estas filas.
 -- La app es la última instancia del proceso: en un arranque en frío, la que nace durante la traza.
 -- tipo: proceso | limites | vsync (período esperado de frame) | frame (FrameTimeline) | hilo (hilo principal)
---       | seccion (HTTP, TTFB, QUEUE, CONN, SCREEN, NAV y reportFullyDrawn) | lanzamiento (launching: del sistema = TTID)
+--       | seccion (HTTP, TTFB, QUEUE, CONN, SCREEN, NAV, MARK y reportFullyDrawn) | lanzamiento (launching: del sistema = TTID)
 --       | jit (tiempo de compilación JIT de la app: delata una compilación de ART distinta entre fases)
 WITH app AS (SELECT upid, pid, name FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1)
 SELECT 'proceso' AS tipo, 0 AS ts, 0 AS dur, 0 AS prof, name AS nombre FROM app
@@ -25,7 +25,7 @@ UNION ALL
 SELECT 'seccion', ts, dur, depth, name
 FROM slice
 WHERE name GLOB 'HTTP *' OR name GLOB 'TTFB *' OR name GLOB 'QUEUE *' OR name GLOB 'CONN *'
-   OR name GLOB 'SCREEN *' OR name GLOB 'NAV *' OR name GLOB 'reportFullyDrawn*'
+   OR name GLOB 'SCREEN *' OR name GLOB 'NAV *' OR name GLOB 'MARK *' OR name GLOB 'reportFullyDrawn*'
 UNION ALL
 SELECT 'lanzamiento', ts, dur, 0, name FROM slice WHERE name = 'launching: {{PAQUETE}}'
 UNION ALL

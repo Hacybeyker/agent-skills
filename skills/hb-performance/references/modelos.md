@@ -1,6 +1,6 @@
 # Modelo, razonamiento y costo por sesión
 
-La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`.
+La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `alto`; por defecto Haiku 5.5, Sonnet 5 y Opus 5.5). Con otra herramienta (Copilot, Cursor), cambia esos tres nombres una vez en el plan.
 
 ## Por qué se encarece
 
@@ -25,17 +25,19 @@ Si una sesión llega a su tope de pasos, guarda el estado y se detiene: seguir e
 
 ## Costos de referencia
 
-Una investigación de arranque en frío real (app mediana con red, 10 corridas por fase, una mejora aplicada), con los modelos de la tabla:
+Dos investigaciones reales en una app mediana con red (modelo intermedio salvo el cierre):
 
-| Sesión | Costo aproximado |
-| --- | --- |
-| 0 · Setup (intermedio) | 1,4 USD |
-| 2 · Diagnóstico (intermedio, alto) | 0,8 USD |
-| 3 · Mejora (intermedio, medio) | 1 USD |
-| 4 · Cierre (económico, bajo) | 0,02 USD |
-| Mediciones y decisión (terminal) | 0 |
+| Sesión | Arranque en frío (receta) | Pantalla de detalle (con sesión 1) |
+| --- | --- | --- |
+| 0 · Setup | 1,4 USD · 42 pasos | 2 USD · 66 pasos (cableado a mano y DoD por partes: lo que `instrumentar` genera ahora) |
+| 1 · Ficha y plan | — | 1,1 USD · 35 pasos (preguntas sueltas y una captura manual intentada por el agente) |
+| 2 · Diagnóstico (alto) | 0,8 USD · 21 pasos | ≈ 0,8 USD |
+| 3 · Mejora (medio) | 1 USD · 40 pasos | 1 USD · 30 pasos |
+| 4 · Cierre (económico, bajo) | 0,02 USD · 12 pasos | 0,02 USD · 7 pasos |
+| Mediciones y decisión (terminal) | 0 | 0 |
+| **Total** | **≈ 4,3 USD** | **≈ 5 USD** |
 
-Una sesión que cuesta varias veces esto suele estar explorando: SQL a mano, leyendo scripts, volcando logs o encadenada con otra en el mismo chat.
+Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 0,2 USD: por eso `siguiente` dice en cada paso si va en la terminal o en un chat. Una sesión que cuesta varias veces lo de la tabla suele estar explorando: SQL a mano, leyendo scripts o archivos generados, volcando logs, corriendo el DoD comando por comando o encadenada con otra en el mismo chat.
 
 ## Cómo aplicarlo
 
@@ -48,7 +50,7 @@ Una sesión que cuesta varias veces esto suele estar explorando: SQL a mano, ley
 
 ## Medir el costo
 
-1. Al cerrar cada sesión, anota en "Consumo" de `estado.md` el modelo, el costo o los tokens que muestre la herramienta (`/cost` en Claude Code) y los pasos.
+1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --costo "1.05 USD" --modelo "Sonnet 5" --pasos 30` (lo que muestre su herramienta: `/cost` en Claude Code, créditos en Copilot).
 2. Para comparar versiones de la skill, repite el mismo caso (mismo alcance y mismos flujos) y separa los efectos: una corrida con el mismo modelo que la anterior (ahorro por diseño) y otra con los modelos de esta tabla (ahorro total).
 3. Repite cada una al menos dos veces: el consumo de un agente varía de una corrida a otra.
 4. Comprueba que las conclusiones y los veredictos se mantengan: ahorrar no puede costar rigor.

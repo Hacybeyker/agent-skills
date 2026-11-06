@@ -22,19 +22,26 @@ Convierte el pedido en un plan de medición concreto. Termina con **una sola apr
 
 ## 3. Preguntas que evitan repetir mediciones
 
-Pregúntalas todas juntas, en un solo mensaje:
+Pregúntalas todas juntas, en un solo mensaje, **con este texto**: cada opción dice lo que le va a tocar hacer al usuario. Recomienda la que corresponda al flujo y márcala.
 
-- ¿La sesión del ambiente expira? ¿Cada cuánto? (Si expira a mitad de una corrida, esa corrida no vale.)
-- ¿Qué datos de prueba necesita el flujo? (Por ejemplo, un usuario con movimientos o una lista no vacía.) Quedan fijos hasta el cierre.
-- ¿En qué pantalla empieza cada flujo, y qué pantallas no deberían aparecer (login, onboarding)?
-- Dispositivo: modelo y tasa de refresco **fija** (sin modo adaptativo). Para frames hace falta Android 12 o superior.
-- Modos: guiado o autónomo; recorrido manual, por comando adb o con testigo; riguroso o triage.
+1. **¿Cómo se recorre el flujo en cada corrida?**
+   - **Comando adb** (recomendada si el flujo es corto y la pantalla es estable: "tocar el primer ítem", "abrir X desde Home"): el script toca por ti; 10 corridas por fase sin que hagas nada. Yo busco las coordenadas con `uiautomator dump` y las dejo en el plan.
+   - **testigo** (recomendada si hay que elegir un elemento por su texto o esperar a que aparezca algo): un flujo `.yaml` que escribo yo; 10 corridas automáticas.
+   - **Deep link** (`am start -d ...`): abre la pantalla directo, sin el toque desde la anterior. Mide solo la pantalla.
+   - **Manual** (pantallas complejas, login con OTP, gestos, elegir con criterio): tú recorres el flujo en el dispositivo y presionas Enter en cada corrida; 5 corridas por fase (más una de calentamiento), y algo más de variación.
+2. **¿Dónde empieza cada flujo y qué pantallas no deberían aparecer** (login, onboarding)? El script no graba si la app está en otra pantalla.
+3. **¿Qué datos de prueba necesita el flujo** (un usuario con movimientos, una lista no vacía, "la primera película que aparezca")? Quedan fijos hasta el cierre.
+4. **¿La sesión del ambiente expira? ¿Cada cuánto?** Si expira a mitad de una corrida, esa corrida no vale.
+5. **Dispositivo:** modelo y tasa de refresco **fija** (sin modo adaptativo). Para frames hace falta Android 12 o superior.
+6. **Profundidad:** *riguroso* (antes, control y después; recomendado) o *triage* (una corrida y directo al diagnóstico, sin línea base).
+
+Con recorrido por comando, busca las coordenadas tú: `adb -s <serial> shell uiautomator dump /sdcard/ui.xml && adb -s <serial> pull /sdcard/ui.xml <carpeta>/logs/` y lee solo el nodo que importa (`grep -o '<node[^>]*text="Nombre"[^>]*>'`). El `recorrido` del plan queda como `adb -s <serial> shell input tap <x> <y> && sleep <s>`; las esperas se calibran con la corrida de prueba. **No corras tú una captura manual**: espera a alguien que toque el dispositivo, así que se la entregas al usuario como comando.
 
 ## 4. Métricas principales (antes de medir)
 
 Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después invita a quedarse con la que "mejoró".
 
-- **Al menos una mide lo que siente el usuario de punta a punta:** TTFD, o una métrica de usuario hasta el contenido visible. Si falta la marca, agrégala antes de medir antes: una métrica que termina antes del spinner deja afuera justo lo que el usuario espera.
+- **Al menos una mide lo que siente el usuario de punta a punta:** TTFD, o una métrica de usuario desde la acción (`NAV`, un toque) hasta la marca de contenido visible (`MARK <pantalla>`, de `PerfHooks.mark`). Si la pantalla no tiene la marca, agrégala antes de medir antes (es una línea, ver [setup.md](setup.md) · Contenido visible). Una métrica que termina en la última llamada de red deja afuera el render, y si una mejora reordena las llamadas cambia de significado: `comparar` lo avisa, pero ya es tarde.
 - **Prefiere la familia `app`**, que no depende del backend: `jank_app_pct`, `hilo_slices_sobre_presupuesto`, `hilo_max_ms`, `inflate_cantidad`, `red_llamadas`, `red_solapadas`, `red <endpoint> cliente_ms`.
 - **Percentiles y porcentajes de frame** solo en flujos de régimen estable (scroll, animaciones). En un arranque o una carga los dominan unos pocos frames, y si cambia la cantidad de frames `perf.py` los marca "no comparable".
 - **`jank_app_pct` (App Deadline Missed) es de la app;** `jank_total_pct` suma el del sistema y es informativa.
@@ -45,7 +52,7 @@ Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después in
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --paquete <applicationId> --carpeta <evidencias>/<alcance>/<AAAA-MM-DD> --flujo <nombre> --alcance "<alcance>" --instalar "<comando que instala el build de profiling>"
 ```
 
-Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), avisa si git no la ignora y deja las plantillas. Complétalas:
+Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega a `.git/info/exclude` si git no la ignora (local: el repo no cambia; no toques `.gitignore`) y deja las plantillas. Complétalas:
 
 | Campo | Qué es |
 | --- | --- |
@@ -58,19 +65,21 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), avisa si 
 | `flujos.<nombre>.pasos` | Los pasos exactos en el dispositivo |
 | `flujos.<nombre>.inicio` | Parte del nombre de la actividad donde empieza: si es otra, no se graba |
 | `flujos.<nombre>.invalidar_si` | Patrones (`fnmatch`) de secciones que invalidan la corrida, por ejemplo `SCREEN *Login*` |
-| `flujos.<nombre>.recorrido` | `manual` (Enter), un comando que recorre el flujo (`adb shell input ...`, testigo) o `{"tipo": "arranque-frio", "actividad", "espera_s"}` |
+| `flujos.<nombre>.recorrido` | `manual` (Enter), un comando que recorre el flujo (`adb -s <serial> shell input tap ...`, testigo) o `{"tipo": "arranque-frio", "actividad", "espera_s"}` |
+| `flujos.<nombre>.ventana` | **Obligatoria si el flujo no es el arranque:** `desde` y `hasta` (marcas, como en las métricas de usuario) y `margen_ms`. Frames, jank e hilo principal se calculan solo dentro de ella; sin ventana dependen de cuánto tarda el usuario en presionar Enter |
 | `flujos.<nombre>.metricas_usuario` | `nombre`, `desde` y `hasta` (cada una con `marca`, `punto`: `inicio` o `fin`, y `cual`: `primera` o `ultima`) y `familia` |
 | `flujos.<nombre>.familias` | Cambia la familia de una métrica (nombre o patrón), por ejemplo `{"ttfd_ms": "e2e"}` |
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
 | `mejoras` | Vacío: lo completa la sesión 2; `estado` lo cambia `perf.py decidir` |
+| `modelos` | Nombres de los modelos `economico`, `intermedio` y `alto` que imprime `siguiente` (por defecto Haiku, Sonnet y Opus); cámbialos si el usuario usa otra herramienta |
 
-Las marcas se buscan entre las secciones propias (`HTTP`, `QUEUE`, `CONN`, `TTFB`, `SCREEN`, `NAV`), `reportFullyDrawn`, el lanzamiento (`launching: <paquete>`) y los slices de primer nivel del hilo principal de más de 5 ms. `hasta` se busca después de `desde`.
+Las marcas se buscan entre las secciones propias (`HTTP`, `QUEUE`, `CONN`, `TTFB`, `SCREEN`, `NAV`, `MARK`), `reportFullyDrawn`, el lanzamiento (`launching: <paquete>`) y los slices de primer nivel del hilo principal de más de 5 ms. `hasta` se busca después de `desde`.
 
 **Recorrido por comando:** si el flujo se puede reproducir con adb (`input tap`, `input keyevent`, `am start` con un deep link), es mejor que el manual: 10 corridas sin costo humano y siempre iguales.
 
 ## 6. Corrida de prueba
 
-Antes de aprobar, una corrida que imprime las métricas y no escribe el CSV. Valida que las marcas existan y que los valores tengan sentido:
+Antes de aprobar, una corrida que imprime las métricas y no escribe el CSV. Valida que las marcas existan (las de la ventana y las de las métricas: si falta alguna, el script lo dice), que los valores tengan sentido y, con recorrido por comando, que las esperas alcancen. Si el recorrido es manual, se la entregas al usuario; si es automático, puedes correrla tú:
 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --flujo <flujo> --prueba
@@ -78,4 +87,4 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 
 ## Entregable
 
-`estado.md` con la ficha, el mapa y las hipótesis. Muestra la ficha y el plan y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2. Pásaselos al usuario tal cual y detente.
+`estado.md` con la ficha, el mapa y las hipótesis. Muestra la ficha y el plan (pasos, métricas principales, ventana y recorrido) y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2, con lo que le toca hacer al usuario en cada uno. Pégalo tal cual y detente. Presupuesto: 15 pasos; el mapa va a un subagente económico y las preguntas van todas en un mensaje.

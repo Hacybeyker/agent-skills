@@ -4,7 +4,7 @@ description: 'Revisa código contra las reglas del proyecto (AGENTS.md), su perf
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.0.0"
+  version: "1.0.1"
   category: flow
   origin: "basada en code-reviewer"
 ---
@@ -28,7 +28,7 @@ Revisión de solo lectura. Cada hallazgo cita la regla o el estándar que incump
 
 | Área | Preguntas |
 | --- | --- |
-| **Diseño** | ¿Respeta la arquitectura y la regla de dependencias del perfil? ¿Cada cosa está en su capa y en su feature? ¿Los patrones usados se justifican, o sobra abstracción (KISS, YAGNI)? |
+| **Diseño** | ¿Respeta la arquitectura y la regla de dependencias del proyecto (`AGENTS.md`; el perfil donde el proyecto lo sigue)? ¿Cada cosa está en su capa y en su feature? ¿Los patrones usados se justifican, o sobra abstracción (KISS, YAGNI)? Usar el stack del proyecto (Views, MVP, Rx) no es un hallazgo; migrar fuera de `## Modernización` sí |
 | **Funcionalidad** | ¿Hace lo que promete? ¿Casos borde, errores, concurrencia, cancelación? ¿Qué ve el usuario? |
 | **Complejidad** | ¿Se entiende rápido? ¿Funciones o clases demasiado grandes? ¿Duplicación real (DRY)? |
 | **Tests** | ¿La lógica nueva tiene tests con fakes? ¿Un bugfix trae el test que reproduce el bug? ¿Los tests fallarían si el código se rompiera? |

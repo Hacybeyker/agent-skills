@@ -229,6 +229,49 @@ class TraceMetricsTest(unittest.TestCase):
         self.assertEqual(m["red_conexion_ms"][3], "e2e")
         self.assertEqual(m["red_llamadas"][1], 1)
 
+    def test_la_ventana_acota_frames_e_hilo_y_la_metrica_guarda_la_ultima_llamada(self):
+        rows = [("frame", 0, 16 * MS, 0, "None"), ("frame", 100 * MS, 40 * MS, 0, "App Deadline Missed"),
+                ("frame", 900 * MS, 60 * MS, 0, "App Deadline Missed"),
+                ("hilo", 150 * MS, 30 * MS, 0, "Choreographer#doFrame"), ("hilo", 950 * MS, 200 * MS, 0, "Choreographer#doFrame"),
+                ("seccion", 100 * MS, 0, 0, "NAV detalle"), ("seccion", 120 * MS, 200 * MS, 0, "HTTP GET movie/{id}"),
+                ("seccion", 130 * MS, 100 * MS, 0, "HTTP GET movie/{id}/providers"), ("seccion", 400 * MS, 0, 0, "MARK detalle")]
+        spec = {"ventana": {"desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}, "margen_ms": 100},
+                "metricas_usuario": [{"nombre": "detalle_ms", "desde": {"marca": "NAV detalle"},
+                                      "hasta": {"marca": "HTTP GET movie/{id}/providers"}}]}
+        metrics, invalid, info = perf.trace_metrics([("proceso", 0, 0, 1, "app"), ("limites", 0, 2000 * MS, 0, "")] + rows,
+                                                    60, spec, set(), 34)
+        m = {x[0]: x for x in metrics}
+        self.assertIsNone(invalid)
+        self.assertEqual(m["ventana_ms"][1], 400)
+        self.assertEqual(m["frames"][1], 1)  # solo el frame de t=100 ms: el de 900 ms queda fuera
+        self.assertEqual(m["hilo_max_ms"][1], 30)
+        self.assertEqual(m["detalle_ms"][1], 130)  # NAV 100 → fin de providers 230
+        self.assertEqual(m["detalle_ms hasta_ultima_red_ms"][1], 220)  # movie termina en 320
+        self.assertEqual(m["detalle_ms hasta_ultima_red_ms"][3], "info")
+        spec["ventana"]["hasta"]["marca"] = "MARK otra"
+        metrics, _, info = perf.trace_metrics([("proceso", 0, 0, 1, "app")] + rows, 60, spec, set(), 34)
+        self.assertIn("ventana", info["faltantes"])
+        self.assertEqual({x[0]: x for x in metrics}["frames"][1], 3)
+
+    def test_las_secciones_se_resumen_por_tipo_sin_la_marca_de_la_query(self):
+        names = {"HTTP GET discover/movie #fe9d": 1, "HTTP GET discover/movie #fe7c": 1, "QUEUE GET discover/movie #fe9d": 1,
+                 "TTFB GET discover/movie #fe9d": 1, "NAV home": 1, "SCREEN MainActivity onCreate": 1, "reportFullyDrawn": 1}
+        summary = perf.sections_summary(names)
+        self.assertEqual(summary, "HTTP ×2 (GET discover/movie ×2); QUEUE ×1 (GET discover/movie); TTFB ×1 (GET discover/movie); "
+                                  "SCREEN ×1 (MainActivity onCreate); NAV ×1 (home); otras ×1 (reportFullyDrawn)")
+
+    def test_comparar_avisa_si_la_marca_de_fin_dejo_de_ser_la_ultima_llamada(self):
+        results = [
+            {"flujo": "f", "metrica": "detalle_ms", "veredicto": "mejora", "antes": {"mediana": 276}, "despues": {"mediana": 205}},
+            {"flujo": "f", "metrica": "detalle_ms hasta_ultima_red_ms", "veredicto": "informativa",
+             "antes": {"mediana": 276}, "despues": {"mediana": 260}},
+        ]
+        notes = perf.definition_notes(results)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("en despues la marca de fin termina 55 ms antes", notes[0])
+        results[1]["despues"]["mediana"] = 207
+        self.assertEqual(perf.definition_notes(results), [])
+
     def test_sin_red_no_escribe_metricas_de_red_salvo_que_ya_existan(self):
         m, _, _ = self.metrics([("frame", 0, 16 * MS, 0, "None")])
         self.assertNotIn("red_llamadas", m)
@@ -472,7 +515,7 @@ class CaptureTest(DeviceBase):
         self.tp_outputs(GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba", "--memoria")
         self.assertIn("jank_app_pct", out)
-        self.assertIn("HTTP GET items/{id} ×2", out)
+        self.assertIn("HTTP ×2 (GET items/{id} ×2)", out)
         self.assertIn("pss_mb", out)
         self.assertFalse((self.plan.parent / "metricas.csv").exists())
 
@@ -544,6 +587,22 @@ class CaptureTest(DeviceBase):
         self.assertEqual(phases["antes"]["instalada"], "2026-11-05 10:00:00")
         self.assertEqual(phases["antes"]["version"], "1.0 (7)")
 
+    def test_humo_prueba_el_arranque_sin_crear_una_investigacion(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG, "--instalar", "./gradlew app:installProfiling")
+        self.assertIn("corrida de prueba", out)
+        self.assertIn("TTID 456 ms", out)
+        self.assertIn("Secciones propias: HTTP ×2", out)
+        self.assertIn("Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
+        self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/perf/arranque-frio/" % PKG, out)
+        self.assertIn('--instalar "./gradlew app:installProfiling"', out)
+        self.assertIn("Otra pantalla o flujo · Chat nuevo · Modelo: Sonnet 5 · Esfuerzo: medio", out)
+        self.assertIn("Dispositivo emulator-5554", out)
+        self.assertTrue(any((self.dir / "reports/perf/humo/prueba").glob("humo_1.perfetto-trace*")))
+        self.assertFalse((self.dir / "reports/perf/humo/plan.json").exists())
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("am start -W -n %s/.MainActivity" % PKG, log)
+
     def test_actividad_sin_paquete_se_completa_con_el_paquete_instalado(self):
         self.assertEqual(perf.component_of("com.a.profiling", "com.a.MainActivity"), "com.a.profiling/com.a.MainActivity")
         self.assertEqual(perf.component_of("com.a", ".Main"), "com.a/.Main")
@@ -575,7 +634,8 @@ class CaptureTest(DeviceBase):
         self.env["FAKE_UPDATED"] = "2026-11-06 09:00:00"
         out = self.ok(*(common + ["--fase", "despues"]))
         self.assertIn("sesión 4 · cierre", out)
-        self.assertIn('Chat nuevo (económico, razonamiento bajo): "Sigue hb-performance con ', out)
+        self.assertIn("Chat nuevo · Modelo: Haiku 5.5 · Esfuerzo: bajo", out)
+        self.assertIn('Texto: "Sigue hb-performance con ', out)
 
     def commands(self):
         return [" ".join(json.loads(line)[3:]) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()
@@ -803,6 +863,16 @@ class ReportTest(PerfBase):
 
 
 class NuevoTest(DeviceBase):
+    def test_nuevo_ignora_la_carpeta_en_git_info_exclude(self):
+        subprocess.run(["git", "init", "-q", str(self.dir)], check=True)
+        out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x/2026-11-06", "--paquete", PKG, "--flujo", "x")
+        self.assertIn("✔ git ignora reports/perf/x/2026-11-06 (en .git/info/exclude", out)
+        self.assertIn("/reports/perf/x/2026-11-06/\n", (self.dir / ".git/info/exclude").read_text(encoding="utf-8"))
+        out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x/2026-11-07", "--paquete", PKG, "--flujo", "x")
+        self.assertIn("git ignora", out)
+        plan = json.loads((self.dir / "reports/perf/x/2026-11-07/plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["modelos"]["intermedio"], "Sonnet 5")
+
     def test_receta_arranque_frio_arma_plan_y_estado_listos_para_medir(self):
         folder = self.dir / "reports" / "perf" / "arranque" / "2026-11-05"
         out = self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--receta", "arranque-frio", "--red")
@@ -818,7 +888,8 @@ class NuevoTest(DeviceBase):
         self.assertIn("Pixel Test · Android 14 (API 34)", state)
         self.assertNotIn("{{", state)
         self.assertIn("--fase control --corridas 10", out)
-        self.assertIn("1. `cd ", state)
+        self.assertIn("1. **Terminal** (sin chat)", state)
+        self.assertIn("`cd ", state)
         self.assertIn("diagnostico --carpeta", state)
         self.assertEqual(self.perf("nuevo", "--carpeta", folder, "--paquete", PKG).returncode, 2)
         other = self.dir / "otra"
@@ -862,33 +933,44 @@ class NextStepTest(PerfBase):
         title, steps = self.step()
         self.assertEqual(title, "medición antes y control (sin chat)")
         self.assertEqual(len(steps), 5)  # prueba, antes, control, diagnostico y el chat de la sesión 2
-        self.assertTrue(all(s.startswith("cd ") for s in steps[:4]))
-        self.assertIn("--prueba", steps[0])
+        self.assertTrue(all(s["tipo"] == "terminal" and s["texto"].startswith("cd ") for s in steps[:4]))
+        self.assertEqual(steps[4]["tipo"], "chat")
+        self.assertEqual((steps[4]["modelo"], steps[4]["esfuerzo"]), ("Sonnet 5", "alto"))
+        self.assertIn("--prueba", steps[0]["texto"])
+        self.assertIn("abre la app 10 veces", steps[1]["tu"])
         write(self.folder / "prueba" / "arranque-frio_1.perfetto-trace.gz", "x")
-        self.assertIn("--fase antes --corridas 10", self.step()[1][0])
+        self.assertIn("--fase antes --corridas 10", self.step()[1][0]["texto"])
         self.phases("antes")
-        self.assertIn("--fase control", self.step()[1][0])
+        self.assertIn("--fase control", self.step()[1][0]["texto"])
         self.phases("antes", "control")
-        self.assertIn("diagnostico --carpeta", self.step()[1][0])
+        self.assertIn("diagnostico --carpeta", self.step()[1][0]["texto"])
         write(self.folder / "diagnostico.md", "x")
         self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}, {"id": "M2", "titulo": "b", "estado": "propuesta"}]
         title, steps = self.step()
         self.assertEqual(title, "decisión del usuario (sin chat)")
-        self.assertIn("decidir --carpeta", steps[0])
-        self.assertIn("--aprobar M1,M2", steps[0])
+        self.assertIn("decidir --carpeta", steps[0]["texto"])
+        self.assertIn("--aprobar M1,M2", steps[0]["texto"])
         self.plan["mejoras"][1]["estado"] = "aprobada"
-        self.assertIn("sesión 3, aplica M2", self.step()[1][0])
+        step = self.step()[1][0]
+        self.assertIn("sesión 3, aplica M2", step["texto"])
+        self.assertEqual(step["esfuerzo"], "medio")
         self.plan["mejoras"][1]["estado"] = "aplicada"
         title, steps = self.step()
         self.assertEqual(title, "medición después (sin chat)")
-        self.assertIn("guarda el comando como 'instalar'", steps[0])
+        self.assertIn("guárdalo como 'instalar'", steps[0]["texto"])
         self.plan["instalar"] = "./gradlew :app:installProfiling"
+        self.plan["serial"] = "ABC123"
         steps = self.step()[1]
-        self.assertTrue(steps[0].endswith("&& ./gradlew :app:installProfiling"))
-        self.assertIn("--fase despues --corridas 10", steps[1])
+        self.assertTrue(steps[0]["texto"].endswith("&& ANDROID_SERIAL=ABC123 ./gradlew :app:installProfiling"))
+        self.assertIn("--fase despues --corridas 10", steps[1]["texto"])
+        self.plan["instalar"] = "adb -s ABC123 install -r app.apk"
+        self.assertNotIn("ANDROID_SERIAL", self.step()[1][0]["texto"])
+        self.plan["modelos"] = {"economico": "GPT-5 mini"}
         self.phases("antes", "control", "despues")
-        self.assertEqual(self.step()[0], "sesión 4 · cierre")
+        title, steps = self.step()
+        self.assertEqual(title, "sesión 4 · cierre")
+        self.assertEqual(steps[0]["modelo"], "GPT-5 mini")
         write(self.folder / "reporte.md", "x")
         self.assertEqual(self.step()[0], "investigación cerrada")
 
@@ -899,14 +981,19 @@ class NextStepTest(PerfBase):
                                 {"id": "M2", "titulo": "b", "estado": "pendiente"}]
         self.assertEqual(self.step()[0], "sesión 4 · cierre sin mejoras aplicadas")
         write(self.folder / "reporte.html", "x")
-        self.assertEqual(self.step(), ("investigación cerrada", ["Reporte: %s" % (self.folder / "reporte.html").resolve()]))
+        title, steps = self.step()
+        self.assertEqual((title, steps[0]["tipo"], steps[0]["texto"]),
+                         ("investigación cerrada", "archivo", str((self.folder / "reporte.html").resolve())))
 
     def test_siguiente_escribe_el_paso_en_estado(self):
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · medición antes y control", out)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
         self.assertIn("- **Paso:** medición antes y control (sin chat)", state)
-        self.assertIn("  1. `cd ", state)
+        self.assertIn("  1. **Terminal** (sin chat) · una corrida de prueba", state)
+        self.assertIn("     `cd ", state)
+        self.assertIn("     Tú: ", state)
+        self.assertIn("**Chat nuevo** · Modelo: Sonnet 5 · Esfuerzo: alto", state)
         self.assertIn("## Ficha", state)
         self.phases("antes", "control")
         self.ok("siguiente", "--carpeta", self.folder)
@@ -934,6 +1021,16 @@ class NextStepTest(PerfBase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("M9", result.stderr)
         self.assertEqual(self.perf("decidir", "--carpeta", self.folder, "--aprobar", "-").returncode, 2)
+
+    def test_consumo_agrega_filas_a_la_tabla(self):
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "0 · setup", "--costo", "2.03 USD",
+                      "--modelo", "Sonnet 5", "--pasos", "66")
+        self.assertIn("✔ Consumo: | 0 · setup | Sonnet 5 | 2.03 USD | 66 |", out)
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "4 · cierre", "--costo", "0.016 USD")
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        tail = state[state.index("## Consumo"):]
+        self.assertIn("| 0 · setup | Sonnet 5 | 2.03 USD | 66 |\n| 4 · cierre | — | 0.016 USD | — |", tail)
+        self.assertEqual(tail.count("| Sesión |"), 1)
 
     def test_plan_valida_estados_e_instalar(self):
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "lista"}]
@@ -967,12 +1064,67 @@ class InstrumentTest(PerfBase):
         self.assertIn("beginAsyncSection", tracer_test)
         self.assertNotIn("hb-perf:red", tracer_test)
 
+    def test_genera_el_cableado_segun_hilt_y_actualiza_solo_lo_suyo(self):
+        module = self.dir / "app"
+        write(module / "build.gradle.kts", "dependencies { implementation(libs.hilt.android); implementation(libs.okhttp) }")
+        (module / "src/main/java").mkdir(parents=True)
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Hilt: sí", out)
+        self.assertIn("código principal en src/main/java", out)
+        main = module / "src/main/java/com/ejemplo/perf"
+        perf_dir = module / "src/perf/kotlin/com/ejemplo/perf"
+        hooks = (main / "PerfHooks.kt").read_text(encoding="utf-8")
+        self.assertIn("var mark: (String) -> Unit", hooks)
+        self.assertNotIn("okHttp", hooks)  # con Hilt la red va por el multibinding
+        self.assertNotIn("hb-perf:", hooks)
+        self.assertIn("@Multibinds", (main / "PerfHooksModule.kt").read_text(encoding="utf-8"))
+        self.assertIn("@IntoSet", (perf_dir / "PerfNetworkModule.kt").read_text(encoding="utf-8"))
+        installer = (perf_dir / "PerfInstaller.kt").read_text(encoding="utf-8")
+        self.assertIn("PerfHooks.mark = MarkTrace::mark", installer)
+        self.assertNotIn("PerfHooks.okHttp", installer)
+        self.assertIn('"MARK $name"', (perf_dir / "MarkTrace.kt").read_text(encoding="utf-8"))
+        manifest = (module / "src/profiling/AndroidManifest.xml").read_text(encoding="utf-8")
+        self.assertIn('<profileable android:shell="true" />', manifest)
+        self.assertIn('android:name="com.ejemplo.perf.PerfInstaller"', manifest)
+        self.assertNotIn("profileable", (module / "src/debug/AndroidManifest.xml").read_text(encoding="utf-8"))
+        self.assertIn("@PerfEventListeners factories", out)  # fragmento de red para Hilt
+        self.assertIn("PerfHooks.mark(", out)
+        self.assertNotIn("{{", out)
+        # actualizar: pisa lo generado, respeta lo del proyecto y los manifests existentes
+        own = main / "PerfHooks.kt"
+        own.write_text("package com.ejemplo.perf\nobject PerfHooks\n", encoding="utf-8")
+        (perf_dir / "MarkTrace.kt").write_text((perf_dir / "MarkTrace.kt").read_text(encoding="utf-8") + "// viejo\n",
+                                               encoding="utf-8")
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments", "--actualizar")
+        self.assertIn("~ actualizado", out)
+        self.assertNotIn("// viejo", (perf_dir / "MarkTrace.kt").read_text(encoding="utf-8"))
+        self.assertEqual(own.read_text(encoding="utf-8"), "package com.ejemplo.perf\nobject PerfHooks\n")
+        self.assertIn("no lo generó la skill", out)
+
+    def test_sin_hilt_la_red_pasa_por_perfhooks(self):
+        module = self.dir / "app"
+        write(module / "build.gradle.kts", "dependencies { implementation(libs.okhttp); implementation(libs.koin) }")
+        write(module / "src/debug/AndroidManifest.xml", "<manifest/>")
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        hooks = (module / "src/main/kotlin/com/ejemplo/perf/PerfHooks.kt").read_text(encoding="utf-8")
+        self.assertIn("var okHttp: (OkHttpClient.Builder) -> Unit", hooks)
+        self.assertIn("import okhttp3.OkHttpClient", hooks)
+        self.assertFalse((module / "src/main/kotlin/com/ejemplo/perf/PerfHooksModule.kt").exists())
+        self.assertIn("PerfHooks.okHttp = {", (module / "src/perf/kotlin/com/ejemplo/perf/PerfInstaller.kt").read_text(encoding="utf-8"))
+        self.assertIn("PerfHooks.okHttp(builder)", out)
+        self.assertIn("Manifest existente", out)
+        self.assertEqual((module / "src/debug/AndroidManifest.xml").read_text(encoding="utf-8"), "<manifest/>")
+
     def test_sin_red_no_copia_lo_de_okhttp_y_valida_el_paquete(self):
         module = self.dir / "app"
         write(module / "build.gradle.kts", "dependencies { implementation(libs.androidx.fragment) }")
         self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf")
         base = module / "src/perf/kotlin/com/ejemplo/perf"
         self.assertFalse((base / "TraceEventListener.kt").exists())
+        self.assertFalse((base / "PerfNetworkModule.kt").exists())
+        hooks = (module / "src/main/kotlin/com/ejemplo/perf/PerfHooks.kt").read_text(encoding="utf-8")
+        self.assertNotIn("okHttp", hooks)
+        self.assertNotIn("\n\n\n", hooks)
         self.assertIn("FragmentManager", (base / "ScreenTraceCallbacks.kt").read_text(encoding="utf-8"))
         tracer = (base / "SectionTracer.kt").read_text(encoding="utf-8")
         self.assertNotIn("beginAsyncSection", tracer)

@@ -4,6 +4,7 @@
   "config": "base",
   "compilacion": "completa",
   "instalar": "./gradlew :app:installProfiling",
+  "modelos": {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5"},
   "principales": ["home_hasta_datos_ms", "jank_app_pct", "hilo_slices_sobre_presupuesto"],
   "flujos": {
     "home-recarga": {
@@ -15,11 +16,16 @@
       "inicio": "MainActivity",
       "invalidar_si": ["SCREEN *Login*"],
       "recorrido": "manual",
+      "ventana": {
+        "desde": {"marca": "NAV home", "punto": "inicio", "cual": "ultima"},
+        "hasta": {"marca": "MARK home", "punto": "fin", "cual": "ultima"},
+        "margen_ms": 500
+      },
       "metricas_usuario": [
         {
           "nombre": "home_hasta_datos_ms",
-          "desde": {"marca": "SCREEN MainActivity onResume", "punto": "inicio", "cual": "ultima"},
-          "hasta": {"marca": "HTTP GET */home*", "punto": "fin", "cual": "ultima"},
+          "desde": {"marca": "NAV home", "punto": "inicio", "cual": "ultima"},
+          "hasta": {"marca": "MARK home", "punto": "fin", "cual": "ultima"},
           "familia": "e2e"
         }
       ],
