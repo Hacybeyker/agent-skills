@@ -14,7 +14,7 @@ Cada pedido mezcla tres cosas, y cada una vive en un lugar distinto:
 | **El stack del proyecto** (con qué) | `AGENTS.md` de cada proyecto | `Perfil: hb-stack-mobile-kotlin`, `Variante: kmp`, comandos del DoD |
 | **Cómo se hace en ese stack** | Perfiles de stack, globales | `hb-stack-mobile-kotlin` con sus variantes |
 
-No hace falta recordar nombres: las skills se activan por intención ("implementa la feature de perfil", "revisa el código", "haz commit").
+No hace falta recordar nombres: las skills se activan por intención ("implementa la feature de perfil", "revisa el código", "haz commit"). Si no sabes por dónde empezar o quieres pedir algo puntual, [PROMPTS.md](PROMPTS.md) tiene un prompt listo para copiar por cada caso de cada skill.
 
 ## Skills
 
