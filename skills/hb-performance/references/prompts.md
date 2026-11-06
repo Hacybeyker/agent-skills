@@ -9,7 +9,7 @@ Para el usuario, no para el agente. Cada caso trae el **modelo y el esfuerzo** c
 | **Primera vez en el proyecto** (sin build de profiling) | Sonnet 5 · medio | `Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota: "tarda", "jank al hacer scroll">. Dispositivo <serial>.` → el agente hace el setup (sesión 0) y te deja el comando de la prueba de humo |
 | **Arranque en frío** (setup listo) | Sin chat | `cd <raíz> && python3 -I <skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId> --serial <serial> --carpeta reports/perf/arranque-frio/<AAAA-MM-DD> --instalar "<comando que instala el build de profiling>"` (`--red` si la primera pantalla carga de la red) → imprime los comandos para medir |
 | **Otra pantalla o flujo** (setup listo) | Sonnet 5 · medio | `Usa hb-performance: medir <flujo: de dónde a dónde, qué debe verse al final>. Dispositivo <serial>.` → sesión 1: te hace las preguntas en un solo mensaje y arma el plan |
-| **Solo el diagnóstico, sin cambiar código** (triage) | Sonnet 5 · medio | `Usa hb-performance en modo triage: diagnostica <flujo> con una corrida, sin línea base ni mejoras. Dispositivo <serial>.` |
+| **Solo el diagnóstico, sin cambiar código** (triage) | Sonnet 5 · medio | `Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>.` → termina en el reporte inicial |
 | **Prueba de humo del setup** | Sin chat | `cd <raíz> && python3 -I <skill>/scripts/perf.py humo --paquete <applicationId> --serial <serial> --instalar "<comando de instalación>"` |
 
 ## Seguir

@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Opcional: android-profiler para heap dumps, testigo para automatizar recorridos."
 metadata:
   author: hacybeyker
-  version: "0.4.0"
+  version: "0.4.1"
   category: flow
 ---
 
@@ -57,7 +57,7 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 - **Retomar:** si te pasan un `estado.md`, léelo y sigue la sesión de "Siguiente paso", y solo esa; si no está escrito, `perf.py siguiente --carpeta <carpeta>` lo calcula. Sin `estado.md`: la 0 si `AGENTS.md` no dice que el setup está listo; si no, la 1.
 - **Recetas:** el arranque en frío no necesita la sesión 1. `perf.py nuevo --receta arranque-frio` arma `plan.json` y `estado.md` listos para medir (TTID, TTFD y el hilo principal).
 - **Modos:** *guiado* por defecto: el agente corre en su terminal todo lo que no necesita el dispositivo en la mano (`perf.py` salvo `capturar`, Gradle, DoD, instalar) y el usuario corre las capturas. *Autónomo*: el agente también captura, con el modelo más económico y solo si el recorrido es automático (`arranque-frio`, un comando o testigo).
-- **Profundidad:** *riguroso* por defecto (antes, control y después, 10 corridas con recorrido automático). *Triage*: una corrida de prueba y directo al diagnóstico; los hallazgos llevan "⚠ sin línea base".
+- **Profundidad:** *riguroso* por defecto (antes, control y después, 10 corridas con recorrido automático). *Triage* (`profundidad: triage` en el plan, `nuevo --triage`): 3 corridas de antes, sin control, y termina en el diagnóstico y el reporte inicial; los hallazgos llevan "⚠ sin línea base".
 - **Modelo y costo:** [modelos.md](references/modelos.md). Los nombres de los modelos que imprime `siguiente` salen de `modelos` en `plan.json` (por defecto Haiku, Sonnet y Opus); con otra herramienta, el usuario los cambia una vez.
 
 ## Herramientas

@@ -11,7 +11,7 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 | `hb-setup` | Flujo | 1.1.0 |
 | `hb-implement` | Flujo | 1.3.1 |
 | `hb-review` | Flujo | 1.0.1 |
-| `hb-performance` | Flujo | 0.4.0 |
+| `hb-performance` | Flujo | 0.4.1 |
 | `hb-commit` | Flujo | 1.0.0 |
 | `hb-release` | Flujo | 1.0.0 |
 | `hb-stack-mobile-kotlin` | Perfil | 1.4.0 |

@@ -391,7 +391,7 @@ elif cmd.startswith("dumpsys thermalservice"):
 elif cmd.startswith("dumpsys battery"):
     print("  level: 90")
 elif cmd.startswith("dumpsys activity activities"):
-    print("  topResumedActivity=ActivityRecord{{1 u0 com.ejemplo.app/.MainActivity t5}}")
+    print("  topResumedActivity=ActivityRecord{{1 u0 %s t5}}" % os.environ.get("FAKE_RESUMED", "com.ejemplo.app/.MainActivity"))
 elif cmd.startswith("cmd package compile"):
     print("Success")
 elif cmd.startswith("am broadcast"):
@@ -495,6 +495,33 @@ class CaptureTest(DeviceBase):
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("cmd package compile -f -m speed %s" % PKG, log)
         self.assertIn("kill -TERM 4242", log)
+
+    def test_preparar_corre_antes_de_cada_corrida_y_del_calentamiento(self):
+        self.tp_outputs(GOOD)
+        marker = self.dir / "preparado.txt"
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["preparar"] = "echo x >> %s" % marker
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("no tiene 'preparar'", out)
+        self.assertEqual(marker.read_text(encoding="utf-8").count("x"), 3)  # calentamiento + 2 corridas
+        plan["flujos"]["home"]["preparar"] = "false"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("'preparar' terminó con código 1", result.stderr)
+
+    def test_sin_preparar_avisa_y_relanza_la_app_si_no_esta_al_frente(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        self.assertIn("el flujo no tiene 'preparar'", out)
+        self.assertNotIn("am start -n", (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.env["FAKE_RESUMED"] = "com.miui.home/.launcher.Launcher"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 3)  # relanzó, pero el fake sigue en el launcher: se detiene con claridad
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("am start -n %s/.MainActivity" % PKG, log)
+        self.assertIn("la pantalla activa es 'com.miui.home/.launcher.Launcher'", result.stderr)
 
     def test_corrida_invalida_se_guarda_aparte_y_se_repite(self):
         self.tp_outputs(LOGIN, GOOD)
@@ -898,6 +925,8 @@ class NuevoTest(DeviceBase):
         self.assertEqual(json.loads((other / "plan.json").read_text(encoding="utf-8"))["instalar"],
                          "./gradlew :app:installProfiling")
         self.assertIn("perf.py siguiente", out)
+        out = self.ok("nuevo", "--carpeta", self.dir / "triage", "--paquete", PKG, "--flujo", "x", "--triage")
+        self.assertEqual(json.loads((self.dir / "triage" / "plan.json").read_text(encoding="utf-8"))["profundidad"], "triage")
 
     def test_con_varios_dispositivos_avisa_y_guarda_el_serial_elegido(self):
         self.env["FAKE_DEVICES"] = "emulator-5554,NJ4"
@@ -973,6 +1002,30 @@ class NextStepTest(PerfBase):
         self.assertEqual(steps[0]["modelo"], "GPT-5 mini")
         write(self.folder / "reporte.md", "x")
         self.assertEqual(self.step()[0], "investigación cerrada")
+
+    def test_triage_mide_tres_corridas_sin_control_y_cierra_con_el_reporte_inicial(self):
+        self.plan["profundidad"] = "triage"
+        self.plan["flujos"] = {"detalle": {"inicio": "MainActivity", "recorrido": "adb shell input tap 1 1"}}
+        write(self.folder / "prueba" / "detalle_1.perfetto-trace.gz", "x")
+        title, steps = self.step()
+        self.assertEqual(title, "medición antes (sin chat)")
+        self.assertIn("--fase antes --corridas 3", steps[0]["texto"])
+        self.assertIn("triage: 3 corridas, sin control", steps[0]["que"])
+        self.assertIn("(3 corridas)", steps[0]["tu"])
+        self.assertFalse(any("--fase control" in s["texto"] for s in steps))
+        self.phases("antes")
+        self.assertIn("diagnostico --carpeta", self.step()[1][0]["texto"])
+        write(self.folder / "diagnostico.md", "x")
+        self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")
+        write(self.folder / "reporte-inicial.md", "x")
+        title, steps = self.step()
+        self.assertEqual(title, "triage cerrado")
+        self.assertEqual(steps[0]["tipo"], "archivo")
+        self.plan["profundidad"] = "riguroso"
+        self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")  # ya no cierra: sigue con el plan de mejoras
+        self.plan["profundidad"] = "ligero"
+        self.save()
+        self.assertEqual(self.perf("siguiente", "--carpeta", self.folder).returncode, 2)
 
     def test_sin_mejoras_aprobadas_va_al_cierre(self):
         self.phases("antes", "control")

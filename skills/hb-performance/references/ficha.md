@@ -33,9 +33,11 @@ Pregúntalas todas juntas, en un solo mensaje, **con este texto**: cada opción 
 3. **¿Qué datos de prueba necesita el flujo** (un usuario con movimientos, una lista no vacía, "la primera película que aparezca")? Quedan fijos hasta el cierre.
 4. **¿La sesión del ambiente expira? ¿Cada cuánto?** Si expira a mitad de una corrida, esa corrida no vale.
 5. **Dispositivo:** modelo y tasa de refresco **fija** (sin modo adaptativo). Para frames hace falta Android 12 o superior.
-6. **Profundidad:** *riguroso* (antes, control y después; recomendado) o *triage* (una corrida y directo al diagnóstico, sin línea base).
+6. **Profundidad:** *riguroso* (antes, control y después; recomendado si se van a aplicar mejoras) o *triage* (3 corridas y directo al diagnóstico; termina en el reporte inicial, sin línea base ni medición después). Con triage, `profundidad: "triage"` en el plan.
 
-Con recorrido por comando, busca las coordenadas tú: `adb -s <serial> shell uiautomator dump /sdcard/ui.xml && adb -s <serial> pull /sdcard/ui.xml <carpeta>/logs/` y lee solo el nodo que importa (`grep -o '<node[^>]*text="Nombre"[^>]*>'`). El `recorrido` del plan queda como `adb -s <serial> shell input tap <x> <y> && sleep <s>`; las esperas se calibran con la corrida de prueba. **No corras tú una captura manual**: espera a alguien que toque el dispositivo, así que se la entregas al usuario como comando.
+Con recorrido por comando, busca las coordenadas tú, **solo con `uiautomator dump` y `grep`**, nunca con capturas de pantalla (leer una imagen cuesta decenas de miles de tokens): `adb -s <serial> shell uiautomator dump /sdcard/ui.xml && adb -s <serial> pull /sdcard/ui.xml <carpeta>/logs/` y lee solo el nodo que importa (`grep -o '<node[^>]*text="Nombre"[^>]*>' | head -3`; el centro del `bounds` es el tap). Para confirmar que el tap llegó, otro `dump` y `grep` de un texto de la pantalla destino. El `recorrido` del plan queda como `adb -s <serial> shell input tap <x> <y> && sleep <s>`; las esperas se calibran con la corrida de prueba. **No corras tú una captura manual**: espera a alguien que toque el dispositivo, así que se la entregas al usuario como comando.
+
+**`preparar` es obligatorio con recorrido automático en un flujo que no es el arranque:** un comando que deja la app en el punto de partida antes de **cada** corrida (y después de fijar la compilación de ART, que puede cerrar la app). En una app de una sola actividad, `inicio` no distingue pantallas: sin `preparar`, la segunda corrida tocaría sobre la pantalla donde terminó la primera. Opciones: `adb -s <serial> shell input keyevent KEYCODE_BACK && sleep 1` si el flujo es ida y vuelta, o `adb -s <serial> shell am force-stop <paquete> && adb -s <serial> shell am start -n <paquete>/<actividad> && sleep <s>` para arrancar siempre igual (la ventana del flujo deja afuera ese arranque). Sin `preparar`, el script avisa y, si la app no está al frente, la relanza.
 
 ## 4. Métricas principales (antes de medir)
 
@@ -66,11 +68,13 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega
 | `flujos.<nombre>.inicio` | Parte del nombre de la actividad donde empieza: si es otra, no se graba |
 | `flujos.<nombre>.invalidar_si` | Patrones (`fnmatch`) de secciones que invalidan la corrida, por ejemplo `SCREEN *Login*` |
 | `flujos.<nombre>.recorrido` | `manual` (Enter), un comando que recorre el flujo (`adb -s <serial> shell input tap ...`, testigo) o `{"tipo": "arranque-frio", "actividad", "espera_s"}` |
+| `flujos.<nombre>.preparar` | Comando que deja la app en el punto de partida antes de cada corrida (obligatorio con recorrido automático fuera del arranque; ver arriba) |
 | `flujos.<nombre>.ventana` | **Obligatoria si el flujo no es el arranque:** `desde` y `hasta` (marcas, como en las métricas de usuario) y `margen_ms`. Frames, jank e hilo principal se calculan solo dentro de ella; sin ventana dependen de cuánto tarda el usuario en presionar Enter |
 | `flujos.<nombre>.metricas_usuario` | `nombre`, `desde` y `hasta` (cada una con `marca`, `punto`: `inicio` o `fin`, y `cual`: `primera` o `ultima`) y `familia` |
 | `flujos.<nombre>.familias` | Cambia la familia de una métrica (nombre o patrón), por ejemplo `{"ttfd_ms": "e2e"}` |
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
 | `mejoras` | Vacío: lo completa la sesión 2; `estado` lo cambia `perf.py decidir` |
+| `profundidad` | `riguroso` (por defecto) o `triage`: 3 corridas de antes, sin control, termina en el reporte inicial |
 | `modelos` | Nombres de los modelos `economico`, `intermedio` y `alto` que imprime `siguiente` (por defecto Haiku, Sonnet y Opus); cámbialos si el usuario usa otra herramienta |
 
 Las marcas se buscan entre las secciones propias (`HTTP`, `QUEUE`, `CONN`, `TTFB`, `SCREEN`, `NAV`, `MARK`), `reportFullyDrawn`, el lanzamiento (`launching: <paquete>`) y los slices de primer nivel del hilo principal de más de 5 ms. `hasta` se busca después de `desde`.

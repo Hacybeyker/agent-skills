@@ -41,7 +41,7 @@ import textwrap
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -423,7 +423,11 @@ def load_plan(path):
                                                                            ", ".join(ESTADOS)))
     if plan.get("instalar") is not None and not isinstance(plan["instalar"], str):
         raise PerfError("%s: 'instalar' es el comando que compila e instala el build de profiling (texto)" % path)
+    if plan.get("profundidad", "riguroso") not in ("riguroso", "triage"):
+        raise PerfError("%s: 'profundidad' es riguroso o triage" % path)
     for name, flow in plan["flujos"].items():
+        if flow.get("preparar") is not None and not isinstance(flow["preparar"], str):
+            raise PerfError("%s: flujos.%s.preparar es un comando (texto) que deja la app en el punto de partida" % (path, name))
         window = flow.get("ventana")
         if window is not None and not (isinstance(window, dict) and "desde" in window and "hasta" in window):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
@@ -1307,9 +1311,15 @@ def next_steps(folder, plan, flow=None):
     session2 = chat(resume, "intermedio", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
                     "plan de mejoras; termina con el comando para que decidas", plan)
     session4 = chat(resume, "economico", "bajo", "sesión 4: compara, escribe la lectura y el resumen y genera el reporte", plan)
+    triage = plan.get("profundidad") == "triage"
     report = state.parent / ("reporte.html" if (state.parent / "reporte.html").is_file() else "reporte.md")
     if report.is_file():
         return "investigación cerrada", [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
+    initial = state.parent / ("reporte-inicial.html" if (state.parent / "reporte-inicial.html").is_file() else "reporte-inicial.md")
+    if triage and initial.is_file():
+        return "triage cerrado", [{"tipo": "archivo", "texto": str(initial),
+                                   "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después); "
+                                          "para aplicar mejoras, cambia profundidad a riguroso y mide control y después"}]
     if "despues" in phases:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -1334,18 +1344,23 @@ def next_steps(folder, plan, flow=None):
     if (state.parent / "diagnostico.md").is_file():
         return "sesión 2 · diagnóstico", [session2]
     steps = []
+    if triage:
+        you_run = you_run.replace(str(runs), "3")
+        runs = 3
     if "antes" not in phases:
         if not any((state.parent / "prueba").glob("*.perfetto-trace*")):
             steps.append(terminal(command(*(capture + ["--prueba"])),
                                   "una corrida de prueba: imprime las métricas y las marcas, sin guardar nada",
                                   "lo mismo que en una corrida, una sola vez; revisa que estén las marcas del plan"))
-        steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", runs])), "mide el estado inicial", you_run))
-    if "control" not in phases:
+        steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", runs])),
+                              "mide el estado inicial" + (" (triage: 3 corridas, sin control)" if triage else ""), you_run))
+    if "control" not in phases and not triage:
         steps.append(terminal(command(*(capture + ["--fase", "control", "--corridas", runs])),
                               "repite la medición sin cambiar nada: mide el ruido", you_run))
     steps += [terminal(command("diagnostico", "--carpeta", folder),
                        "corre las consultas de diagnóstico sobre las trazas y deja diagnostico.md", "espera"), session2]
-    return ("medición antes y control (sin chat)" if "antes" not in phases else
+    return ("medición antes (sin chat)" if triage and "antes" not in phases else
+            "medición antes y control (sin chat)" if "antes" not in phases else
             "control y diagnóstico (sin chat)" if "control" not in phases else "diagnóstico (sin chat)"), steps
 
 
@@ -1513,6 +1528,7 @@ def cmd_capturar(args, plan=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     known = known_metrics(csv_path, flow_name)
     start_screen = None if startup else flow.get("inicio")
+    prepare_command = (args.preparar or flow.get("preparar") or "").strip() or None
 
     def check_start():
         if not start_screen:
@@ -1527,6 +1543,25 @@ def cmd_capturar(args, plan=None):
                 return
         raise Precondicion("la pantalla activa es '%s' y el flujo empieza en '%s'" % (current or "?", start_screen))
 
+    def prepare():
+        """Deja la app en el punto de partida antes de cada corrida: el comando 'preparar' del plan o, si la app no
+        está al frente (la compilación de ART o una corrida anterior la cerraron), la relanza."""
+        if startup:
+            return
+        if prepare_command:
+            result = subprocess.run(prepare_command, shell=True)
+            if result.returncode != 0:
+                raise Precondicion("'preparar' terminó con código %d" % result.returncode)
+        elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
+            component = launcher_activity(adb, package)
+            if component:
+                adb.shell("am start -n %s" % component)
+                settle(3)
+        check_start()
+
+    if not startup and recorrido != "manual" and not prepare_command and not args.prueba:
+        print("⚠ el flujo no tiene 'preparar': entre corridas la app queda donde terminó el recorrido. Si la app es de "
+              "una sola actividad, 'inicio' no distingue pantallas: pon en el plan un comando que la devuelva al inicio.")
     compilation = "sin fijar (--sin-compilar)"
     if not args.sin_compilar:
         compilation = fix_compilation(adb, package, args.compilacion or plan.get("compilacion", "completa"))
@@ -1540,7 +1575,7 @@ def cmd_capturar(args, plan=None):
             settle(1)
             reason, _ = launch(adb, package, startup)
         else:
-            check_start()
+            prepare()
             reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups))
         if reason:
             print("⚠ calentamiento: %s" % reason)
@@ -1553,7 +1588,7 @@ def cmd_capturar(args, plan=None):
             raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones"
                                         % (valid, target, attempts))
         attempts += 1
-        check_start()
+        prepare()
         if sdk < 31:
             adb.shell("dumpsys gfxinfo %s reset" % package)
         local = out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))
@@ -2282,7 +2317,7 @@ def cmd_humo(args):
     ensure_ignored(folder)
     capture = argparse.Namespace(plan=None, prueba=True, paquete=args.paquete, carpeta=str(folder), flujo="humo", fase=None,
                                  hz=args.hz, recorrido=None, tp=args.tp, serial=serial, forzar=args.forzar, config=None,
-                                 memoria=False, sin_compilar=False, compilacion=None, rehacer=False, calentamiento=0,
+                                 memoria=False, sin_compilar=False, compilacion=None, rehacer=False, calentamiento=0, preparar=None,
                                  corridas=1, sin_comprimir=False)
     cmd_capturar(capture, plan)
     root = project_root(folder).resolve()
@@ -2318,6 +2353,8 @@ def cmd_nuevo(args):
     plan["compilacion"] = "completa"
     if args.instalar:
         plan["instalar"] = args.instalar
+    if args.triage:
+        plan["profundidad"] = "triage"
     plan["modelos"] = dict(MODELOS)
     if startup:
         families = dict(STARTUP_FAMILIES)
@@ -2527,6 +2564,7 @@ def main(argv=None):
     p.add_argument("--hz", type=int, help="tasa de refresco fija del dispositivo (si no, se lee de cada traza)")
     p.add_argument("--serial", help="dispositivo de medición; queda en el plan y lo usan todas las capturas")
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (queda en el plan)")
+    p.add_argument("--triage", action="store_true", help="profundidad triage: 3 corridas, sin control, termina en el diagnóstico")
     p.set_defaults(func=cmd_nuevo)
 
     p = sub.add_parser("humo", help="prueba de humo del setup: una corrida de arranque que imprime métricas y marcas")
@@ -2569,6 +2607,7 @@ def main(argv=None):
     p.add_argument("--corridas", type=int, default=MIN_RUNS)
     p.add_argument("--calentamiento", type=int, default=1)
     p.add_argument("--recorrido", help="'manual' (Enter entre corridas) o un comando que recorre el flujo (testigo)")
+    p.add_argument("--preparar", help="comando que deja la app en el punto de partida antes de cada corrida (en vez del del plan)")
     p.add_argument("--config", help="configuración de Perfetto para esta captura (base, completa, cpu o una ruta)")
     p.add_argument("--serial")
     p.add_argument("--tp", help="ruta de trace_processor")
