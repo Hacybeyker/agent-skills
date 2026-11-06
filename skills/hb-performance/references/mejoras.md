@@ -29,9 +29,9 @@ En `estado.md` y `plan.json`:
 
 - **Mejoras aplicadas:** archivos, el test que la fija, el resultado del DoD y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`).
 - **Pendientes** actualizados.
-- **`instalar` en `plan.json`:** si falta, agrégalo con el comando que compila e instala el build de profiling (el de `AGENTS.md`, por ejemplo `./gradlew :app:installProfiling`), para que la medición después no dependa de recordarlo.
+- **`instalar` en `plan.json`:** si falta, agrégalo con el comando que compila e instala el build de profiling (el de `AGENTS.md`, por ejemplo `./gradlew :app:installProfiling`), para que la medición después no dependa de recordarlo. Si el plan tiene `serial`, `siguiente` le antepone `ANDROID_SERIAL=<serial>` solo.
 - **Al final**, marca la mejora aplicada; el comando imprime el siguiente paso (la siguiente mejora aprobada en un chat nuevo, o instalar y medir después) y lo deja en `estado.md`:
   ```bash
   cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --aplicada <id>
   ```
-  Pásale esos pasos al usuario tal cual; si hubo migración de datos, agrega "abre la app una vez" antes de medir. Detente.
+  Pégalos tal cual; si hubo migración de datos, dilo en una línea antes. Detente, sin pedir el costo ni que vuelva a este chat.

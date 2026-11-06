@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose."
 metadata:
   author: hacybeyker
-  version: "1.3.0"
+  version: "1.3.1"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -18,7 +18,7 @@ El flujo es el mismo para cualquier stack. La arquitectura, los comandos y las r
 
 1. Lee `AGENTS.md`. **Si no existe, no apliques este flujo**: avísalo y ofrece crearlo con `hb-setup`, o seguir sin él.
 2. Toma de `AGENTS.md`:
-   - `## Stack`: el perfil (`hb-stack-<familia>`) y la variante.
+   - `## Stack` y `## Arquitectura`: el perfil (`hb-stack-<familia>`), la variante y el stack **real** del proyecto; se implementa con ese stack. `## Modernización`: lo único que se puede migrar.
    - `## DoD`: los comandos de verificación, en orden.
    - Las reglas propias: quién commitea, changelog, idioma, prohibiciones.
 3. Carga el perfil y **solo** las referencias que la tarea necesita.
