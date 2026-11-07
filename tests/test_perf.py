@@ -391,7 +391,7 @@ elif cmd.startswith("dumpsys thermalservice"):
 elif cmd.startswith("dumpsys battery"):
     print("  level: 90")
 elif cmd.startswith("dumpsys activity activities"):
-    print("  topResumedActivity=ActivityRecord{{1 u0 com.ejemplo.app/.MainActivity t5}}")
+    print("  topResumedActivity=ActivityRecord{{1 u0 %s t5}}" % os.environ.get("FAKE_RESUMED", "com.ejemplo.app/.MainActivity"))
 elif cmd.startswith("cmd package compile"):
     print("Success")
 elif cmd.startswith("am broadcast"):
@@ -495,6 +495,50 @@ class CaptureTest(DeviceBase):
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("cmd package compile -f -m speed %s" % PKG, log)
         self.assertIn("kill -TERM 4242", log)
+
+    def test_preparar_corre_antes_de_cada_corrida_y_del_calentamiento(self):
+        self.tp_outputs(GOOD)
+        marker = self.dir / "preparado.txt"
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["preparar"] = "echo x >> %s" % marker
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("no tiene 'preparar'", out)
+        self.assertEqual(marker.read_text(encoding="utf-8").count("x"), 3)  # calentamiento + 2 corridas
+        plan["flujos"]["home"]["preparar"] = "false"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("'preparar' terminó con código 1", result.stderr)
+
+    def test_una_corrida_sin_la_ventana_o_sin_la_metrica_principal_es_invalida(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["principales"] = ["detalle_ms"]
+        plan["flujos"]["home"]["ventana"] = {"desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}}
+        plan["flujos"]["home"]["metricas_usuario"] = [{"nombre": "detalle_ms", "desde": {"marca": "NAV detalle"},
+                                                       "hasta": {"marca": "MARK detalle"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        marks = GOOD + '"seccion",50000000,0,0,"NAV detalle"\n"seccion",250000000,0,0,"MARK detalle"\n'
+        self.tp_outputs(GOOD, marks, marks)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertIn("sin marcas para detalle_ms, ventana: el recorrido no completó el flujo", out)
+        self.assertIn("corrida 2/2", out)
+        self.assertTrue(list((self.plan.parent / "antes").glob("*_invalida_*")))
+        data = self.read_csv_at(self.plan.parent / "metricas.csv")
+        self.assertEqual(len({k[2] for k in data}), 2)  # la inválida no entra al CSV
+        self.assertEqual(len([k for k in data if k[1] == "detalle_ms"]), 2)
+
+    def test_sin_preparar_avisa_y_relanza_la_app_si_no_esta_al_frente(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        self.assertIn("el flujo no tiene 'preparar'", out)
+        self.assertNotIn("am start -n", (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.env["FAKE_RESUMED"] = "com.miui.home/.launcher.Launcher"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 3)  # relanzó, pero el fake sigue en el launcher: se detiene con claridad
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("am start -n %s/.MainActivity" % PKG, log)
+        self.assertIn("la pantalla activa es 'com.miui.home/.launcher.Launcher'", result.stderr)
 
     def test_corrida_invalida_se_guarda_aparte_y_se_repite(self):
         self.tp_outputs(LOGIN, GOOD)
@@ -818,14 +862,19 @@ class ReportTest(PerfBase):
               rows("despues", "f", "jank_app_pct", [3] * 5, "%"))
         out = self.ok("reporte", "--carpeta", folder, "--html")
         self.assertIn("no_existe", out)
-        md = (folder / "reporte.md").read_text(encoding="utf-8")
+        md = (folder / "reporte-final.md").read_text(encoding="utf-8")
         self.assertIn("## Métricas principales", md)
+        self.assertIn("| Depende de | Antes | Después | Cambio | Veredicto | Qué significa |", md)
+        self.assertIn("| solo la app | 9 % | 3 % | -6 % (-66.67 %) | mejora | funcionó", md)
+        self.assertIn("## Cómo leer este reporte", md)
         self.assertIn("El jank bajó **mucho**.", md)
-        page = (folder / "reporte.html").read_text(encoding="utf-8")
+        self.assertFalse((folder / "reporte.md").exists())
+        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
         self.assertIn("<title>Rendimiento · &lt;Home&gt; · 2026-01-02</title>", page)
         self.assertIn("Doble &lt;carga&gt;", page)
         self.assertIn("<strong>mucho</strong>", page)
         self.assertIn('class="verdict v-better">mejora', page)
+        self.assertIn('<nav class="toc"><a href="#s0">', page)
         self.assertIn("<svg", page)
         self.assertNotIn("{{", page)
 
@@ -844,7 +893,11 @@ class ReportTest(PerfBase):
         self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
         initial = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
         self.assertIn("## Plan de mejoras", initial)
+        self.assertIn("> Lo que se propone cambiar", initial)
         self.assertIn("| M1 | Clave raw | H0 | ttid_ms | 402 ms | -20 % | alta |", initial)
+        self.assertIn("| Depende de | Mediana | P90 | Mín – máx | Corridas | Ruido de medición | Avisos |", initial)
+        self.assertIn("| a | ttid_ms | solo la app | 402 ms | 410 ms | 395 – 410 | 5 | — | — |", initial)
+        self.assertIn("## Cómo leer este reporte", initial)
         self.assertIn("Arranque en frío", initial)
         self.assertNotIn("secreto", initial)
         self.assertNotIn("Set fijo", initial)
@@ -853,10 +906,57 @@ class ReportTest(PerfBase):
         write(folder / "metricas.csv", HEADER + rows("antes", "a", "ttid_ms", [400, 410, 405, 395, 402])
               + rows("despues", "a", "ttid_ms", [300, 310, 305, 295, 302]))
         self.ok("reporte", "--carpeta", folder)
-        final = (folder / "reporte.md").read_text(encoding="utf-8")
-        self.assertIn("## Propuesto contra logrado", final)
-        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | -24.88 % | mejora | aprobada |", final)
+        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("## Mejoras: esperado contra logrado", final)
+        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | -24.88 % | mejora | aprobada | — no aplicada |", final)
+        self.assertIn("## De los hallazgos al resultado", final)
+        self.assertIn("1 hallazgos → 1 mejoras propuestas → 0 aplicadas → 0 funcionaron", final)
         self.assertIn("El TTID bajó.", final)
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"][0]["estado"] = "aplicada"
+        write(folder / "plan.json", json.dumps(plan))
+        self.ok("reporte", "--carpeta", folder, "--html")
+        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("| M1 | Clave raw | H0 | ✔ funcionó | ttid_ms: 402 ms → 302 ms (-24.88 %) · funcionó", final)
+        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
+        self.assertIn('<div class="step ok"><b>1</b><span>Funcionaron</span></div>', page)
+        self.assertIn('<td class="ok">✔ funcionó</td>', page)
+        self.assertIn('<span class="state s-aplicada" title="aplicada · implementada; se mide en la fase después">aplicada</span>', page)
+
+    def test_hallazgos_dicen_que_pasa_con_cada_uno_y_su_resultado(self):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", "# Rendimiento · Favoritos · 2026-11-06\n\n## Hallazgos\n\n"
+                                    "| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n"
+                                    "| H1 | Carga lenta | 131 ms | Red en el hilo | bug |\n"
+                                    "| H2 | Jank | 2 % | — | descartado |\n"
+                                    "| H3 | Red solapada | n=3 | — | sin veredicto estadístico |\n"
+                                    "| H4 | GC | 1 | Lista | mejorable |\n")
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "principales": ["carga_ms"], "flujos": {"f": {}},
+                                                "mejoras": [{"id": "M1", "titulo": "Caché", "hallazgo": "H1",
+                                                             "metrica": "carga_ms", "estado": "propuesta"},
+                                                            {"id": "M2", "titulo": "Lista", "hallazgo": "H4",
+                                                             "metrica": "gc_count", "estado": "propuesta"}]}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131]))
+        self.ok("reporte", "--carpeta", folder, "--inicial")
+        initial = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué pasa con él |", initial)
+        self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | M1 (propuesta) |", initial)
+        self.assertIn("| H2 | Jank | 2 % | — | descartado | descartado: se investigó y no es la causa; no hay nada que hacer |", initial)
+        self.assertIn("| H3 | Red solapada | n=3 | — | sin veredicto estadístico | no se pudo confirmar ni descartar con estos datos; sin acción |", initial)
+        self.assertIn("No todos se convierten en mejoras", initial)
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"][0]["estado"] = "aplicada"
+        plan["mejoras"][1]["estado"] = "descartada"
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "metricas.csv", HEADER + rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131])
+              + rows("despues", "f", "carga_ms", [46, 45, 47, 46, 44]))
+        self.ok("reporte", "--carpeta", folder)
+        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Resultado |", final)
+        self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | ✔ M1 funcionó: carga_ms |", final)
+        self.assertIn("| H4 | GC | 1 | Lista | mejorable | M2: no se aplicó (descartada) |", final)
+        self.assertIn("4 hallazgos → 2 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
+        self.assertIn("| M2 | Lista | H4 | — no aplicada | descartada · no se aplica |", final)
 
     def test_reporte_exige_estado(self):
         self.assertEqual(self.perf("reporte", "--carpeta", self.dir).returncode, 2)
@@ -898,6 +998,8 @@ class NuevoTest(DeviceBase):
         self.assertEqual(json.loads((other / "plan.json").read_text(encoding="utf-8"))["instalar"],
                          "./gradlew :app:installProfiling")
         self.assertIn("perf.py siguiente", out)
+        out = self.ok("nuevo", "--carpeta", self.dir / "triage", "--paquete", PKG, "--flujo", "x", "--triage")
+        self.assertEqual(json.loads((self.dir / "triage" / "plan.json").read_text(encoding="utf-8"))["profundidad"], "triage")
 
     def test_con_varios_dispositivos_avisa_y_guarda_el_serial_elegido(self):
         self.env["FAKE_DEVICES"] = "emulator-5554,NJ4"
@@ -971,8 +1073,54 @@ class NextStepTest(PerfBase):
         title, steps = self.step()
         self.assertEqual(title, "sesión 4 · cierre")
         self.assertEqual(steps[0]["modelo"], "GPT-5 mini")
-        write(self.folder / "reporte.md", "x")
+        write(self.folder / "reporte-final.md", "x")
         self.assertEqual(self.step()[0], "investigación cerrada")
+
+    def test_triage_mide_tres_corridas_sin_control_y_cierra_con_el_reporte_inicial(self):
+        self.plan["profundidad"] = "triage"
+        self.plan["flujos"] = {"detalle": {"inicio": "MainActivity", "recorrido": "adb shell input tap 1 1"}}
+        write(self.folder / "prueba" / "detalle_1.perfetto-trace.gz", "x")
+        title, steps = self.step()
+        self.assertEqual(title, "medición antes (sin chat)")
+        self.assertIn("--fase antes --corridas 3", steps[0]["texto"])
+        self.assertIn("triage: 3 corridas, sin control", steps[0]["que"])
+        self.assertIn("(3 corridas)", steps[0]["tu"])
+        self.assertFalse(any("--fase control" in s["texto"] for s in steps))
+        self.phases("antes")
+        title, steps = self.step()
+        self.assertEqual(title, "diagnóstico (sin chat)")
+        self.assertIn("diagnostico --carpeta", steps[0]["texto"])
+        write(self.folder / "diagnostico.md", "x")
+        self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")
+        write(self.folder / "reporte-inicial.md", "x")
+        title, steps = self.step()
+        self.assertEqual(title, "triage cerrado")
+        self.assertEqual(steps[0]["tipo"], "archivo")
+        self.plan["profundidad"] = "riguroso"
+        self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")  # ya no cierra: sigue con el plan de mejoras
+        self.plan["profundidad"] = "ligero"
+        self.save()
+        self.assertEqual(self.perf("siguiente", "--carpeta", self.folder).returncode, 2)
+
+    def test_una_mejora_aprobada_o_aplicada_despues_del_cierre_reabre_la_investigacion(self):
+        self.phases("antes", "control", "despues")
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "aplicada", "aplicada_en": "2026-11-04T10:00:00"},
+                                {"id": "M2", "titulo": "b", "estado": "pendiente"}]
+        write(self.folder / "reporte-final.html", "x")
+        self.assertEqual(self.step()[0], "investigación cerrada")
+        self.plan["mejoras"][1]["estado"] = "aprobada"
+        self.assertIn("sesión 3, aplica M2", self.step()[1][0]["texto"])
+        self.plan["mejoras"][1]["estado"] = "aplicada"
+        self.plan["mejoras"][1]["aplicada_en"] = "2026-11-06T12:00:00"  # después de fases.despues (2026-11-05)
+        self.plan["instalar"] = "./gradlew app:installProfiling"
+        title, steps = self.step()
+        self.assertEqual(title, "medición después (sin chat)")
+        self.assertIn("--fase despues --corridas 10 --rehacer", steps[1]["texto"])
+        self.assertIn("de nuevo", steps[1]["que"])
+        self.save()
+        self.ok("decidir", "--carpeta", self.folder, "--aplicada", "M2")
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertTrue(plan["mejoras"][1]["aplicada_en"].startswith("20"))
 
     def test_sin_mejoras_aprobadas_va_al_cierre(self):
         self.phases("antes", "control")
@@ -1031,6 +1179,9 @@ class NextStepTest(PerfBase):
         tail = state[state.index("## Consumo"):]
         self.assertIn("| 0 · setup | Sonnet 5 | 2.03 USD | 66 |\n| 4 · cierre | — | 0.016 USD | — |", tail)
         self.assertEqual(tail.count("| Sesión |"), 1)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "3", "--costo", "<lo que muestre /cost>")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("reemplaza los <...>", result.stderr)
 
     def test_plan_valida_estados_e_instalar(self):
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "lista"}]

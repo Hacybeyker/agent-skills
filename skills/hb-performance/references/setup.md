@@ -30,6 +30,20 @@ El fragmento de `build.gradle.kts` lo imprime `perf.py instrumentar` (build type
 - **CI:** si no quieres compilar `profiling` en CI, filtra la variante con `beforeVariants`.
 - **R8:** los nombres salen ofuscados en CPU y heap. El mapping queda en `<módulo>/build/outputs/mapping/profiling/mapping.txt`.
 
+## Requisitos de la máquina
+
+`perf.py` necesita `adb` (del SDK de Android) y `trace_processor` de Perfetto: el programa que abre una traza (`.perfetto-trace`) y permite consultarla con SQL; con él calcula frames, hilo principal, secciones de red y métricas. Si falta, cualquier comando que lo use se detiene con el comando de instalación, que no pide root (un script de Python en `~/.local/bin` que descarga el binario la primera vez). Si el entorno del usuario lo instala por su cuenta (un script de bootstrap), basta con que quede en el `PATH` o en `TRACE_PROCESSOR`. Compruébalo al empezar el setup, antes de tocar el proyecto:
+
+```bash
+cd ~ && (command -v trace_processor || echo "falta trace_processor") && adb version | head -1
+```
+
+Si falta, pásale al usuario este comando y espera a que lo corra:
+
+```bash
+cd ~ && mkdir -p ~/.local/bin && curl -fsSL https://get.perfetto.dev/trace_processor -o ~/.local/bin/trace_processor && chmod +x ~/.local/bin/trace_processor && { grep -qs '.local/bin' ~/.zshrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc; } && export PATH="$HOME/.local/bin:$PATH" && trace_processor --version
+```
+
 ## Instrumentación y cableado
 
 `perf.py instrumentar` copia las piezas genéricas al source set `perf` (y sus tests a `testDebug`) y **también el cableado**: `PerfHooks` en el código principal, los módulos de Hilt si detecta Hilt, los manifests de `debug` y `profiling` y `PerfInstaller` ya apuntando a los ganchos. No pisa nada que exista. Detecta OkHttp, Retrofit, fragments y Hilt; se fuerza con `--red`/`--sin-red`, `--retrofit`/`--sin-retrofit`, `--fragments`/`--sin-fragments`, `--hilt`/`--sin-hilt` y `--principal <src/main/...>`.
@@ -38,13 +52,15 @@ El fragmento de `build.gradle.kts` lo imprime `perf.py instrumentar` (build type
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py instrumentar --modulo app --paquete <paquete.de.la.app>.perf
 ```
 
-Al final imprime, **con el paquete ya puesto**, los fragmentos que solo puedes pegar tú porque dependen del proyecto. No los reescribas ni leas los archivos generados: pega cada fragmento donde corresponde.
+Al final imprime, **con el paquete ya puesto**, los fragmentos que solo puedes pegar tú porque dependen del proyecto. No los reescribas ni leas los archivos generados: pega cada fragmento donde corresponde, con **una sola edición por archivo** (imports y código juntos; cada edición es un paso que reenvía el chat).
 
 1. **`build.gradle.kts`:** el build type `profiling`, el source set `perf` en `debug` y `profiling`, la exclusión `**/perf/**` de la cobertura y, si una librería llega solo con `releaseImplementation` (una variante no-op, por ejemplo), su `"profilingImplementation"`: `initWith(release)` copia la configuración, no las dependencias.
 2. **Red:** el código principal arma el `OkHttpClient` y no ve el source set `perf`. Con Hilt, inyecta `@PerfEventListeners Set<@JvmSuppressWildcards EventListener.Factory>` donde se arma el cliente y aplica la primera factory; sin Hilt, llama a `PerfHooks.okHttp(builder)` antes de `build()`. En release el set queda vacío y el lambda no hace nada. Busca **cada** `OkHttpClient.Builder()` del alcance: un cliente que no pasa por el gancho queda sin secciones. OkHttp admite un solo `eventListenerFactory`: si ya hay uno, combínalos.
 3. **Navegación sin cambio de actividad:** `PerfHooks.navigation` con el destino tal cual (la ruta `movie/{id}` en Navigation Compose, la clave en Navigation 3), sin convertirlo a texto.
 4. **Contenido visible:** en la primera pantalla, `ReportDrawnWhen { !uiState.isLoading }` (Compose, activity-compose 1.7+) o `reportFullyDrawn()` (Views): es el TTFD y lo usa Android vitals. En **cualquier otra pantalla que se vaya a medir**, `PerfHooks.mark("<pantalla>")` una vez por carga, cuando el contenido real está a la vista: deja la marca `MARK <pantalla>`, donde terminan las métricas de usuario y la ventana del flujo. Sin ella, una métrica que termina en la última llamada de red deja afuera el render y cambia de significado si una mejora reordena las llamadas.
 5. **Manifests existentes:** si `src/debug/AndroidManifest.xml` o `src/profiling/AndroidManifest.xml` ya existían, agrega el `<provider>` (y `<profileable>` en profiling) que imprime el script.
+6. **Dependencias por variante, antes del DoD:** `grep -n "releaseImplementation\|debugImplementation" <módulo>/build.gradle*`; cada librería que solo llega en `release` (el no-op de Chucker, Flipper, LeakCanary) necesita su `"profilingImplementation"`, o `assembleProfiling` falla y el DoD se repite entero.
+7. **Nada en `.gitignore`:** `reports/` queda fuera de git por `.git/info/exclude` (lo escriben `nuevo` y `humo`); si hace falta agregarlo, va ahí. El `.gitignore` es del proyecto y no se toca.
 
 **Actualizar la instrumentación** cuando cambia la skill: `instrumentar --actualizar` sobrescribe solo los archivos que llevan su encabezado "Generated by hb-performance"; lo que escribió el proyecto no se toca.
 
@@ -71,6 +87,6 @@ Con más de un dispositivo (`adb devices`), el serial va en la instalación (`ad
 
 ## Cierre del setup
 
-- Agrega a `AGENTS.md` una sección con el encabezado en el idioma del archivo (`## Performance` o `## Rendimiento`), de 10 líneas como máximo: `applicationId`, cómo instalar el build de profiling, qué secciones hay, dónde está el `reportFullyDrawn` y "setup listo". Sin `AGENTS.md`, propón crearlo solo con esa sección (u ofrece `hb-setup`).
+- Agrega a `AGENTS.md` una sección con el encabezado en el idioma del archivo (`## Performance` o `## Rendimiento`), de 10 líneas como máximo: `applicationId`, cómo instalar el build de profiling (con el serial como `ANDROID_SERIAL=<serial> ./gradlew ...`; Gradle no tiene `-s <serial>`), qué secciones hay, dónde está el `reportFullyDrawn` y "setup listo". Sin `AGENTS.md`, propón crearlo solo con esa sección (u ofrece `hb-setup`).
 - Propón commitearlo en **su propio PR** (por ejemplo `build(perf): agregar el build de profiling y la instrumentación de rendimiento`). Si el equipo no acepta herramientas de medición en el repo, guárdalo como parche en una carpeta no versionada y aplícalo con `git apply` al investigar.
 - **Siguiente paso**, al final de tu respuesta y como último bloque: el comando de instalación y `perf.py humo`, completo y listo para copiar, y una línea que diga que `humo` imprime lo que sigue (la receta del arranque o el chat de la sesión 1). Anota el costo de esta sesión con `perf.py consumo` cuando haya carpeta; si todavía no la hay, dile al usuario el comando para anotarlo después.

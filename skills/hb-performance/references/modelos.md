@@ -37,6 +37,8 @@ Dos investigaciones reales en una app mediana con red (modelo intermedio salvo e
 | Mediciones y decisión (terminal) | 0 | 0 |
 | **Total** | **≈ 4,3 USD** | **≈ 5 USD** |
 
+Con 0.5.0 (recorrido automático por `adb`, `preparar`, ventana entre marcas y reportes nuevos), dos investigaciones más en la misma app: una rigurosa de la pantalla de detalle, ≈ 5,9 USD (setup 1,65 · sesión 1 2,28 · sesión 2 0,69 · sesión 3 1,25 · cierre 0,02), y una de triage y luego rigurosa de favoritos, ≈ 4,6 USD (sesión 1 2,27 · sesión 2 1,15 · sesión 3 1,11 · cierre 0,02), con una mejora medida de −65 %. La sesión 1 es hoy la más cara: la mitad de sus pasos se van en encontrar y validar las coordenadas del recorrido.
+
 Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 0,2 USD: por eso `siguiente` dice en cada paso si va en la terminal o en un chat. Una sesión que cuesta varias veces lo de la tabla suele estar explorando: SQL a mano, leyendo scripts o archivos generados, volcando logs, corriendo el DoD comando por comando o encadenada con otra en el mismo chat.
 
 ## Cómo aplicarlo

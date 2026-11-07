@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Opcional: android-profiler para heap dumps, testigo para automatizar recorridos."
 metadata:
   author: hacybeyker
-  version: "0.4.0"
+  version: "0.5.0"
   category: flow
 ---
 
@@ -35,7 +35,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 9. **Instrumentación permanente solo en debug y profiling**, sin efecto en release. Lo temporal se quita antes del commit.
 10. **Git:** no hagas commit, push, merge, rebase ni cambies de rama salvo que el usuario lo pida y `AGENTS.md` lo permita. Propón un commit por mejora, con las reglas de `hb-commit`.
 11. **Datos:** la evidencia cruda se usa sin enmascarar, salvo que `AGENTS.md` pida otra cosa. Vive en una carpeta ignorada por git y nunca va a commits, PRs ni al reporte.
-12. **Comandos para el usuario:** uno por paso, que empiece con `cd <ruta absoluta> && ...`. Con más de un dispositivo conectado, el serial va en cada comando (`adb -s`, `ANDROID_SERIAL=<serial> ./gradlew ...`, `--serial`) o en el plan (`nuevo --serial`). Las capturas con recorrido manual las corre el usuario: tú se las entregas, nunca las ejecutas.
+12. **Comandos para el usuario:** uno por paso, que empiece con `cd <ruta absoluta> && ...`. Con más de un dispositivo conectado, el serial va en cada comando (`adb -s`, `ANDROID_SERIAL=<serial> ./gradlew ...`, `--serial`) o en el plan (`nuevo --serial`). Las capturas de las fases (`capturar --fase antes|control|despues`) y `diagnostico` las corre el usuario **aunque el recorrido sea automático**: tú se las entregas como comandos, nunca las ejecutas; la única que puedes correr es la corrida de prueba de la sesión 1, avisando antes. Solo si el usuario pide el modo autónomo capturas tú.
 13. **Los comandos que siguen los da `perf.py`:** cada comando imprime el paso siguiente, completo y en orden, y lo deja en `estado.md`; `perf.py siguiente` lo recalcula. Cópialos tal cual, sin inventar ni reordenar.
 14. **Español neutro** (tú, no vos) en todo lo que le escribas al usuario y en `estado.md`.
 
@@ -56,8 +56,8 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 
 - **Retomar:** si te pasan un `estado.md`, léelo y sigue la sesión de "Siguiente paso", y solo esa; si no está escrito, `perf.py siguiente --carpeta <carpeta>` lo calcula. Sin `estado.md`: la 0 si `AGENTS.md` no dice que el setup está listo; si no, la 1.
 - **Recetas:** el arranque en frío no necesita la sesión 1. `perf.py nuevo --receta arranque-frio` arma `plan.json` y `estado.md` listos para medir (TTID, TTFD y el hilo principal).
-- **Modos:** *guiado* por defecto: el agente corre en su terminal todo lo que no necesita el dispositivo en la mano (`perf.py` salvo `capturar`, Gradle, DoD, instalar) y el usuario corre las capturas. *Autónomo*: el agente también captura, con el modelo más económico y solo si el recorrido es automático (`arranque-frio`, un comando o testigo).
-- **Profundidad:** *riguroso* por defecto (antes, control y después, 10 corridas con recorrido automático). *Triage*: una corrida de prueba y directo al diagnóstico; los hallazgos llevan "⚠ sin línea base".
+- **Modos:** *guiado* por defecto: el agente corre en su terminal lo que no mide (`perf.py` salvo `capturar` y `diagnostico`, Gradle, DoD, instalar) y **el usuario corre las mediciones desde su terminal, también cuando el recorrido es automático** (así ve correr el dispositivo y no paga tokens por esperar). *Autónomo*, solo si el usuario lo pide: el agente también captura, con el modelo más económico y solo con recorrido automático (`arranque-frio`, un comando o testigo).
+- **Profundidad:** *riguroso* por defecto (antes, control y después, 10 corridas con recorrido automático). *Triage* (`profundidad: triage` en el plan, `nuevo --triage`): 3 corridas de antes, sin control, y termina en el diagnóstico y el reporte inicial; los hallazgos llevan "⚠ sin línea base".
 - **Modelo y costo:** [modelos.md](references/modelos.md). Los nombres de los modelos que imprime `siguiente` salen de `modelos` en `plan.json` (por defecto Haiku, Sonnet y Opus); con otra herramienta, el usuario los cambia una vez.
 
 ## Herramientas

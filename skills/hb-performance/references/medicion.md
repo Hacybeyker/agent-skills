@@ -24,7 +24,7 @@ Qué hace, en orden:
    - `perfil`: borra los perfiles, instala el Baseline Profile del APK con `profileinstaller` y compila con `speed-profile` (`CompilationMode.Partial`). Más parecida a una instalación de Play; para medir un Baseline Profile. Si el perfil no se instala, se detiene.
 
    Sin esto, un build recién instalado corre con JIT y parece una regresión que no existe. Con `completa`, el TTID suele salir algo más alto que con `perfil` (un ejecutable más grande que cargar): sirve para comparar fases entre sí, no como el TTID que verá el usuario de Play. Cada corrida guarda `jit_ms` (informativa) y `comparar` avisa si la compilación o el JIT cambiaron entre fases. Después, el **calentamiento** (una corrida que no cuenta).
-3. **Por cada corrida:** valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
+3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
 4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase).
 
 Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), con hasta 3 intentos de más. Una corrida inválida se guarda como `_invalida_<motivo>` para auditoría y no entra al CSV.
@@ -34,6 +34,7 @@ Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), 
 | `--fase antes \| control \| despues` | `control` es el bloque A/A del estado inicial (modo riguroso), justo después de `antes` y con el mismo build: mide el ruido |
 | `--corridas 10` | Más potencia estadística, sin costo humano si el recorrido es automático |
 | `--recorrido "<comando>"` | Recorre el flujo con un comando en vez de lo que diga el plan |
+| `--preparar "<comando>"` | Deja la app en el punto de partida antes de cada corrida, en vez del `preparar` del plan. Sin ninguno, si la app no está al frente el script la relanza (la compilación de ART puede cerrarla) y avisa |
 | (`ventana` del plan) | Frames, jank e hilo principal solo entre dos marcas del flujo (`ventana_ms` queda como informativa); sin ventana cubren toda la traza, lo que en un recorrido manual depende de cuánto tarda el usuario en presionar Enter |
 | `--config cpu` | Una captura con muestreo de CPU, solo para el diagnóstico (con `--prueba`) |
 | `--memoria` | `dumpsys meminfo` después de cada corrida: PSS, heaps, actividades y vistas vivas |

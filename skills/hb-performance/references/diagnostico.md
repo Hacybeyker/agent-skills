@@ -59,7 +59,7 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
 
 ## 6. Entregable
 
-1. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo", separa los **bugs** de lo **mejorable pero intencional** (se decide con el negocio) y de las **consecuencias** de otro hallazgo. Lo que salga de consultas y no de una métrica lleva "sin veredicto estadístico".
+1. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo" usa una de estas palabras, porque el reporte las explica al lector: `bug` (hay que corregirlo), `mejorable` (intencional, se decide con el negocio), `consecuencia de H#` (lo arregla otro hallazgo), `descartado` (se investigó y no es la causa: no genera mejora) o `sin veredicto estadístico` (salió de consultas y no de una métrica: no se pudo confirmar ni descartar). Solo `bug` y `mejorable` dan lugar a una mejora.
 2. **`mejoras` en `plan.json`**, una por cambio que se pueda commitear solo:
    ```json
    {"id": "M1", "hallazgo": "H1", "titulo": "...", "flujo": "<flujo>", "metrica": "<métrica que debería moverse>",

@@ -16,6 +16,7 @@
       "inicio": "MainActivity",
       "invalidar_si": ["SCREEN *Login*"],
       "recorrido": "manual",
+      "preparar": "",
       "ventana": {
         "desde": {"marca": "NAV home", "punto": "inicio", "cual": "ultima"},
         "hasta": {"marca": "MARK home", "punto": "fin", "cual": "ultima"},
