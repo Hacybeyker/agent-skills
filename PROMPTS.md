@@ -64,6 +64,7 @@ Tiene varias sesiones y comandos de terminal: su guía completa está en [skills
 | Caso | Prompt |
 | --- | --- |
 | Primera vez en el proyecto | `Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>.` |
+| Solo el diagnóstico, sin cambiar código (triage) | `Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>.` |
 | Retomar | `Sigue hb-performance con <ruta absoluta>/estado.md` |
 
 ## hb-coach · aprender un tema

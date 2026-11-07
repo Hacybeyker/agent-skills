@@ -38,7 +38,7 @@ De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
 
-Genera `reporte.md` y `reporte.html` (autocontenido, con gráficos antes y después): resumen ejecutivo, métricas principales, propuesto contra logrado, hallazgos, mejoras, lectura de la comparación, comparación, las filas de la ficha que sirven al lector y los pendientes. Lleva solo métricas agregadas: se puede compartir.
+Genera `reporte-final.md` y `reporte-final.html` (autocontenido, con gráficos antes y después, pensado para alguien que no siguió la investigación): resumen ejecutivo; de los hallazgos al resultado (cuántos hallazgos, cuántas mejoras, cuántas aplicadas y cuáles funcionaron ✔ o no ✖); métricas principales con qué significa cada veredicto; esperado contra logrado; hallazgos con su resultado; mejoras aplicadas; lectura de la comparación; comparación completa; las filas de la ficha que sirven al lector; lo que queda abierto; y un glosario ("Cómo leer este reporte"). Lleva solo métricas agregadas: se puede compartir. El reporte inicial (`reporte-inicial.*`, sesión 2) no se toca.
 
 ## 5. Guarda de regresión
 
@@ -46,7 +46,7 @@ Propón cómo proteger la mejora: el test de la sesión 3 y, si el flujo es crí
 
 ## Entrega
 
-- El resumen ejecutivo y la ruta de `reporte.html`.
+- El resumen ejecutivo y la ruta de `reporte-final.html`.
 - Los commits propuestos y el texto del PR, solo con métricas agregadas.
 - Pendientes y hallazgos fuera del alcance, para una próxima investigación.
 - Cómo validarlo en campo después del release (Android vitals: TTID y TTFD si la app llama a `reportFullyDrawn`).

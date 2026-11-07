@@ -41,7 +41,7 @@ import textwrap
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -66,6 +66,25 @@ VERDICT_CLASS = {"mejora": "v-better", "regresión": "v-worse", "sin cambio": "v
                  "informativa": "v-same", "no comparable": "v-same"}
 FICHA_REPORTE = ("alcance", "síntoma", "sintoma", "métricas principales", "metricas principales", "build",
                  "dispositivo", "modos")
+FAMILY_LABEL = {"app": "solo la app", "e2e": "app + backend", "info": "informativa"}
+VERDICT_TEXT = {"mejora": "funcionó: mejoró más que el ruido de medición",
+                "regresión": "empeoró más que el ruido de medición",
+                "sin cambio": "no cambió: la mediana de después queda dentro del rango de antes",
+                "dentro del ruido": "la diferencia no supera el ruido de medición",
+                "no comparable": "no comparable: cambió la cantidad de frames y el porcentaje mide otra cosa",
+                "informativa": "informativa: sin veredicto"}
+STATE_TEXT = {"propuesta": "propuesta · esperando tu decisión", "aprobada": "aprobada · se aplica en la sesión 3",
+              "aplicada": "aplicada · implementada; se mide en la fase después", "descartada": "descartada · no se aplica",
+              "pendiente": "pendiente · queda para más adelante"}
+GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rara no la mueve. Es el número que se compara.
+- **P90:** 9 de cada 10 corridas quedaron por debajo de este valor; muestra los peores casos habituales.
+- **Corridas:** cuántas veces se repitió el flujo para esa fase. Menos de 5 es poca evidencia.
+- **Ruido de medición:** cuánto cambia la métrica entre dos mediciones **sin ningún cambio** en la app (antes contra control). Una diferencia menor que esto no prueba nada.
+- **Varía mucho (CV):** las corridas difieren entre sí más de un 10 %; suele ser el backend (red) o el dispositivo. El número sirve, pero con menos confianza.
+- **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
+- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames).
+- **Hallazgos:** una causa posible encontrada en el código o en las trazas. Solo los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y **no** es la causa (no hay nada que hacer); `sin veredicto estadístico`, que con estos datos no se pudo confirmar ni descartar (tampoco hay acción, salvo medir otra cosa).
+- **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
@@ -202,6 +221,19 @@ def describe(values, cv_max=CV_MAX):
     if data["cv"] is not None and data["cv"] > cv_max:
         data["avisos"].append("inestable")
     return data
+
+
+def human_warnings(avisos, cv=None, n=None):
+    """Los avisos del script en palabras: qué pasa y por qué."""
+    out = []
+    for aviso in avisos:
+        if aviso == "pocas corridas":
+            out.append("pocas corridas (%s de %d): menos evidencia" % (n if n is not None else "menos", MIN_RUNS))
+        elif aviso == "inestable":
+            out.append("varía mucho entre corridas" + (" (CV %.0f %%)" % cv if cv is not None else ""))
+        else:
+            out.append(aviso)
+    return "; ".join(out) or "—"
 
 
 def verdict(before, after, sense, control=None):
@@ -785,14 +817,20 @@ def parse_meminfo(text):
 
 # ── Herramientas externas ────────────────────────────────────────────────────
 
+TP_INSTALL = ('cd ~ && mkdir -p ~/.local/bin && curl -fsSL https://get.perfetto.dev/trace_processor '
+              '-o ~/.local/bin/trace_processor && chmod +x ~/.local/bin/trace_processor && '
+              '{ grep -qs \'.local/bin\' ~/.zshrc || echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc; } && '
+              'export PATH="$HOME/.local/bin:$PATH" && trace_processor --version')
+
+
 def find_tp(option):
     for candidate in (option, os.environ.get("TRACE_PROCESSOR"), shutil.which("trace_processor"),
                       shutil.which("trace_processor_shell")):
         if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
             return candidate
-    raise Precondicion("falta trace_processor de Perfetto. Instálalo con la guía oficial "
-                       "(curl -LO https://get.perfetto.dev/trace_processor && chmod +x trace_processor), "
-                       "déjalo en el PATH o pásalo con --tp")
+    raise Precondicion("falta trace_processor de Perfetto (lee las trazas y las consulta con SQL). "
+                       "Instálalo sin root, en tu usuario, y vuelve a correr este comando:\n  %s\n"
+                       "Si ya lo tienes en otra ruta, pásalo con --tp o con TRACE_PROCESSOR=<ruta>." % TP_INSTALL)
 
 
 _TP_STYLE = {}
@@ -1312,27 +1350,33 @@ def next_steps(folder, plan, flow=None):
                     "plan de mejoras; termina con el comando para que decidas", plan)
     session4 = chat(resume, "economico", "bajo", "sesión 4: compara, escribe la lectura y el resumen y genera el reporte", plan)
     triage = plan.get("profundidad") == "triage"
-    report = state.parent / ("reporte.html" if (state.parent / "reporte.html").is_file() else "reporte.md")
-    if report.is_file():
+    # Una mejora aplicada después de medir "después" deja esa fase vieja: hay que medirla de nuevo (--rehacer).
+    measured = phases.get("despues", {}).get("fecha", "")
+    stale = "despues" in phases and any(m.get("estado") == "aplicada" and m.get("aplicada_en", "") > measured for m in mejoras)
+    report = next((state.parent / n for n in ("reporte-final.html", "reporte-final.md", "reporte.html", "reporte.md")
+                   if (state.parent / n).is_file()), state.parent / "reporte-final.md")
+    if report.is_file() and "aprobada" not in estados and not stale:
         return "investigación cerrada", [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
     initial = state.parent / ("reporte-inicial.html" if (state.parent / "reporte-inicial.html").is_file() else "reporte-inicial.md")
     if triage and initial.is_file():
         return "triage cerrado", [{"tipo": "archivo", "texto": str(initial),
                                    "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después); "
                                           "para aplicar mejoras, cambia profundidad a riguroso y mide control y después"}]
-    if "despues" in phases:
-        return "sesión 4 · cierre", [session4]
-    if "aplicada" in estados and "aprobada" not in estados:
-        return "medición después (sin chat)", [
-            terminal(install_command(plan, root), "compila e instala el build de profiling con la mejora",
-                     "espera; si la mejora migra datos, abre la app una vez antes de medir"),
-            terminal(command(*(capture + ["--fase", "despues", "--corridas", runs])),
-                     "mide la fase después con las mismas condiciones que antes", you_run), session4]
     if "aprobada" in estados:
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         return "sesión 3 · %s" % first["id"], [
             chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
                  "sesión 3: aplica %s con su test y el DoD, propone el commit y marca la mejora aplicada" % first["id"], plan)]
+    if "despues" in phases and not stale:
+        return "sesión 4 · cierre", [session4]
+    if "aplicada" in estados and "aprobada" not in estados:
+        return "medición después (sin chat)", [
+            terminal(install_command(plan, root), "compila e instala el build de profiling con la mejora",
+                     "espera; si la mejora migra datos, abre la app una vez antes de medir"),
+            terminal(command(*(capture + ["--fase", "despues", "--corridas", runs] + (["--rehacer"] if stale else []))),
+                     "mide la fase después con las mismas condiciones que antes"
+                     + (" (de nuevo: hay una mejora aplicada después de la medición anterior)" if stale else ""), you_run),
+            session4]
     if "propuesta" in estados:
         ids = ",".join(m["id"] for m in mejoras if m.get("estado", "propuesta") == "propuesta")
         return "decisión del usuario (sin chat)", [
@@ -1361,7 +1405,7 @@ def next_steps(folder, plan, flow=None):
                        "corre las consultas de diagnóstico sobre las trazas y deja diagnostico.md", "espera"), session2]
     return ("medición antes (sin chat)" if triage and "antes" not in phases else
             "medición antes y control (sin chat)" if "antes" not in phases else
-            "control y diagnóstico (sin chat)" if "control" not in phases else "diagnóstico (sin chat)"), steps
+            "control y diagnóstico (sin chat)" if "control" not in phases and not triage else "diagnóstico (sin chat)"), steps
 
 
 def render_steps(steps, markdown):
@@ -1432,6 +1476,8 @@ def cmd_consumo(args):
     if not state.is_file():
         raise PerfError("no existe %s" % state)
     text = state.read_text(encoding="utf-8")
+    if any("<" in str(v) for v in (args.sesion, args.costo, args.modelo, args.pasos) if v):
+        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo \"1.05 USD\")")
     row = "| %s | %s | %s | %s |" % (args.sesion, args.modelo or "—", args.costo, args.pasos or "—")
 
     def append(match):
@@ -1467,6 +1513,8 @@ def cmd_decidir(args):
     for item in plan["mejoras"]:
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
+            if choices[item["id"]] == "aplicada":
+                item["aplicada_en"] = datetime.datetime.now().isoformat(timespec="seconds")
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     parts = ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
              for _, estado, label in DECISIONS if estado in choices.values()]
@@ -1549,7 +1597,7 @@ def cmd_capturar(args, plan=None):
         if startup:
             return
         if prepare_command:
-            result = subprocess.run(prepare_command, shell=True)
+            result = subprocess.run(prepare_command, shell=True, stdout=subprocess.DEVNULL)  # solo sus errores
             if result.returncode != 0:
                 raise Precondicion("'preparar' terminó con código %d" % result.returncode)
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
@@ -1603,6 +1651,12 @@ def cmd_capturar(args, plan=None):
             if not results["metricas"]:
                 raise PerfError("trace_processor no devolvió las filas de metricas.sql")
             metrics, invalid, info = trace_metrics(trace_rows(*results["metricas"][-1]), hz, flow, known, sdk)
+            if not invalid and not args.prueba:
+                # Sin la ventana o sin una métrica principal, el recorrido no llegó a donde debía (un tap que no
+                # navegó, la pantalla que no cargó a tiempo): la corrida no vale y se repite.
+                essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in plan.get("principales", [])]
+                if essential:
+                    invalid = "sin marcas para %s: el recorrido no completó el flujo" % ", ".join(essential)
             names = {m[0] for m in metrics}
             metrics += [m for m in with_families(extra, flow.get("familias")) if m[0] not in names]
             for name, _ in queries[1:]:
@@ -1919,11 +1973,26 @@ def logrado_rows(plan, results):
         out.append([item["id"], item["titulo"], item.get("metrica", "—"),
                     fmt(r["antes"]["mediana"], unit) if r else "—", item.get("esperado", "—"),
                     fmt(r["despues"]["mediana"], unit) if r else "—", fmt_pct(r["delta_pct"]) if r else "—",
-                    r["veredicto"] if r else "—", item.get("estado", "—")])
+                    r["veredicto"] if r else "—", item.get("estado", "—"), improvement_result(item, r)])
     return out
 
 
-LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "Δ %", "Veredicto", "Estado"]
+def improvement_result(item, r):
+    """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica."""
+    if item.get("estado") != "aplicada":
+        return "— no aplicada"
+    if r is None:
+        return "— sin medir"
+    if r["veredicto"] == "mejora":
+        return "✔ funcionó"
+    if r["veredicto"] == "regresión":
+        return "✖ empeoró"
+    if r["veredicto"] in ("informativa", "no comparable"):
+        return "— sin veredicto"
+    return "✖ no funcionó"
+
+
+LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "Δ %", "Veredicto", "Estado", "Resultado"]
 
 
 def cmd_comparar(args):
@@ -2082,6 +2151,9 @@ def inline_md(text):
     return re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', text)
 
 
+NUMERIC_CELL = re.compile(r"[-+−]?[\d.,]+ ?[a-zA-Z%]{0,3}( \([-+−]?[\d.,]+ ?%?\))?( ?[–/] ?[-+−]?[\d.,]+ ?[a-zA-Z%]{0,3})?|—")
+
+
 def md_to_html(text):
     """Markdown mínimo: títulos, párrafos, listas, tablas y bloques de código."""
     lines, out, i = text.splitlines(), [], 0
@@ -2097,6 +2169,12 @@ def md_to_html(text):
                 i += 1
             i += 1
             out.append("<pre><code>%s</code></pre>" % e("\n".join(block)))
+        elif line.startswith(">"):
+            quote = []
+            while i < len(lines) and lines[i].startswith(">"):
+                quote.append(lines[i].lstrip(">").strip())
+                i += 1
+            out.append('<p class="hint">%s</p>' % inline_md(" ".join(quote)))
         elif line.startswith("#"):
             level = min(len(line) - len(line.lstrip("#")) + 2, 6)
             out.append("<h%d>%s</h%d>" % (level, inline_md(line.lstrip("#").strip()), level))
@@ -2109,7 +2187,9 @@ def md_to_html(text):
                     rows.append([c.replace("\\|", "|") for c in cells])
                 i += 1
             head = "".join("<th>%s</th>" % inline_md(c) for c in rows[0]) if rows else ""
-            body = "".join("<tr>%s</tr>" % "".join("<td>%s</td>" % inline_md(c) for c in r) for r in rows[1:])
+            body = "".join("<tr>%s</tr>" % "".join(
+                '<td class="num">%s</td>' % inline_md(c) if NUMERIC_CELL.fullmatch(c) else "<td>%s</td>" % inline_md(c)
+                for c in r) for r in rows[1:])
             out.append('<div class="table-wrap"><table><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
                        % (head, body))
         elif re.match(r"\s*([-*]|\d+\.)\s", line):
@@ -2122,7 +2202,7 @@ def md_to_html(text):
             out.append("<%s>%s</%s>" % (tag, "".join("<li>%s</li>" % inline_md(it) for it in items), tag))
         else:
             para = []
-            while i < len(lines) and lines[i].strip() and not re.match(r"\s*(#|\||```|[-*]\s|\d+\.\s)", lines[i]):
+            while i < len(lines) and lines[i].strip() and not re.match(r"\s*(#|>|\||```|[-*]\s|\d+\.\s)", lines[i]):
                 para.append(lines[i].strip())
                 i += 1
             out.append("<p>%s</p>" % inline_md(" ".join(para)))
@@ -2154,13 +2234,15 @@ def initial_md(rows, plan):
         control = entry["fases"].get("control")
         noise = abs(statistics.median(control) - s["mediana"]) / abs(s["mediana"]) * 100 \
             if control and s["mediana"] else None
-        table.append([flow, metric, entry["familia"], fmt(s["mediana"], entry["unidad"]), fmt(s["p90"], entry["unidad"]),
-                      "%s – %s" % (fmt(s["min"]), fmt(s["max"])), s["n"], fmt_pct(noise, signed=False),
-                      ", ".join(s["avisos"]) or "—"])
+        table.append([flow, metric, FAMILY_LABEL.get(entry["familia"], entry["familia"]), fmt(s["mediana"], entry["unidad"]),
+                      fmt(s["p90"], entry["unidad"]), "%s – %s" % (fmt(s["min"]), fmt(s["max"])), s["n"],
+                      fmt_pct(noise, signed=False), human_warnings(s["avisos"], s["cv"], s["n"])])
     if not table:
         return ""
-    return markdown_table(["Flujo", "Métrica", "Familia", "Mediana", "P90", "Mín – máx", "n", "Ruido (A/A)", "Avisos"],
-                          table)
+    intro = ("> Lo que midió la app antes de cambiar nada, por métrica principal. La **mediana** es el número que se "
+             "compara después; el **ruido de medición** es cuánto cambió la métrica al medir dos veces sin tocar nada.\n\n")
+    return intro + markdown_table(["Flujo", "Métrica", "Depende de", "Mediana", "P90", "Mín – máx", "Corridas",
+                                   "Ruido de medición", "Avisos"], table)
 
 
 def plan_rows(plan, rows):
@@ -2180,19 +2262,137 @@ def plan_rows(plan, rows):
 PLAN_HEADERS = ["#", "Mejora", "Hallazgo", "Métrica", "Antes", "Esperado", "Prioridad", "Esfuerzo", "Riesgo", "Estado"]
 
 
-def render_report(folder, name, title, subtitle, parts, charts=""):
+def parse_table(md):
+    """(encabezados, filas) de la primera tabla markdown del texto; ([], []) si no hay."""
+    rows = []
+    for line in md.splitlines():
+        if not line.lstrip().startswith("|"):
+            if rows:
+                break
+            continue
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c):
+            continue
+        rows.append([c.replace("\\|", "|") for c in cells])
+    return (rows[0], rows[1:]) if rows else ([], [])
+
+
+def finding_outcome(finding_id, tipo, plan, results=None):
+    """Qué pasa con un hallazgo: a qué mejora dio lugar y, con resultados, si esa mejora funcionó."""
+    mejoras = [m for m in plan.get("mejoras", []) if m.get("hallazgo") == finding_id]
+    low = tipo.lower()
+    if mejoras:
+        parts = []
+        for m in mejoras:
+            estado = m.get("estado", "propuesta")
+            text = "%s (%s)" % (m["id"], STATE_TEXT.get(estado, estado).split(" · ")[0])
+            if results is not None:
+                r = results.get(m.get("metrica"))
+                if estado != "aplicada":
+                    text = "%s: no se aplicó (%s)" % (m["id"], estado)
+                elif r is None:
+                    text = "%s: aplicada, sin medición de su métrica" % m["id"]
+                elif r["veredicto"] == "mejora":
+                    text = "✔ %s funcionó: %s" % (m["id"], m.get("metrica"))
+                elif r["veredicto"] == "regresión":
+                    text = "✖ %s empeoró: %s" % (m["id"], m.get("metrica"))
+                else:
+                    text = "✖ %s no funcionó: %s %s" % (m["id"], m.get("metrica"), r["veredicto"])
+            parts.append(text)
+        return "; ".join(parts)
+    if "descart" in low:
+        return "descartado: se investigó y no es la causa; no hay nada que hacer"
+    if "sin veredicto" in low or "confirmar" in low:
+        return "no se pudo confirmar ni descartar con estos datos; sin acción"
+    if "consecuencia" in low:
+        return "lo resuelve la mejora del hallazgo del que depende"
+    return "sin mejora asociada"
+
+
+def findings_md(text, plan, results=None):
+    """La tabla de hallazgos de estado.md con una columna que dice qué pasa con cada uno (y el resultado, si lo hay)."""
+    headers, rows = parse_table(text)
+    if not headers:
+        return text
+    tipo_index = next((i for i, h in enumerate(headers) if h.lower().startswith("tipo")), None)
+    if tipo_index is None:
+        return text
+    new_headers = headers[:tipo_index] + ["Tipo", "Resultado" if results is not None else "Qué pasa con él"]
+    new_rows = [row[:tipo_index] + [row[tipo_index] if tipo_index < len(row) else "—",
+                                    finding_outcome(row[0], row[tipo_index] if tipo_index < len(row) else "", plan, results)]
+                for row in rows if row]
+    intro = ("> Un hallazgo es una causa posible. **No todos se convierten en mejoras:** los de tipo `bug` o `mejorable` "
+             "sí; `descartado` significa que se investigó y no es la causa; `sin veredicto estadístico`, que con estos "
+             "datos no se pudo confirmar ni descartar.\n\n")
+    return intro + markdown_table(new_headers, new_rows)
+
+
+def improvements_summary(plan, results, n_findings=None):
+    """Para el reporte final: de los hallazgos a las mejoras y su resultado, en una tabla corta."""
+    by_metric = {r["metrica"]: r for r in results}
+    rows = []
+    for m in plan.get("mejoras", []):
+        r = by_metric.get(m.get("metrica"))
+        estado = m.get("estado", "propuesta")
+        result = improvement_result(m, r)
+        if estado != "aplicada":
+            why = STATE_TEXT.get(estado, estado)
+        elif r is None:
+            why = "su métrica no tiene antes y después"
+        else:
+            why = "%s: %s → %s (%s) · %s" % (m.get("metrica"), fmt(r["antes"]["mediana"], r["unidad"]),
+                                            fmt(r["despues"]["mediana"], r["unidad"]), fmt_pct(r["delta_pct"]),
+                                            VERDICT_TEXT.get(r["veredicto"], r["veredicto"]))
+        rows.append([m["id"], m["titulo"], m.get("hallazgo", "—"), result, why])
+    if not rows:
+        return ""
+    counts = flow_counts(plan, rows, n_findings)
+    intro = ("> **%(hallazgos)d hallazgos → %(mejoras)d mejoras propuestas → %(aplicadas)d aplicadas → %(ok)d funcionaron.** "
+             "Una mejora que no funcionó no se descarta sola: la lectura de la comparación dice por qué y qué sigue.\n\n"
+             % counts)
+    return intro + markdown_table(["#", "Mejora", "Hallazgo", "Resultado", "Detalle"], rows)
+
+
+def flow_counts(plan, rows, n_findings=None):
+    mejoras = plan.get("mejoras", [])
+    linked = len({m.get("hallazgo") for m in mejoras if m.get("hallazgo")})
+    return {"hallazgos": n_findings if n_findings else linked or len(mejoras),
+            "mejoras": len(mejoras), "aplicadas": sum(1 for m in mejoras if m.get("estado") == "aplicada"),
+            "ok": sum(1 for row in rows if row[3].startswith("✔")),
+            "ko": sum(1 for row in rows if row[3].startswith("✖"))}
+
+
+def flow_html(counts):
+    """Franja con el recorrido hallazgos → mejoras → aplicadas → resultado, para el HTML."""
+    steps = [("Hallazgos", counts["hallazgos"], ""), ("Mejoras propuestas", counts["mejoras"], ""),
+             ("Aplicadas y medidas", counts["aplicadas"], ""),
+             ("Funcionaron", counts["ok"], " ok" if counts["ok"] else " end"),
+             ("No funcionaron", counts["ko"], " ko" if counts["ko"] else "")]
+    return '<div class="flow">%s</div>' % "".join(
+        '<div class="step%s"><b>%d</b><span>%s</span></div>' % (css, n, e(label)) for label, n, css in steps)
+
+
+def render_report(folder, name, title, subtitle, parts, charts="", extras=None):
+    """Escribe <name>.md y devuelve el HTML. `extras`: HTML propio por sección (gráficos, franjas) que va antes del texto."""
     md = "# %s\n\n_%s_\n" % (title, subtitle)
     md += "".join("\n## %s\n\n%s\n" % (section, body) for section, body in parts if body)
     (folder / ("%s.md" % name)).write_text(md, encoding="utf-8")
-    body = ""
-    for section, content in parts:
-        if not content:
-            continue
-        extra = '<div class="charts">%s</div>' % charts if section == "Métricas principales" and charts else ""
-        body += "<section><h2>%s</h2>%s%s</section>" % (e(section), extra, md_to_html(content))
+    extras = dict(extras or {})
+    if charts:
+        extras["Métricas principales"] = '<div class="charts">%s</div>' % charts
+    shown = [(section, content) for section, content in parts if content]
+    nav = "".join('<a href="#s%d">%s</a>' % (i, e(section)) for i, (section, _) in enumerate(shown))
+    body = '<nav class="toc">%s</nav>' % nav
+    for i, (section, content) in enumerate(shown):
+        body += '<section id="s%d"><h2>%s</h2>%s%s</section>' % (i, e(section), extras.get(section, ""), md_to_html(content))
     body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable)( \(backend\))?</td>",
                   lambda m: '<td><span class="verdict %s">%s</span>%s</td>' % (
                       VERDICT_CLASS[m.group(1)], m.group(1), m.group(2) or ""), body)
+    body = re.sub(r"<td>(propuesta|aprobada|aplicada|descartada|pendiente)</td>",
+                  lambda m: '<td><span class="state s-%s" title="%s">%s</span></td>'
+                  % (m.group(1), e(STATE_TEXT[m.group(1)]), m.group(1)), body)
+    body = re.sub(r"<td>(✔[^<]*)</td>", r'<td class="ok">\1</td>', body)
+    body = re.sub(r"<td>(✖[^<]*)</td>", r'<td class="ko">\1</td>', body)
     page = (ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
     return page.replace("{{TITLE}}", e(title)).replace("{{SUBTITLE}}", e(subtitle)).replace("{{BODY}}", body)
 
@@ -2214,10 +2414,17 @@ def cmd_reporte(args):
         plan_md = markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) if plan.get("mejoras") else ""
         if plan_md and update_block(folder, "mejoras", plan_md):
             print("✔ estado.md actualizado (Plan de mejoras)")
+        plan_intro = ("> Lo que se propone cambiar, una mejora por hallazgo. **Tú decides** cuáles se aplican "
+                      "(`perf.py decidir`); las aprobadas se implementan en la fase siguiente y se vuelven a medir.\n\n")
+        pending_intro = ("> No son tareas obligatorias. Es lo que esta investigación no pudo cerrar, y cómo se cerraría "
+                         "si alguna vez importa.\n\n")
         parts = [("Resumen", pick("resumen ejecutivo", "resumen")), ("Estado inicial", initial_md(rows, plan)),
-                 ("Hallazgos", pick("hallazgos")), ("Plan de mejoras", plan_md),
-                 ("Ficha y condiciones", ficha_subset(pick("ficha"))), ("Pendientes", pick("pendientes"))]
-        subtitle = "Reporte inicial · %s · hb-performance %s · e2e = depende del backend" % (date, VERSION)
+                 ("Hallazgos", findings_md(pick("hallazgos"), plan)),
+                 ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
+                 ("Ficha y condiciones", ficha_subset(pick("ficha"))),
+                 ("Queda abierto (opcional)", pending_intro + pick("pendientes") if pick("pendientes") else ""),
+                 ("Cómo leer este reporte", GLOSSARY)]
+        subtitle = "Reporte inicial · %s · hb-performance %s" % (date, VERSION)
         page = render_report(folder, "reporte-inicial", title, subtitle, parts)
         print("✔ Reporte inicial: %s" % (folder / "reporte-inicial.md"))
         if args.html:
@@ -2234,27 +2441,44 @@ def cmd_reporte(args):
     primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
     missing = [m for m in principales if m not in {r["metrica"] for r in results}]
     chosen = compact_compare(results, plan)
-    primary_md = markdown_table(["Flujo", "Métrica", "Antes", "Después", "Δ %", "Veredicto"], [
-        [r["flujo"], r["metrica"], fmt(r["antes"]["mediana"], r["unidad"]), fmt(r["despues"]["mediana"], r["unidad"]),
-         fmt_pct(r["delta_pct"]), r["veredicto"] + (" (backend)" if r["familia"] == "e2e" else "")] for r in primary]
-    ) if primary else ""
+    primary_intro = ("> Las métricas que se fijaron antes de medir, antes y después de las mejoras aplicadas. El "
+                     "veredicto lo calcula el script comparando con el rango de antes y con el ruido de medición.\n\n")
+    primary_md = primary_intro + markdown_table(["Flujo", "Métrica", "Depende de", "Antes", "Después", "Cambio", "Veredicto",
+                                                 "Qué significa"], [
+        [r["flujo"], r["metrica"], FAMILY_LABEL.get(r["familia"], r["familia"]), fmt(r["antes"]["mediana"], r["unidad"]),
+         fmt(r["despues"]["mediana"], r["unidad"]), "%s (%s)" % (fmt_signed(r["delta"], r["unidad"]), fmt_pct(r["delta_pct"])),
+         r["veredicto"], VERDICT_TEXT.get(r["veredicto"], "") + (" · depende del backend" if r["familia"] == "e2e" else "")]
+        for r in primary]) if primary else ""
+    results_by_metric = {r["metrica"]: r for r in results}
+    n_findings = len(parse_table(pick("hallazgos"))[1])
     logrado_md = markdown_table(LOGRADO_HEADERS, logrado_rows(plan, results)) if plan.get("mejoras") else ""
-    comparison_md = markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen]) if chosen else \
+    comparison_md = ("> La tabla técnica, igual a `comparacion.md`: todas las métricas medidas, con mediana y P90 por fase. "
+                     "Familia `app` = solo la app, `e2e` = app + backend; Ruido (A/A) = antes contra control.\n\n"
+                     + markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen])) if chosen else \
         "No hay métricas con antes y después."
-    parts = [("Resumen ejecutivo", pick("resumen ejecutivo")), ("Métricas principales", primary_md),
-             ("Propuesto contra logrado", logrado_md), ("Hallazgos", pick("hallazgos")),
+    pending_intro = ("> No son tareas obligatorias. Es lo que esta investigación no pudo cerrar, y cómo se cerraría si "
+                     "alguna vez importa.\n\n")
+    parts = [("Resumen ejecutivo", pick("resumen ejecutivo")),
+             ("De los hallazgos al resultado", improvements_summary(plan, results, n_findings)),
+             ("Métricas principales", primary_md),
+             ("Mejoras: esperado contra logrado", logrado_md),
+             ("Hallazgos", findings_md(pick("hallazgos"), plan, results_by_metric)),
              ("Mejoras aplicadas", pick("mejoras aplicadas")),
              ("Lectura de la comparación", pick("lectura de la comparación", "lectura de la comparacion")),
-             ("Comparación", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
-             ("Pendientes", pick("pendientes"))]
-    charts = "".join('<figure class="chart"><figcaption>%s · %s</figcaption>%s</figure>'
-                     % (e(r["metrica"]), e(r["flujo"]), bars_svg(r)) for r in primary)
-    subtitle = "%s · hb-performance %s · e2e = depende del backend" % (date, VERSION)
-    page = render_report(folder, "reporte", title, subtitle, parts, charts)
-    print("✔ Reporte: %s" % (folder / "reporte.md"))
+             ("Comparación completa", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
+             ("Queda abierto (opcional)", pending_intro + pick("pendientes") if pick("pendientes") else ""),
+             ("Cómo leer este reporte", GLOSSARY)]
+    charts = "".join('<figure class="chart"><figcaption>%s · %s <span class="verdict %s">%s</span></figcaption>%s</figure>'
+                     % (e(r["metrica"]), e(r["flujo"]), VERDICT_CLASS[r["veredicto"]], e(r["veredicto"]), bars_svg(r))
+                     for r in primary)
+    subtitle = "Reporte final · %s · hb-performance %s" % (date, VERSION)
+    summary_rows = parse_table(improvements_summary(plan, results, n_findings))[1]
+    extras = {"De los hallazgos al resultado": flow_html(flow_counts(plan, summary_rows, n_findings))} if summary_rows else {}
+    page = render_report(folder, "reporte-final", title, subtitle, parts, charts, extras)
+    print("✔ Reporte final: %s" % (folder / "reporte-final.md"))
     if args.html:
-        (folder / "reporte.html").write_text(page, encoding="utf-8")
-        print("✔ Reporte HTML: %s" % (folder / "reporte.html"))
+        (folder / "reporte-final.html").write_text(page, encoding="utf-8")
+        print("✔ Reporte HTML: %s" % (folder / "reporte-final.html"))
     for m in missing:
         print("⚠ La métrica principal '%s' no tiene antes y después en el CSV." % m)
     if unmatched:

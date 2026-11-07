@@ -6,51 +6,106 @@
 <title>{{TITLE}}</title>
 <style>
   :root {
-    --bg: #f7f7f8; --surface: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --border: #e3e3e6;
-    --before: #9aa4b2; --after: #4f6bed; --better: #1f8a4c; --worse: #c4372d; --same: #6e6e73;
+    --bg: #f4f5f7; --surface: #ffffff; --text: #1c1d21; --muted: #646872; --border: #e2e4e9; --soft: #f7f8fa;
+    --accent: #3657d6; --accent-soft: #e9edfb;
+    --before: #a3abb8; --after: #3657d6;
+    --ok: #1e7f48; --ok-soft: #e3f4ea; --ko: #bf3a2f; --ko-soft: #fbe7e4; --same: #646872; --same-soft: #eef0f3;
+    --warn: #9a6400; --warn-soft: #fff3d6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #141416; --surface: #1d1d20; --text: #f2f2f4; --muted: #a0a0a8; --border: #33333a;
-      --before: #6b7380; --after: #8da2ff; --better: #4cc77f; --worse: #ff6b5f; --same: #a0a0a8;
+      --bg: #121317; --surface: #1b1d23; --text: #eef0f4; --muted: #9ca2ad; --border: #2e323b; --soft: #202329;
+      --accent: #8da2ff; --accent-soft: #232a45;
+      --before: #6b7380; --after: #8da2ff;
+      --ok: #4cc77f; --ok-soft: #173123; --ko: #ff6b5f; --ko-soft: #3a1f1c; --same: #9ca2ad; --same-soft: #262930;
+      --warn: #f0b64a; --warn-soft: #3a2e14;
     }
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body { margin: 0; background: var(--bg); color: var(--text);
-         font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 64px; }
-  header h1 { margin: 0 0 4px; font-size: 26px; }
-  header p { margin: 0; color: var(--muted); }
-  section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-            padding: 20px; margin-top: 20px; }
-  h2 { margin: 0 0 12px; font-size: 18px; }
-  h3 { margin: 0 0 8px; font-size: 15px; }
-  .table-wrap { overflow-x: auto; }
+         font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif; }
+  header { background: linear-gradient(135deg, var(--accent) 0%, #6b3fd6 100%); color: #fff; padding: 40px 16px 32px; }
+  header .inner { max-width: 1080px; margin: 0 auto; }
+  header .kicker { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; opacity: .8; margin: 0 0 8px; }
+  header h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; font-weight: 700; }
+  header p { margin: 0; opacity: .9; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 72px; }
+  .toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+  .toc a { font-size: 13px; color: var(--accent); background: var(--accent-soft); border-radius: 999px;
+           padding: 4px 12px; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+            padding: 22px 24px; margin-top: 16px; }
+  h2 { margin: 0 0 12px; font-size: 19px; }
+  h3 { margin: 18px 0 8px; font-size: 15px; }
+  h4 { margin: 14px 0 6px; font-size: 14px; color: var(--muted); }
+  p { margin: 8px 0; }
+  .hint { color: var(--muted); font-size: 14px; border-left: 3px solid var(--accent); background: var(--soft);
+          padding: 8px 12px; border-radius: 0 8px 8px 0; margin: 0 0 14px; }
+  .hint code { color: var(--text); }
+  .table-wrap { overflow-x: auto; margin: 10px 0; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-  .verdict { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
-             border: 1px solid currentColor; white-space: nowrap; }
-  .v-better { color: var(--better); } .v-worse { color: var(--worse); } .v-same { color: var(--same); }
-  .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-  .chart { margin: 0; } .chart figcaption { font-weight: 600; margin-bottom: 6px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; font-size: 12.5px; text-transform: uppercase;
+       letter-spacing: .04em; background: var(--soft); }
+  tbody tr:nth-child(even) { background: var(--soft); }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--soft);
+         padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--soft); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  .verdict, .state { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+                     white-space: nowrap; }
+  .v-better { color: var(--ok); background: var(--ok-soft); }
+  .v-worse { color: var(--ko); background: var(--ko-soft); }
+  .v-same { color: var(--same); background: var(--same-soft); }
+  .state { color: var(--same); background: var(--same-soft); white-space: normal; }
+  .s-propuesta { color: var(--warn); background: var(--warn-soft); }
+  .s-aprobada, .s-aplicada { color: var(--accent); background: var(--accent-soft); }
+  .s-descartada { color: var(--ko); background: var(--ko-soft); }
+  td.ok { color: var(--ok); font-weight: 600; }
+  td.ko { color: var(--ko); font-weight: 600; }
+  .flow { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 16px; }
+  .flow .step { flex: 1 1 150px; background: var(--soft); border: 1px solid var(--border); border-radius: 10px;
+                padding: 12px 14px; position: relative; }
+  .flow .step b { display: block; font-size: 26px; line-height: 1.1; }
+  .flow .step span { font-size: 12.5px; color: var(--muted); }
+  .flow .step.ok { border-color: var(--ok); background: var(--ok-soft); } .flow .step.ok b { color: var(--ok); }
+  .flow .step.ko { border-color: var(--ko); background: var(--ko-soft); } .flow .step.ko b { color: var(--ko); }
+  .flow .step:not(:last-child)::after { content: "→"; position: absolute; right: -11px; top: 50%; transform: translateY(-50%);
+                                         color: var(--muted); font-size: 14px; }
+  .flow .step.ok::after, .flow .step.end::after { content: ""; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-bottom: 14px; }
+  .chart { margin: 0; background: var(--soft); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .chart figcaption { font-weight: 600; margin-bottom: 8px; font-size: 14px; display: flex; gap: 8px; align-items: center;
+                      flex-wrap: wrap; }
   .chart svg { width: 100%; height: auto; }
   .bar-before { fill: var(--before); } .bar-after { fill: var(--after); }
   .bar-label, .bar-value { fill: var(--text); font-size: 12px; }
-  .card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
-  .card p { margin: 4px 0; }
+  ul, ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  li code:first-child { font-weight: 600; }
   .muted { color: var(--muted); }
-  ul { margin: 0; padding-left: 20px; }
+  footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 32px; color: var(--muted); font-size: 12.5px; }
+  @media print {
+    body { background: #fff; } header { background: #333; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    section { break-inside: avoid; border-color: #ccc; } .toc { display: none; }
+  }
 </style>
 </head>
 <body>
-<main>
 <header>
-  <h1>{{TITLE}}</h1>
-  <p>{{SUBTITLE}}</p>
+  <div class="inner">
+    <p class="kicker">hb-performance · rendimiento Android</p>
+    <h1>{{TITLE}}</h1>
+    <p>{{SUBTITLE}}</p>
+  </div>
 </header>
+<main>
 {{BODY}}
 </main>
+<footer>Generado por hb-performance. Los números son medianas de varias corridas; el detalle está en <code>estado.md</code> y <code>metricas.csv</code> de la misma carpeta.</footer>
 </body>
 </html>
