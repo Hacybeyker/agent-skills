@@ -41,6 +41,8 @@ Si el pedido trae un alcance aprobado (un documento de alcance, un `PLAN.md` o u
 - **Te detienes igual** si el mismo paso del DoD falla tres veces, si hace falta algo fuera del alcance (credenciales, push, publicar, borrar datos) o si dos reglas se contradicen y ninguna opción se puede deshacer.
 - Sigue valiendo la regla de no commitear (sección 7), salvo que el pedido lo autorice por escrito.
 
+Para orquestar una construcción grande por bloques (un plan, un brief común y un subagente por bloque), la receta está en [orquestacion.md](references/orquestacion.md).
+
 ## 2. Implementación
 
 ### Feature o enhancement
