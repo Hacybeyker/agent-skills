@@ -73,7 +73,19 @@ Una tarea a la vez. No toques código que no tenga que ver con ella.
 
 Si el proyecto lleva `CHANGELOG.md` con `[Unreleased]`, o `AGENTS.md` pide documentar, agrega la entrada con las reglas de `hb-commit` (secciones estándar de Keep a Changelog, idioma del archivo).
 
-## 4. Definition of Done
+## 4. Autorrevisión y Definition of Done
+
+### Autorrevisión (antes del DoD)
+
+El DoD no ve los fallos de diseño. Antes de correrlo, relee tu diff contra el **documento de alcance completo** (la spec, el `PLAN.md` o el issue entero), no solo contra el prompt de esta tarea: las contradicciones y los casos que el prompt no repite viven ahí. Recorre esta lista fija y corrige lo que encuentres:
+
+1. **Estado y persistencia frente a los requisitos.** ¿Qué sobrevive a un arranque en frío, a la muerte del proceso y a recrear la pantalla? Cada dato que el alcance exige conservar debe vivir donde sobrevive (base local, `SavedStateHandle`, backend), no solo en memoria. Si un requisito choca con otro ("se conserva" frente a "vive en memoria"), no lo resuelvas en silencio: decídelo y anótalo (sección 1).
+2. **`catch` demasiado amplios.** Atrapa las excepciones concretas, no `Exception`, `Throwable` ni una genérica como `IllegalArgumentException`, y nunca la cancelación de corrutinas. El mapeo de errores cubre todas las combinaciones que el contrato permite (un 401 sin cuerpo, por ejemplo).
+3. **Dependencias sin uso.** Cada dependencia que agregaste tiene al menos un import que la use; si no, quítala. Si el alcance pide declararla aunque nada la use todavía, anótalo.
+4. **Casos que el alcance pide y no se hicieron.** Recorre el alcance línea por línea: cachés, estados vacíos y de error, caminos negativos alcanzables desde la UI, valores de referencia, identificadores de test. Lo que quede fuera se hace o se declara en la entrega como pendiente.
+5. **Reglas del `AGENTS.md`.** Comentarios (¿solo el porqué?), palabras o temas prohibidos, nombres, una declaración por archivo, idioma del código, de la documentación y de los textos. Búscalas con `grep` sobre el diff, no de memoria.
+
+### Definition of Done
 
 - Corre los comandos de `## DoD`, en orden.
 - Si un paso falla, corrige y repite desde ese paso. **Si el mismo paso falla tres veces, detente** y reporta el error con tu diagnóstico.
@@ -159,6 +171,7 @@ Se genera siempre, salvo que el usuario diga que no.
 - [ ] Tests nuevos con fakes; en un bugfix, el test que reproduce el bug.
 - [ ] Patrones aplicados solo donde el problema los pedía.
 - [ ] Changelog actualizado si el proyecto lo usa.
+- [ ] Autorrevisión contra el alcance completo: estado y persistencia, `catch`, dependencias, casos pedidos y reglas del `AGENTS.md`.
 - [ ] DoD completo: cada paso en `pass` o `skipped` con motivo.
 - [ ] Si el cambio toca UI de Compose en Android y existe la CLI `android`: previews dibujados, revisados e incluidos en el reporte.
 - [ ] Reporte generado y ruta entregada.
