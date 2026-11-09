@@ -2871,6 +2871,127 @@ LaunchedEffect(uiState.isLoading) { if (!uiState.isLoading) PerfHooks.mark("<pan
 }
 
 
+# ── Escaneo del proyecto: puntos de extensión de contenido visible ───────────
+
+SCAN_SKIP = {"build", "node_modules", "reports", "test", "androidTest", "testFixtures", "out"}
+SCAN_MAX_FILES = 5000
+SCAN_MAX_BYTES = 400_000
+HOOK_TOKENS = ("VisibleContent", "ContentVisible", "ContentReady", "ScreenReady", "ScreenLoaded", "ContentLoaded",
+               "FullyDrawn", "ReportDrawn", "ScreenDrawn", "ContentShown", "ScreenShown", "ScreenDisplayed",
+               "ScreenImpression", "ScreenViewed", "ScreenTracker", "ScreenTracking")
+INTERFACE_DECL = re.compile(r"\binterface\s+(\w+)")
+COMPOSITION_LOCAL = re.compile(r"\bval\s+(\w+)\s*(?::[^=\n]+)?=\s*(?:static)?[cC]ompositionLocalOf\b")
+SET_OF = re.compile(r"\bSet<\s*(?:@\w+(?:\([^)]*\))?\s+)*(\w+)")
+INTO_BINDING = re.compile(r"@(?:IntoSet|IntoMap)\b[\s\S]{0,300}?\bfun\s+\w+\s*\([^)]*\)\s*:\s*(?:@\w+\s+)*(\w+)")
+PACKAGE_DECL = re.compile(r"^\s*package\s+([\w.]+)", re.M)
+FUN_DECL = re.compile(r"\bfun\s+(\w+)\s*\(([^)]*)\)(\s*:\s*[\w.<>?]+)?(\s*[{=])?")
+
+
+def walk_files(root, patterns, suffixes):
+    """Archivos con esas extensiones bajo root, en orden, sin carpetas de build, ocultas ni de tests y sin las rutas
+    prohibidas; los que generó la skill tampoco."""
+    count = 0
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = sorted(d for d in dirs if d not in SCAN_SKIP and not d.startswith(".")
+                         and not is_denied(os.path.join(current, d), root, patterns))
+        for name in sorted(files):
+            path = pathlib.Path(current) / name
+            if name.endswith(suffixes) and not is_denied(path, root, patterns) and not is_generated(path):
+                count += 1
+                if count > SCAN_MAX_FILES:
+                    return
+                yield path
+
+
+def hook_methods(text, declaration):
+    """Funciones abstractas (sin cuerpo) de la interfaz que empieza en declaration: [(nombre, parámetros, retorno)]."""
+    start = text.find("{", declaration.end())
+    # entre el nombre y la llave solo van genéricos y supertipos; si aparece otra declaración, la interfaz no tiene cuerpo
+    if start < 0 or re.search(r"\b(?:class|interface|object|fun|val|var)\b", text[declaration.end():start]):
+        return []
+    body = text[start:match_brace(text, start)]
+    return [(m.group(1), m.group(2).strip(), (m.group(3) or "").strip(": ").strip())
+            for m in FUN_DECL.finditer(body) if not m.group(4)]
+
+
+def scan_sources(root, patterns):
+    """Un solo recorrido de los .kt y .java: interfaces y CompositionLocal con un nombre de 'contenido visible'
+    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. Devuelve {"ganchos": [...], "archivos": n}."""
+    hooks, multi, files = [], set(), 0
+    root = pathlib.Path(root)
+    for path in walk_files(root, patterns, (".kt", ".java")):
+        try:
+            if path.stat().st_size > SCAN_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        files += 1
+        multi.update(SET_OF.findall(text))
+        multi.update(INTO_BINDING.findall(text))
+        relative = path.relative_to(root).as_posix()
+        package_match = PACKAGE_DECL.search(text)
+        package = package_match.group(1) if package_match else ""
+        for declaration in INTERFACE_DECL.finditer(text):
+            if any(token in declaration.group(1) for token in HOOK_TOKENS):
+                hooks.append({"tipo": "interfaz", "nombre": declaration.group(1), "archivo": relative, "paquete": package,
+                              "linea": text.count("\n", 0, declaration.start()) + 1,
+                              "metodos": hook_methods(text, declaration)})
+        for local in COMPOSITION_LOCAL.finditer(text):
+            if any(token in local.group(1) for token in HOOK_TOKENS):
+                hooks.append({"tipo": "compositionlocal", "nombre": local.group(1), "archivo": relative, "paquete": package,
+                              "linea": text.count("\n", 0, local.start()) + 1, "metodos": []})
+    for hook in hooks:
+        hook["multibinding"] = hook["tipo"] == "interfaz" and hook["nombre"] in multi
+    return {"ganchos": hooks, "archivos": files}
+
+
+def hook_snippet(hooks, variant):
+    """Cómo conectar PerfHooks.mark al punto de extensión que el proyecto ya tiene, en lugar de editar pantallas."""
+    lines = ["// El proyecto ya tiene un punto de extensión de contenido visible: conecta ahí las marcas, no en las pantallas.",
+             "// Candidatos (verifica leyendo la interfaz y quién la llama; el nombre de la marca es lo que reciba el gancho):"]
+    for hook in hooks[:6]:
+        extra = ""
+        if hook["metodos"]:
+            extra = " · " + "; ".join("fun %s(%s)" % (m[0], m[1]) for m in hook["metodos"][:2])
+        lines.append("//  - %s %s (%s:%d)%s%s" % (
+            "interfaz" if hook["tipo"] == "interfaz" else "CompositionLocal", hook["nombre"], hook["archivo"], hook["linea"],
+            " · con multibinding" if hook["multibinding"] else "", extra))
+    chosen = next((h for h in hooks if h["tipo"] == "interfaz" and h["multibinding"] and h["metodos"]), None)
+    if chosen:
+        method = chosen["metodos"][0]
+        name_param = next(iter(re.findall(r"(\w+)\s*:\s*String\b", method[1])), None)
+        lines += [
+            "//",
+            "// Binding en el source set perf (debug y %s; release queda igual, el multibinding ya existe):" % variant,
+            "@Module",
+            "@InstallIn(SingletonComponent::class)",
+            "object PerfVisibleContentModule {",
+            "    @Provides",
+            "    @IntoSet",
+            "    fun perf%s(): %s = object : %s {" % (chosen["nombre"], chosen["nombre"], chosen["nombre"]),
+            "        override fun %s(%s) { PerfHooks.mark(%s) }" % (
+                method[0], method[1], name_param or '"<pantalla>" /* arma el nombre con los parámetros */'),
+            "    }",
+            "}",
+            "// imports: %s.%s, {{PAQUETE}}.PerfHooks, dagger.Module, dagger.Provides, dagger.hilt.InstallIn, "
+            "dagger.hilt.components.SingletonComponent, dagger.multibindings.IntoSet%s" % (
+                chosen["paquete"] or "<paquete>", chosen["nombre"],
+                " (más los tipos de los parámetros)" if any(t not in ("String", "Int", "Long", "Boolean", "Float", "Double")
+                                                          for t in re.findall(r":\s*([\w.]+)", method[1])) else ""),
+            "// Con un Map usa @IntoMap y la clave del proyecto; con Dagger 2 sin Hilt, agrega el módulo a la lista del componente.",
+            "// Si el componente no es Singleton (retained, activity), cambia @InstallIn."]
+    else:
+        lines += [
+            "//",
+            "// Sin multibinding que lo reciba: no hay dónde sumar un binding sin tocar el código principal. Pon la marca en la",
+            "// implementación que atiende el gancho (PerfHooks.mark(<nombre>) en un solo archivo) o, con CompositionLocal, en",
+            "// el CompositionLocalProvider que lo provee. Si hay pantallas sin pasar por él, una línea por pantalla como último recurso."]
+    lines.append("// Primera pantalla (TTFD, también para Android vitals), Compose: ReportDrawnWhen { !uiState.isLoading }; "
+                 "Views: reportFullyDrawn().")
+    return "\n".join(lines)
+
+
 VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
 DEBUGGABLE_OFF = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)false\b")
@@ -3031,8 +3152,14 @@ def cmd_instrumentar(args):
     if network:
         snippets.append(("2. Red: cada OkHttpClient pasa por el gancho", SNIPPETS["red_hilt" if hilt else "red_sinhilt"]))
     snippets.append(("%d. Navegación sin cambio de actividad (Compose, Navigation 3)" % (3 if network else 2), SNIPPETS["nav"]))
-    snippets.append(("%d. Contenido visible: reportFullyDrawn en la primera pantalla y PerfHooks.mark en las demás"
-                     % (4 if network else 3), SNIPPETS["contenido"]))
+    hooks = scan_sources(root, denied)["ganchos"]
+    if hooks:
+        snippets.append(("%d. Contenido visible: el proyecto ya tiene un punto de extensión (%d candidato%s): conecta ahí las "
+                         "marcas" % (4 if network else 3, len(hooks), "" if len(hooks) == 1 else "s"),
+                         hook_snippet(hooks, variant)))
+    else:
+        snippets.append(("%d. Contenido visible: reportFullyDrawn en la primera pantalla y PerfHooks.mark en las demás"
+                         % (4 if network else 3), SNIPPETS["contenido"]))
     if "manifest" in pending:
         snippets.append(("Manifest existente: agrega dentro de <application>",
                          '<provider android:name="{{PAQUETE}}.PerfInstaller" android:authorities="${applicationId}.perf-installer" '
