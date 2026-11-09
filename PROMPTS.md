@@ -38,6 +38,7 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | Un PR | `Revisa el PR #<n>.` |
 | Archivos concretos | `Revisa <ruta/Archivo.kt> y <ruta/Otro.kt>.` |
 | Rápida, sin correr el DoD | `Haz una revisión rápida, solo de lectura, de <qué>.` |
+| Un bloque delegado a un subagente (orquestadores) | `Con hb-review en modo rápido, revisa el diff del bloque <x> contra <documento de alcance>. No corras el DoD.` |
 | Solo seguridad | `Revisa <qué> solo con el checklist de seguridad del perfil.` |
 
 ## hb-commit · commits, push y PRs

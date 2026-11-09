@@ -1,10 +1,10 @@
 ---
 name: hb-review
-description: 'Revisa código contra las reglas del proyecto (AGENTS.md), su perfil hb-stack-* y las prácticas de code review de la industria (guía de Google, Conventional Comments). Revisa el diff actual, una rama, un PR o archivos concretos; corre el DoD y entrega hallazgos priorizados con veredicto. No modifica código. Úsala cuando el usuario pida revisar código, hacer code review, revisar un PR o validar cambios antes de un commit ("revisa el código", "haz code review", "revisa el PR #12", "¿cumple con las reglas?", "/hb-review").'
+description: 'Revisa código contra las reglas del proyecto (AGENTS.md), su perfil hb-stack-* y las prácticas de code review de la industria (guía de Google, Conventional Comments). Revisa el diff actual, una rama, un PR o archivos concretos; corre el DoD y entrega hallazgos priorizados con veredicto. Tiene un modo rápido para orquestadores: revisa el diff de un bloque contra el alcance, sin volver a correr el DoD. No modifica código. Úsala cuando el usuario pida revisar código, hacer code review, revisar un PR o validar cambios antes de un commit ("revisa el código", "haz code review", "revisa el PR #12", "¿cumple con las reglas?", "revisión rápida del bloque", "/hb-review").'
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.0.1"
+  version: "1.1.0"
   category: flow
   origin: "basada en code-reviewer"
 ---
@@ -42,7 +42,7 @@ Reconoce también lo que está bien hecho: un buen review no es solo una lista d
 
 ## 3. Verificación automática
 
-Corre el DoD de `AGENTS.md` y reporta cada paso (`pass`, `fail` o `skipped`). No corrijas nada. Si el usuario pidió una revisión rápida o solo de lectura, marca el DoD como `skipped`.
+Corre el DoD de `AGENTS.md` y reporta cada paso (`pass`, `fail` o `skipped`). No corrijas nada. Si el usuario pidió una revisión rápida o solo de lectura, marca el DoD como `skipped`. El modo rápido para orquestadores (ver abajo) también lo salta siempre.
 
 ## 4. Reporte
 
@@ -74,3 +74,14 @@ Ordena por severidad. Agrupa los hallazgos repetidos en uno solo con todas sus u
 - Esta skill **no modifica código**. Si el usuario pide aplicar las correcciones, usa `hb-implement`.
 - Para un PR, publica el review en GitHub (`gh pr review`) solo si el usuario lo pide.
 - Si el proyecto tiene instalados plugins de review (por ejemplo `pr-review-toolkit`), puedes sugerirlos como segunda pasada para tests, errores silenciosos o diseño de tipos.
+
+## Modo rápido (para orquestadores)
+
+Para quien delegó un bloque a un subagente y debe revisarlo antes de commitear, sin repetir el DoD que ya corrió. Se activa cuando el pedido lo dice ("revisión rápida del bloque", "modo rápido") o cuando un plan lo invoca por cada bloque.
+
+- **Qué revisas:** el diff del bloque (`git diff HEAD`, o `git diff <base>...<rama>` si ya está commiteado; el orquestador lo indica) **contra el documento de alcance** y el `AGENTS.md`. Lee completos los archivos con lógica (reglas de negocio, estado, persistencia, manejo de errores): la lista de archivos y el DoD en verde no bastan. Carga solo las referencias del perfil que toca el bloque.
+- **No corres el DoD:** lo corre el orquestador. Márcalo `skipped` con el motivo "lo corre el orquestador".
+- **Qué buscas** (lo que el DoD no ve): estado y persistencia frente a los requisitos; `catch` demasiado amplios; dependencias sin uso; casos que el alcance pide y no están; decisiones del agente que cambian una regla del alcance; reglas del `AGENTS.md` (comentarios, palabras prohibidas, idioma); tests que no fallarían si el código se rompiera.
+- **Qué no haces:** no repites lo que el linter ya cubre, no propones migraciones, no tocas código.
+- **Devuelves poco y priorizado:** el veredicto en una línea (✅ listo para commitear, o 🔄 corregir antes), los hallazgos `issue (blocking)` e `issue` con ubicación y la regla o el requisito que incumplen, y las `question` que el orquestador debe resolver. Sin `nitpick` ni `praise`. Si no hay hallazgos, dilo en una línea.
+- El orquestador decide qué hacer con el resultado: reanudar al subagente con los hallazgos o corregirlos él. Esta skill no corrige.
