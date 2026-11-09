@@ -2893,7 +2893,7 @@ def is_generated(path):
 
 SNIPPETS = {
     "gradle_existente": """android {
-    // La variante "{{VARIANTE}}" ya es profileable y no depurable: no se crea otro build type.
+    // La variante "{{VARIANTE}}" {{ESTADO}}: no se crea otro build type.
     sourceSets {
         getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
         getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
@@ -3193,9 +3193,15 @@ def find_profileable_variants(module, root, patterns):
 
 def resolve_variant(found, requested):
     """(variante, existente): la pedida con --variante; si no, la única profileable y no depurable del módulo (la que
-    creó la skill gana si hay varias); si no hay ninguna, 'profiling' nueva."""
+    creó la skill gana si hay varias); si no hay ninguna, 'profiling' nueva. Una pedida que declara <profileable> es
+    existente aunque no se pueda verificar su build type (sabores, otro plugin): crear otro la duplicaría; si es
+    depurable, se rechaza."""
     if requested:
-        return requested, any(c["nombre"] == requested and c["estado"] == "ok" for c in found)
+        asked = next((c for c in found if c["nombre"] == requested), None)
+        if asked and asked["estado"] == "depurable":
+            raise PerfError("variante '%s' es depurable (declara isDebuggable o hereda de debug): las trazas no reflejan "
+                            "el rendimiento real. Usa otra, o --variante profiling para crear una propia" % requested)
+        return requested, asked is not None
     valid = [c for c in found if c["estado"] == "ok"]
     chosen = [c for c in valid if c["generada"]] or valid
     if len(chosen) > 1:
@@ -3220,6 +3226,7 @@ def cmd_instrumentar(args):
     denied = read_no_leer(root, extra=args.no_leer)
     found_variants = find_profileable_variants(module, root, denied)
     variant, existing = resolve_variant(found_variants, args.variante)
+    unverified = any(c["nombre"] == variant and c["estado"] == "sin build type" for c in found_variants)
     modules = list_modules(root, denied)
     scan = scan_sources(root, denied)
     network = choose(args.red, detect(module, ["okhttp", "retrofit"]))
@@ -3271,9 +3278,15 @@ def cmd_instrumentar(args):
         target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
         print("+ %s" % target)
     yes_no = lambda flag: "sí" if flag else "no"  # noqa: E731
+    kind = "nueva"
+    if existing:
+        kind = ("existente: declara <profileable>, sin verificar que no sea depurable, no se crea otro build type"
+                if unverified else "existente: profileable y no depurable, no se crea otro build type")
     print("Variante: %s (%s) · Red: %s · Retrofit: %s · Fragments: %s · Hilt: %s · código principal en %s" % (
-        variant, "existente: profileable y no depurable, no se crea otro build type" if existing else "nueva",
-        yes_no(network), yes_no(retrofit), yes_no(fragments), yes_no(hilt), main_dir))
+        variant, kind, yes_no(network), yes_no(retrofit), yes_no(fragments), yes_no(hilt), main_dir))
+    if unverified:
+        print("⚠ %s declara <profileable> pero no pude verificar su build type (sabores u otro plugin): confirma que no "
+              "sea depurable (isDebuggable) antes de medir" % variant)
     if len(modules) > 1:
         shown = ["%s (%s)" % m for m in modules[:12]]
         print("Módulos: %s%s. La instrumentación va en el módulo app (--modulo %s); las librerías emiten marcas por una interfaz." % (
@@ -3316,7 +3329,9 @@ def cmd_instrumentar(args):
     for title, body in snippets:
         print(title)
         print(textwrap.indent(body.replace("{{PAQUETE}}", args.paquete).replace("{{FUENTE}}", args.fuente)
-                              .replace("{{VARIANTE}}", variant), "   "))
+                              .replace("{{VARIANTE}}", variant)
+                              .replace("{{ESTADO}}", "declara <profileable> y no pude verificar que no sea depurable: confírmalo"
+                                       if unverified else "ya es profileable y no depurable"), "   "))
         print()
     print("El `paquete` del plan es el applicationId de la variante %s (con su sufijo, si lo tiene); se instala con "
           "install%s." % (variant, variant[:1].upper() + variant[1:]))

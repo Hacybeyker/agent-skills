@@ -1637,6 +1637,26 @@ class VariantTest(PerfBase):
             self.assertIn("release y debug", result.stderr)
         self.assertFalse((module / "src/perf").exists())
 
+    def test_variante_pedida_sin_build_type_legible_se_trata_como_existente_y_avisa(self):
+        module = self.module(otra=PROFILEABLE)
+        out = self.instrument(module, "--variante", "otra").stdout
+        self.assertIn("Variante: otra (existente: declara <profileable>, sin verificar que no sea depurable", out)
+        self.assertIn("⚠ otra declara <profileable> pero no pude verificar su build type", out)
+        self.assertIn('getByName("otra").kotlin.directories', out)
+        self.assertNotIn('create("otra")', out)
+        self.assertNotIn("initWith", out)
+        self.assertNotIn("ya es profileable y no depurable", out)
+        self.assertFalse((module / "src/profiling").exists())
+        self.assertEqual((module / "src/otra/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+
+    def test_variante_pedida_depurable_se_rechaza(self):
+        module = self.module(staging=PROFILEABLE)
+        result = self.instrument(module, "--variante", "staging")
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("variante 'staging' es depurable", result.stderr)
+        self.assertNotIn('create("staging")', result.stdout)
+        self.assertFalse((module / "src/perf").exists())
+
     def test_las_rutas_prohibidas_no_se_leen_al_buscar_la_variante(self):
         module = self.module(benchmark=PROFILEABLE)
         out = self.instrument(module, "--no-leer", "app/src/benchmark/").stdout
