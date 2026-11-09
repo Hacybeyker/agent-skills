@@ -4,7 +4,7 @@ description: 'Perfil de stack para apps Android nativas y Kotlin Multiplatform (
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.4.0"
+  version: "1.5.0"
   category: stack
   origin: "fusiona android-best-practices y kmp-best-practices"
 ---
@@ -102,7 +102,7 @@ Detalle en [presentation.md](references/presentation.md).
 | R8, Baseline Profiles, estabilidad de Compose, tiempo de arranque | [performance.md](references/performance.md) |
 | Variante Android: Hilt, Navigation 3, Room, DataStore | [variants/android.md](references/variants/android.md) |
 | Variante KMP: estructura, source sets, Koin, Navigation 3 de CMP, Room/DataStore KMP, Ktor | [variants/kmp.md](references/variants/kmp.md) |
-| El proyecto usa Views y XML, MVP, RxJava, LiveData o Dagger 2: cómo aplicar las reglas ahí y cómo migrar solo lo decidido | [legacy.md](references/legacy.md) |
+| El proyecto usa Views y XML, MVP, RxJava, LiveData o Dagger 2: cómo aplicar las reglas ahí (módulo library, tests con Hilt, Roborazzi para Views, edge-to-edge, convivir con un host Compose) y cómo migrar solo lo decidido | [legacy.md](references/legacy.md) |
 
 ## 6. Skills oficiales complementarias
 
