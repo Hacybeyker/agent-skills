@@ -64,6 +64,7 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 ## Herramientas
 
 - `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `capturar`, `diagnostico`, `consulta`, `resumen`, `comparar`, `har`, `reporte`, `decidir`, `siguiente` y `consumo` (cada uno con `--help`). Usa `adb` y `trace_processor`.
+- Permisos para auto mode (el clasificador puede denegar secuencias de `adb`): [prompts.md](references/prompts.md) · Permisos recomendados; los agrega el usuario, la skill no toca su configuración.
 - Otras skills, por intención y sin depender de sus archivos: `android-profiler` (heap dumps y fugas), `jetpack-compose-performance`, `anr-audit-and-fix` y `r8-analyzer`.
 
 ## Checklist

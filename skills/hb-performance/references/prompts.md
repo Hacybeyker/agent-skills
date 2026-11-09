@@ -45,3 +45,19 @@ Para el usuario, no para el agente. Cada caso trae el **modelo y el esfuerzo** c
 - **Si el paso siguiente es un comando, no abras un chat**: un chat que solo lee `estado.md` para decírtelo cuesta unos 0,2 USD.
 - Las mediciones y la decisión van en tu terminal: cero tokens.
 - Si el agente te pide el costo o que vuelvas a su chat, no hace falta: `perf.py consumo` lo anota desde la terminal.
+
+## Permisos recomendados para auto mode
+
+En auto mode el clasificador de permisos puede denegar una secuencia de `adb` (un `input swipe` seguido de `screencap`, por ejemplo) sin un criterio que se vea, y un chat que se detiene a pedir permiso se paga entero. Pre-aprueba lo que la skill usa, **antes de empezar**, con `/permissions` o en `.claude/settings.local.json` del proyecto (el local no se commitea). La skill no cambia tus permisos: los agregas tú, y con otra herramienta, el equivalente.
+
+| Para qué | Regla (`permissions.allow`) |
+| --- | --- |
+| Todo `perf.py` (nuevo, capturar, diagnostico, comparar, reporte...) | `Bash(python3 -I <ruta-absoluta-de-la-skill>/scripts/perf.py *)` |
+| Gradle: formateador, DoD, `assemble`/`install` de la variante | `Bash(./gradlew *)` y, si pasas el serial así, `Bash(ANDROID_SERIAL=* ./gradlew *)` |
+| Lo que el agente escribe con `adb` en la ficha (buscar coordenadas, tocar, comprobar la pantalla) | `Bash(adb devices)`, `Bash(adb -s * shell uiautomator dump *)`, `Bash(adb -s * pull *)`, `Bash(adb -s * shell input *)`, `Bash(adb -s * shell dumpsys *)`, `Bash(adb -s * shell getprop *)` |
+| Lo mismo sin pensarlo, en un dispositivo de pruebas | `Bash(adb *)`: incluye `uninstall` y `pm clear`, que la skill nunca usa |
+
+- Las mediciones (`capturar`, `diagnostico`) las corres tú en tu terminal: no necesitan permisos. `perf.py` llama a `adb` por dentro, y esas llamadas no pasan por el clasificador; solo lo que el agente escribe en su terminal.
+- Los comandos de la skill empiezan con `cd <ruta> && ...`: un comando compuesto se evalúa por partes. Si tu configuración pregunta por el `cd`, agrega `Bash(cd *)`.
+- Con `Bash(adb *)` quedan fuera del criterio del clasificador `adb uninstall` y `pm clear`; si eso te incomoda, usa la lista acotada.
+
