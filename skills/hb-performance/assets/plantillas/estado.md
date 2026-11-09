@@ -17,6 +17,7 @@
 | Modos | guiado o autónomo · recorrido manual, comando, arranque-frio o testigo · riguroso o triage |
 | Stack | UI · asincronía · listas · red |
 | Precondiciones | estado de la app igual en todas las fases (sesión, datos, caché) · nunca desinstalar entre fases |
+| No leer | {{NO_LEER}} |
 
 ## Mapa del alcance
 

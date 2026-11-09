@@ -1175,6 +1175,61 @@ class NuevoTest(DeviceBase):
         self.assertEqual(plan["flujos"]["arranque-frio"]["recorrido"]["actividad"], PKG + "/.MainActivity")
 
 
+class NoLeerTest(DeviceBase):
+    def test_une_flags_plan_y_agents_md_sin_duplicados(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## Performance\n\n- **No leer:** docs/ALCANCE-*, `secretos/`; ~/otro/proyecto\n"
+              "- Otra línea: x\n")
+        found = perf.read_no_leer(self.dir, plan={"no_leer": ["docs/ALCANCE-*", "tmp/"]}, extra=["casos/"])
+        self.assertEqual(found, ["casos/", "docs/ALCANCE-*", "tmp/", "secretos/", "~/otro/proyecto"])
+
+    def test_sin_agents_md_ni_lista_no_hay_rutas(self):
+        self.assertEqual(perf.read_no_leer(self.dir), [])
+        write(self.dir / "AGENTS.md", "# P\nno hay nada\n")
+        self.assertEqual(perf.read_no_leer(self.dir), [])
+
+    def test_rutas_relativas_carpetas_y_absolutas(self):
+        patterns = ["docs/ALCANCE-*", "secretos/", "**/golden/**", str(self.dir / "fuera" / "aparte")]
+        denied = lambda rel: perf.is_denied(self.dir / rel, self.dir, patterns)  # noqa: E731
+        self.assertTrue(denied("docs/ALCANCE-1.md"))
+        self.assertTrue(denied("secretos/a/b.kt"))
+        self.assertTrue(denied("app/src/golden/x.png"))
+        self.assertFalse(denied("docs/README.md"))
+        self.assertFalse(denied("app/src/main/Secretos.kt"))
+        self.assertTrue(perf.is_denied(self.dir / "fuera" / "aparte" / "x.md", self.dir, patterns))
+        self.assertFalse(perf.is_denied(self.dir / "fuera" / "otra" / "x.md", self.dir, patterns))
+        self.assertTrue(perf.is_denied(Path(os.path.expanduser("~/otro/proyecto/x")), self.dir, ["~/otro/proyecto"]))
+
+    def test_nuevo_guarda_la_lista_en_el_plan_y_en_estado_md(self):
+        write(self.dir / "AGENTS.md", "## Rendimiento\n- No leer: docs/ALCANCE-*\n")
+        folder = self.dir / "reports" / "perf" / "x"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x", "--no-leer", "casos/")
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["no_leer"], ["casos/", "docs/ALCANCE-*"])
+        self.assertIn("| No leer | `casos/`, `docs/ALCANCE-*` |", (folder / "estado.md").read_text(encoding="utf-8"))
+        other = self.dir / "reports" / "perf" / "y"
+        self.ok("nuevo", "--carpeta", other, "--paquete", PKG, "--flujo", "x")
+        self.assertIn("docs/ALCANCE-*", json.loads((other / "plan.json").read_text(encoding="utf-8"))["no_leer"])
+
+    def test_sin_lista_el_estado_dice_ninguna_y_el_plan_no_la_trae(self):
+        folder = self.dir / "reports" / "perf" / "z"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x")
+        self.assertNotIn("no_leer", json.loads((folder / "plan.json").read_text(encoding="utf-8")))
+        self.assertIn("| No leer | ninguna |", (folder / "estado.md").read_text(encoding="utf-8"))
+
+    def test_los_textos_de_los_chats_nuevos_repiten_la_lista(self):
+        step = perf.chat("Usa hb-performance con estado.md", "intermedio", "medio", "sesión 2", {"no_leer": ["docs/ALCANCE-*", "casos/"]})
+        self.assertIn("No leas ni busques en: docs/ALCANCE-*, casos/.", step["texto"])
+        self.assertNotIn("No leas", perf.chat("x", "intermedio", "medio", "y", {})["texto"])
+
+    def test_un_plan_con_no_leer_mal_formado_se_rechaza(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["no_leer"] = "docs/"
+        write(self.plan, json.dumps(plan))
+        result = self.perf("capturar", "--plan", self.plan, "--prueba", "--paquete", PKG, "--carpeta", self.dir / "p")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'no_leer' es una lista", result.stderr)
+
+
 class NextStepTest(PerfBase):
     def setUp(self):
         super().setUp()

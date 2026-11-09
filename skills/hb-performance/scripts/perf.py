@@ -491,6 +491,8 @@ def load_plan(path):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
     if not isinstance(plan.get("modelos", {}), dict):
         raise PerfError("%s: 'modelos' es un objeto con economico, intermedio y alto" % path)
+    if not isinstance(plan.get("no_leer", []), list) or any(not isinstance(x, str) or not x.strip() for x in plan.get("no_leer", [])):
+        raise PerfError("%s: 'no_leer' es una lista de rutas o patrones que el agente no debe leer (texto)" % path)
     return plan
 
 
@@ -1364,6 +1366,52 @@ def project_root(folder):
     return pathlib.Path.cwd()
 
 
+NO_LEER_LINE = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(?:no leer|do not read)\s*\**\s*:\s*\**\s*(.+?)\s*$", re.I | re.M)
+
+
+def read_no_leer(root, plan=None, extra=()):
+    """Rutas que el agente no debe leer (pruebas a ciegas): los --no-leer, 'no_leer' del plan y la línea 'No leer:' de
+    la sección Performance de AGENTS.md. Sin duplicados y en ese orden."""
+    patterns = list(extra) + list((plan or {}).get("no_leer") or [])
+    try:
+        text = (pathlib.Path(root) / "AGENTS.md").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    for match in NO_LEER_LINE.finditer(text):
+        patterns += [p.strip().strip("`'\"") for p in re.split(r"[,;]", match.group(1))]
+    out = []
+    for pattern in patterns:
+        if pattern and pattern not in out:
+            out.append(pattern)
+    return out
+
+
+def is_denied(path, root, patterns):
+    """True si la ruta cae en alguna de las prohibidas. Un patrón relativo (docs/ALCANCE-*, secretos/) se compara con la
+    ruta desde la raíz del proyecto; uno absoluto o con ~, con la ruta completa. Una carpeta cubre todo lo que tiene dentro."""
+    if not patterns:
+        return False
+    absolute = pathlib.Path(path).resolve()
+    try:
+        relative = absolute.relative_to(pathlib.Path(root).resolve()).as_posix()
+    except ValueError:
+        relative = None
+    for raw in patterns:
+        pattern = os.path.expanduser(raw.strip())
+        if os.path.isabs(pattern):  # con y sin enlaces simbólicos (en macOS /var es /private/var)
+            targets, bases = {absolute.as_posix(), os.path.abspath(str(path))}, {pattern, os.path.realpath(pattern)}
+        elif relative is not None:
+            targets, bases = {relative}, {pattern}
+        else:
+            continue
+        for target in targets:
+            for base in {b.rstrip("/") for b in bases if b.rstrip("/")}:
+                for candidate in (target, "/" + target):
+                    if fnmatch.fnmatchcase(candidate, base) or fnmatch.fnmatchcase(candidate, base + "/*"):
+                        return True
+    return False
+
+
 def model_name(plan, tier):
     return (plan.get("modelos") or {}).get(tier) or MODELOS[tier]
 
@@ -1384,6 +1432,8 @@ def terminal(command, what, you):
 
 
 def chat(text, tier, effort, what, plan):
+    if plan.get("no_leer"):
+        text += " No leas ni busques en: %s." % ", ".join(plan["no_leer"])
     return {"tipo": "chat", "texto": text, "modelo": model_name(plan, tier), "esfuerzo": effort, "que": what}
 
 
@@ -2693,6 +2743,9 @@ def cmd_nuevo(args):
         plan["instalar"] = args.instalar
     if args.triage:
         plan["profundidad"] = "triage"
+    no_leer = read_no_leer(project_root(folder), extra=args.no_leer)
+    if no_leer:
+        plan["no_leer"] = no_leer
     plan["modelos"] = dict(MODELOS)
     if startup:
         families = dict(STARTUP_FAMILIES)
@@ -2715,7 +2768,8 @@ def cmd_nuevo(args):
     (folder / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     state = (ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
     state = state.replace("{{ALCANCE}}", scope).replace("{{FECHA}}", datetime.date.today().isoformat()) \
-        .replace("{{PAQUETE}}", args.paquete).replace("{{DISPOSITIVO}}", device or "<modelo · Android · Hz>")
+        .replace("{{PAQUETE}}", args.paquete).replace("{{DISPOSITIVO}}", device or "<modelo · Android · Hz>") \
+        .replace("{{NO_LEER}}", ", ".join("`%s`" % x for x in no_leer) or "ninguna")
     (folder / "estado.md").write_text(state, encoding="utf-8")
     print("✔ %s y %s" % (folder / "plan.json", folder / "estado.md"))
     ensure_ignored(folder)
@@ -2903,6 +2957,9 @@ def main(argv=None):
     p.add_argument("--serial", help="dispositivo de medición; queda en el plan y lo usan todas las capturas")
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (queda en el plan)")
     p.add_argument("--triage", action="store_true", help="profundidad triage: 3 corridas, sin control, termina en el diagnóstico")
+    p.add_argument("--no-leer", dest="no_leer", action="append", default=[], metavar="RUTA",
+                   help="ruta o patrón que el agente no debe leer (pruebas a ciegas); se repite. Se suma a la línea "
+                        "'No leer:' de AGENTS.md")
     p.set_defaults(func=cmd_nuevo)
 
     p = sub.add_parser("humo", help="prueba de humo del setup: una corrida de arranque que imprime métricas y marcas")

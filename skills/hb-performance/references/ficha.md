@@ -89,6 +89,7 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega
 | `flujos.<nombre>.familias` | Cambia la familia de una métrica (nombre o patrón), por ejemplo `{"ttfd_ms": "e2e"}` |
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
 | `mejoras` | Vacío: lo completa la sesión 2; `estado` lo cambia `perf.py decidir` |
+| `no_leer` | Rutas o patrones que el agente no debe leer ni buscar (prueba a ciegas): `docs/ALCANCE-*`, `casos/`, `~/otro/proyecto`. `nuevo --no-leer` (repetible) y la línea `No leer:` de `AGENTS.md` los suman; `siguiente` los repite en cada chat nuevo |
 | `profundidad` | `riguroso` (por defecto) o `triage`: 3 corridas de antes, sin control, termina en el reporte inicial |
 | `modelos` | Nombres de los modelos `economico`, `intermedio` y `alto` que imprime `siguiente` (por defecto Haiku, Sonnet y Opus); cámbialos si el usuario usa otra herramienta |
 

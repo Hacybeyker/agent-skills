@@ -38,6 +38,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 12. **Comandos para el usuario:** uno por paso, que empiece con `cd <ruta absoluta> && ...`. Con más de un dispositivo conectado, el serial va en cada comando (`adb -s`, `ANDROID_SERIAL=<serial> ./gradlew ...`, `--serial`) o en el plan (`nuevo --serial`). Las capturas de las fases (`capturar --fase antes|control|despues`) y `diagnostico` las corre el usuario **aunque el recorrido sea automático**: tú se las entregas como comandos, nunca las ejecutas; la única que puedes correr es la corrida de prueba de la sesión 1, avisando antes. Solo si el usuario pide el modo autónomo capturas tú.
 13. **Los comandos que siguen los da `perf.py`:** cada comando imprime el paso siguiente, completo y en orden, y lo deja en `estado.md`; `perf.py siguiente` lo recalcula. Cópialos tal cual, sin inventar ni reordenar.
 14. **Español neutro** (tú, no vos) en todo lo que le escribas al usuario y en `estado.md`.
+15. **Rutas que no se leen** (pruebas a ciegas): la línea `No leer:` de la sección Performance de `AGENTS.md`, `no_leer` de `plan.json` y la fila "No leer" de `estado.md` son una sola lista, y vale en todas las sesiones. No leas, no busques (grep, find, glob) ni cites esas rutas, ni para "confirmar" algo; si el trabajo las necesita, dilo y pregunta. `perf.py` también las omite.
 
 ## Sesiones
 
