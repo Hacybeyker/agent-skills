@@ -615,6 +615,35 @@ class CaptureTest(DeviceBase):
         self.assertRegex(out, r"jank_app_pct.*frames no confiables")
         self.assertIn("frames no confiables", (self.plan.parent / "resumen.md").read_text(encoding="utf-8"))
 
+    def test_otra_tanda_de_la_misma_fase_con_gpu_del_host_conserva_el_nivel_no_confiable(self):
+        self.tp_outputs(GOOD)
+        self.env.update({"FAKE_EMULATOR": "1", "FAKE_GLES": GLES_SOFT})
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        self.env["FAKE_GLES"] = GLES_HOST  # se relanzó el emulador con -gpu host
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["corridas"], 2)
+        self.assertEqual(phases["antes"]["entorno"]["frames"], "no")
+        self.assertTrue(phases["antes"]["entorno"]["software"])
+        self.assertEqual(perf.frames_trust(self.plan.parent), ("no", "emulador, render por software"))
+
+    def test_write_phase_conserva_el_peor_entorno_de_la_fase(self):
+        soft = {"emulador": True, "software": True, "render": "SwiftShader", "frames": "no"}
+        host = {"emulador": True, "software": False, "render": "Apple M2", "frames": "baja"}
+        for first, second, expected in ((soft, host, "no"), (host, soft, "no"), (host, None, "baja"), (None, host, "baja"),
+                                        (soft, None, "no")):
+            folder = self.dir / ("fase-%s-%s" % (first and first["frames"], second and second["frames"]))
+            folder.mkdir()
+            for env in (first, second):
+                perf.write_phase(folder, "antes", dict({"fecha": "2026-11-09T10:00:00", "corridas": 1}, **({"entorno": env} if env else {})))
+            self.assertEqual(perf.read_phases(folder)["antes"]["corridas"], 2)
+            self.assertEqual(perf.frames_trust(folder)[0], expected, (first, second))
+        folder = self.dir / "fase-real"
+        folder.mkdir()
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-09T10:00:00", "corridas": 1})
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-09T11:00:00", "corridas": 1})
+        self.assertNotIn("entorno", perf.read_phases(folder)["antes"])
+
     def test_en_un_dispositivo_real_no_avisa_ni_agrega_entorno(self):
         self.tp_outputs(GOOD)
         self.env["FAKE_GLES"] = GLES_REAL

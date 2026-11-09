@@ -90,7 +90,7 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 | Emulador con GPU del host (`-gpu host`) | `baja` | Aviso: valen los conteos (red, inflates) y las fugas; los tiempos y los frames son orientativos, y los reportes lo anotan en los avisos de `jank_*`, `frame_*` y `gfx_*` |
 | Render por software (SwiftShader, llvmpipe), en emulador o no | `no` | Aviso, y `comparar` y el reporte dan `no confiable` a los frames en lugar de un veredicto; los conteos y los tiempos que no son de frame siguen con el suyo |
 
-Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
+Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`; si una fase se mide en varias tandas, conserva el peor nivel: relanzar el emulador con `-gpu host` no la vuelve confiable, hay que repetirla con `--rehacer`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
 
 ## Familias de métricas
 

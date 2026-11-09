@@ -1292,10 +1292,15 @@ def read_phases(folder):
 
 
 def write_phase(folder, phase, data):
+    """Registra la fase sumando las corridas de otra tanda. El 'entorno' conserva el peor nivel de frames de las tandas:
+    relanzar el emulador con la GPU del host o seguir en un dispositivo real no vuelve confiables las corridas de antes."""
     phases = read_phases(folder)
     previous = phases.get(phase) or {}
     data["corridas"] = previous.get("corridas", 0) + data.get("corridas", 0)
     data["fecha"] = previous.get("fecha") or data["fecha"]
+    environments = [e for e in (previous.get("entorno"), data.get("entorno")) if e]
+    if environments:
+        data["entorno"] = max(environments, key=lambda e: FRAMES_LEVEL.get(e.get("frames", "ok"), 0))  # empate: la anterior
     phases[phase] = data
     (pathlib.Path(folder) / "fases.json").write_text(json.dumps(phases, ensure_ascii=False, indent=2) + "\n",
                                                      encoding="utf-8")
