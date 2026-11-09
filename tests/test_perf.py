@@ -1215,6 +1215,23 @@ class NuevoTest(DeviceBase):
         self.assertEqual(plan["flujos"]["arranque-frio"]["recorrido"]["actividad"], PKG + "/.MainActivity")
 
 
+class RecorridoSinTestigoTest(DeviceBase):
+    """Maestro y testigo solo llevan la app al punto de partida (`preparar`): nunca son el recorrido medido."""
+
+    def test_estado_md_no_ofrece_testigo_como_recorrido(self):
+        folder = self.dir / "r"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x")
+        modes = next(l for l in (folder / "estado.md").read_text(encoding="utf-8").splitlines() if l.startswith("| Modos"))
+        self.assertIn("recorrido manual, comando o arranque-frio", modes)
+        self.assertNotIn("testigo", modes)
+
+    def test_la_ayuda_de_recorrido_no_menciona_testigo(self):
+        out = self.ok("capturar", "--help")
+        recorrido = out[out.index("\n  --recorrido"):out.index("\n  --preparar")]
+        self.assertNotIn("testigo", recorrido.lower())
+        self.assertIn("adb", recorrido)
+
+
 class NoLeerTest(DeviceBase):
     def test_une_flags_plan_y_agents_md_sin_duplicados(self):
         write(self.dir / "AGENTS.md", "# P\n\n## Performance\n\n- **No leer:** docs/ALCANCE-*, `secretos/`; ~/otro/proyecto\n"

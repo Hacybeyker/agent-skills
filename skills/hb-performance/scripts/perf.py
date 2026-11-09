@@ -3512,7 +3512,7 @@ def main(argv=None):
     p.add_argument("--fase", help="antes, control o despues")
     p.add_argument("--corridas", type=int, default=MIN_RUNS)
     p.add_argument("--calentamiento", type=int, default=1)
-    p.add_argument("--recorrido", help="'manual' (Enter entre corridas) o un comando que recorre el flujo (testigo)")
+    p.add_argument("--recorrido", help="'manual' (Enter entre corridas) o un comando adb con los toques medidos (nunca Maestro)")
     p.add_argument("--preparar", help="comando que deja la app en el punto de partida antes de cada corrida (en vez del del plan)")
     p.add_argument("--config", help="configuración de Perfetto para esta captura (base, completa, cpu o una ruta)")
     p.add_argument("--serial")

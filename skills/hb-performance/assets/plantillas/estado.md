@@ -14,7 +14,7 @@
 | Flujos | pasos e invalidaciones en plan.json |
 | Build y ambiente | build de profiling (R8, no debuggable, profileable) · backend real o mocks |
 | Dispositivo | {{DISPOSITIVO}} · Hz fijos |
-| Modos | guiado o autónomo · recorrido manual, comando, arranque-frio o testigo · riguroso o triage |
+| Modos | guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage |
 | Stack | UI · asincronía · listas · red |
 | Precondiciones | estado de la app igual en todas las fases (sesión, datos, caché) · nunca desinstalar entre fases |
 | No leer | {{NO_LEER}} |
