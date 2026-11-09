@@ -491,6 +491,24 @@ def load_plan(path):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
     if not isinstance(plan.get("modelos", {}), dict):
         raise PerfError("%s: 'modelos' es un objeto con economico, intermedio y alto" % path)
+    foreign = plan.get("hilos_ajenos", [])
+    if not isinstance(foreign, list):
+        raise PerfError("%s: 'hilos_ajenos' es una lista de {\"nombre\", \"patron\"}" % path)
+    names = set()
+    for group_spec in foreign:
+        if not isinstance(group_spec, dict) or not re.fullmatch(r"[A-Za-z][\w-]*", str(group_spec.get("nombre", ""))) \
+                or not group_spec.get("patron"):
+            raise PerfError("%s: cada entrada de 'hilos_ajenos' necesita 'nombre' (letras, números, _ o -) y 'patron' "
+                            "(expresión regular del nombre del hilo)" % path)
+        try:
+            re.compile(group_spec["patron"])
+        except (re.error, TypeError):
+            raise PerfError("%s: 'hilos_ajenos' %s: la expresión regular %r no es válida" % (
+                path, group_spec["nombre"], group_spec["patron"]))
+        if group_spec.get("familia", "e2e") not in FAMILIAS or group_spec["nombre"] in names:
+            raise PerfError("%s: 'hilos_ajenos' %s: nombre repetido o familia fuera de %s" % (
+                path, group_spec["nombre"], ", ".join(FAMILIAS)))
+        names.add(group_spec["nombre"])
     if not isinstance(plan.get("no_leer", []), list) or any(not isinstance(x, str) or not x.strip() for x in plan.get("no_leer", [])):
         raise PerfError("%s: 'no_leer' es una lista de rutas o patrones que el agente no debe leer (texto)" % path)
     return plan
@@ -726,6 +744,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
         return [], "la app no aparece en la traza", info
     markers = sorted(sections + main + launches, key=lambda r: r[1])
     window = resolve_window(markers, flow_spec.get("ventana"))
+    info["ventana_ns"] = window
     if window:  # frames e hilo solo dentro de la ventana: lo que pasa antes o después (esperar, dar Enter) no cuenta
         frames = [f for f in frames if window[0] <= f[1] <= window[1]]
         main = [r for r in main if window[0] <= r[1] <= window[1]]
@@ -800,6 +819,48 @@ def sections_summary(names):
             detail += ", …"
         parts.append("%s ×%d (%s)" % (prefix, sum(groups[prefix].values()), detail))
     return "; ".join(parts) or "ninguna"
+
+
+def foreign_thread_metrics(sets, groups, known=()):
+    """Métricas de los hilos que el plan declara ajenos a la app (hilos_ajenos: un servidor en el mismo proceso, por
+    ejemplo), a partir de assets/queries/hilos_ajenos.sql. Por grupo: CPU y cantidad de hilos; el resto de los hilos de
+    la app (menos el principal) en hilos_app_cpu_ms; y, por endpoint, la CPU del grupo mientras había una llamada en
+    vuelo (cada llamada cuenta lo suyo: las solapadas se suman). Siempre se emiten los mismos nombres, con 0 si no hubo."""
+    compiled = [(g["nombre"], re.compile(g["patron"]), g.get("familia", "e2e")) for g in groups]
+    header, body = sets[-1] if sets else ([], [])
+    index = {name: i for i, name in enumerate(header)}
+    for column in ("tipo", "nombre", "llamada", "hilos", "cpu_ms"):
+        if body and column not in index:
+            raise PerfError("hilos_ajenos.sql no devolvió la columna '%s'" % column)
+    cpu = {name: 0.0 for name, _, _ in compiled}
+    count = {name: 0 for name, _, _ in compiled}
+    calls, other = {}, 0.0
+    for row in body:
+        thread = row[index["nombre"]] or ""
+        owner = next((name for name, pattern, _ in compiled if pattern.search(thread)), None)
+        try:
+            value = float(row[index["cpu_ms"]])
+        except (TypeError, ValueError):
+            continue
+        if row[index["tipo"]] == "hilo":
+            if owner:
+                cpu[owner] += value
+                count[owner] += to_int(row[index["hilos"]])
+            else:
+                other += value
+        elif row[index["tipo"]] == "red" and owner:
+            key = (owner, endpoint_of(row[index["llamada"]] or ""))
+            calls[key] = calls.get(key, 0.0) + value
+    out = []
+    for name, _, family in compiled:
+        out += [("hilos_%s_cpu_ms" % name, cpu[name], "ms", family), ("hilos_%s_cantidad" % name, count[name], "hilos", "info")]
+        suffix = " %s_cpu_ms" % name
+        endpoints = {e for (n, e) in calls if n == name} | {m[4:-len(suffix)] for m in known
+                                                              if m.startswith("red ") and m.endswith(suffix)}
+        out += [("red %s%s" % (endpoint, suffix), calls.get((name, endpoint), 0.0), "ms", family)
+                for endpoint in sorted(endpoints)]
+    out.append(("hilos_app_cpu_ms", other, "ms", "app"))
+    return out
 
 
 def sql_metrics(header, body, source):
@@ -1803,6 +1864,12 @@ def cmd_capturar(args, plan=None):
                 essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in plan.get("principales", [])]
                 if essential:
                     invalid = "sin marcas para %s: el recorrido no completó el flujo" % ", ".join(essential)
+            if not invalid and plan.get("hilos_ajenos"):
+                window = info.get("ventana_ns")
+                foreign_sql = fill_sql((ASSETS / "queries" / "hilos_ajenos.sql").read_text(encoding="utf-8"), package,
+                                       {"DESDE": window[0] if window else 0, "HASTA": window[1] if window else 4 * 10 ** 18})
+                metrics += with_families(foreign_thread_metrics(run_tp_batch(tp, local, [("ajenos", foreign_sql)])["ajenos"],
+                                                                plan["hilos_ajenos"], known), flow.get("familias"))
             names = {m[0] for m in metrics}
             metrics += [m for m in with_families(extra, flow.get("familias")) if m[0] not in names]
             for name, _ in queries[1:]:

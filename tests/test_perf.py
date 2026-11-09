@@ -1761,3 +1761,77 @@ class MultiModuleTest(PerfBase):
                                                            "com.ejemplo.perf", "--sin-fragments", "--sin-hilt",
                                                            "--no-leer", "feature/").stdout)
 
+
+AJENOS = ('"tipo","nombre","llamada","hilos","cpu_ms"\n'
+          '"hilo","ktor-nio-1","",1,100\n"hilo","ktor-nio-2","",1,50.5\n"hilo","pool-1","",1,30\n'
+          '"red","ktor-nio-1","HTTP GET items/{id} #ab12",1,40\n"red","ktor-nio-2","HTTP GET items/{id}",1,10\n')
+GROUPS = [{"nombre": "servidor", "patron": "^ktor-"}]
+
+
+class ForeignThreadsTest(DeviceBase):
+    def read_csv_at(self, path):
+        with Path(path).open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+    def sets(self, text=AJENOS):
+        lines = [[c.strip('"') for c in line.split(",")] for line in text.strip().splitlines()]
+        return [(lines[0], lines[1:])]
+
+    def test_clasifica_los_hilos_por_regex_y_separa_la_cpu_de_la_app(self):
+        metrics = {m[0]: m for m in perf.foreign_thread_metrics(self.sets(), GROUPS)}
+        self.assertEqual(metrics["hilos_servidor_cpu_ms"][1:], (150.5, "ms", "e2e"))
+        self.assertEqual(metrics["hilos_servidor_cantidad"][1:], (2, "hilos", "info"))
+        self.assertEqual(metrics["hilos_app_cpu_ms"][1:], (30.0, "ms", "app"))
+        self.assertEqual(metrics["red GET items/{id} servidor_cpu_ms"][1:], (50.0, "ms", "e2e"))
+
+    def test_sin_filas_emite_ceros_y_la_familia_se_puede_elegir(self):
+        metrics = {m[0]: m for m in perf.foreign_thread_metrics(
+            [], [{"nombre": "bd", "patron": "room", "familia": "info"}], known={"red GET x bd_cpu_ms"})}
+        self.assertEqual(metrics["hilos_bd_cpu_ms"][1:], (0.0, "ms", "info"))
+        self.assertEqual(metrics["red GET x bd_cpu_ms"][1], 0.0)
+        self.assertEqual(metrics["hilos_app_cpu_ms"][1], 0.0)
+
+    def test_el_primer_grupo_que_calza_se_queda_el_hilo(self):
+        groups = [{"nombre": "a", "patron": "ktor"}, {"nombre": "b", "patron": "ktor-nio"}]
+        metrics = {m[0]: m[1] for m in perf.foreign_thread_metrics(self.sets(), groups)}
+        self.assertEqual((metrics["hilos_a_cpu_ms"], metrics["hilos_b_cpu_ms"]), (150.5, 0.0))
+
+    def test_la_consulta_recibe_la_ventana_y_el_paquete(self):
+        sql = (ROOT / "skills/hb-performance/assets/queries/hilos_ajenos.sql").read_text(encoding="utf-8")
+        filled = perf.fill_sql(sql, PKG, {"DESDE": 5, "HASTA": 10})
+        self.assertNotIn("{{", filled)
+        self.assertIn("name = 'com.ejemplo.app'", filled)
+
+    def test_el_plan_valida_los_hilos_ajenos(self):
+        for bad, message in (("x", "es una lista"), ([{"nombre": "s"}], "necesita 'nombre'"),
+                             ([{"nombre": "s", "patron": "(["}], "no es válida"),
+                             ([{"nombre": "s", "patron": "a", "familia": "zzz"}], "familia fuera de"),
+                             ([{"nombre": "s", "patron": "a"}, {"nombre": "s", "patron": "b"}], "nombre repetido")):
+            plan = json.loads(self.plan.read_text(encoding="utf-8"))
+            plan["hilos_ajenos"] = bad
+            write(self.plan, json.dumps(plan))
+            result = self.perf("capturar", "--plan", self.plan, "--prueba", "--paquete", PKG, "--carpeta", self.dir / "p")
+            self.assertEqual(result.returncode, 2, bad)
+            self.assertIn(message, result.stderr)
+
+    def test_capturar_agrega_las_metricas_de_hilos_ajenos_solo_si_el_plan_las_declara(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_TP_OTRA"] = AJENOS
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("hilos_servidor_cpu_ms", {k[1] for k in self.read_csv_at(self.plan.parent / "metricas.csv")})
+        self.assertNotIn("ajenos", (self.dir / "tp.sql").read_text(encoding="utf-8") if (self.dir / "tp.sql").exists() else "")
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["hilos_ajenos"] = GROUPS
+        write(self.plan, json.dumps(plan))
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "2")
+        data = self.read_csv_at(self.plan.parent / "metricas.csv")
+        self.assertEqual(data[("control", "hilos_servidor_cpu_ms", "1")]["valor"], "150.5")
+        self.assertEqual(data[("control", "hilos_servidor_cpu_ms", "1")]["familia"], "e2e")
+        self.assertEqual(data[("control", "hilos_app_cpu_ms", "2")]["valor"], "30")
+        self.assertEqual(data[("control", "red GET items/{id} servidor_cpu_ms", "1")]["valor"], "50")
+        sql = (self.dir / "tp.sql").read_text(encoding="utf-8")
+        self.assertIn("thread_state", sql)
+        self.assertNotIn("{{", sql)
+        # la ventana del flujo (si la hay) acota la consulta; sin ventana, toda la traza
+        self.assertRegex(sql, r"ts\.ts < 4000000000000000000")
+

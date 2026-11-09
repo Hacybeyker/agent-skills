@@ -104,6 +104,19 @@ Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulat
 - `<métrica> hasta_ultima_red_ms`: para una métrica de usuario que termina en una llamada, cuánto hay desde su inicio hasta el fin de la última llamada de red. `comparar` avisa si se separan: la marca de fin dejó de ser la última llamada y la métrica cambió de definición.
 - El presupuesto de frame sale de `hz` (del plan o de la traza): 16,7 ms a 60 Hz, 11,1 ms a 90 Hz, 8,3 ms a 120 Hz.
 
+## Hilos ajenos a la app
+
+Si hay un servidor (o cualquier trabajo que no es de la app) en el mismo proceso, sus hilos suman CPU, memoria y tiempo de respuesta que no se arreglan en la app. Decláralos en `plan.json` con una expresión regular del nombre del hilo (`hilos_ajenos`, [ficha.md](ficha.md)); mira los nombres en `cpu_por_hilo`. Cuando hay `hilos_ajenos`, cada corrida hace una **segunda pasada** por la traza (unos segundos más) y agrega, por grupo declarado:
+
+| Métrica | Qué es | Familia |
+| --- | --- | --- |
+| `hilos_<nombre>_cpu_ms` | CPU de los hilos del grupo dentro de la ventana del flujo (toda la traza si no hay ventana) | la del grupo (`e2e` por defecto) |
+| `hilos_<nombre>_cantidad` | Cuántos hilos del grupo corrieron | `info` |
+| `hilos_app_cpu_ms` | CPU del resto de los hilos de la app, sin el principal ni los de ningún grupo | `app` |
+| `red <endpoint> <nombre>_cpu_ms` | CPU del grupo mientras había una llamada a ese endpoint en vuelo; las llamadas solapadas se suman | la del grupo |
+
+Las métricas del hilo principal (`hilo_*`) no cambian: el hilo principal nunca es ajeno. Si un grupo es el backend, `red <endpoint> ms` y `ttfb_ms` ya incluyen su trabajo: lee `red <endpoint> <nombre>_cpu_ms` para ver cuánto de esa espera es CPU del servidor y cuánto es el propio tiempo del servidor (esperas, `delay`). Si un hilo calza con dos grupos, gana el primero de la lista.
+
 ## Con Maestro y testigo
 
 - **Nunca como `recorrido`.** Medido en un A/A (misma app, mismo flujo, 10 corridas por lado), Maestro dando un solo toque sumó un 14 % al tiempo de punta a punta (284 → 325 ms, con un ruido adb-contra-adb del 0,4 %) y multiplicó por 3–10 la varianza del hilo principal; la traza creció seis veces. Su driver corre en el dispositivo y activa accesibilidad: trabajo extra para la app dentro de la ventana medida, y no depende del flow.
