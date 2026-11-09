@@ -59,7 +59,7 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 - **Recetas:** el arranque en frío no necesita la sesión 1. `perf.py nuevo --receta arranque-frio` arma `plan.json` y `estado.md` listos para medir (TTID, TTFD y el hilo principal).
 - **Modos:** *guiado* por defecto: el agente corre en su terminal lo que no mide (`perf.py` salvo `capturar` y `diagnostico`, Gradle, DoD, instalar) y **el usuario corre las mediciones desde su terminal, también cuando el recorrido es automático** (así ve correr el dispositivo y no paga tokens por esperar). *Autónomo*, solo si el usuario lo pide: el agente también captura, con el modelo más económico y solo con recorrido automático (`arranque-frio` o un comando).
 - **Profundidad:** *riguroso* por defecto (antes, control y después, 10 corridas con recorrido automático). *Triage* (`profundidad: triage` en el plan, `nuevo --triage`): 3 corridas de antes, sin control, y termina en el diagnóstico y el reporte inicial; los hallazgos llevan "⚠ sin línea base".
-- **Modelo y costo:** [modelos.md](references/modelos.md). Los nombres de los modelos que imprime `siguiente` salen de `modelos` en `plan.json` (por defecto Haiku, Sonnet y Opus); con otra herramienta, el usuario los cambia una vez.
+- **Modelo y costo:** [modelos.md](references/modelos.md). Los nombres de los modelos que imprime `siguiente` salen de `modelos` en `plan.json` (niveles economico, intermedio, diagnostico y alto; por defecto Haiku, Sonnet, Sonnet y Opus); con otra herramienta, el usuario los cambia una vez.
 
 ## Herramientas
 

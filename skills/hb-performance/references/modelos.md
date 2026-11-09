@@ -1,6 +1,8 @@
 # Modelo, razonamiento y costo por sesión
 
-La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `alto`; por defecto Haiku 5.5, Sonnet 5 y Opus 5.5). Con otra herramienta (Copilot, Cursor), cambia esos tres nombres una vez en el plan.
+La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `diagnostico`, `alto`; por defecto Haiku 5.5, Sonnet 5.5, Sonnet 5.5 y Opus 5.5). Con otra herramienta (Copilot, Cursor), cambia esos nombres una vez en el plan.
+
+`diagnostico` es el modelo de la sesión 2 y es opcional: un plan sin `diagnostico` (por ejemplo, uno creado antes de que existiera) usa su `intermedio`, así que nada cambia si no lo tocas. Sirve para bajar el modelo de lo mecánico (setup, ficha y mejoras usan `intermedio`) sin bajar el del diagnóstico, o para subir solo el diagnóstico.
 
 ## Por qué se encarece
 
@@ -17,7 +19,7 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 | 0 · Setup | Intermedio | Medio | 40 |
 | 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 |
 | Mediciones | Ninguno en modo guiado (las corre el usuario); el más económico en modo autónomo | Bajo | — |
-| 2 · Diagnóstico | Intermedio; el superior solo si el caso se complica | Alto | 25 |
+| 2 · Diagnóstico | Diagnóstico (por defecto el intermedio); el alto solo si el caso se complica | Alto | 25 |
 | 3 · Mejora (una por chat) | Intermedio | Medio | 30 |
 | 4 · Cierre | Económico o intermedio | Bajo | 10 |
 
@@ -52,7 +54,7 @@ Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 
 
 ## Medir el costo
 
-1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --costo "1.05 USD" --modelo "Sonnet 5" --pasos 30` (lo que muestre su herramienta: `/cost` en Claude Code, créditos en Copilot).
+1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --costo "1.05 USD" --modelo "Sonnet 5.5" --pasos 30` (lo que muestre su herramienta: `/cost` en Claude Code, créditos en Copilot).
 2. Para comparar versiones de la skill, repite el mismo caso (mismo alcance y mismos flujos) y separa los efectos: una corrida con el mismo modelo que la anterior (ahorro por diseño) y otra con los modelos de esta tabla (ahorro total).
 3. Repite cada una al menos dos veces: el consumo de un agente varía de una corrida a otra.
 4. Comprueba que las conclusiones y los veredictos se mantengan: ahorrar no puede costar rigor.

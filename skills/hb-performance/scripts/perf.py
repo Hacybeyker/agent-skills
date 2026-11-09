@@ -93,7 +93,10 @@ ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
 MARKER = "hbperf_marker"
 ESTADOS = ("propuesta", "aprobada", "descartada", "pendiente", "aplicada")
-MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5"}
+# Niveles de modelo que recomienda `siguiente`. 'diagnostico' (la sesión 2) es opcional en plan.json: sin él usa el
+# 'intermedio' del plan, así que un plan anterior no cambia.
+MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5", "alto": "Opus 5.5"}
+MODEL_FALLBACK = {"diagnostico": "intermedio"}
 SECTION_PREFIXES = ("HTTP", "QUEUE", "CONN", "TTFB", "SCREEN", "NAV", "MARK")
 QUERY_TAG = re.compile(r" #[0-9a-f]{4,8}$")
 e = html.escape
@@ -497,7 +500,7 @@ def load_plan(path):
         if window is not None and not (isinstance(window, dict) and "desde" in window and "hasta" in window):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
     if not isinstance(plan.get("modelos", {}), dict):
-        raise PerfError("%s: 'modelos' es un objeto con economico, intermedio y alto" % path)
+        raise PerfError("%s: 'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico" % path)
     foreign = plan.get("hilos_ajenos", [])
     if not isinstance(foreign, list):
         raise PerfError("%s: 'hilos_ajenos' es una lista de {\"nombre\", \"patron\"}" % path)
@@ -1518,7 +1521,12 @@ def is_denied(path, root, patterns):
 
 
 def model_name(plan, tier):
-    return (plan.get("modelos") or {}).get(tier) or MODELOS[tier]
+    """El modelo del nivel según plan.json; un nivel sin nombre en el plan toma el de su nivel base (MODEL_FALLBACK) y, si
+    tampoco está, el de fábrica."""
+    named = (plan.get("modelos") or {}).get(tier)
+    if named:
+        return named
+    return model_name(plan, MODEL_FALLBACK[tier]) if tier in MODEL_FALLBACK else MODELOS[tier]
 
 
 def install_command(plan, root):
@@ -1573,7 +1581,7 @@ def next_steps(folder, plan, flow=None):
     mejoras = plan.get("mejoras", [])
     estados = [m.get("estado", "propuesta") for m in mejoras]
     resume = "Sigue hb-performance con %s" % state
-    session2 = chat(resume, "intermedio", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
+    session2 = chat(resume, "diagnostico", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
                     "plan de mejoras; termina con el comando para que decidas", plan)
     session4 = chat(resume, "economico", "bajo", "sesión 4: compara, escribe la lectura y el resumen y genera el reporte", plan)
     triage = plan.get("profundidad") == "triage"
@@ -2828,7 +2836,7 @@ def cmd_humo(args):
     print("  · Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
     print("    cd %s && python3 -I %s %s%s" % (root, HERE / "perf.py", " ".join(nuevo),
                                                " [--red si la primera pantalla carga de la red]"))
-    print("  · Otra pantalla o flujo · Chat nuevo · Modelo: %s · Esfuerzo: medio" % MODELOS["intermedio"])
+    print("  · Otra pantalla o flujo · Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio"))
     print("    Texto: \"Usa hb-performance: <qué pantalla o flujo analizar y qué se nota>. Dispositivo %s.\"" % serial)
 
 

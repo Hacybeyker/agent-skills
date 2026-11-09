@@ -842,7 +842,7 @@ class CaptureTest(DeviceBase):
         self.assertIn("Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
         self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/perf/arranque-frio/" % PKG, out)
         self.assertIn('--instalar "./gradlew app:installProfiling"', out)
-        self.assertIn("Otra pantalla o flujo · Chat nuevo · Modelo: Sonnet 5 · Esfuerzo: medio", out)
+        self.assertIn("Otra pantalla o flujo · Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", out)
         self.assertIn("Dispositivo emulator-5554", out)
         self.assertTrue(any((self.dir / "reports/perf/humo/prueba").glob("humo_1.perfetto-trace*")))
         self.assertFalse((self.dir / "reports/perf/humo/plan.json").exists())
@@ -1191,7 +1191,7 @@ class NuevoTest(DeviceBase):
         out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x/2026-11-07", "--paquete", PKG, "--flujo", "x")
         self.assertIn("git ignora", out)
         plan = json.loads((self.dir / "reports/perf/x/2026-11-07/plan.json").read_text(encoding="utf-8"))
-        self.assertEqual(plan["modelos"]["intermedio"], "Sonnet 5")
+        self.assertEqual(plan["modelos"], {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5", "alto": "Opus 5.5"})
 
     def test_receta_arranque_frio_arma_plan_y_estado_listos_para_medir(self):
         folder = self.dir / "reports" / "perf" / "arranque" / "2026-11-05"
@@ -1248,6 +1248,45 @@ class RecorridoSinTestigoTest(DeviceBase):
         recorrido = out[out.index("\n  --recorrido"):out.index("\n  --preparar")]
         self.assertNotIn("testigo", recorrido.lower())
         self.assertIn("adb", recorrido)
+
+
+class ModelLevelsTest(unittest.TestCase):
+    """Los nombres de modelo salen de model_name y las referencias hablan de niveles."""
+
+    def text(self, *parts):
+        return (ROOT.joinpath("skills", "hb-performance", *parts)).read_text(encoding="utf-8")
+
+    def test_ningun_texto_del_script_fija_un_modelo_fuera_de_model_name(self):
+        import inspect
+        self.assertEqual(inspect.getsource(perf).count("MODELOS["), 1)  # el de model_name
+        self.assertNotIn("MODELOS[", inspect.getsource(perf.cmd_humo))
+        self.assertIn("model_name(", inspect.getsource(perf.cmd_humo))
+
+    def test_la_plantilla_del_plan_trae_los_mismos_modelos_que_el_script(self):
+        template = json.loads(self.text("assets", "plantillas", "plan.json"))
+        self.assertEqual(template["modelos"], perf.MODELOS)
+
+    def test_prompts_habla_de_niveles_y_no_de_nombres_fijos_de_modelo(self):
+        prompts = self.text("references", "prompts.md")
+        intro, tables = prompts.split("## Empezar", 1)
+        self.assertIn("`modelos`", intro)
+        for level in ("económico", "intermedio", "diagnóstico", "alto"):
+            self.assertIn(level, intro)
+        for line in tables.splitlines():
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) > 3 and cells[1] != "Caso" and not cells[1].startswith("-"):
+                self.assertNotRegex(cells[2], r"(Haiku|Sonnet|Opus) \d", line)  # la columna Chat
+        self.assertRegex(tables, r"\| Intermedio · medio \|")
+        self.assertRegex(tables, r"\| Económico · bajo \|")
+        self.assertRegex(tables, r"\| Diagnóstico · alto \|")
+
+    def test_modelos_y_ficha_describen_el_nivel_diagnostico(self):
+        models = self.text("references", "modelos.md")
+        self.assertIn("`diagnostico`", models)
+        self.assertRegex(models, r"\| 2 · Diagnóstico \| Diagnóstico \(por defecto el intermedio\)")
+        self.assertIn("sin `diagnostico`", models)
+        self.assertIn("`diagnostico`", self.text("references", "ficha.md"))
+        self.assertNotRegex(models, r"Sonnet 5(?!\.5)")
 
 
 class NoLeerTest(DeviceBase):
@@ -1355,7 +1394,7 @@ class NextStepTest(PerfBase):
         self.assertEqual(len(steps), 5)  # prueba, antes, control, diagnostico y el chat de la sesión 2
         self.assertTrue(all(s["tipo"] == "terminal" and s["texto"].startswith("cd ") for s in steps[:4]))
         self.assertEqual(steps[4]["tipo"], "chat")
-        self.assertEqual((steps[4]["modelo"], steps[4]["esfuerzo"]), ("Sonnet 5", "alto"))
+        self.assertEqual((steps[4]["modelo"], steps[4]["esfuerzo"]), ("Sonnet 5.5", "alto"))
         self.assertIn("--prueba", steps[0]["texto"])
         self.assertIn("abre la app 10 veces", steps[1]["tu"])
         write(self.folder / "prueba" / "arranque-frio_1.perfetto-trace.gz", "x")
@@ -1393,6 +1432,41 @@ class NextStepTest(PerfBase):
         self.assertEqual(steps[0]["modelo"], "GPT-5 mini")
         write(self.folder / "reporte-final.md", "x")
         self.assertEqual(self.step()[0], "investigación cerrada")
+
+    def test_el_diagnostico_es_un_nivel_propio_y_por_defecto_igual_al_intermedio(self):
+        self.assertEqual(perf.MODELOS, {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5",
+                                        "alto": "Opus 5.5"})
+        write(self.folder / "diagnostico.md", "x")
+        title, steps = self.step()
+        self.assertEqual(title, "sesión 2 · diagnóstico")
+        self.assertEqual((steps[0]["modelo"], steps[0]["esfuerzo"]), ("Sonnet 5.5", "alto"))
+
+    def test_un_plan_anterior_sin_diagnostico_usa_su_intermedio(self):
+        write(self.folder / "diagnostico.md", "x")
+        self.plan["modelos"] = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5"}
+        self.save()
+        self.assertEqual(perf.load_plan(self.folder / "plan.json")["modelos"]["intermedio"], "Sonnet 5")  # sigue siendo válido
+        chat = self.step()[1][0]
+        self.assertEqual((chat["modelo"], chat["esfuerzo"]), ("Sonnet 5", "alto"))
+        out = self.ok("siguiente", "--carpeta", self.folder)  # el comando real lee el plan.json viejo sin quejarse
+        self.assertIn("Chat nuevo · Modelo: Sonnet 5 · Esfuerzo: alto", out)
+        self.plan["modelos"] = {"economico": "GPT-5 mini"}  # ni intermedio ni diagnostico: los de fábrica
+        self.assertEqual(self.step()[1][0]["modelo"], "Sonnet 5.5")
+
+    def test_cambiar_el_diagnostico_no_toca_la_sesion_3_y_cambiar_el_intermedio_no_toca_el_diagnostico(self):
+        write(self.folder / "diagnostico.md", "x")
+        self.plan["modelos"] = {"intermedio": "Haiku 5.5", "diagnostico": "Opus 5.5"}
+        self.assertEqual(self.step()[1][0]["modelo"], "Opus 5.5")  # sesión 2
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "x", "estado": "aprobada"}]
+        title, steps = self.step()
+        self.assertEqual((title, steps[0]["modelo"]), ("sesión 3 · M1", "Haiku 5.5"))  # sesión 3
+
+    def test_modelos_tiene_que_ser_un_objeto_y_el_mensaje_nombra_el_diagnostico(self):
+        self.plan["modelos"] = "Sonnet"
+        self.save()
+        result = self.perf("siguiente", "--carpeta", self.folder)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico", result.stderr)
 
     def test_triage_mide_tres_corridas_sin_control_y_cierra_con_el_reporte_inicial(self):
         self.plan["profundidad"] = "triage"
@@ -1459,7 +1533,7 @@ class NextStepTest(PerfBase):
         self.assertIn("  1. **Terminal** (sin chat) · una corrida de prueba", state)
         self.assertIn("     `cd ", state)
         self.assertIn("     Tú: ", state)
-        self.assertIn("**Chat nuevo** · Modelo: Sonnet 5 · Esfuerzo: alto", state)
+        self.assertIn("**Chat nuevo** · Modelo: Sonnet 5.5 · Esfuerzo: alto", state)
         self.assertIn("## Ficha", state)
         self.phases("antes", "control")
         self.ok("siguiente", "--carpeta", self.folder)
