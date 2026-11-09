@@ -1828,9 +1828,10 @@ class MultiModuleTest(PerfBase):
                                                            "--no-leer", "feature/").stdout)
 
 
-AJENOS = ('"tipo","nombre","llamada","hilos","cpu_ms"\n'
-          '"hilo","ktor-nio-1","",1,100\n"hilo","ktor-nio-2","",1,50.5\n"hilo","pool-1","",1,30\n'
-          '"red","ktor-nio-1","HTTP GET items/{id} #ab12",1,40\n"red","ktor-nio-2","HTTP GET items/{id}",1,10\n')
+AJENOS = ('"tipo","nombre","llamada","id","hilos","cpu_ms"\n'
+          '"hilo","ktor-nio-1","","",1,100\n"hilo","ktor-nio-2","","",1,50.5\n"hilo","pool-1","","",1,30\n'
+          '"red","ktor-nio-1","HTTP GET items/{id} #ab12",7,1,40\n"red","ktor-nio-2","HTTP GET items/{id} #ab12",7,1,10\n'
+          '"llamada","","HTTP GET items/{id} #ab12",7,0,0\n"llamada","","HTTP GET items/{id}",8,0,0\n')
 GROUPS = [{"nombre": "servidor", "patron": "^ktor-"}]
 
 
@@ -1848,7 +1849,19 @@ class ForeignThreadsTest(DeviceBase):
         self.assertEqual(metrics["hilos_servidor_cpu_ms"][1:], (150.5, "ms", "e2e"))
         self.assertEqual(metrics["hilos_servidor_cantidad"][1:], (2, "hilos", "info"))
         self.assertEqual(metrics["hilos_app_cpu_ms"][1:], (30.0, "ms", "app"))
-        self.assertEqual(metrics["red GET items/{id} servidor_cpu_ms"][1:], (50.0, "ms", "e2e"))
+        # la llamada 7 usó 40 + 10 ms del grupo y la 8 nada: la mediana por llamada es 25 (el total de la corrida sería 50)
+        self.assertEqual(metrics["red GET items/{id} servidor_cpu_ms"][1:], (25.0, "ms", "e2e"))
+
+    def test_la_cpu_de_red_es_la_mediana_por_llamada_y_no_el_total_del_endpoint(self):
+        rows = ['"tipo","nombre","llamada","id","hilos","cpu_ms"']
+        for call, cpu in ((1, 10), (2, 20), (3, 90)):
+            rows.append('"red","ktor-nio-1","HTTP GET lista",%d,1,%d' % (call, cpu))
+            rows.append('"llamada","","HTTP GET lista",%d,0,0' % call)
+        rows.append('"llamada","","HTTP GET lista",4,0,0')  # una llamada sin CPU del grupo cuenta como 0
+        rows.append('"llamada","","HTTP POST otra",5,0,0')
+        metrics = {m[0]: m for m in perf.foreign_thread_metrics(self.sets("\n".join(rows)), GROUPS)}
+        self.assertEqual(metrics["red GET lista servidor_cpu_ms"][1:], (15.0, "ms", "e2e"))  # mediana de 10, 20, 90, 0
+        self.assertEqual(metrics["red POST otra servidor_cpu_ms"][1], 0.0)
 
     def test_sin_filas_emite_ceros_y_la_familia_se_puede_elegir(self):
         metrics = {m[0]: m for m in perf.foreign_thread_metrics(
@@ -1856,6 +1869,38 @@ class ForeignThreadsTest(DeviceBase):
         self.assertEqual(metrics["hilos_bd_cpu_ms"][1:], (0.0, "ms", "info"))
         self.assertEqual(metrics["red GET x bd_cpu_ms"][1], 0.0)
         self.assertEqual(metrics["hilos_app_cpu_ms"][1], 0.0)
+
+    def test_la_consulta_agrupa_por_llamada_y_lista_las_llamadas_sin_cpu(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.executescript("""
+            CREATE TABLE process (upid INT, pid INT, name TEXT, start_ts INT);
+            CREATE TABLE thread (utid INT, upid INT, tid INT, name TEXT);
+            CREATE TABLE thread_state (utid INT, ts INT, dur INT, state TEXT);
+            CREATE TABLE trace_bounds (start_ts INT);
+            CREATE TABLE slice (id INT, name TEXT, ts INT, dur INT);
+            INSERT INTO process VALUES (1, 100, 'com.ejemplo.app', 0);
+            INSERT INTO trace_bounds VALUES (0);
+            INSERT INTO thread VALUES (1, 1, 100, 'main'), (2, 1, 101, 'ktor-nio-1'), (3, 1, 102, 'pool-1');
+            INSERT INTO thread_state VALUES (1, 0, 900000000, 'Running'),
+                (2, 20000000, 30000000, 'Running'), (2, 210000000, 10000000, 'Running'), (2, 500000000, 5000000, 'Running'),
+                (3, 420000000, 10000000, 'Running');
+            INSERT INTO slice VALUES (10, 'HTTP GET a', 0, 100000000), (11, 'HTTP GET a', 200000000, 100000000),
+                (12, 'HTTP GET b', 400000000, 50000000), (13, 'HTTP GET a', 600000000, 0);
+        """)
+        sql = perf.fill_sql((ROOT / "skills/hb-performance/assets/queries/hilos_ajenos.sql").read_text(encoding="utf-8"),
+                            PKG, {"DESDE": 0, "HASTA": 10 ** 10})
+        cursor = db.execute(sql)
+        header = [d[0] for d in cursor.description]
+        rows = [dict(zip(header, r)) for r in cursor.fetchall()]
+        self.assertEqual(header, ["tipo", "nombre", "llamada", "id", "hilos", "cpu_ms"])
+        by_kind = lambda kind: sorted((r["nombre"], r["id"], r["cpu_ms"]) for r in rows if r["tipo"] == kind)  # noqa: E731
+        self.assertEqual(by_kind("hilo"), [("ktor-nio-1", 0, 45.0), ("pool-1", 0, 10.0)])
+        self.assertEqual(by_kind("red"), [("ktor-nio-1", 10, 30.0), ("ktor-nio-1", 11, 10.0), ("pool-1", 12, 10.0)])
+        self.assertEqual(sorted(r["id"] for r in rows if r["tipo"] == "llamada"), [10, 11, 12])  # la de dur 0 no cuenta
+        metrics = {m[0]: m[1] for m in perf.foreign_thread_metrics([(header, [[str(v) for v in r.values()] for r in rows])], GROUPS)}
+        self.assertEqual(metrics["red GET a servidor_cpu_ms"], 20.0)  # mediana de 30 y 10, no su suma (40)
+        self.assertEqual(metrics["red GET b servidor_cpu_ms"], 0.0)
 
     def test_el_primer_grupo_que_calza_se_queda_el_hilo(self):
         groups = [{"nombre": "a", "patron": "ktor"}, {"nombre": "b", "patron": "ktor-nio"}]
@@ -1894,7 +1939,7 @@ class ForeignThreadsTest(DeviceBase):
         self.assertEqual(data[("control", "hilos_servidor_cpu_ms", "1")]["valor"], "150.5")
         self.assertEqual(data[("control", "hilos_servidor_cpu_ms", "1")]["familia"], "e2e")
         self.assertEqual(data[("control", "hilos_app_cpu_ms", "2")]["valor"], "30")
-        self.assertEqual(data[("control", "red GET items/{id} servidor_cpu_ms", "1")]["valor"], "50")
+        self.assertEqual(data[("control", "red GET items/{id} servidor_cpu_ms", "1")]["valor"], "25")
         sql = (self.dir / "tp.sql").read_text(encoding="utf-8")
         self.assertIn("thread_state", sql)
         self.assertNotIn("{{", sql)

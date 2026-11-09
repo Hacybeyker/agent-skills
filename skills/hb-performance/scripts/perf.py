@@ -824,41 +824,47 @@ def sections_summary(names):
 def foreign_thread_metrics(sets, groups, known=()):
     """Métricas de los hilos que el plan declara ajenos a la app (hilos_ajenos: un servidor en el mismo proceso, por
     ejemplo), a partir de assets/queries/hilos_ajenos.sql. Por grupo: CPU y cantidad de hilos; el resto de los hilos de
-    la app (menos el principal) en hilos_app_cpu_ms; y, por endpoint, la CPU del grupo mientras había una llamada en
-    vuelo (cada llamada cuenta lo suyo: las solapadas se suman). Siempre se emiten los mismos nombres, con 0 si no hubo."""
+    la app (menos el principal) en hilos_app_cpu_ms; y, por endpoint, la mediana por llamada de la CPU del grupo
+    mientras esa llamada estaba en vuelo (las que no tuvieron cuentan 0; la CPU de un momento con dos llamadas en vuelo
+    cuenta en las dos), igual que `red <endpoint> ms`. Siempre se emiten los mismos nombres, con 0 si no hubo."""
     compiled = [(g["nombre"], re.compile(g["patron"]), g.get("familia", "e2e")) for g in groups]
     header, body = sets[-1] if sets else ([], [])
     index = {name: i for i, name in enumerate(header)}
-    for column in ("tipo", "nombre", "llamada", "hilos", "cpu_ms"):
+    for column in ("tipo", "nombre", "llamada", "id", "hilos", "cpu_ms"):
         if body and column not in index:
             raise PerfError("hilos_ajenos.sql no devolvió la columna '%s'" % column)
     cpu = {name: 0.0 for name, _, _ in compiled}
     count = {name: 0 for name, _, _ in compiled}
-    calls, other = {}, 0.0
+    call_endpoint, call_cpu, other = {}, {}, 0.0  # id de la llamada → endpoint; (grupo, id) → CPU del grupo en la llamada
     for row in body:
+        kind = row[index["tipo"]]
         thread = row[index["nombre"]] or ""
         owner = next((name for name, pattern, _ in compiled if pattern.search(thread)), None)
         try:
             value = float(row[index["cpu_ms"]])
         except (TypeError, ValueError):
             continue
-        if row[index["tipo"]] == "hilo":
+        if kind == "hilo":
             if owner:
                 cpu[owner] += value
                 count[owner] += to_int(row[index["hilos"]])
             else:
                 other += value
-        elif row[index["tipo"]] == "red" and owner:
-            key = (owner, endpoint_of(row[index["llamada"]] or ""))
-            calls[key] = calls.get(key, 0.0) + value
+        elif kind in ("red", "llamada"):
+            call = row[index["id"]]
+            call_endpoint[call] = endpoint_of(row[index["llamada"]] or "")
+            if kind == "red" and owner:
+                call_cpu[(owner, call)] = call_cpu.get((owner, call), 0.0) + value
     out = []
     for name, _, family in compiled:
         out += [("hilos_%s_cpu_ms" % name, cpu[name], "ms", family), ("hilos_%s_cantidad" % name, count[name], "hilos", "info")]
         suffix = " %s_cpu_ms" % name
-        endpoints = {e for (n, e) in calls if n == name} | {m[4:-len(suffix)] for m in known
-                                                              if m.startswith("red ") and m.endswith(suffix)}
-        out += [("red %s%s" % (endpoint, suffix), calls.get((name, endpoint), 0.0), "ms", family)
-                for endpoint in sorted(endpoints)]
+        per_endpoint = {}
+        for call, endpoint in call_endpoint.items():
+            per_endpoint.setdefault(endpoint, []).append(call_cpu.get((name, call), 0.0))
+        endpoints = set(per_endpoint) | {m[4:-len(suffix)] for m in known if m.startswith("red ") and m.endswith(suffix)}
+        out += [("red %s%s" % (endpoint, suffix), statistics.median(per_endpoint[endpoint]) if endpoint in per_endpoint else 0.0,
+                 "ms", family) for endpoint in sorted(endpoints)]
     out.append(("hilos_app_cpu_ms", other, "ms", "app"))
     return out
 

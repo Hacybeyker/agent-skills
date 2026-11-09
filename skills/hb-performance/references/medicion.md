@@ -113,9 +113,9 @@ Si hay un servidor (o cualquier trabajo que no es de la app) en el mismo proceso
 | `hilos_<nombre>_cpu_ms` | CPU de los hilos del grupo dentro de la ventana del flujo (toda la traza si no hay ventana) | la del grupo (`e2e` por defecto) |
 | `hilos_<nombre>_cantidad` | Cuántos hilos del grupo corrieron | `info` |
 | `hilos_app_cpu_ms` | CPU del resto de los hilos de la app, sin el principal ni los de ningún grupo | `app` |
-| `red <endpoint> <nombre>_cpu_ms` | CPU del grupo mientras había una llamada a ese endpoint en vuelo; las llamadas solapadas se suman | la del grupo |
+| `red <endpoint> <nombre>_cpu_ms` | **Mediana por llamada** de la CPU del grupo mientras esa llamada estaba en vuelo, sobre las mismas llamadas que `red <endpoint> ms` (las que no tuvieron CPU del grupo cuentan 0; si hay dos llamadas en vuelo a la vez, la CPU de ese momento cuenta en las dos). No es el total de la corrida: ese es `hilos_<nombre>_cpu_ms` | la del grupo |
 
-Las métricas del hilo principal (`hilo_*`) no cambian: el hilo principal nunca es ajeno. Si un grupo es el backend, `red <endpoint> ms` y `ttfb_ms` ya incluyen su trabajo: lee `red <endpoint> <nombre>_cpu_ms` para ver cuánto de esa espera es CPU del servidor y cuánto es el propio tiempo del servidor (esperas, `delay`). Si un hilo calza con dos grupos, gana el primero de la lista.
+Las métricas del hilo principal (`hilo_*`) no cambian: el hilo principal nunca es ajeno. Si un grupo es el backend, `red <endpoint> ms` y `ttfb_ms` ya incluyen su trabajo: compara con `red <endpoint> <nombre>_cpu_ms` (ambas son medianas por llamada) para ver cuánto de esa espera es CPU del servidor y cuánto es el propio tiempo del servidor (esperas, `delay`). Si un hilo calza con dos grupos, gana el primero de la lista.
 
 ## Con Maestro y testigo
 
