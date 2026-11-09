@@ -253,6 +253,28 @@ def slug(text):
     return s[:60] or "reporte"
 
 
+def ensure_ignored(repo, out_dir, report):
+    """Si git no ignora el reporte, deja su carpeta en .git/info/exclude: local, el repo y su .gitignore no cambian.
+    Devuelve un aviso para stderr, o None."""
+    if subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", str(report)]).returncode == 0:
+        return None
+    try:
+        relative = out_dir.resolve().relative_to(repo.resolve()).as_posix()
+        found = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
+                               capture_output=True, text=True)
+        if found.returncode != 0 or relative in ("", "."):
+            raise OSError("sin ruta de exclude")
+        exclude = repo / found.stdout.strip()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write(("" if not current or current.endswith("\n") else "\n") + f"/{relative}/\n")
+        print(f"✔ git ignora {relative} (en .git/info/exclude, local: el repo no cambia)")
+    except (OSError, ValueError):
+        return f"⚠️  {out_dir.name}/ no está ignorada por git y no pude agregarla a .git/info/exclude: que no entre a un commit"
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--meta", required=True, help="JSON con título, tipo, explicaciones por archivo y DoD")
@@ -329,10 +351,10 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{date}-{slug(meta.get('title', 'reporte'))}.html"
     out.write_text(page, encoding="utf-8")
-    ignored = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", str(out)]).returncode == 0
     print(f"📄 Reporte generado: {out.relative_to(repo)}")
-    if not ignored:
-        print(f"⚠️  {args.out}/ no está en .gitignore", file=sys.stderr)
+    warning = ensure_ignored(repo, out_dir, out)
+    if warning:
+        print(warning, file=sys.stderr)
     for path in missing_previews:
         print(f"⚠️  Preview sin imagen: {path}", file=sys.stderr)
     missing = [f["path"] for f in files if f["path"] not in infos and f["group"] is None]

@@ -86,11 +86,68 @@ class ReportTest(unittest.TestCase):
     def test_no_muestra_el_contenido_de_un_binario(self):
         self.assertIn("Archivo binario", self.html())
 
-    def test_avisa_los_archivos_sin_explicacion_y_la_carpeta_sin_ignorar(self):
+    def test_avisa_los_archivos_sin_explicacion(self):
         result = self.generate()
         self.assertIn("Archivos sin explicación en meta.json", result.stderr)
         self.assertIn("b.txt", result.stderr)
-        self.assertIn("no está en .gitignore", result.stderr)
+
+    def exclude(self):
+        path = self.repo / ".git" / "info" / "exclude"
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    def status(self, repo=None):
+        return run(["git", "status", "--porcelain", "--untracked-files=all"], repo or self.repo).stdout
+
+    def test_deja_la_carpeta_fuera_de_git_con_info_exclude_y_no_toca_gitignore(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("/reports/\n", self.exclude())
+        self.assertIn("git ignora reports (en .git/info/exclude", result.stdout)
+        self.assertNotIn(".gitignore", result.stderr)
+        self.assertFalse((self.repo / ".gitignore").exists())
+        self.assertNotIn("reports", self.status())
+
+    def test_no_modifica_un_gitignore_existente(self):
+        write(self.repo / ".gitignore", "build/\n")
+        self.generate()
+        self.assertEqual((self.repo / ".gitignore").read_text(encoding="utf-8"), "build/\n")
+        self.assertIn("/reports/\n", self.exclude())
+
+    def test_si_el_proyecto_ya_la_ignora_no_escribe_nada_y_al_repetir_no_duplica(self):
+        write(self.repo / ".gitignore", "reports/\n")
+        result = self.generate()
+        self.assertNotIn("git ignora", result.stdout)
+        self.assertNotIn("/reports/", self.exclude())
+        (self.repo / ".gitignore").unlink()
+        self.generate()
+        self.generate()
+        self.assertEqual(self.exclude().count("/reports/\n"), 1)
+
+    def test_agrega_la_entrada_en_otra_linea_si_exclude_no_termina_en_salto(self):
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text("*.tmp", encoding="utf-8")
+        self.generate()
+        self.assertEqual(self.exclude(), "*.tmp\n/reports/\n")
+
+    def test_la_skill_no_pide_editar_el_gitignore(self):
+        text = (ROOT / "skills" / "hb-implement" / "SKILL.md").read_text(encoding="utf-8")
+        step = text[text.index("## 6. Reporte HTML"):]
+        step = step[:step.index("\n2. ")]
+        self.assertIn(".git/info/exclude", step)
+        self.assertIn("sin tocar el `.gitignore`", step)
+        self.assertNotIn("esté en `.gitignore`", text)
+        self.assertNotIn("agrégalo", step)
+
+    def test_en_un_worktree_usa_el_exclude_comun_y_no_falla(self):
+        commit_all(self.repo, "cambios")
+        tree = Path(self.tmp.name) / "arbol"
+        run(["git", "worktree", "add", "-q", "-b", "otra", tree], self.repo)
+        write(tree / "nuevo.txt", "x\n")
+        result = run([sys.executable, "-I", SCRIPT, "--meta", self.meta, "--repo", tree], tree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("reports", self.status(tree))
+        self.assertIn("/reports/\n", self.exclude())
 
     def test_al_regenerar_no_se_incluye_a_si_mismo(self):
         self.html()

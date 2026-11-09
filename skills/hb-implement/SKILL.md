@@ -123,7 +123,7 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XCont
 
 Se genera siempre, salvo que el usuario diga que no.
 
-1. Asegura que `reports/` esté en `.gitignore`. Si no está, agrégalo.
+1. Deja `reports/` fuera de git sin tocar el `.gitignore` del proyecto: si `git check-ignore -q reports/` falla, agrega `/reports/` a `.git/info/exclude` (local; con `git rev-parse --git-path info/exclude` si es un worktree). `report.py` lo hace solo al generar el reporte y lo dice; hazlo antes de escribir el meta para que no aparezca como archivo nuevo.
 2. Escribe un meta **por tarea**, `reports/<AAAA-MM-DD>-<slug>.meta.json` (el mismo prefijo que tendrá el reporte), con lo que git no sabe. Un `reports/meta.json` compartido lo pisa el siguiente bloque.
 
 ```json
