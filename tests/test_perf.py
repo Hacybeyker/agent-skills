@@ -1699,3 +1699,65 @@ class ContentHooksTest(PerfBase):
         hooks = scan(self.dir, [])["ganchos"]
         self.assertEqual([(h["nombre"], h["metodos"], h["multibinding"]) for h in hooks], [("ScreenReady", [], False)])
 
+
+class MultiModuleTest(PerfBase):
+    def project(self, **files):
+        write(self.dir / "settings.gradle.kts", 'include(":app", ":core", ":feature:home")')
+        write(self.dir / "app" / "build.gradle.kts", 'plugins { id("com.android.application") }\ndependencies { implementation(libs.okhttp) }')
+        write(self.dir / "core" / "build.gradle.kts", 'plugins { alias(libs.plugins.android.library) }')
+        write(self.dir / "feature" / "home" / "build.gradle.kts", 'plugins { id("com.android.library") }')
+        for name, text in files.items():
+            write(self.dir / name.replace("__", "/"), text)
+
+    def instrument(self, *extra):
+        return self.perf("instrumentar", "--modulo", self.dir / "app", "--paquete", "com.ejemplo.perf", "--sin-fragments",
+                         "--sin-hilt", *extra)
+
+    def test_lista_los_modulos_y_dice_donde_va_la_instrumentacion(self):
+        self.project()
+        modules = perf.list_modules(self.dir, [])
+        self.assertEqual(modules, [("app", "aplicación"), ("core", "librería"), ("feature/home", "librería")])
+        out = self.instrument().stdout
+        self.assertIn("Módulos: app (aplicación) · core (librería) · feature/home (librería)", out)
+        self.assertIn("La instrumentación va en el módulo app", out)
+
+    def test_un_proyecto_de_un_modulo_no_agrega_nada(self):
+        write(self.dir / "app" / "build.gradle.kts", 'plugins { id("com.android.application") }')
+        out = self.instrument().stdout
+        self.assertNotIn("Módulos:", out)
+        self.assertNotIn("módulos library", out)
+
+    def test_sin_punto_de_extension_ofrece_el_puente_por_interfaz_para_las_librerias(self):
+        self.project()
+        out = self.instrument().stdout
+        self.assertIn("Pantallas en módulos library", out)
+        self.assertIn("object ContentVisible", out)
+        self.assertIn("ContentVisible.onVisible = { PerfHooks.mark(it) }", out)
+        self.assertIn("import com.ejemplo.perf.PerfHooks", out)
+
+    def test_con_punto_de_extension_no_ofrece_el_puente(self):
+        self.project(**{"core__src__main__kotlin__T.kt": TRACKER, "core__src__main__kotlin__M.kt": TRACKER_MODULE})
+        out = self.instrument().stdout
+        self.assertIn("ya tiene un punto de extensión", out)
+        self.assertNotIn("object ContentVisible", out)
+
+    def test_avisa_si_el_cliente_okhttp_se_arma_en_una_libreria(self):
+        self.project(**{"core__src__main__kotlin__Net.kt": "package n\nval c = OkHttpClient.Builder().build()\n"})
+        out = self.instrument().stdout
+        self.assertIn("OkHttpClient se arma fuera del módulo app (core/src/main/kotlin/Net.kt:2)", out)
+        self.project(**{"app__src__main__kotlin__Net.kt": "package n\nval c = OkHttpClient.Builder().build()\n"})
+        write(self.dir / "core" / "src" / "main" / "kotlin" / "Net.kt", "package n\n")
+        self.assertNotIn("se arma fuera", self.instrument().stdout)
+
+    def test_recetas_de_views_y_rxjava_solo_si_el_proyecto_las_usa(self):
+        self.project(**{"feature__home__src__main__kotlin__Web.kt": "import android.webkit.WebView\nclass W : WebView()\n",
+                        "feature__home__src__main__kotlin__List.kt": "import io.reactivex.rxjava3.core.Single\nclass L(val r: RecyclerView)\n"})
+        out = self.instrument().stdout
+        self.assertIn("Pantallas con Views y RxJava (WebView, RecyclerView, RxJava en el proyecto)", out)
+        self.assertIn("postVisualStateCallback", out)
+        self.assertIn("doOnPreDraw", out)
+        self.project()
+        self.assertNotIn("Pantallas con Views", self.perf("instrumentar", "--modulo", self.dir / "app", "--paquete",
+                                                           "com.ejemplo.perf", "--sin-fragments", "--sin-hilt",
+                                                           "--no-leer", "feature/").stdout)
+

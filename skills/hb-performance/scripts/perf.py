@@ -2884,6 +2884,9 @@ COMPOSITION_LOCAL = re.compile(r"\bval\s+(\w+)\s*(?::[^=\n]+)?=\s*(?:static)?[cC
 SET_OF = re.compile(r"\bSet<\s*(?:@\w+(?:\([^)]*\))?\s+)*(\w+)")
 INTO_BINDING = re.compile(r"@(?:IntoSet|IntoMap)\b[\s\S]{0,300}?\bfun\s+\w+\s*\([^)]*\)\s*:\s*(?:@\w+\s+)*(\w+)")
 PACKAGE_DECL = re.compile(r"^\s*package\s+([\w.]+)", re.M)
+OKHTTP_BUILDER = re.compile(r"\bOkHttpClient\s*\.\s*Builder\s*\(\s*\)|\bOkHttpClient\s*\(\s*\)")
+MODULE_PLUGINS = (("aplicación", re.compile(r"android[._-]?application|com\.android\.application", re.I)),
+                  ("librería", re.compile(r"android[._-]?library|com\.android\.library", re.I)))
 FUN_DECL = re.compile(r"\bfun\s+(\w+)\s*\(([^)]*)\)(\s*:\s*[\w.<>?]+)?(\s*[{=])?")
 
 
@@ -2916,8 +2919,10 @@ def hook_methods(text, declaration):
 
 def scan_sources(root, patterns):
     """Un solo recorrido de los .kt y .java: interfaces y CompositionLocal con un nombre de 'contenido visible'
-    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. Devuelve {"ganchos": [...], "archivos": n}."""
-    hooks, multi, files = [], set(), 0
+    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. También dónde se arma un OkHttpClient y cuántos
+    archivos usan WebView, RecyclerView o RxJava. Devuelve {"ganchos", "archivos", "okhttp", "vistas"}."""
+    hooks, multi, files, builders = [], set(), 0, []
+    views = {"WebView": 0, "RecyclerView": 0, "RxJava": 0}
     root = pathlib.Path(root)
     for path in walk_files(root, patterns, (".kt", ".java")):
         try:
@@ -2927,6 +2932,11 @@ def scan_sources(root, patterns):
         except OSError:
             continue
         files += 1
+        for name, found in (("WebView", "WebView" in text), ("RecyclerView", "RecyclerView" in text),
+                            ("RxJava", "io.reactivex" in text or "rxjava" in text.lower())):
+            views[name] += 1 if found else 0
+        for builder in OKHTTP_BUILDER.finditer(text):
+            builders.append((path.relative_to(root).as_posix(), text.count("\n", 0, builder.start()) + 1))
         multi.update(SET_OF.findall(text))
         multi.update(INTO_BINDING.findall(text))
         relative = path.relative_to(root).as_posix()
@@ -2943,7 +2953,31 @@ def scan_sources(root, patterns):
                               "linea": text.count("\n", 0, local.start()) + 1, "metodos": []})
     for hook in hooks:
         hook["multibinding"] = hook["tipo"] == "interfaz" and hook["nombre"] in multi
-    return {"ganchos": hooks, "archivos": files}
+    return {"ganchos": hooks, "archivos": files, "okhttp": builders, "vistas": views}
+
+
+def is_under(path, folder):
+    try:
+        pathlib.Path(path).resolve().relative_to(pathlib.Path(folder).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def list_modules(root, patterns, max_depth=5):
+    """[(carpeta relativa, tipo)] de los módulos Gradle bajo root: 'aplicación', 'librería' u 'otro'."""
+    root = pathlib.Path(root)
+    modules = []
+    for current, dirs, files in os.walk(str(root)):
+        depth = len(pathlib.Path(current).relative_to(root).parts)
+        dirs[:] = sorted(d for d in dirs if depth < max_depth and d not in SCAN_SKIP and d not in ("src", "gradle")
+                         and not d.startswith(".") and not is_denied(os.path.join(current, d), root, patterns))
+        gradle = next((n for n in ("build.gradle.kts", "build.gradle") if n in files), None)
+        if gradle and current != str(root):
+            text = (pathlib.Path(current) / gradle).read_text(encoding="utf-8", errors="ignore")
+            kind = next((label for label, pattern in MODULE_PLUGINS if pattern.search(text)), "otro")
+            modules.append((pathlib.Path(current).relative_to(root).as_posix(), kind))
+    return modules
 
 
 def hook_snippet(hooks, variant):
@@ -2991,6 +3025,31 @@ def hook_snippet(hooks, variant):
                  "Views: reportFullyDrawn().")
     return "\n".join(lines)
 
+
+BRIDGE_SNIPPET = """// Las librerías no ven PerfHooks (vive en el módulo app): una pantalla de un módulo library emite la marca por una
+// interfaz que SÍ ven. Es código de producción (sin efecto en release): propónselo al usuario antes de agregarlo.
+// 1. En un módulo del que dependan las librerías con pantallas (core, common...):
+object ContentVisible {
+    @Volatile var onVisible: (String) -> Unit = {} // no-op hasta que la app lo apunta
+    fun mark(screen: String) = onVisible(screen)
+}
+// 2. En las pantallas medidas, de cualquier módulo, una vez por carga: ContentVisible.mark("<pantalla>")
+// 3. En el módulo app, una sola línea en Application.onCreate (PerfHooks.mark no hace nada en release):
+ContentVisible.onVisible = { PerfHooks.mark(it) } // import {{PAQUETE}}.PerfHooks"""
+
+VIEWS_SNIPPET = """// Marca = el contenido real ya está a la vista, una vez por carga (no por navegación ni por cada bind).
+// WebView: tras onPageFinished, cuando el DOM ya se pintó (API 23+):
+override fun onPageFinished(view: WebView, url: String) {
+    view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+        override fun onComplete(requestId: Long) { if (!marked) { marked = true; PerfHooks.mark("<pantalla>") } }
+    })
+}
+// RecyclerView: tras entregar la lista y antes de pintarla (androidx.core.view.doOnPreDraw):
+adapter.submitList(items) { recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla>") } }
+//   adapter sin submitList: notifyDataSetChanged() seguido de recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla>") }
+// RxJava / MVP: en el onSuccess/onNext que ya corre en el hilo principal (observeOn(AndroidSchedulers.mainThread())),
+//   después de entregar los datos al adapter o a la vista, no en un doOnNext de la capa de red; vuelve `marked` a false
+//   cuando empieza una carga nueva."""
 
 VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
@@ -3089,6 +3148,8 @@ def cmd_instrumentar(args):
     denied = read_no_leer(root, extra=args.no_leer)
     found_variants = find_profileable_variants(module, root, denied)
     variant, existing = resolve_variant(found_variants, args.variante)
+    modules = list_modules(root, denied)
+    scan = scan_sources(root, denied)
     network = choose(args.red, detect(module, ["okhttp", "retrofit"]))
     retrofit = network and choose(args.retrofit, detect(module, ["retrofit"]))
     fragments = choose(args.fragments, detect(module, ["fragment", "appcompat"]))
@@ -3141,6 +3202,16 @@ def cmd_instrumentar(args):
     print("Variante: %s (%s) · Red: %s · Retrofit: %s · Fragments: %s · Hilt: %s · código principal en %s" % (
         variant, "existente: profileable y no depurable, no se crea otro build type" if existing else "nueva",
         yes_no(network), yes_no(retrofit), yes_no(fragments), yes_no(hilt), main_dir))
+    if len(modules) > 1:
+        shown = ["%s (%s)" % m for m in modules[:12]]
+        print("Módulos: %s%s. La instrumentación va en el módulo app (--modulo %s); las librerías emiten marcas por una interfaz." % (
+            " · ".join(shown), " …" if len(modules) > 12 else "", module.as_posix()))
+    outside = [(f, n) for f, n in scan["okhttp"] if not is_under(root / f, module)]
+    if outside:
+        print("⚠ OkHttpClient se arma fuera del módulo app (%s%s): PerfHooks y el multibinding de red viven en el código "
+              "principal de la app y esos módulos no los ven, así que esas llamadas quedan sin secciones HTTP. Díselo al "
+              "usuario: mide sin ellas, usa `perf.py har` con Chucker (medicion.md) o decidan mover el gancho a ese módulo."
+              % (", ".join("%s:%d" % o for o in outside[:3]), " …" if len(outside) > 3 else ""))
     for other in found_variants:
         if other["nombre"] != variant and other["estado"] != "ok":
             print("  · %s también declara <profileable> pero %s: no se usa" % (
@@ -3152,7 +3223,7 @@ def cmd_instrumentar(args):
     if network:
         snippets.append(("2. Red: cada OkHttpClient pasa por el gancho", SNIPPETS["red_hilt" if hilt else "red_sinhilt"]))
     snippets.append(("%d. Navegación sin cambio de actividad (Compose, Navigation 3)" % (3 if network else 2), SNIPPETS["nav"]))
-    hooks = scan_sources(root, denied)["ganchos"]
+    hooks = scan["ganchos"]
     if hooks:
         snippets.append(("%d. Contenido visible: el proyecto ya tiene un punto de extensión (%d candidato%s): conecta ahí las "
                          "marcas" % (4 if network else 3, len(hooks), "" if len(hooks) == 1 else "s"),
@@ -3160,6 +3231,12 @@ def cmd_instrumentar(args):
     else:
         snippets.append(("%d. Contenido visible: reportFullyDrawn en la primera pantalla y PerfHooks.mark en las demás"
                          % (4 if network else 3), SNIPPETS["contenido"]))
+        if len(modules) > 1:
+            snippets.append(("Pantallas en módulos library: la marca sale por una interfaz que ellas sí ven", BRIDGE_SNIPPET))
+    if any(scan["vistas"][name] for name in ("WebView", "RecyclerView")) or scan["vistas"]["RxJava"]:
+        used = [name for name in ("WebView", "RecyclerView", "RxJava") if scan["vistas"][name]]
+        snippets.append(("Pantallas con Views y RxJava (%s en %s): dónde va la marca" % (
+            ", ".join(used), "el proyecto"), VIEWS_SNIPPET))
     if "manifest" in pending:
         snippets.append(("Manifest existente: agrega dentro de <application>",
                          '<provider android:name="{{PAQUETE}}.PerfInstaller" android:authorities="${applicationId}.perf-installer" '
