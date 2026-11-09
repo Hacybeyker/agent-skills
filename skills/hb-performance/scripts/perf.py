@@ -41,7 +41,7 @@ import textwrap
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -59,11 +59,13 @@ CORE = ["ttid_ms", "ttfd_ms", "bind_application_ms", "jit_ms", "jank_app_pct", "
         "hilo_slices_100ms", "hilo_max_ms", "inflate_cantidad", "inflate_ms", "red_llamadas", "red_solapadas",
         "red_repetidas_2s", "gfx_jank_pct", "gfx_p90_ms", "pss_mb", "java_heap_mb", "activities", "views"]
 FRAME_METRICS = ("jank_app_pct", "jank_total_pct", "frame_p50_ms", "frame_p90_ms", "frame_p99_ms")
+FRAMES_LEVEL = {"ok": 0, "baja": 1, "no": 2}
+SOFTWARE_RENDERER = re.compile(r"swiftshader|llvmpipe|softpipe|swrast|subzero|software", re.I)
 FRAMES_CHANGE_MAX = 0.5
 NOT_JANK = {"", "None", "Unknown", "Unknown Jank", "Buffer Stuffing", "SurfaceFlinger Stuffing"}
 COMMON_HZ = (24, 30, 48, 50, 60, 72, 75, 90, 96, 100, 120, 144, 165, 240)
 VERDICT_CLASS = {"mejora": "v-better", "regresión": "v-worse", "sin cambio": "v-same", "dentro del ruido": "v-same",
-                 "informativa": "v-same", "no comparable": "v-same"}
+                 "informativa": "v-same", "no comparable": "v-same", "no confiable": "v-same"}
 FICHA_REPORTE = ("alcance", "síntoma", "sintoma", "métricas principales", "metricas principales", "build",
                  "dispositivo", "modos")
 FAMILY_LABEL = {"app": "solo la app", "e2e": "app + backend", "info": "informativa"}
@@ -72,6 +74,7 @@ VERDICT_TEXT = {"mejora": "funcionó: mejoró más que el ruido de medición",
                 "sin cambio": "no cambió: la mediana de después queda dentro del rango de antes",
                 "dentro del ruido": "la diferencia no supera el ruido de medición",
                 "no comparable": "no comparable: cambió la cantidad de frames y el porcentaje mide otra cosa",
+                "no confiable": "no confiable: los frames se midieron con render por software, no dicen cómo se ve en un dispositivo real",
                 "informativa": "informativa: sin veredicto"}
 STATE_TEXT = {"propuesta": "propuesta · esperando tu decisión", "aprobada": "aprobada · se aplica en la sesión 3",
               "aplicada": "aplicada · implementada; se mide en la fase después", "descartada": "descartada · no se aplica",
@@ -82,7 +85,7 @@ GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rar
 - **Ruido de medición:** cuánto cambia la métrica entre dos mediciones **sin ningún cambio** en la app (antes contra control). Una diferencia menor que esto no prueba nada.
 - **Varía mucho (CV):** las corridas difieren entre sí más de un 10 %; suele ser el backend (red) o el dispositivo. El número sirve, pero con menos confianza.
 - **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
-- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames).
+- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen.
 - **Hallazgos:** una causa posible encontrada en el código o en las trazas. Solo los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y **no** es la causa (no hay nada que hacer); `sin veredicto estadístico`, que con estos datos no se pudo confirmar ni descartar (tampoco hay acción, salvo medir otra cosa).
 - **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -90,10 +93,23 @@ ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
 MARKER = "hbperf_marker"
 ESTADOS = ("propuesta", "aprobada", "descartada", "pendiente", "aplicada")
-MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5"}
+# Niveles de modelo que recomienda `siguiente`. 'diagnostico' (la sesión 2) es opcional en plan.json: sin él usa el
+# 'intermedio' del plan, así que un plan anterior no cambia.
+MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5", "alto": "Opus 5.5"}
+MODEL_FALLBACK = {"diagnostico": "intermedio"}
 SECTION_PREFIXES = ("HTTP", "QUEUE", "CONN", "TTFB", "SCREEN", "NAV", "MARK")
 QUERY_TAG = re.compile(r" #[0-9a-f]{4,8}$")
 e = html.escape
+
+
+MAX_CONSECUTIVE_INVALID = 3
+
+
+def max_attempts(target):
+    """Intentos totales de una captura: las corridas pedidas más una reserva de 3 como mínimo y de la mitad de las pedidas
+    si son más (5 → 8, 10 → 15, 20 → 30). Así las inválidas sueltas de un backend inestable no cortan una captura larga;
+    las seguidas ya las corta MAX_CONSECUTIVE_INVALID."""
+    return target + max(3, target // 2)
 
 
 class PerfError(Exception):
@@ -268,7 +284,21 @@ def frames_changed(groups, flow):
     return abs(after - before) > FRAMES_CHANGE_MAX * max(before, 1)
 
 
-def compare(rows, cv_max=CV_MAX):
+def frame_metric(name):
+    return name in FRAME_METRICS or name.startswith("gfx_")
+
+
+def frames_note(trust):
+    """Aviso para las métricas de frame según la confianza del dispositivo que las midió."""
+    level, motive = trust
+    if level == "no":
+        return "frames no confiables (%s)" % motive
+    if level == "baja":
+        return "frames orientativos (%s)" % motive
+    return ""
+
+
+def compare(rows, cv_max=CV_MAX, trust=("ok", "")):
     results, unmatched = [], []
     groups = group(rows)
     for (flow, metric), entry in sorted(groups.items()):
@@ -281,8 +311,13 @@ def compare(rows, cv_max=CV_MAX):
         delta = after["mediana"] - before["mediana"]
         noise = abs(statistics.median(control) - before["mediana"]) if control else None
         warnings = set(before["avisos"] + after["avisos"])
+        note = frames_note(trust) if frame_metric(metric) else ""
+        if note:
+            warnings.add(note)
         if entry["familia"] == "info":
             result = "informativa"
+        elif note and trust[0] == "no":
+            result = "no confiable"
         elif metric in FRAME_METRICS and frames_changed(groups, flow):
             result = "no comparable"
             warnings.add("frames distintos")
@@ -357,8 +392,9 @@ def priority(metric, plan):
     return (3, 0, metric)
 
 
-def summary_rows(rows, plan, phases=FASES, flows=None, everything=False):
+def summary_rows(rows, plan, phases=FASES, flows=None, everything=False, trust=("ok", "")):
     table, hidden = [], 0
+    note = frames_note(trust)
     for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
         if flows and flow not in flows:
             continue
@@ -374,7 +410,7 @@ def summary_rows(rows, plan, phases=FASES, flows=None, everything=False):
             unit = entry["unidad"]
             table.append([phase, flow, metric, entry["familia"], s["n"], fmt(s["mediana"], unit), fmt(s["p90"], unit),
                           "%s – %s" % (fmt(s["min"]), fmt(s["max"])), fmt_pct(s["cv"], signed=False),
-                          ", ".join(s["avisos"]) or "—"])
+                          ", ".join(s["avisos"] + ([note] if note and frame_metric(metric) else [])) or "—"])
     return table, hidden
 
 
@@ -464,7 +500,27 @@ def load_plan(path):
         if window is not None and not (isinstance(window, dict) and "desde" in window and "hasta" in window):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
     if not isinstance(plan.get("modelos", {}), dict):
-        raise PerfError("%s: 'modelos' es un objeto con economico, intermedio y alto" % path)
+        raise PerfError("%s: 'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico" % path)
+    foreign = plan.get("hilos_ajenos", [])
+    if not isinstance(foreign, list):
+        raise PerfError("%s: 'hilos_ajenos' es una lista de {\"nombre\", \"patron\"}" % path)
+    names = set()
+    for group_spec in foreign:
+        if not isinstance(group_spec, dict) or not re.fullmatch(r"[A-Za-z][\w-]*", str(group_spec.get("nombre", ""))) \
+                or not group_spec.get("patron"):
+            raise PerfError("%s: cada entrada de 'hilos_ajenos' necesita 'nombre' (letras, números, _ o -) y 'patron' "
+                            "(expresión regular del nombre del hilo)" % path)
+        try:
+            re.compile(group_spec["patron"])
+        except (re.error, TypeError):
+            raise PerfError("%s: 'hilos_ajenos' %s: la expresión regular %r no es válida" % (
+                path, group_spec["nombre"], group_spec["patron"]))
+        if group_spec.get("familia", "e2e") not in FAMILIAS or group_spec["nombre"] in names:
+            raise PerfError("%s: 'hilos_ajenos' %s: nombre repetido o familia fuera de %s" % (
+                path, group_spec["nombre"], ", ".join(FAMILIAS)))
+        names.add(group_spec["nombre"])
+    if not isinstance(plan.get("no_leer", []), list) or any(not isinstance(x, str) or not x.strip() for x in plan.get("no_leer", [])):
+        raise PerfError("%s: 'no_leer' es una lista de rutas o patrones que el agente no debe leer (texto)" % path)
     return plan
 
 
@@ -698,6 +754,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
         return [], "la app no aparece en la traza", info
     markers = sorted(sections + main + launches, key=lambda r: r[1])
     window = resolve_window(markers, flow_spec.get("ventana"))
+    info["ventana_ns"] = window
     if window:  # frames e hilo solo dentro de la ventana: lo que pasa antes o después (esperar, dar Enter) no cuenta
         frames = [f for f in frames if window[0] <= f[1] <= window[1]]
         main = [r for r in main if window[0] <= r[1] <= window[1]]
@@ -772,6 +829,54 @@ def sections_summary(names):
             detail += ", …"
         parts.append("%s ×%d (%s)" % (prefix, sum(groups[prefix].values()), detail))
     return "; ".join(parts) or "ninguna"
+
+
+def foreign_thread_metrics(sets, groups, known=()):
+    """Métricas de los hilos que el plan declara ajenos a la app (hilos_ajenos: un servidor en el mismo proceso, por
+    ejemplo), a partir de assets/queries/hilos_ajenos.sql. Por grupo: CPU y cantidad de hilos; el resto de los hilos de
+    la app (menos el principal) en hilos_app_cpu_ms; y, por endpoint, la mediana por llamada de la CPU del grupo
+    mientras esa llamada estaba en vuelo (las que no tuvieron cuentan 0; la CPU de un momento con dos llamadas en vuelo
+    cuenta en las dos), igual que `red <endpoint> ms`. Siempre se emiten los mismos nombres, con 0 si no hubo."""
+    compiled = [(g["nombre"], re.compile(g["patron"]), g.get("familia", "e2e")) for g in groups]
+    header, body = sets[-1] if sets else ([], [])
+    index = {name: i for i, name in enumerate(header)}
+    for column in ("tipo", "nombre", "llamada", "id", "hilos", "cpu_ms"):
+        if body and column not in index:
+            raise PerfError("hilos_ajenos.sql no devolvió la columna '%s'" % column)
+    cpu = {name: 0.0 for name, _, _ in compiled}
+    count = {name: 0 for name, _, _ in compiled}
+    call_endpoint, call_cpu, other = {}, {}, 0.0  # id de la llamada → endpoint; (grupo, id) → CPU del grupo en la llamada
+    for row in body:
+        kind = row[index["tipo"]]
+        thread = row[index["nombre"]] or ""
+        owner = next((name for name, pattern, _ in compiled if pattern.search(thread)), None)
+        try:
+            value = float(row[index["cpu_ms"]])
+        except (TypeError, ValueError):
+            continue
+        if kind == "hilo":
+            if owner:
+                cpu[owner] += value
+                count[owner] += to_int(row[index["hilos"]])
+            else:
+                other += value
+        elif kind in ("red", "llamada"):
+            call = row[index["id"]]
+            call_endpoint[call] = endpoint_of(row[index["llamada"]] or "")
+            if kind == "red" and owner:
+                call_cpu[(owner, call)] = call_cpu.get((owner, call), 0.0) + value
+    out = []
+    for name, _, family in compiled:
+        out += [("hilos_%s_cpu_ms" % name, cpu[name], "ms", family), ("hilos_%s_cantidad" % name, count[name], "hilos", "info")]
+        suffix = " %s_cpu_ms" % name
+        per_endpoint = {}
+        for call, endpoint in call_endpoint.items():
+            per_endpoint.setdefault(endpoint, []).append(call_cpu.get((name, call), 0.0))
+        endpoints = set(per_endpoint) | {m[4:-len(suffix)] for m in known if m.startswith("red ") and m.endswith(suffix)}
+        out += [("red %s%s" % (endpoint, suffix), statistics.median(per_endpoint[endpoint]) if endpoint in per_endpoint else 0.0,
+                 "ms", family) for endpoint in sorted(endpoints)]
+    out.append(("hilos_app_cpu_ms", other, "ms", "app"))
+    return out
 
 
 def sql_metrics(header, body, source):
@@ -971,6 +1076,52 @@ def preflight(adb, package, force):
     return sdk, warnings, package_build(dump)
 
 
+def classify_environment(text):
+    """Emulador y render por software a partir de la salida de device_environment. 'frames' es la confianza en las
+    métricas de frame: 'no' con render por software, 'baja' en un emulador con GPU del host, 'ok' en un dispositivo real."""
+    values = dict(re.findall(r"^([qbhmcg])=(.*)$", text, re.M))
+    hardware, model = values.get("h", "").strip().lower(), values.get("m", "").strip().lower()
+    emulator = values.get("q", "").strip() == "1" or values.get("b", "").strip() == "1" \
+        or hardware in ("ranchu", "goldfish") or "emulator" in values.get("c", "").lower() \
+        or "emulator" in model or model.startswith("sdk_gphone") or "android sdk built for" in model
+    render = values.get("g", "").replace("GLES:", "").strip()
+    software = bool(SOFTWARE_RENDERER.search(render))
+    return {"emulador": emulator, "render": render, "software": software,
+            "frames": "no" if software else "baja" if emulator else "ok"}
+
+
+def device_environment(adb):
+    """Una sola llamada a adb: ro.kernel.qemu y afines, y el renderer de GLES que reporta SurfaceFlinger."""
+    out = adb.shell('echo "q=$(getprop ro.kernel.qemu)"; echo "b=$(getprop ro.boot.qemu)"; echo "h=$(getprop ro.hardware)"; '
+                    'echo "m=$(getprop ro.product.model)"; echo "c=$(getprop ro.build.characteristics)"; '
+                    'echo "g=$(dumpsys SurfaceFlinger | grep -m1 GLES)"').stdout
+    return classify_environment(out)
+
+
+def environment_warnings(env):
+    gpu = "reinicia el emulador con -gpu host (AVD: Graphics = Hardware) o usa un dispositivo físico"
+    if env["software"]:
+        return ["el dispositivo renderiza por software (%s): los frames (jank_*, frame_*, gfx_*) no son confiables y los "
+                "reportes los marcan; %s" % (env["render"] or "sin dato", gpu)]
+    if env["emulador"]:
+        return ["es un emulador%s: valen los conteos (red, inflates) y las fugas; los tiempos y los frames son orientativos. "
+                "Para decidir con frames, %s" % (" (render: %s)" % env["render"] if env["render"] else "", gpu)]
+    return []
+
+
+def frames_trust(folder):
+    """(nivel, motivo) más bajo de confianza en los frames entre las fases registradas en fases.json."""
+    level, motive = "ok", ""
+    for data in read_phases(folder).values():
+        env = data.get("entorno") or {}
+        value = env.get("frames", "ok")
+        if FRAMES_LEVEL.get(value, 0) > FRAMES_LEVEL[level]:
+            level = value
+            motive = ("%srender por software" % ("emulador, " if env.get("emulador") else "") if env.get("software")
+                      else "emulador (render: %s)" % (env.get("render") or "sin dato"))
+    return level, motive
+
+
 def resumed_activity(adb):
     text = adb.shell("dumpsys activity activities").stdout
     match = re.search(r"(?:topResumedActivity|mResumedActivity|ResumedActivity)[=:]\s*ActivityRecord\{[^}]*?\s(\S+/\S+)", text)
@@ -1111,8 +1262,9 @@ def crash_excerpt(adb, package):
 
 
 def mapping_hint():
-    found = sorted(pathlib.Path(".").glob("*/build/outputs/mapping/profiling/mapping.txt"))
-    target = str(found[0]) if found else "<módulo>/build/outputs/mapping/profiling/mapping.txt"
+    found = sorted(f for f in pathlib.Path(".").glob("*/build/outputs/mapping/*/mapping.txt")
+                   if f.parent.name not in ("release", "debug"))
+    target = str(found[0]) if found else "<módulo>/build/outputs/mapping/<variante>/mapping.txt"
     return "desofusca la pila con: retrace %s <archivo-con-la-pila> (cmdline-tools del SDK)" % target
 
 
@@ -1150,10 +1302,15 @@ def read_phases(folder):
 
 
 def write_phase(folder, phase, data):
+    """Registra la fase sumando las corridas de otra tanda. El 'entorno' conserva el peor nivel de frames de las tandas:
+    relanzar el emulador con la GPU del host o seguir en un dispositivo real no vuelve confiables las corridas de antes."""
     phases = read_phases(folder)
     previous = phases.get(phase) or {}
     data["corridas"] = previous.get("corridas", 0) + data.get("corridas", 0)
     data["fecha"] = previous.get("fecha") or data["fecha"]
+    environments = [e for e in (previous.get("entorno"), data.get("entorno")) if e]
+    if environments:
+        data["entorno"] = max(environments, key=lambda e: FRAMES_LEVEL.get(e.get("frames", "ok"), 0))  # empate: la anterior
     phases[phase] = data
     (pathlib.Path(folder) / "fases.json").write_text(json.dumps(phases, ensure_ascii=False, indent=2) + "\n",
                                                      encoding="utf-8")
@@ -1292,8 +1449,84 @@ def project_root(folder):
     return pathlib.Path.cwd()
 
 
+NO_LEER_LINE = re.compile(r"^(?P<indent>[ \t]*)(?P<bullet>(?:[-*][ \t]+)|(?:-(?=\*)))?\**[ \t]*(?:no leer|do not read)[ \t]*\**[ \t]*:"
+                          r"[ \t]*\**[ \t]*(?P<rest>.*?)[ \t]*$", re.I)
+BULLET_LINE = re.compile(r"^(?P<indent>[ \t]*)[-*][ \t]+(?P<item>.+?)[ \t]*$")
+
+
+def no_leer_in(text):
+    """Patrones de la línea 'No leer:' de un AGENTS.md: en la misma línea, separados por coma o punto y coma, o uno por
+    viñeta en las líneas siguientes (sin línea en blanco en medio; si la línea es ella misma una viñeta, solo cuentan las
+    viñetas más indentadas)."""
+    lines = text.splitlines()
+    found = []
+    for index, line in enumerate(lines):
+        head = NO_LEER_LINE.match(line)
+        if not head:
+            continue
+        items = [head.group("rest")] if head.group("rest") else []
+        if not items:
+            depth = len(head.group("indent").expandtabs(4))
+            for following in lines[index + 1:]:
+                bullet = BULLET_LINE.match(following)
+                if not bullet or (head.group("bullet") and len(bullet.group("indent").expandtabs(4)) <= depth):
+                    break
+                items.append(bullet.group("item"))
+        for item in items:
+            found += [part.strip().strip("`'\"") for part in re.split(r"[,;]", item)]
+    return found
+
+
+def read_no_leer(root, plan=None, extra=()):
+    """Rutas que el agente no debe leer (pruebas a ciegas): los --no-leer, 'no_leer' del plan y la línea 'No leer:' de
+    la sección Performance de AGENTS.md. Sin duplicados y en ese orden. Los patrones se comparan con la ruta desde la
+    raíz del proyecto (is_denied)."""
+    patterns = list(extra) + list((plan or {}).get("no_leer") or [])
+    try:
+        text = (pathlib.Path(root) / "AGENTS.md").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    patterns += no_leer_in(text)
+    out = []
+    for pattern in patterns:
+        if pattern and pattern not in out:
+            out.append(pattern)
+    return out
+
+
+def is_denied(path, root, patterns):
+    """True si la ruta cae en alguna de las prohibidas. Un patrón relativo (docs/ALCANCE-*, secretos/) se compara con la
+    ruta desde la raíz del proyecto; uno absoluto o con ~, con la ruta completa. Una carpeta cubre todo lo que tiene dentro."""
+    if not patterns:
+        return False
+    absolute = pathlib.Path(path).resolve()
+    try:
+        relative = absolute.relative_to(pathlib.Path(root).resolve()).as_posix()
+    except ValueError:
+        relative = None
+    for raw in patterns:
+        pattern = os.path.expanduser(raw.strip())
+        if os.path.isabs(pattern):  # con y sin enlaces simbólicos (en macOS /var es /private/var)
+            targets, bases = {absolute.as_posix(), os.path.abspath(str(path))}, {pattern, os.path.realpath(pattern)}
+        elif relative is not None:
+            targets, bases = {relative}, {pattern}
+        else:
+            continue
+        for target in targets:
+            for base in {b.rstrip("/") for b in bases if b.rstrip("/")}:
+                for candidate in (target, "/" + target):
+                    if fnmatch.fnmatchcase(candidate, base) or fnmatch.fnmatchcase(candidate, base + "/*"):
+                        return True
+    return False
+
+
 def model_name(plan, tier):
-    return (plan.get("modelos") or {}).get(tier) or MODELOS[tier]
+    """El modelo del nivel según plan.json; un nivel sin nombre en el plan toma el de su nivel base (MODEL_FALLBACK) y, si
+    tampoco está, el de fábrica."""
+    named = (plan.get("modelos") or {}).get(tier)
+    if named:
+        return named
+    return model_name(plan, MODEL_FALLBACK[tier]) if tier in MODEL_FALLBACK else MODELOS[tier]
 
 
 def install_command(plan, root):
@@ -1312,6 +1545,8 @@ def terminal(command, what, you):
 
 
 def chat(text, tier, effort, what, plan):
+    if plan.get("no_leer"):
+        text += " No leas ni busques en: %s." % ", ".join(plan["no_leer"])
     return {"tipo": "chat", "texto": text, "modelo": model_name(plan, tier), "esfuerzo": effort, "que": what}
 
 
@@ -1346,7 +1581,7 @@ def next_steps(folder, plan, flow=None):
     mejoras = plan.get("mejoras", [])
     estados = [m.get("estado", "propuesta") for m in mejoras]
     resume = "Sigue hb-performance con %s" % state
-    session2 = chat(resume, "intermedio", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
+    session2 = chat(resume, "diagnostico", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
                     "plan de mejoras; termina con el comando para que decidas", plan)
     session4 = chat(resume, "economico", "bajo", "sesión 4: compara, escribe la lectura y el resumen y genera el reporte", plan)
     triage = plan.get("profundidad") == "triage"
@@ -1559,6 +1794,8 @@ def cmd_capturar(args, plan=None):
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
     sdk, warnings, build = preflight(adb, package, args.forzar)
+    environment = device_environment(adb)
+    warnings += environment_warnings(environment)
     commit, dirty = git_info()
     if not args.prueba:
         warnings += check_build(folder, phase, build, commit, args.forzar)
@@ -1623,20 +1860,41 @@ def cmd_capturar(args, plan=None):
             settle(1)
             reason, _ = launch(adb, package, startup)
         else:
-            prepare()
+            try:
+                prepare()
+            except Precondicion as error:
+                if not prepare_command:
+                    raise
+                print("⚠ calentamiento: %s" % error)
+                continue
             reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups))
         if reason:
             print("⚠ calentamiento: %s" % reason)
 
     target = 1 if args.prueba else args.corridas
     valid, attempts, seen_hz = 0, 0, set()
+    consecutive, last_invalid = 0, ""
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
     while valid < target:
-        if attempts >= target + 3:
+        if consecutive >= MAX_CONSECUTIVE_INVALID:
+            raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
+                                        "suerte. Revisa el recorrido, 'preparar' o el backend y vuelve a correr; las "
+                                        "%d válidas quedan guardadas" % (consecutive, last_invalid, valid))
+        if attempts >= max_attempts(target):
             raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones"
                                         % (valid, target, attempts))
         attempts += 1
-        prepare()
+        try:
+            prepare()
+        except Precondicion as error:
+            if not prepare_command or args.prueba:
+                raise
+            # 'preparar' falló (un login que no entró, un backend caído): la corrida no vale, se repite y cuenta
+            # para el tope de inválidas seguidas.
+            consecutive, last_invalid = consecutive + 1, str(error)
+            print("✖ corrida %d inválida: %s (se repite)" % (n, error))
+            n += 1
+            continue
         if sdk < 31:
             adb.shell("dumpsys gfxinfo %s reset" % package)
         local = out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))
@@ -1657,6 +1915,12 @@ def cmd_capturar(args, plan=None):
                 essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in plan.get("principales", [])]
                 if essential:
                     invalid = "sin marcas para %s: el recorrido no completó el flujo" % ", ".join(essential)
+            if not invalid and plan.get("hilos_ajenos"):
+                window = info.get("ventana_ns")
+                foreign_sql = fill_sql((ASSETS / "queries" / "hilos_ajenos.sql").read_text(encoding="utf-8"), package,
+                                       {"DESDE": window[0] if window else 0, "HASTA": window[1] if window else 4 * 10 ** 18})
+                metrics += with_families(foreign_thread_metrics(run_tp_batch(tp, local, [("ajenos", foreign_sql)])["ajenos"],
+                                                                plan["hilos_ajenos"], known), flow.get("familias"))
             names = {m[0] for m in metrics}
             metrics += [m for m in with_families(extra, flow.get("familias")) if m[0] not in names]
             for name, _ in queries[1:]:
@@ -1682,8 +1946,10 @@ def cmd_capturar(args, plan=None):
             if not args.sin_comprimir:
                 compress(target_name)
             print("✖ corrida %d inválida: %s (traza guardada para auditoría)" % (n, invalid))
+            consecutive, last_invalid = consecutive + 1, invalid
             n += 1
             continue
+        consecutive = 0
         saved = local if args.sin_comprimir else compress(local)
         if args.prueba:
             print(run_line("de prueba", size_mb, metrics))
@@ -1715,10 +1981,12 @@ def cmd_capturar(args, plan=None):
               % "/".join(str(h) for h in sorted(seen_hz)))
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
               "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation}
+    if environment["emulador"] or environment["software"]:
+        record["entorno"] = environment
     record.update(build)
     write_phase(folder, phase, record)
     rows = read_rows(csv_path)
-    table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,))
+    table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,), trust=frames_trust(folder))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
     write_summary(csv_path, rows, plan)
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
@@ -1727,10 +1995,11 @@ def cmd_capturar(args, plan=None):
 
 
 def write_summary(csv_path, rows, plan):
-    full, _ = summary_rows(rows, plan, everything=True)
+    trust = frames_trust(pathlib.Path(csv_path).parent)
+    full, _ = summary_rows(rows, plan, everything=True, trust=trust)
     pathlib.Path(csv_path).with_name("resumen.md").write_text(
         "# Resumen de métricas\n\n" + markdown_table(SUMMARY_HEADERS, full) + "\n", encoding="utf-8")
-    compact, hidden = summary_rows(rows, plan)
+    compact, hidden = summary_rows(rows, plan, trust=trust)
     block = markdown_table(SUMMARY_HEADERS, compact[:MAX_ROWS])
     if hidden or len(compact) > MAX_ROWS:
         block += "\n\nDetalle completo en `resumen.md`."
@@ -1897,7 +2166,7 @@ def cmd_diagnostico(args):
 def cmd_resumen(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
-    table, hidden = summary_rows(rows, plan, everything=args.todo)
+    table, hidden = summary_rows(rows, plan, everything=args.todo, trust=frames_trust(pathlib.Path(args.csv).parent))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS] if not args.todo else table))
     if hidden or (not args.todo and len(table) > MAX_ROWS):
         print("… %d métricas más en resumen.md (o usa --todo)" % (hidden + max(0, len(table) - MAX_ROWS)))
@@ -1960,6 +2229,12 @@ def builds_table(folder):
         notes.append("antes y después se midieron con distinta compilación de ART (%s · %s): los tiempos no son "
                      "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
                                                                       after.get("compilacion") or "sin registrar"))
+    level, motive = frames_trust(folder)
+    if level != "ok":
+        notes.append("las fases se midieron en un entorno con frames %s (%s): %s" % (
+            "no confiables" if level == "no" else "orientativos", motive,
+            "no uses jank_* ni frame_* para decidir; repite en un dispositivo físico o con -gpu host" if level == "no"
+            else "valen los conteos y las fugas; para decidir con frames, usa un dispositivo físico"))
     return table, notes
 
 
@@ -1987,7 +2262,7 @@ def improvement_result(item, r):
         return "✔ funcionó"
     if r["veredicto"] == "regresión":
         return "✖ empeoró"
-    if r["veredicto"] in ("informativa", "no comparable"):
+    if r["veredicto"] in ("informativa", "no comparable", "no confiable"):
         return "— sin veredicto"
     return "✖ no funcionó"
 
@@ -1998,7 +2273,9 @@ LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "
 def cmd_comparar(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
-    results, unmatched = compare(rows)
+    folder = pathlib.Path(args.csv).parent
+    trust = frames_trust(folder)
+    results, unmatched = compare(rows, trust=trust)
     chosen = compact_compare(results, plan, everything=args.todo)
     table = markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen[:None if args.todo else MAX_ROWS]])
     print(table)
@@ -2011,6 +2288,9 @@ def cmd_comparar(args):
     if counts.get("no comparable"):
         print("no comparable = la cantidad de frames cambió más de %d %%: los porcentajes y percentiles de frame "
               "miden otra cosa." % (FRAMES_CHANGE_MAX * 100))
+    if counts.get("no confiable"):
+        print("no confiable = los frames se midieron con render por software (emulador sin GPU del host): no dicen cómo "
+              "se ve en un dispositivo real.")
     if len(chosen) < len(results):
         print("… %d métricas sin cambios relevantes en comparacion.md" % (len(results) - len(chosen)))
     for u in unmatched[:5]:
@@ -2018,7 +2298,6 @@ def cmd_comparar(args):
     regressions = [r for r in results if r["veredicto"] == "regresión"]
     if regressions:
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
-    folder = pathlib.Path(args.csv).parent
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
     for note in notes:
@@ -2223,9 +2502,10 @@ def bars_svg(result):
             % (width, e(result["metrica"]), e(fmt(before, unit)), e(fmt(after, unit)), "".join(rows)))
 
 
-def initial_md(rows, plan):
+def initial_md(rows, plan, trust=("ok", "")):
     """Estado inicial de las métricas principales (antes y, si existe, el ruido del bloque de control)."""
     principales = plan.get("principales") or []
+    note = frames_note(trust)
     table = []
     for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
         if metric not in principales or "antes" not in entry["fases"]:
@@ -2236,7 +2516,8 @@ def initial_md(rows, plan):
             if control and s["mediana"] else None
         table.append([flow, metric, FAMILY_LABEL.get(entry["familia"], entry["familia"]), fmt(s["mediana"], entry["unidad"]),
                       fmt(s["p90"], entry["unidad"]), "%s – %s" % (fmt(s["min"]), fmt(s["max"])), s["n"],
-                      fmt_pct(noise, signed=False), human_warnings(s["avisos"], s["cv"], s["n"])])
+                      fmt_pct(noise, signed=False),
+                      human_warnings(s["avisos"] + ([note] if note and frame_metric(metric) else []), s["cv"], s["n"])])
     if not table:
         return ""
     intro = ("> Lo que midió la app antes de cambiar nada, por métrica principal. La **mediana** es el número que se "
@@ -2385,7 +2666,7 @@ def render_report(folder, name, title, subtitle, parts, charts="", extras=None):
     body = '<nav class="toc">%s</nav>' % nav
     for i, (section, content) in enumerate(shown):
         body += '<section id="s%d"><h2>%s</h2>%s%s</section>' % (i, e(section), extras.get(section, ""), md_to_html(content))
-    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable)( \(backend\))?</td>",
+    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable|no confiable)( \(backend\))?</td>",
                   lambda m: '<td><span class="verdict %s">%s</span>%s</td>' % (
                       VERDICT_CLASS[m.group(1)], m.group(1), m.group(2) or ""), body)
     body = re.sub(r"<td>(propuesta|aprobada|aplicada|descartada|pendiente)</td>",
@@ -2418,7 +2699,7 @@ def cmd_reporte(args):
                       "(`perf.py decidir`); las aprobadas se implementan en la fase siguiente y se vuelven a medir.\n\n")
         pending_intro = ("> No son tareas obligatorias. Es lo que esta investigación no pudo cerrar, y cómo se cerraría "
                          "si alguna vez importa.\n\n")
-        parts = [("Resumen", pick("resumen ejecutivo", "resumen")), ("Estado inicial", initial_md(rows, plan)),
+        parts = [("Resumen", pick("resumen ejecutivo", "resumen")), ("Estado inicial", initial_md(rows, plan, frames_trust(folder))),
                  ("Hallazgos", findings_md(pick("hallazgos"), plan)),
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
@@ -2436,7 +2717,7 @@ def cmd_reporte(args):
             print_next(folder, plan)
         return
 
-    results, unmatched = compare(rows)
+    results, unmatched = compare(rows, trust=frames_trust(folder))
     principales = plan.get("principales") or []
     primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
     missing = [m for m in principales if m not in {r["metrica"] for r in results}]
@@ -2503,7 +2784,9 @@ def device_summary(serial, package, need_activity):
     release = adb.shell("getprop ro.build.version.release").stdout.strip()
     sdk = adb.shell("getprop ro.build.version.sdk").stdout.strip()
     activity = launcher_activity(adb, package) if need_activity else ""
-    return "%s · Android %s (API %s)" % (model or "?", release or "?", sdk or "?"), activity
+    environment = device_environment(adb)
+    kind = " · emulador%s" % (" con render por software" if environment["software"] else "") if environment["emulador"] or environment["software"] else ""
+    return "%s · Android %s (API %s)%s" % (model or "?", release or "?", sdk or "?", kind), activity
 
 
 def ensure_ignored(folder):
@@ -2553,7 +2836,7 @@ def cmd_humo(args):
     print("  · Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
     print("    cd %s && python3 -I %s %s%s" % (root, HERE / "perf.py", " ".join(nuevo),
                                                " [--red si la primera pantalla carga de la red]"))
-    print("  · Otra pantalla o flujo · Chat nuevo · Modelo: %s · Esfuerzo: medio" % MODELOS["intermedio"])
+    print("  · Otra pantalla o flujo · Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio"))
     print("    Texto: \"Usa hb-performance: <qué pantalla o flujo analizar y qué se nota>. Dispositivo %s.\"" % serial)
 
 
@@ -2579,6 +2862,9 @@ def cmd_nuevo(args):
         plan["instalar"] = args.instalar
     if args.triage:
         plan["profundidad"] = "triage"
+    no_leer = read_no_leer(project_root(folder), extra=args.no_leer)
+    if no_leer:
+        plan["no_leer"] = no_leer
     plan["modelos"] = dict(MODELOS)
     if startup:
         families = dict(STARTUP_FAMILIES)
@@ -2601,7 +2887,8 @@ def cmd_nuevo(args):
     (folder / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     state = (ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
     state = state.replace("{{ALCANCE}}", scope).replace("{{FECHA}}", datetime.date.today().isoformat()) \
-        .replace("{{PAQUETE}}", args.paquete).replace("{{DISPOSITIVO}}", device or "<modelo · Android · Hz>")
+        .replace("{{PAQUETE}}", args.paquete).replace("{{DISPOSITIVO}}", device or "<modelo · Android · Hz>") \
+        .replace("{{NO_LEER}}", ", ".join("`%s`" % x for x in no_leer) or "ninguna")
     (folder / "estado.md").write_text(state, encoding="utf-8")
     print("✔ %s y %s" % (folder / "plan.json", folder / "estado.md"))
     ensure_ignored(folder)
@@ -2656,22 +2943,31 @@ def is_generated(path):
 
 
 SNIPPETS = {
+    "gradle_existente": """android {
+    // La variante "{{VARIANTE}}" {{ESTADO}}: no se crea otro build type.
+    sourceSets {
+        getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
+        getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
+    }
+}
+// Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): si la variante no las
+// recibe ya, repítelas como "{{VARIANTE}}Implementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
     "gradle": """android {
     buildTypes {
-        create("profiling") {
+        create("{{VARIANTE}}") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".profiling" // opcional: convive con el build instalado; el paquete del plan lleva el sufijo
+            applicationIdSuffix = ".{{VARIANTE}}" // opcional: convive con el build instalado; el paquete del plan lleva el sufijo
             matchingFallbacks += listOf("release") // solo con módulos de librería
         }
     }
     sourceSets {
         getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
-        getByName("profiling").kotlin.directories += "{{FUENTE}}"
+        getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
     }
 }
 // Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): repítelas como
-// "profilingImplementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
+// "{{VARIANTE}}Implementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
     "red_hilt": """// Donde se arma el OkHttpClient (Hilt): inyecta el set y aplica la primera factory.
 @Provides fun okHttp(@PerfEventListeners factories: Set<@JvmSuppressWildcards EventListener.Factory>): OkHttpClient =
     OkHttpClient.Builder()
@@ -2693,12 +2989,369 @@ LaunchedEffect(uiState.isLoading) { if (!uiState.isLoading) PerfHooks.mark("<pan
 }
 
 
+# ── Escaneo del proyecto: puntos de extensión de contenido visible ───────────
+
+SCAN_SKIP = {"build", "node_modules", "reports", "test", "androidTest", "testFixtures", "out"}
+SCAN_MAX_FILES = 5000
+SCAN_MAX_BYTES = 400_000
+HOOK_TOKENS = ("VisibleContent", "ContentVisible", "ContentReady", "ScreenReady", "ScreenLoaded", "ContentLoaded",
+               "FullyDrawn", "ReportDrawn", "ScreenDrawn", "ContentShown", "ScreenShown", "ScreenDisplayed",
+               "ScreenImpression", "ScreenViewed", "ScreenTracker", "ScreenTracking")
+INTERFACE_DECL = re.compile(r"\binterface\s+(\w+)")
+COMPOSITION_LOCAL = re.compile(r"\bval\s+(\w+)\s*(?::[^=\n]+)?=\s*(?:static)?[cC]ompositionLocalOf\b")
+SET_OF = re.compile(r"\bSet<\s*(?:@\w+(?:\([^)]*\))?\s+)*(\w+)")
+INTO_BINDING = re.compile(r"@(?:IntoSet|IntoMap)\b[\s\S]{0,300}?\bfun\s+\w+\s*\([^)]*\)\s*:\s*(?:@\w+\s+)*(\w+)")
+PACKAGE_DECL = re.compile(r"^\s*package\s+([\w.]+)", re.M)
+OKHTTP_BUILDER = re.compile(r"\bOkHttpClient\s*\.\s*Builder\s*\(\s*\)|\bOkHttpClient\s*\(\s*\)")
+MODULE_PLUGINS = (("aplicación", re.compile(r"android[._-]?application|com\.android\.application", re.I)),
+                  ("librería", re.compile(r"android[._-]?library|com\.android\.library", re.I)))
+FUN_HEAD = re.compile(r"\bfun\s+(\w+)\s*\(")
+FUN_TAIL = re.compile(r"\s*(?::\s*([^{=]*))?([{=])?")
+PRIMITIVE_TYPES = ("String", "Int", "Long", "Boolean", "Float", "Double", "Unit")
+
+def walk_files(root, patterns, suffixes):
+    """Archivos con esas extensiones bajo root, en orden, sin carpetas de build, ocultas ni de tests y sin las rutas
+    prohibidas; los que generó la skill tampoco."""
+    count = 0
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = sorted(d for d in dirs if d not in SCAN_SKIP and not d.startswith(".")
+                         and not is_denied(os.path.join(current, d), root, patterns))
+        for name in sorted(files):
+            path = pathlib.Path(current) / name
+            if name.endswith(suffixes) and not is_denied(path, root, patterns) and not is_generated(path):
+                count += 1
+                if count > SCAN_MAX_FILES:
+                    return
+                yield path
+
+
+def match_paren(text, start):
+    """Índice justo después del paréntesis que cierra el que está en text[start]."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def split_params(params):
+    """Parámetros de primer nivel de una lista de Kotlin, sin partir las comas de genéricos ni de tipos función."""
+    parts, depth, start, previous = [], 0, 0, ""
+    for i, char in enumerate(params):
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}" or (char == ">" and previous != "-"):  # el > de "->" no cierra nada
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(params[start:i])
+            start = i + 1
+        previous = char
+    parts.append(params[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def without_default(param):
+    """El parámetro sin su valor por defecto: un override no puede repetirlo."""
+    depth, previous = 0, ""
+    for i, char in enumerate(param):
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}" or (char == ">" and previous != "-"):
+            depth -= 1
+        elif char == "=" and depth == 0:
+            return param[:i].strip()
+        previous = char
+    return param
+
+
+def hook_methods(text, declaration):
+    """Funciones abstractas (sin cuerpo) de la interfaz Kotlin que empieza en declaration: [(nombre, parámetros sin valores
+    por defecto, retorno, suspend)]. Una interfaz Java no da métodos."""
+    start = text.find("{", declaration.end())
+    # entre el nombre y la llave solo van genéricos y supertipos; si aparece otra declaración, la interfaz no tiene cuerpo
+    if start < 0 or re.search(r"\b(?:class|interface|object|fun|val|var)\b", text[declaration.end():start]):
+        return []
+    body = text[start:match_brace(text, start)]
+    methods = []
+    for head in FUN_HEAD.finditer(body):
+        close = match_paren(body, head.end() - 1)
+        tail = FUN_TAIL.match(body[close:].split("\n", 1)[0].split("//", 1)[0])
+        if tail and not tail.group(2):
+            params = ", ".join(without_default(p) for p in split_params(body[head.end():close - 1]))
+            methods.append((head.group(1), params, (tail.group(1) or "").strip(),
+                            bool(re.search(r"\bsuspend\s+$", body[:head.start()]))))
+    return methods
+
+
+def scan_sources(root, patterns):
+    """Un solo recorrido de los .kt y .java: interfaces y CompositionLocal con un nombre de 'contenido visible'
+    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. También dónde se arma un OkHttpClient y cuántos
+    archivos usan WebView, RecyclerView o RxJava. Devuelve {"ganchos", "archivos", "okhttp", "vistas"}."""
+    hooks, multi, files, builders = [], set(), 0, []
+    views = {"WebView": 0, "RecyclerView": 0, "RxJava": 0}
+    root = pathlib.Path(root)
+    for path in walk_files(root, patterns, (".kt", ".java")):
+        try:
+            if path.stat().st_size > SCAN_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        files += 1
+        for name, found in (("WebView", "WebView" in text), ("RecyclerView", "RecyclerView" in text),
+                            ("RxJava", "io.reactivex" in text or "rxjava" in text.lower())):
+            views[name] += 1 if found else 0
+        for builder in OKHTTP_BUILDER.finditer(text):
+            builders.append((path.relative_to(root).as_posix(), text.count("\n", 0, builder.start()) + 1))
+        multi.update(SET_OF.findall(text))
+        multi.update(INTO_BINDING.findall(text))
+        relative = path.relative_to(root).as_posix()
+        package_match = PACKAGE_DECL.search(text)
+        package = package_match.group(1) if package_match else ""
+        for declaration in INTERFACE_DECL.finditer(text):
+            if any(token in declaration.group(1) for token in HOOK_TOKENS):
+                hooks.append({"tipo": "interfaz", "nombre": declaration.group(1), "archivo": relative, "paquete": package,
+                              "linea": text.count("\n", 0, declaration.start()) + 1,
+                              "metodos": hook_methods(text, declaration)})
+        for local in COMPOSITION_LOCAL.finditer(text):
+            if any(token in local.group(1) for token in HOOK_TOKENS):
+                hooks.append({"tipo": "compositionlocal", "nombre": local.group(1), "archivo": relative, "paquete": package,
+                              "linea": text.count("\n", 0, local.start()) + 1, "metodos": []})
+    for hook in hooks:
+        hook["multibinding"] = hook["tipo"] == "interfaz" and hook["nombre"] in multi
+    return {"ganchos": hooks, "archivos": files, "okhttp": builders, "vistas": views}
+
+
+def is_under(path, folder):
+    try:
+        pathlib.Path(path).resolve().relative_to(pathlib.Path(folder).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def list_modules(root, patterns, max_depth=5):
+    """[(carpeta relativa, tipo)] de los módulos Gradle bajo root: 'aplicación', 'librería' u 'otro'."""
+    root = pathlib.Path(root)
+    modules = []
+    for current, dirs, files in os.walk(str(root)):
+        depth = len(pathlib.Path(current).relative_to(root).parts)
+        dirs[:] = sorted(d for d in dirs if depth < max_depth and d not in SCAN_SKIP and d not in ("src", "gradle")
+                         and not d.startswith(".") and not is_denied(os.path.join(current, d), root, patterns))
+        gradle = next((n for n in ("build.gradle.kts", "build.gradle") if n in files), None)
+        if gradle and current != str(root):
+            text = (pathlib.Path(current) / gradle).read_text(encoding="utf-8", errors="ignore")
+            kind = next((label for label, pattern in MODULE_PLUGINS if pattern.search(text)), "otro")
+            modules.append((pathlib.Path(current).relative_to(root).as_posix(), kind))
+    return modules
+
+
+def hook_snippet(hooks, variant):
+    """Cómo conectar PerfHooks.mark al punto de extensión que el proyecto ya tiene, en lugar de editar pantallas."""
+    lines = ["// El proyecto ya tiene un punto de extensión de contenido visible: conecta ahí las marcas, no en las pantallas.",
+             "// Candidatos (verifica leyendo la interfaz y quién la llama; el nombre de la marca es lo que reciba el gancho):"]
+    for hook in hooks[:6]:
+        extra = ""
+        if hook["metodos"]:
+            extra = " · " + "; ".join("%sfun %s(%s)%s" % ("suspend " if m[3] else "", m[0], m[1], ": %s" % m[2] if m[2] else "")
+                                      for m in hook["metodos"][:2])
+        lines.append("//  - %s %s (%s:%d)%s%s" % (
+            "interfaz" if hook["tipo"] == "interfaz" else "CompositionLocal", hook["nombre"], hook["archivo"], hook["linea"],
+            " · con multibinding" if hook["multibinding"] else "", extra))
+    chosen = next((h for h in hooks if h["tipo"] == "interfaz" and h["multibinding"] and h["metodos"]), None)
+    unreadable = next((h for h in hooks if h["tipo"] == "interfaz" and h["multibinding"] and not h["metodos"]), None)
+    target = chosen or unreadable
+    if target:
+        method = target["metodos"][0] if chosen else None
+        types = []
+        if method:
+            types = [p.split(":", 1)[1].strip().rstrip("?") for p in split_params(method[1]) if ":" in p]
+            types += [method[2].rstrip("?")] if method[2] else []
+        lines += [
+            "//",
+            "// Binding en el source set perf (debug y %s; release queda igual, el multibinding ya existe):" % variant]
+        if not method:
+            lines += ["// %s tiene un multibinding pero no pude leer sus métodos (¿interfaz Java o una firma que no reconozco?): "
+                      "ábrela," % target["nombre"],
+                      "// implementa cada método y, en el que avisa que el contenido está a la vista, llama a PerfHooks.mark(<nombre>)."]
+        lines += [
+            "@Module",
+            "@InstallIn(SingletonComponent::class)",
+            "object PerfVisibleContentModule {",
+            "    @Provides",
+            "    @IntoSet",
+            "    fun perf%s(): %s = object : %s {" % (target["nombre"], target["nombre"], target["nombre"])]
+        if method:
+            name_param = next(iter(re.findall(r"(\w+)\s*:\s*String\b", method[1])), None)
+            returns = method[2] and method[2] != "Unit"
+            mark = "PerfHooks.mark(%s)" % (name_param or '"<pantalla>" /* arma el nombre con los parámetros */')
+            lines += ["        override %sfun %s(%s)%s { %s%s }" % (
+                "suspend " if method[3] else "", method[0], method[1], ": %s" % method[2] if returns else "", mark,
+                '; TODO("devuelve lo que espera quien lo llama")' if returns else "")]
+            if returns:
+                lines.insert(len(lines) - 1, "        // %s devuelve %s: reemplaza el TODO por el valor que el proyecto espera." % (method[0], method[2]))
+        else:
+            lines.append("        // PerfHooks.mark(<nombre>) en el método que avisa que el contenido está a la vista")
+        lines += [
+            "    }",
+            "}",
+            "// imports: %s.%s, {{PAQUETE}}.PerfHooks, dagger.Module, dagger.Provides, dagger.hilt.InstallIn, "
+            "dagger.hilt.components.SingletonComponent, dagger.multibindings.IntoSet%s" % (
+                target["paquete"] or "<paquete>", target["nombre"],
+                " (más los tipos de los parámetros)" if any(t not in PRIMITIVE_TYPES for t in types) else ""),
+            "// Con un Map usa @IntoMap y la clave del proyecto; con Dagger 2 sin Hilt, agrega el módulo a la lista del componente.",
+            "// Si el componente no es Singleton (retained, activity), cambia @InstallIn."]
+    else:
+        lines += [
+            "//",
+            "// Sin multibinding que lo reciba: no hay dónde sumar un binding sin tocar el código principal. Pon la marca en la",
+            "// implementación que atiende el gancho (PerfHooks.mark(<nombre>) en un solo archivo) o, con CompositionLocal, en",
+            "// el CompositionLocalProvider que lo provee. Si hay pantallas sin pasar por él, una línea por pantalla como último recurso."]
+    lines.append("// Primera pantalla (TTFD, también para Android vitals), Compose: ReportDrawnWhen { !uiState.isLoading }; "
+                 "Views: reportFullyDrawn().")
+    return "\n".join(lines)
+
+
+BRIDGE_SNIPPET = """// Las librerías no ven PerfHooks (vive en el módulo app): una pantalla de un módulo library emite la marca por una
+// interfaz que SÍ ven. Es código de producción (sin efecto en release): propónselo al usuario antes de agregarlo.
+// 1. En un módulo del que dependan las librerías con pantallas (core, common...):
+object ContentVisible {
+    @Volatile var onVisible: (String) -> Unit = {} // no-op hasta que la app lo apunta
+    fun mark(screen: String) = onVisible(screen)
+}
+// 2. En las pantallas medidas, de cualquier módulo, una vez por carga: ContentVisible.mark("<pantalla>")
+// 3. En el módulo app, una sola línea en Application.onCreate (PerfHooks.mark no hace nada en release):
+ContentVisible.onVisible = { PerfHooks.mark(it) } // import {{PAQUETE}}.PerfHooks"""
+
+VIEWS_SNIPPET = """// Marca = el contenido real ya está a la vista, una vez por carga (no por navegación ni por cada bind).
+// WebView: tras onPageFinished, cuando el DOM ya se pintó (API 23+):
+override fun onPageFinished(view: WebView, url: String) {
+    view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+        override fun onComplete(requestId: Long) { if (!marked) { marked = true; PerfHooks.mark("<pantalla>") } }
+    })
+}
+// RecyclerView: tras entregar la lista y antes de pintarla (androidx.core.view.doOnPreDraw):
+adapter.submitList(items) { recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla>") } }
+//   adapter sin submitList: notifyDataSetChanged() seguido de recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla>") }
+// RxJava / MVP: en el onSuccess/onNext que ya corre en el hilo principal (observeOn(AndroidSchedulers.mainThread())),
+//   después de entregar los datos al adapter o a la vista, no en un doOnNext de la capa de red; vuelve `marked` a false
+//   cuando empieza una carga nueva."""
+
+VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+PRODUCTION_VARIANTS = ("debug", "release")  # build types del proyecto: jamás llevan el source set ni el provider de perf
+DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
+DEBUGGABLE_OFF = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)false\b")
+BUILD_TYPE_HEADER = re.compile(r"(?:(?:create|register|getByName|maybeCreate)\s*\(\s*[\"'](\w+)[\"']\s*\)"
+                               r"|(?:val\s+)?(\w+)\s+by\s+(?:creating|getting)|(?<![\w.\"'])(\w+))\s*\{")
+
+
+def match_brace(text, start):
+    """Índice justo después de la llave que cierra la que está en text[start]."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def build_types(text):
+    """{nombre: cuerpo} de los build types de un build.gradle(.kts); solo los de primer nivel de buildTypes { }."""
+    found = re.search(r"\bbuildTypes\s*\{", text)
+    if not found:
+        return {}
+    start = found.end() - 1
+    body = text[start + 1:match_brace(text, start) - 1]
+    types, pos = {}, 0
+    while True:
+        header = BUILD_TYPE_HEADER.search(body, pos)
+        if not header:
+            return types
+        brace = header.end() - 1
+        end = match_brace(body, brace)
+        types[header.group(1) or header.group(2) or header.group(3)] = body[brace + 1:end - 1]
+        pos = end
+
+
+def is_debuggable(name, body):
+    """True si el build type es depurable: lo declara, o hereda de debug con initWith y no lo apaga."""
+    if DEBUGGABLE_ON.search(body):
+        return True
+    if DEBUGGABLE_OFF.search(body):
+        return False
+    base = re.search(r"initWith\s*\(?([^)\n;]*)", body)  # initWith(getByName("debug")) o, en Groovy, initWith debug
+    if base:
+        words = re.findall(r"\w+", base.group(1))
+        return bool(words) and words[-1] == "debug"
+    return name == "debug"
+
+
+def find_profileable_variants(module, root, patterns):
+    """Variantes del módulo cuyo manifest declara <profileable>: [{nombre, manifest, estado, generada}]. 'estado': 'ok'
+    (build type no depurable), 'depurable' o 'sin build type' (no se pudo verificar: sabores, otro plugin)."""
+    gradle = next((module / n for n in ("build.gradle.kts", "build.gradle") if (module / n).is_file()), None)
+    types = {}
+    if gradle and not is_denied(gradle, root, patterns):
+        types = build_types(gradle.read_text(encoding="utf-8", errors="ignore"))
+    found = []
+    for manifest in sorted((module / "src").glob("*/AndroidManifest.xml")):
+        name = manifest.parent.name
+        if name == "main" or name.lower() in PRODUCTION_VARIANTS or is_denied(manifest, root, patterns):
+            continue
+        text = manifest.read_text(encoding="utf-8", errors="ignore")
+        profileable = re.search(r"<profileable\b[^>]*>", text)
+        if not profileable or re.search(r"android:enabled\s*=\s*[\"']false[\"']", profileable.group(0)):
+            continue
+        state = "sin build type" if name not in types else "depurable" if is_debuggable(name, types[name]) else "ok"
+        found.append({"nombre": name, "manifest": manifest, "estado": state, "generada": GENERATED in text[:400]})
+    return found
+
+
+def resolve_variant(found, requested):
+    """(variante, existente): la pedida con --variante; si no, la única profileable y no depurable del módulo (la que
+    creó la skill gana si hay varias); si no hay ninguna, 'profiling' nueva. Una pedida que declara <profileable> es
+    existente aunque no se pueda verificar su build type (sabores, otro plugin): crear otro la duplicaría; si es
+    depurable, se rechaza."""
+    if requested:
+        asked = next((c for c in found if c["nombre"] == requested), None)
+        if asked and asked["estado"] == "depurable":
+            raise PerfError("variante '%s' es depurable (declara isDebuggable o hereda de debug): las trazas no reflejan "
+                            "el rendimiento real. Usa otra, o --variante profiling para crear una propia" % requested)
+        return requested, asked is not None
+    valid = [c for c in found if c["estado"] == "ok"]
+    chosen = [c for c in valid if c["generada"]] or valid
+    if len(chosen) > 1:
+        raise PerfError("hay %d variantes profileable y no depurables (%s): elige una con --variante, o --variante "
+                        "profiling para crear una propia" % (len(chosen), ", ".join(c["nombre"] for c in chosen)))
+    return (chosen[0]["nombre"], True) if chosen else ("profiling", False)
+
+
 def cmd_instrumentar(args):
     module = pathlib.Path(args.modulo)
     if not (module / "build.gradle.kts").is_file() and not (module / "build.gradle").is_file():
         raise PerfError("%s no parece un módulo Gradle (falta build.gradle o build.gradle.kts)" % module)
     if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", args.paquete):
         raise PerfError("paquete '%s' no válido: usa algo como com.ejemplo.app.perf" % args.paquete)
+    if args.variante and not VARIANT_NAME.fullmatch(args.variante):
+        raise PerfError("variante '%s' no válida: usa el nombre del build type (profiling, benchmark, releaseLike)" % args.variante)
+    if args.variante and args.variante.lower() in PRODUCTION_VARIANTS:
+        raise PerfError("variante '%s' no válida: release y debug son los build types del proyecto y la instrumentación "
+                        "no puede entrar en el release que se publica; usa otra variante o deja que se cree `profiling`"
+                        % args.variante)
+    root = project_root(module)
+    denied = read_no_leer(root, extra=args.no_leer)
+    found_variants = find_profileable_variants(module, root, denied)
+    variant, existing = resolve_variant(found_variants, args.variante)
+    unverified = any(c["nombre"] == variant and c["estado"] == "sin build type" for c in found_variants)
+    modules = list_modules(root, denied)
+    scan = scan_sources(root, denied)
     network = choose(args.red, detect(module, ["okhttp", "retrofit"]))
     retrofit = network and choose(args.retrofit, detect(module, ["retrofit"]))
     fragments = choose(args.fragments, detect(module, ["fragment", "appcompat"]))
@@ -2726,8 +3379,8 @@ def cmd_instrumentar(args):
             mains.append(("PerfHooksModule.kt", "PerfHooksModule.kt"))
     plan = [(templates / src, module / args.fuente / package_path / dst) for src, dst in files]
     plan += [(templates / "main" / src, module / main_dir / package_path / dst) for src, dst in mains]
-    plan += [(templates / "manifests" / ("%s.xml" % kind), module / "src" / kind / "AndroidManifest.xml")
-             for kind in ("debug", "profiling")]
+    plan += [(templates / "manifests" / ("%s.xml" % kind), module / "src" / folder / "AndroidManifest.xml")
+             for kind, folder in (("debug", "debug"), ("profiling", variant))]
     if not args.sin_tests:
         plan += [(templates / "test" / src, module / args.tests / package_path / dst) for src, dst in tests]
     pending = []
@@ -2737,8 +3390,9 @@ def cmd_instrumentar(args):
                 target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
                 print("~ actualizado: %s" % target)
             elif target.suffix == ".xml":
+                lacks = target.parent.name == variant and "<profileable" not in target.read_text(encoding="utf-8", errors="ignore")
                 print("= ya existe, no se toca: %s (agrega el <provider> de abajo%s)" % (
-                    target, " y <profileable android:shell=\"true\" />" if "profiling" in str(target) else ""))
+                    target, " y <profileable android:shell=\"true\" />" if lacks else ""))
                 pending.append("manifest")
             else:
                 print("= ya existe, no se toca: %s%s" % (target, "" if is_generated(target) else " (no lo generó la skill)"))
@@ -2747,25 +3401,65 @@ def cmd_instrumentar(args):
         target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
         print("+ %s" % target)
     yes_no = lambda flag: "sí" if flag else "no"  # noqa: E731
-    print("Red: %s · Retrofit: %s · Fragments: %s · Hilt: %s · código principal en %s" % (
-        yes_no(network), yes_no(retrofit), yes_no(fragments), yes_no(hilt), main_dir))
+    kind = "nueva"
+    if existing:
+        kind = ("existente: declara <profileable>, sin verificar que no sea depurable, no se crea otro build type"
+                if unverified else "existente: profileable y no depurable, no se crea otro build type")
+    print("Variante: %s (%s) · Red: %s · Retrofit: %s · Fragments: %s · Hilt: %s · código principal en %s" % (
+        variant, kind, yes_no(network), yes_no(retrofit), yes_no(fragments), yes_no(hilt), main_dir))
+    if unverified:
+        print("⚠ %s declara <profileable> pero no pude verificar su build type (sabores u otro plugin): confirma que no "
+              "sea depurable (isDebuggable) antes de medir" % variant)
+    if len(modules) > 1:
+        shown = ["%s (%s)" % m for m in modules[:12]]
+        print("Módulos: %s%s. La instrumentación va en el módulo app (--modulo %s); las librerías emiten marcas por una interfaz." % (
+            " · ".join(shown), " …" if len(modules) > 12 else "", module.as_posix()))
+    outside = [(f, n) for f, n in scan["okhttp"] if not is_under(root / f, module)]
+    if outside:
+        print("⚠ OkHttpClient se arma fuera del módulo app (%s%s): PerfHooks y el multibinding de red viven en el código "
+              "principal de la app y esos módulos no los ven, así que esas llamadas quedan sin secciones HTTP. Díselo al "
+              "usuario: mide sin ellas, usa `perf.py har` con Chucker (medicion.md) o decidan mover el gancho a ese módulo."
+              % (", ".join("%s:%d" % o for o in outside[:3]), " …" if len(outside) > 3 else ""))
+    for other in found_variants:
+        if other["nombre"] != variant and other["estado"] != "ok":
+            print("  · %s también declara <profileable> pero %s: no se usa" % (
+                other["nombre"], "es depurable" if other["estado"] == "depurable" else "no pude verificar su build type"))
     print("\nFalta pegar, con el paquete ya puesto (references/setup.md explica cada pieza):\n")
-    snippets = [("1. Build type profiling, source set y cobertura (build.gradle.kts del módulo)", SNIPPETS["gradle"])]
+    snippets = [("1. %s (build.gradle.kts del módulo)" % ("Source set y cobertura de la variante %s" % variant if existing
+                                                           else "Build type %s, source set y cobertura" % variant),
+                 SNIPPETS["gradle_existente" if existing else "gradle"])]
     if network:
         snippets.append(("2. Red: cada OkHttpClient pasa por el gancho", SNIPPETS["red_hilt" if hilt else "red_sinhilt"]))
     snippets.append(("%d. Navegación sin cambio de actividad (Compose, Navigation 3)" % (3 if network else 2), SNIPPETS["nav"]))
-    snippets.append(("%d. Contenido visible: reportFullyDrawn en la primera pantalla y PerfHooks.mark en las demás"
-                     % (4 if network else 3), SNIPPETS["contenido"]))
+    hooks = scan["ganchos"]
+    if hooks:
+        snippets.append(("%d. Contenido visible: el proyecto ya tiene un punto de extensión (%d candidato%s): conecta ahí las "
+                         "marcas" % (4 if network else 3, len(hooks), "" if len(hooks) == 1 else "s"),
+                         hook_snippet(hooks, variant)))
+    else:
+        snippets.append(("%d. Contenido visible: reportFullyDrawn en la primera pantalla y PerfHooks.mark en las demás"
+                         % (4 if network else 3), SNIPPETS["contenido"]))
+        if len(modules) > 1:
+            snippets.append(("Pantallas en módulos library: la marca sale por una interfaz que ellas sí ven", BRIDGE_SNIPPET))
+    if any(scan["vistas"][name] for name in ("WebView", "RecyclerView")) or scan["vistas"]["RxJava"]:
+        used = [name for name in ("WebView", "RecyclerView", "RxJava") if scan["vistas"][name]]
+        snippets.append(("Pantallas con Views y RxJava (%s en %s): dónde va la marca" % (
+            ", ".join(used), "el proyecto"), VIEWS_SNIPPET))
     if "manifest" in pending:
         snippets.append(("Manifest existente: agrega dentro de <application>",
                          '<provider android:name="{{PAQUETE}}.PerfInstaller" android:authorities="${applicationId}.perf-installer" '
                          'android:exported="false" />'))
     for title, body in snippets:
         print(title)
-        print(textwrap.indent(body.replace("{{PAQUETE}}", args.paquete).replace("{{FUENTE}}", args.fuente), "   "))
+        print(textwrap.indent(body.replace("{{PAQUETE}}", args.paquete).replace("{{FUENTE}}", args.fuente)
+                              .replace("{{VARIANTE}}", variant)
+                              .replace("{{ESTADO}}", "declara <profileable> y no pude verificar que no sea depurable: confírmalo"
+                                       if unverified else "ya es profileable y no depurable"), "   "))
         print()
-    print("Después: el formateador del proyecto en una invocación de Gradle aparte y, en otra, el DoD más assembleProfiling "
-          "con el log en un archivo (setup.md · DoD).")
+    print("El `paquete` del plan es el applicationId de la variante %s (con su sufijo, si lo tiene); se instala con "
+          "install%s." % (variant, variant[:1].upper() + variant[1:]))
+    print("Después: el formateador del proyecto en una invocación de Gradle aparte y, en otra, el DoD más assemble%s "
+          "con el log en un archivo (setup.md · DoD)." % (variant[:1].upper() + variant[1:]))
 
 
 # ── Entrada ──────────────────────────────────────────────────────────────────
@@ -2789,6 +3483,9 @@ def main(argv=None):
     p.add_argument("--serial", help="dispositivo de medición; queda en el plan y lo usan todas las capturas")
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (queda en el plan)")
     p.add_argument("--triage", action="store_true", help="profundidad triage: 3 corridas, sin control, termina en el diagnóstico")
+    p.add_argument("--no-leer", dest="no_leer", action="append", default=[], metavar="RUTA",
+                   help="ruta o patrón que el agente no debe leer (pruebas a ciegas); se repite. Se suma a la línea "
+                        "'No leer:' de AGENTS.md")
     p.set_defaults(func=cmd_nuevo)
 
     p = sub.add_parser("humo", help="prueba de humo del setup: una corrida de arranque que imprime métricas y marcas")
@@ -2830,7 +3527,7 @@ def main(argv=None):
     p.add_argument("--fase", help="antes, control o despues")
     p.add_argument("--corridas", type=int, default=MIN_RUNS)
     p.add_argument("--calentamiento", type=int, default=1)
-    p.add_argument("--recorrido", help="'manual' (Enter entre corridas) o un comando que recorre el flujo (testigo)")
+    p.add_argument("--recorrido", help="'manual' (Enter entre corridas) o un comando adb con los toques medidos (nunca Maestro)")
     p.add_argument("--preparar", help="comando que deja la app en el punto de partida antes de cada corrida (en vez del del plan)")
     p.add_argument("--config", help="configuración de Perfetto para esta captura (base, completa, cpu o una ruta)")
     p.add_argument("--serial")
@@ -2911,6 +3608,10 @@ def main(argv=None):
     p.add_argument("--sin-hilt", dest="hilt", action="store_false", help="gancho de red con PerfHooks.okHttp")
     p.add_argument("--principal", help="carpeta del código principal (src/main/kotlin o src/main/java; si no, se detecta)")
     p.add_argument("--sin-tests", action="store_true")
+    p.add_argument("--variante", help="build type que lleva la instrumentación (profileable y no depurable). Por defecto se "
+                                      "reutiliza el que el módulo ya tenga; si no hay ninguno, se crea 'profiling'")
+    p.add_argument("--no-leer", dest="no_leer", action="append", default=[], metavar="RUTA",
+                   help="ruta o patrón que el escaneo no debe leer; se repite (se suma a la línea 'No leer:' de AGENTS.md)")
     p.add_argument("--actualizar", action="store_true",
                    help="sobrescribe los archivos que generó la skill (los que llevan su encabezado); nunca los del proyecto")
     p.set_defaults(func=cmd_instrumentar)

@@ -27,7 +27,7 @@ Qué hace, en orden:
 3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
 4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase).
 
-Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), con hasta 3 intentos de más. Una corrida inválida se guarda como `_invalida_<motivo>` para auditoría y no entra al CSV.
+Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), con intentos de reserva: 3 como mínimo y la mitad de las pedidas si son más (5 → 8 intentos, 10 → 15, 20 → 30), así que unas pocas inválidas sueltas no cortan una captura larga. Tres inválidas **seguidas** la detienen antes, sin gastar la reserva: algo falla de forma sistemática. Una corrida inválida se guarda como `_invalida_<motivo>` para auditoría y no entra al CSV.
 
 | Opción | Para qué |
 | --- | --- |
@@ -76,9 +76,21 @@ Corre las consultas de diagnóstico sobre la corrida mediana y la peor de la pri
 | --- | --- | --- |
 | `debuggable` | Conteos y orden de las llamadas, duplicados, fugas | Frames, CPU y tiempos: corre con chequeos extra |
 | `profileable` (profiling) | Todo | — |
-| Emulador | Conteos y fugas | Tiempos y frames |
+| Emulador | Conteos y fugas | Tiempos y frames (con `-gpu host` son orientativos; con render por software, no valen) |
 
 Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script usa `gfxinfo` (métricas `gfx_*`).
+
+### Emulador y render por software
+
+`capturar` (y `humo`) detecta el emulador (`ro.kernel.qemu`, `ro.hardware`, el modelo) y el renderer de GLES que reporta SurfaceFlinger, en una sola llamada a `adb`:
+
+| Entorno | `frames` | Qué pasa |
+| --- | --- | --- |
+| Dispositivo físico con GPU | `ok` | Nada |
+| Emulador con GPU del host (`-gpu host`) | `baja` | Aviso: valen los conteos (red, inflates) y las fugas; los tiempos y los frames son orientativos, y los reportes lo anotan en los avisos de `jank_*`, `frame_*` y `gfx_*` |
+| Render por software (SwiftShader, llvmpipe), en emulador o no | `no` | Aviso, y `comparar` y el reporte dan `no confiable` a los frames en lugar de un veredicto; los conteos y los tiempos que no son de frame siguen con el suyo |
+
+Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`; si una fase se mide en varias tandas, conserva el peor nivel: relanzar el emulador con `-gpu host` no la vuelve confiable, hay que repetirla con `--rehacer`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
 
 ## Familias de métricas
 
@@ -92,12 +104,24 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 - `<métrica> hasta_ultima_red_ms`: para una métrica de usuario que termina en una llamada, cuánto hay desde su inicio hasta el fin de la última llamada de red. `comparar` avisa si se separan: la marca de fin dejó de ser la última llamada y la métrica cambió de definición.
 - El presupuesto de frame sale de `hz` (del plan o de la traza): 16,7 ms a 60 Hz, 11,1 ms a 90 Hz, 8,3 ms a 120 Hz.
 
-## Con testigo
+## Hilos ajenos a la app
 
-- **Frames y CPU:** `recorrido` en el plan con el comando de testigo para un flujo, sin video ni red:
-  `testigo run --app <apk-profiling> --flows <flujo.yaml> --network none --no-record --out <carpeta>/testigo`.
-  testigo no reinstala un APK que no cambió, así que se conserva la compilación.
-- **Red con Chucker (build `debuggable`):** conteos, duplicados y solapadas por endpoint, sin instrumentación:
+Si hay un servidor (o cualquier trabajo que no es de la app) en el mismo proceso, sus hilos suman CPU, memoria y tiempo de respuesta que no se arreglan en la app. Decláralos en `plan.json` con una expresión regular del nombre del hilo (`hilos_ajenos`, [ficha.md](ficha.md)); mira los nombres en `cpu_por_hilo`. Cuando hay `hilos_ajenos`, cada corrida hace una **segunda pasada** por la traza (unos segundos más) y agrega, por grupo declarado:
+
+| Métrica | Qué es | Familia |
+| --- | --- | --- |
+| `hilos_<nombre>_cpu_ms` | CPU de los hilos del grupo dentro de la ventana del flujo (toda la traza si no hay ventana) | la del grupo (`e2e` por defecto) |
+| `hilos_<nombre>_cantidad` | Cuántos hilos del grupo corrieron | `info` |
+| `hilos_app_cpu_ms` | CPU del resto de los hilos de la app, sin el principal ni los de ningún grupo | `app` |
+| `red <endpoint> <nombre>_cpu_ms` | **Mediana por llamada** de la CPU del grupo mientras esa llamada estaba en vuelo, sobre las mismas llamadas que `red <endpoint> ms` (las que no tuvieron CPU del grupo cuentan 0; si hay dos llamadas en vuelo a la vez, la CPU de ese momento cuenta en las dos). No es el total de la corrida: ese es `hilos_<nombre>_cpu_ms` | la del grupo |
+
+Las métricas del hilo principal (`hilo_*`) no cambian: el hilo principal nunca es ajeno. Si un grupo es el backend, `red <endpoint> ms` y `ttfb_ms` ya incluyen su trabajo: compara con `red <endpoint> <nombre>_cpu_ms` (ambas son medianas por llamada) para ver cuánto de esa espera es CPU del servidor y cuánto es el propio tiempo del servidor (esperas, `delay`). Si un hilo calza con dos grupos, gana el primero de la lista.
+
+## Con Maestro y testigo
+
+- **Nunca como `recorrido`.** Medido en un A/A (misma app, mismo flujo, 10 corridas por lado), Maestro dando un solo toque sumó un 14 % al tiempo de punta a punta (284 → 325 ms, con un ruido adb-contra-adb del 0,4 %) y multiplicó por 3–10 la varianza del hilo principal; la traza creció seis veces. Su driver corre en el dispositivo y activa accesibilidad: trabajo extra para la app dentro de la ventana medida, y no depende del flow.
+- **Sí como `preparar`:** corre antes de que arranque la traza. Un flow de Maestro lleva la app al punto de partida (login, avisos, tab) y el tramo medido queda en uno o dos toques de `adb` ([ficha.md](ficha.md) · Flujos largos). `maestro --device <serial> test <flow.yaml> > /dev/null && sleep 2`; `testigo run` no, porque además instala la app si el artefacto cambió y arranca la evidencia.
+- **Red con Chucker (build `debuggable`), aparte de la medición:** conteos, duplicados y solapadas por endpoint, sin instrumentación:
   ```bash
   cd <raíz-del-proyecto> && testigo run --app <apk-debug> --flows <flujo.yaml> --repeat 5 --network chucker --network-format har --no-record --out <carpeta>/red-antes
   cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py har --fase antes --flujo <flujo> --csv <carpeta>/metricas.csv <carpeta>/red-antes/*/<flujo>/*/network.har

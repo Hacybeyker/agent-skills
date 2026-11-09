@@ -417,6 +417,10 @@ elif cmd.startswith("kill -0"):
     sys.exit(1)
 elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
+elif cmd.startswith('echo "q='):
+    emulator = os.environ.get("FAKE_EMULATOR")
+    print("q=%s\nb=\nh=%s\nm=%s\nc=\ng=%s" % ("1" if emulator else "", "ranchu" if emulator else "qcom",
+          "sdk_gphone64_arm64" if emulator else "Pixel Test", os.environ.get("FAKE_GLES", "")))
 '''
 
 FAKE_TP = r'''#!{python}
@@ -481,6 +485,120 @@ class DeviceBase(PerfBase):
         write(self.dir / "tp.txt", "===\n".join(outputs))
 
 
+GLES_REAL = "GLES: Qualcomm, Adreno (TM) 740, OpenGL ES 3.2 V@0615.0"
+GLES_HOST = "GLES: Google (Apple), Android Emulator OpenGL ES Translator (Apple M2 Pro), OpenGL ES 3.0 (4.1 Metal)"
+GLES_SOFT = "GLES: Google (Google Inc.), Android Emulator OpenGL ES Translator (Google SwiftShader), OpenGL ES 3.0"
+
+
+def environment_text(qemu="", hardware="qcom", model="Pixel Test", characteristics="", gles=GLES_REAL):
+    return "q=%s\nb=\nh=%s\nm=%s\nc=%s\ng=%s\n" % (qemu, hardware, model, characteristics, gles)
+
+
+class EnvironmentTest(unittest.TestCase):
+    def test_un_dispositivo_real_es_confiable(self):
+        env = perf.classify_environment(environment_text())
+        self.assertEqual((env["emulador"], env["software"], env["frames"]), (False, False, "ok"))
+        self.assertEqual(perf.environment_warnings(env), [])
+
+    def test_la_salida_vacia_no_inventa_un_emulador(self):
+        self.assertEqual(perf.classify_environment("")["frames"], "ok")
+
+    def test_emulador_con_gpu_del_host_da_frames_orientativos(self):
+        env = perf.classify_environment(environment_text(qemu="1", hardware="ranchu", gles=GLES_HOST))
+        self.assertEqual((env["emulador"], env["software"], env["frames"]), (True, False, "baja"))
+        self.assertIn("es un emulador", perf.environment_warnings(env)[0])
+        self.assertIn("-gpu host", perf.environment_warnings(env)[0])
+
+    def test_emulador_con_swiftshader_no_es_confiable(self):
+        env = perf.classify_environment(environment_text(qemu="1", hardware="ranchu", gles=GLES_SOFT))
+        self.assertEqual((env["emulador"], env["software"], env["frames"]), (True, True, "no"))
+        warning = perf.environment_warnings(env)[0]
+        self.assertIn("renderiza por software", warning)
+        self.assertIn("-gpu host", warning)
+        self.assertIn("dispositivo físico", warning)
+
+    def test_se_reconoce_el_emulador_por_cualquiera_de_sus_senales(self):
+        for kwargs in ({"qemu": "1"}, {"hardware": "goldfish"}, {"characteristics": "emulator"},
+                       {"model": "sdk_gphone64_arm64"}, {"model": "Android SDK built for x86"}):
+            self.assertTrue(perf.classify_environment(environment_text(**kwargs))["emulador"], kwargs)
+
+    def test_render_por_software_en_un_dispositivo_fisico_tampoco_es_confiable(self):
+        env = perf.classify_environment(environment_text(gles="GLES: Mesa, llvmpipe (LLVM 15.0.7), OpenGL ES 3.2"))
+        self.assertEqual((env["emulador"], env["frames"]), (False, "no"))
+
+
+class FramesTrustTest(PerfBase):
+    def rows(self):
+        return read_rows_from(rows("antes", "home", "jank_app_pct", [10, 11, 10, 12, 10], unit="%")
+                              + rows("despues", "home", "jank_app_pct", [2, 3, 2, 2, 3], unit="%")
+                              + rows("antes", "home", "red_llamadas", [4, 4, 4, 4, 4], unit="llamadas")
+                              + rows("despues", "home", "red_llamadas", [2, 2, 2, 2, 2], unit="llamadas"))
+
+    def verdicts(self, trust):
+        results, _ = perf.compare(self.rows(), trust=trust)
+        return {r["metrica"]: r for r in results}
+
+    def test_sin_aviso_el_veredicto_no_cambia(self):
+        results = self.verdicts(("ok", ""))
+        self.assertEqual(results["jank_app_pct"]["veredicto"], "mejora")
+        self.assertFalse([a for a in results["jank_app_pct"]["avisos"] if a.startswith("frames")])
+
+    def test_con_render_por_software_los_frames_no_tienen_veredicto_y_los_conteos_si(self):
+        results = self.verdicts(("no", "emulador, render por software"))
+        self.assertEqual(results["jank_app_pct"]["veredicto"], "no confiable")
+        self.assertIn("frames no confiables (emulador, render por software)", results["jank_app_pct"]["avisos"])
+        self.assertEqual(results["red_llamadas"]["veredicto"], "mejora")
+        self.assertEqual(results["red_llamadas"]["avisos"], [])
+
+    def test_con_gpu_del_host_el_veredicto_se_conserva_con_aviso(self):
+        results = self.verdicts(("baja", "emulador (render: Translator)"))
+        self.assertEqual(results["jank_app_pct"]["veredicto"], "mejora")
+        self.assertTrue(any(a.startswith("frames orientativos") for a in results["jank_app_pct"]["avisos"]))
+
+    def test_trust_lee_el_peor_entorno_de_las_fases(self):
+        self.assertEqual(perf.frames_trust(self.dir), ("ok", ""))
+        write(self.dir / "fases.json", json.dumps({
+            "antes": {"entorno": {"emulador": True, "software": False, "frames": "baja"}},
+            "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
+        self.assertEqual(perf.frames_trust(self.dir), ("no", "emulador, render por software"))
+
+    def test_el_motivo_de_la_confianza_baja_dice_el_render_y_no_que_falta_la_gpu(self):
+        host = {"emulador": True, "software": False, "render": "Android Emulator OpenGL ES Translator (Apple M2 Pro)",
+                "frames": "baja"}
+        write(self.dir / "fases.json", json.dumps({"antes": {"entorno": host}}))
+        level, motive = perf.frames_trust(self.dir)
+        self.assertEqual(level, "baja")
+        self.assertEqual(motive, "emulador (render: Android Emulator OpenGL ES Translator (Apple M2 Pro))")
+        self.assertNotIn("sin GPU del host", motive)
+        write(self.dir / "fases.json", json.dumps({"antes": {"entorno": dict(host, render="")}}))
+        self.assertEqual(perf.frames_trust(self.dir), ("baja", "emulador (render: sin dato)"))
+
+    def test_comparar_y_resumen_marcan_los_frames_de_las_fases_medidas_en_software(self):
+        write(self.csv, HEADER + rows("antes", "home", "jank_app_pct", [10, 11, 10, 12, 10], unit="%")
+              + rows("despues", "home", "jank_app_pct", [2, 3, 2, 2, 3], unit="%")
+              + rows("antes", "home", "red_llamadas", [4] * 5, unit="llamadas")
+              + rows("despues", "home", "red_llamadas", [2] * 5, unit="llamadas"))
+        write(self.dir / "fases.json", json.dumps({
+            "antes": {"entorno": {"emulador": True, "software": True, "frames": "no"}},
+            "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
+        out = self.ok("comparar", self.csv)
+        self.assertRegex(out, r"jank_app_pct.*no confiable")
+        self.assertRegex(out, r"red_llamadas.*mejora")
+        self.assertIn("no confiable = los frames se midieron con render por software", out)
+        self.assertIn("frames no confiables", out)
+        comparison = (self.dir / "comparacion.md").read_text(encoding="utf-8")
+        self.assertRegex(comparison, r"jank_app_pct.*no confiable")
+        self.ok("resumen", self.csv)
+        self.assertIn("frames no confiables (emulador, render por software)", (self.dir / "resumen.md").read_text(encoding="utf-8"))
+
+
+def read_rows_from(text):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "metricas.csv"
+        path.write_text(HEADER + text, encoding="utf-8")
+        return perf.read_rows(path)
+
+
 class CaptureTest(DeviceBase):
     def test_captura_corridas_validas_escribe_csv_comprime_y_resume(self):
         self.tp_outputs(GOOD)
@@ -496,6 +614,55 @@ class CaptureTest(DeviceBase):
         self.assertIn("cmd package compile -f -m speed %s" % PKG, log)
         self.assertIn("kill -TERM 4242", log)
 
+    def test_en_un_emulador_con_render_por_software_avisa_recomienda_y_lo_registra_en_la_fase(self):
+        self.tp_outputs(GOOD)
+        self.env.update({"FAKE_EMULATOR": "1", "FAKE_GLES": GLES_SOFT})
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertIn("⚠ el dispositivo renderiza por software", out)
+        self.assertIn("-gpu host", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["entorno"]["frames"], "no")
+        self.assertTrue(phases["antes"]["entorno"]["emulador"])
+        self.assertRegex(out, r"jank_app_pct.*frames no confiables")
+        self.assertIn("frames no confiables", (self.plan.parent / "resumen.md").read_text(encoding="utf-8"))
+
+    def test_otra_tanda_de_la_misma_fase_con_gpu_del_host_conserva_el_nivel_no_confiable(self):
+        self.tp_outputs(GOOD)
+        self.env.update({"FAKE_EMULATOR": "1", "FAKE_GLES": GLES_SOFT})
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        self.env["FAKE_GLES"] = GLES_HOST  # se relanzó el emulador con -gpu host
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["corridas"], 2)
+        self.assertEqual(phases["antes"]["entorno"]["frames"], "no")
+        self.assertTrue(phases["antes"]["entorno"]["software"])
+        self.assertEqual(perf.frames_trust(self.plan.parent), ("no", "emulador, render por software"))
+
+    def test_write_phase_conserva_el_peor_entorno_de_la_fase(self):
+        soft = {"emulador": True, "software": True, "render": "SwiftShader", "frames": "no"}
+        host = {"emulador": True, "software": False, "render": "Apple M2", "frames": "baja"}
+        for first, second, expected in ((soft, host, "no"), (host, soft, "no"), (host, None, "baja"), (None, host, "baja"),
+                                        (soft, None, "no")):
+            folder = self.dir / ("fase-%s-%s" % (first and first["frames"], second and second["frames"]))
+            folder.mkdir()
+            for env in (first, second):
+                perf.write_phase(folder, "antes", dict({"fecha": "2026-11-09T10:00:00", "corridas": 1}, **({"entorno": env} if env else {})))
+            self.assertEqual(perf.read_phases(folder)["antes"]["corridas"], 2)
+            self.assertEqual(perf.frames_trust(folder)[0], expected, (first, second))
+        folder = self.dir / "fase-real"
+        folder.mkdir()
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-09T10:00:00", "corridas": 1})
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-09T11:00:00", "corridas": 1})
+        self.assertNotIn("entorno", perf.read_phases(folder)["antes"])
+
+    def test_en_un_dispositivo_real_no_avisa_ni_agrega_entorno(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_GLES"] = GLES_REAL
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("emulador", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertNotIn("entorno", phases["antes"])
+
     def test_preparar_corre_antes_de_cada_corrida_y_del_calentamiento(self):
         self.tp_outputs(GOOD)
         marker = self.dir / "preparado.txt"
@@ -507,9 +674,44 @@ class CaptureTest(DeviceBase):
         self.assertEqual(marker.read_text(encoding="utf-8").count("x"), 3)  # calentamiento + 2 corridas
         plan["flujos"]["home"]["preparar"] = "false"
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
-        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
-        self.assertEqual(result.returncode, 3)
-        self.assertIn("'preparar' terminó con código 1", result.stderr)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "10")
+        # Un 'preparar' que falla (login que no entra, backend caído) invalida la corrida y se repite; tres seguidas
+        # detienen la captura con el motivo, sin gastar los 15 intentos.
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("⚠ calentamiento: 'preparar' terminó con código 1", result.stdout)
+        self.assertEqual(result.stdout.count("inválida: 'preparar' terminó con código 1 (se repite)"), 3)
+        self.assertIn("3 corridas inválidas seguidas (última: 'preparar' terminó con código 1)", result.stderr)
+
+    def test_tres_corridas_invalidas_seguidas_detienen_la_captura(self):
+        self.tp_outputs(LOGIN, LOGIN, LOGIN, GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("inválida"), 3)
+        self.assertIn("3 corridas inválidas seguidas", result.stderr)
+        self.assertIn("las 0 válidas quedan guardadas", result.stderr)
+        self.tp_outputs(GOOD, LOGIN, LOGIN, GOOD, LOGIN, GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "3",
+                      "--calentamiento", "0", "--sin-compilar", "--rehacer")
+        self.assertIn("corrida 3/3", out)  # dos inválidas seguidas no detienen: el contador se reinicia con una válida
+
+    def test_el_tope_de_intentos_crece_con_las_corridas_pedidas(self):
+        self.assertEqual([perf.max_attempts(n) for n in (1, 5, 6, 10, 20)], [4, 8, 9, 15, 30])
+
+    def test_invalidas_sueltas_no_cortan_una_captura_de_diez_corridas(self):
+        # cuatro inválidas sin dos seguidas: el tope viejo (corridas + 3 = 13) las cortaba con 9 válidas
+        self.tp_outputs(GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, GOOD, GOOD, GOOD, GOOD, GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(out.count("✖ corrida"), 4)
+        self.assertIn("corrida 10/10", out)
+
+    def test_con_pocas_corridas_el_tope_sigue_siendo_tres_intentos_de_mas(self):
+        self.tp_outputs(LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "4",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("solo 3 de 4 corridas válidas en 7 intentos", result.stderr)
 
     def test_una_corrida_sin_la_ventana_o_sin_la_metrica_principal_es_invalida(self):
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
@@ -640,7 +842,7 @@ class CaptureTest(DeviceBase):
         self.assertIn("Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
         self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/perf/arranque-frio/" % PKG, out)
         self.assertIn('--instalar "./gradlew app:installProfiling"', out)
-        self.assertIn("Otra pantalla o flujo · Chat nuevo · Modelo: Sonnet 5 · Esfuerzo: medio", out)
+        self.assertIn("Otra pantalla o flujo · Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", out)
         self.assertIn("Dispositivo emulator-5554", out)
         self.assertTrue(any((self.dir / "reports/perf/humo/prueba").glob("humo_1.perfetto-trace*")))
         self.assertFalse((self.dir / "reports/perf/humo/plan.json").exists())
@@ -878,6 +1080,24 @@ class ReportTest(PerfBase):
         self.assertIn("<svg", page)
         self.assertNotIn("{{", page)
 
+    def test_reporte_marca_no_confiable_una_principal_de_frames_medida_con_render_por_software(self):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", "# Rendimiento · Home · 2026-11-09\n\n## Resumen ejecutivo\n\nTexto.\n")
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {}}, "principales": ["jank_app_pct"],
+                                                "mejoras": [{"id": "M1", "titulo": "Menos jank", "flujo": "f",
+                                                             "metrica": "jank_app_pct", "estado": "aplicada"}]}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "f", "jank_app_pct", [9, 10, 9, 10, 9], "%") +
+              rows("despues", "f", "jank_app_pct", [3] * 5, "%"))
+        write(folder / "fases.json", json.dumps({"antes": {"entorno": {"emulador": True, "software": True, "frames": "no"}},
+                                                  "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
+        self.ok("reporte", "--carpeta", folder, "--html")
+        md = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("| no confiable | no confiable: los frames se midieron con render por software", md)
+        self.assertNotIn("| mejora |", md)
+        self.assertIn("— sin veredicto", md)  # la mejora no se declara lograda con frames que no valen
+        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
+        self.assertIn('class="verdict v-same">no confiable', page)
+
     def test_reporte_inicial_con_plan_y_final_con_propuesto_contra_logrado(self):
         folder = self.dir / "inv"
         write(folder / "estado.md", "# Rendimiento · Arranque · 2026-11-05\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n"
@@ -971,7 +1191,7 @@ class NuevoTest(DeviceBase):
         out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x/2026-11-07", "--paquete", PKG, "--flujo", "x")
         self.assertIn("git ignora", out)
         plan = json.loads((self.dir / "reports/perf/x/2026-11-07/plan.json").read_text(encoding="utf-8"))
-        self.assertEqual(plan["modelos"]["intermedio"], "Sonnet 5")
+        self.assertEqual(plan["modelos"], {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5", "alto": "Opus 5.5"})
 
     def test_receta_arranque_frio_arma_plan_y_estado_listos_para_medir(self):
         folder = self.dir / "reports" / "perf" / "arranque" / "2026-11-05"
@@ -1013,6 +1233,143 @@ class NuevoTest(DeviceBase):
         self.assertEqual(plan["flujos"]["arranque-frio"]["recorrido"]["actividad"], PKG + "/.MainActivity")
 
 
+class RecorridoSinTestigoTest(DeviceBase):
+    """Maestro y testigo solo llevan la app al punto de partida (`preparar`): nunca son el recorrido medido."""
+
+    def test_estado_md_no_ofrece_testigo_como_recorrido(self):
+        folder = self.dir / "r"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x")
+        modes = next(l for l in (folder / "estado.md").read_text(encoding="utf-8").splitlines() if l.startswith("| Modos"))
+        self.assertIn("recorrido manual, comando o arranque-frio", modes)
+        self.assertNotIn("testigo", modes)
+
+    def test_la_ayuda_de_recorrido_no_menciona_testigo(self):
+        out = self.ok("capturar", "--help")
+        recorrido = out[out.index("\n  --recorrido"):out.index("\n  --preparar")]
+        self.assertNotIn("testigo", recorrido.lower())
+        self.assertIn("adb", recorrido)
+
+
+class ModelLevelsTest(unittest.TestCase):
+    """Los nombres de modelo salen de model_name y las referencias hablan de niveles."""
+
+    def text(self, *parts):
+        return (ROOT.joinpath("skills", "hb-performance", *parts)).read_text(encoding="utf-8")
+
+    def test_ningun_texto_del_script_fija_un_modelo_fuera_de_model_name(self):
+        import inspect
+        self.assertEqual(inspect.getsource(perf).count("MODELOS["), 1)  # el de model_name
+        self.assertNotIn("MODELOS[", inspect.getsource(perf.cmd_humo))
+        self.assertIn("model_name(", inspect.getsource(perf.cmd_humo))
+
+    def test_la_plantilla_del_plan_trae_los_mismos_modelos_que_el_script(self):
+        template = json.loads(self.text("assets", "plantillas", "plan.json"))
+        self.assertEqual(template["modelos"], perf.MODELOS)
+
+    def test_prompts_habla_de_niveles_y_no_de_nombres_fijos_de_modelo(self):
+        prompts = self.text("references", "prompts.md")
+        intro, tables = prompts.split("## Empezar", 1)
+        self.assertIn("`modelos`", intro)
+        for level in ("económico", "intermedio", "diagnóstico", "alto"):
+            self.assertIn(level, intro)
+        for line in tables.splitlines():
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) > 3 and cells[1] != "Caso" and not cells[1].startswith("-"):
+                self.assertNotRegex(cells[2], r"(Haiku|Sonnet|Opus) \d", line)  # la columna Chat
+        self.assertRegex(tables, r"\| Intermedio · medio \|")
+        self.assertRegex(tables, r"\| Económico · bajo \|")
+        self.assertRegex(tables, r"\| Diagnóstico · alto \|")
+
+    def test_modelos_y_ficha_describen_el_nivel_diagnostico(self):
+        models = self.text("references", "modelos.md")
+        self.assertIn("`diagnostico`", models)
+        self.assertRegex(models, r"\| 2 · Diagnóstico \| Diagnóstico \(por defecto el intermedio\)")
+        self.assertIn("sin `diagnostico`", models)
+        self.assertIn("`diagnostico`", self.text("references", "ficha.md"))
+        self.assertNotRegex(models, r"Sonnet 5(?!\.5)")
+
+
+class NoLeerTest(DeviceBase):
+    def test_une_flags_plan_y_agents_md_sin_duplicados(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## Performance\n\n- **No leer:** docs/ALCANCE-*, `secretos/`; ~/otro/proyecto\n"
+              "- Otra línea: x\n")
+        found = perf.read_no_leer(self.dir, plan={"no_leer": ["docs/ALCANCE-*", "tmp/"]}, extra=["casos/"])
+        self.assertEqual(found, ["casos/", "docs/ALCANCE-*", "tmp/", "secretos/", "~/otro/proyecto"])
+
+    def read_agents(self, text):
+        write(self.dir / "AGENTS.md", text)
+        return perf.read_no_leer(self.dir)
+
+    def test_la_lista_en_las_lineas_siguientes_se_lee_como_viñetas(self):
+        self.assertEqual(self.read_agents("## Performance\n\nNo leer:\n- docs/ALCANCE-*\n- `casos/`\n* secretos/, tmp/\n\n- Otra: x\n"),
+                         ["docs/ALCANCE-*", "casos/", "secretos/", "tmp/"])
+        self.assertEqual(self.read_agents("## Performance\n- **No leer:**\n  - docs/ALCANCE-*\n  - `casos/`\n- Otra línea: x\n"),
+                         ["docs/ALCANCE-*", "casos/"])
+        self.assertEqual(self.read_agents("**No leer:**\n- casos/\n"), ["casos/"])
+
+    def test_no_leer_sin_lista_no_se_come_la_linea_siguiente(self):
+        self.assertEqual(self.read_agents("No leer:\nTexto normal sin viñeta\n"), [])
+        self.assertEqual(self.read_agents("- No leer:\n- Otra línea: x\n"), [])
+        self.assertEqual(self.read_agents("No leer:\n\n- Otra: x\n"), [])
+        self.assertEqual(self.read_agents("No leer: casos/\n- Otra: x\nTexto\n"), ["casos/"])
+        self.assertEqual(self.read_agents("**No leer**: casos/, `tmp/`\n"), ["casos/", "tmp/"])
+
+    def test_los_patrones_se_comparan_desde_la_raiz_del_proyecto(self):
+        denied = lambda pattern, rel: perf.is_denied(self.dir / rel, self.dir, [pattern])  # noqa: E731
+        self.assertFalse(denied("ALCANCE-*", "docs/ALCANCE-x.md"))  # sin carpeta solo cubre la raíz
+        self.assertTrue(denied("ALCANCE-*", "ALCANCE-x.md"))
+        self.assertTrue(denied("docs/ALCANCE-*", "docs/ALCANCE-x.md"))
+        self.assertTrue(denied("**/ALCANCE-*", "docs/ALCANCE-x.md"))
+        self.assertTrue(denied("**/ALCANCE-*", "ALCANCE-x.md"))
+
+    def test_sin_agents_md_ni_lista_no_hay_rutas(self):
+        self.assertEqual(perf.read_no_leer(self.dir), [])
+        write(self.dir / "AGENTS.md", "# P\nno hay nada\n")
+        self.assertEqual(perf.read_no_leer(self.dir), [])
+
+    def test_rutas_relativas_carpetas_y_absolutas(self):
+        patterns = ["docs/ALCANCE-*", "secretos/", "**/golden/**", str(self.dir / "fuera" / "aparte")]
+        denied = lambda rel: perf.is_denied(self.dir / rel, self.dir, patterns)  # noqa: E731
+        self.assertTrue(denied("docs/ALCANCE-1.md"))
+        self.assertTrue(denied("secretos/a/b.kt"))
+        self.assertTrue(denied("app/src/golden/x.png"))
+        self.assertFalse(denied("docs/README.md"))
+        self.assertFalse(denied("app/src/main/Secretos.kt"))
+        self.assertTrue(perf.is_denied(self.dir / "fuera" / "aparte" / "x.md", self.dir, patterns))
+        self.assertFalse(perf.is_denied(self.dir / "fuera" / "otra" / "x.md", self.dir, patterns))
+        self.assertTrue(perf.is_denied(Path(os.path.expanduser("~/otro/proyecto/x")), self.dir, ["~/otro/proyecto"]))
+
+    def test_nuevo_guarda_la_lista_en_el_plan_y_en_estado_md(self):
+        write(self.dir / "AGENTS.md", "## Rendimiento\n- No leer: docs/ALCANCE-*\n")
+        folder = self.dir / "reports" / "perf" / "x"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x", "--no-leer", "casos/")
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["no_leer"], ["casos/", "docs/ALCANCE-*"])
+        self.assertIn("| No leer | `casos/`, `docs/ALCANCE-*` |", (folder / "estado.md").read_text(encoding="utf-8"))
+        other = self.dir / "reports" / "perf" / "y"
+        self.ok("nuevo", "--carpeta", other, "--paquete", PKG, "--flujo", "x")
+        self.assertIn("docs/ALCANCE-*", json.loads((other / "plan.json").read_text(encoding="utf-8"))["no_leer"])
+
+    def test_sin_lista_el_estado_dice_ninguna_y_el_plan_no_la_trae(self):
+        folder = self.dir / "reports" / "perf" / "z"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x")
+        self.assertNotIn("no_leer", json.loads((folder / "plan.json").read_text(encoding="utf-8")))
+        self.assertIn("| No leer | ninguna |", (folder / "estado.md").read_text(encoding="utf-8"))
+
+    def test_los_textos_de_los_chats_nuevos_repiten_la_lista(self):
+        step = perf.chat("Usa hb-performance con estado.md", "intermedio", "medio", "sesión 2", {"no_leer": ["docs/ALCANCE-*", "casos/"]})
+        self.assertIn("No leas ni busques en: docs/ALCANCE-*, casos/.", step["texto"])
+        self.assertNotIn("No leas", perf.chat("x", "intermedio", "medio", "y", {})["texto"])
+
+    def test_un_plan_con_no_leer_mal_formado_se_rechaza(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["no_leer"] = "docs/"
+        write(self.plan, json.dumps(plan))
+        result = self.perf("capturar", "--plan", self.plan, "--prueba", "--paquete", PKG, "--carpeta", self.dir / "p")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'no_leer' es una lista", result.stderr)
+
+
 class NextStepTest(PerfBase):
     def setUp(self):
         super().setUp()
@@ -1037,7 +1394,7 @@ class NextStepTest(PerfBase):
         self.assertEqual(len(steps), 5)  # prueba, antes, control, diagnostico y el chat de la sesión 2
         self.assertTrue(all(s["tipo"] == "terminal" and s["texto"].startswith("cd ") for s in steps[:4]))
         self.assertEqual(steps[4]["tipo"], "chat")
-        self.assertEqual((steps[4]["modelo"], steps[4]["esfuerzo"]), ("Sonnet 5", "alto"))
+        self.assertEqual((steps[4]["modelo"], steps[4]["esfuerzo"]), ("Sonnet 5.5", "alto"))
         self.assertIn("--prueba", steps[0]["texto"])
         self.assertIn("abre la app 10 veces", steps[1]["tu"])
         write(self.folder / "prueba" / "arranque-frio_1.perfetto-trace.gz", "x")
@@ -1075,6 +1432,41 @@ class NextStepTest(PerfBase):
         self.assertEqual(steps[0]["modelo"], "GPT-5 mini")
         write(self.folder / "reporte-final.md", "x")
         self.assertEqual(self.step()[0], "investigación cerrada")
+
+    def test_el_diagnostico_es_un_nivel_propio_y_por_defecto_igual_al_intermedio(self):
+        self.assertEqual(perf.MODELOS, {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5",
+                                        "alto": "Opus 5.5"})
+        write(self.folder / "diagnostico.md", "x")
+        title, steps = self.step()
+        self.assertEqual(title, "sesión 2 · diagnóstico")
+        self.assertEqual((steps[0]["modelo"], steps[0]["esfuerzo"]), ("Sonnet 5.5", "alto"))
+
+    def test_un_plan_anterior_sin_diagnostico_usa_su_intermedio(self):
+        write(self.folder / "diagnostico.md", "x")
+        self.plan["modelos"] = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5"}
+        self.save()
+        self.assertEqual(perf.load_plan(self.folder / "plan.json")["modelos"]["intermedio"], "Sonnet 5")  # sigue siendo válido
+        chat = self.step()[1][0]
+        self.assertEqual((chat["modelo"], chat["esfuerzo"]), ("Sonnet 5", "alto"))
+        out = self.ok("siguiente", "--carpeta", self.folder)  # el comando real lee el plan.json viejo sin quejarse
+        self.assertIn("Chat nuevo · Modelo: Sonnet 5 · Esfuerzo: alto", out)
+        self.plan["modelos"] = {"economico": "GPT-5 mini"}  # ni intermedio ni diagnostico: los de fábrica
+        self.assertEqual(self.step()[1][0]["modelo"], "Sonnet 5.5")
+
+    def test_cambiar_el_diagnostico_no_toca_la_sesion_3_y_cambiar_el_intermedio_no_toca_el_diagnostico(self):
+        write(self.folder / "diagnostico.md", "x")
+        self.plan["modelos"] = {"intermedio": "Haiku 5.5", "diagnostico": "Opus 5.5"}
+        self.assertEqual(self.step()[1][0]["modelo"], "Opus 5.5")  # sesión 2
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "x", "estado": "aprobada"}]
+        title, steps = self.step()
+        self.assertEqual((title, steps[0]["modelo"]), ("sesión 3 · M1", "Haiku 5.5"))  # sesión 3
+
+    def test_modelos_tiene_que_ser_un_objeto_y_el_mensaje_nombra_el_diagnostico(self):
+        self.plan["modelos"] = "Sonnet"
+        self.save()
+        result = self.perf("siguiente", "--carpeta", self.folder)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico", result.stderr)
 
     def test_triage_mide_tres_corridas_sin_control_y_cierra_con_el_reporte_inicial(self):
         self.plan["profundidad"] = "triage"
@@ -1141,7 +1533,7 @@ class NextStepTest(PerfBase):
         self.assertIn("  1. **Terminal** (sin chat) · una corrida de prueba", state)
         self.assertIn("     `cd ", state)
         self.assertIn("     Tú: ", state)
-        self.assertIn("**Chat nuevo** · Modelo: Sonnet 5 · Esfuerzo: alto", state)
+        self.assertIn("**Chat nuevo** · Modelo: Sonnet 5.5 · Esfuerzo: alto", state)
         self.assertIn("## Ficha", state)
         self.phases("antes", "control")
         self.ok("siguiente", "--carpeta", self.folder)
@@ -1288,3 +1680,454 @@ class InstrumentTest(PerfBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GRADLE_KTS = """
+plugins { id("com.android.application") }
+android {
+    buildTypes {
+        release { isMinifyEnabled = true }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+        }
+        create("staging") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging"
+        }
+    }
+}
+dependencies { implementation(libs.okhttp) }
+"""
+PROFILEABLE = '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application>' \
+              '<profileable android:shell="true" /></application></manifest>'
+
+
+class VariantTest(PerfBase):
+    def module(self, gradle=GRADLE_KTS, **manifests):
+        module = self.dir / "app"
+        write(module / "build.gradle.kts", gradle)
+        for name, text in manifests.items():
+            write(module / "src" / name / "AndroidManifest.xml", text)
+        return module
+
+    def instrument(self, module, *extra):
+        return self.perf("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments", *extra)
+
+    def test_lee_los_build_types_de_kotlin_y_groovy_y_si_son_depurables(self):
+        kotlin = perf.build_types(GRADLE_KTS)
+        self.assertEqual(sorted(kotlin), ["benchmark", "release", "staging"])
+        self.assertFalse(perf.is_debuggable("benchmark", kotlin["benchmark"]))
+        self.assertTrue(perf.is_debuggable("staging", kotlin["staging"]))  # hereda de debug
+        groovy = perf.build_types("""android { buildTypes {
+            release { minifyEnabled true; proguardFiles getDefaultProguardFile('x') }
+            benchmark { initWith release; debuggable false; matchingFallbacks = ['release'] }
+            qa { initWith debug }
+            lab { debuggable true }
+        } }""")
+        self.assertEqual(sorted(groovy), ["benchmark", "lab", "qa", "release"])
+        self.assertFalse(perf.is_debuggable("benchmark", groovy["benchmark"]))
+        self.assertTrue(perf.is_debuggable("qa", groovy["qa"]))
+        self.assertTrue(perf.is_debuggable("lab", groovy["lab"]))
+        self.assertEqual(perf.build_types("android { }"), {})
+
+    def test_sin_variante_profileable_crea_profiling_como_antes(self):
+        module = self.module()
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertIn('create("profiling")', out)
+        self.assertIn("assembleProfiling", out)
+        self.assertTrue((module / "src/profiling/AndroidManifest.xml").is_file())
+
+    def test_reutiliza_la_variante_profileable_y_no_depurable_que_ya_existe(self):
+        module = self.module(benchmark=PROFILEABLE)
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: benchmark (existente: profileable y no depurable, no se crea otro build type)", out)
+        self.assertFalse((module / "src/profiling").exists())
+        self.assertEqual((module / "src/benchmark/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+        self.assertIn("= ya existe, no se toca", out)
+        self.assertNotIn('create("profiling")', out)
+        self.assertNotIn('create("benchmark")', out)
+        self.assertIn('getByName("benchmark").kotlin.directories', out)
+        self.assertIn('"benchmarkImplementation"', out)
+        self.assertIn("installBenchmark", out)
+        self.assertIn("assembleBenchmark", out)
+        hint = out[out.index("Manifest existente"):]
+        self.assertNotIn("<profileable", hint.split("\n\n")[0])  # ya la tiene: solo falta el <provider>
+        self.assertTrue((module / "src/perf/kotlin/com/ejemplo/perf/PerfInstaller.kt").is_file())
+
+    def test_una_variante_depurable_o_sin_verificar_no_se_reutiliza(self):
+        module = self.module(staging=PROFILEABLE, otra=PROFILEABLE)
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertIn("staging también declara <profileable> pero es depurable", out)
+        self.assertIn("otra también declara <profileable> pero no pude verificar su build type", out)
+
+    def test_una_profileable_con_enabled_false_no_cuenta(self):
+        off = PROFILEABLE.replace("<profileable ", '<profileable android:enabled="false" ')
+        out = self.ok("instrumentar", "--modulo", self.module(benchmark=off), "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+
+    def test_dos_variantes_validas_obligan_a_elegir_con_variante(self):
+        gradle = GRADLE_KTS.replace('create("staging") {\n            initWith(getByName("debug"))',
+                                    'create("macro") {\n            initWith(getByName("release"))')
+        module = self.module(gradle, benchmark=PROFILEABLE, macro=PROFILEABLE)
+        result = self.instrument(module)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("2 variantes profileable y no depurables (benchmark, macro)", result.stderr)
+        out = self.instrument(module, "--variante", "macro").stdout
+        self.assertIn("Variante: macro (existente", out)
+        self.assertIn("Variante: profiling (nueva)", self.instrument(module, "--variante", "profiling").stdout)
+
+    def test_la_que_creo_la_skill_gana_si_hay_otra(self):
+        gradle = GRADLE_KTS.replace('create("staging") {\n            initWith(getByName("debug"))',
+                                    'create("profiling") {\n            initWith(getByName("release"))')
+        module = self.module(gradle, benchmark=PROFILEABLE,
+                             profiling="<!-- Generated by hb-performance -->" + PROFILEABLE)
+        self.assertIn("Variante: profiling (existente", self.instrument(module).stdout)
+
+    def test_variante_con_nombre_invalido_se_rechaza(self):
+        result = self.instrument(self.module(), "--variante", "../x")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("variante '../x' no válida", result.stderr)
+
+    def test_release_y_debug_nunca_son_candidatas_aunque_declaren_profileable(self):
+        module = self.module(release=PROFILEABLE, debug=PROFILEABLE)
+        found = perf.find_profileable_variants(module, self.dir, [])
+        self.assertEqual([c["nombre"] for c in found], [])
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertNotIn('getByName("release").kotlin.directories', out)
+        self.assertNotIn("Variante: release", out)
+        self.assertEqual((module / "src/release/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+        self.assertNotIn("PerfInstaller", (module / "src/release/AndroidManifest.xml").read_text(encoding="utf-8"))
+
+    def test_variante_release_o_debug_se_rechaza_porque_instrumentarian_produccion(self):
+        module = self.module(release=PROFILEABLE)
+        for name in ("release", "debug", "Release"):
+            result = self.instrument(module, "--variante", name)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn("variante '%s' no válida" % name, result.stderr)
+            self.assertIn("release y debug", result.stderr)
+        self.assertFalse((module / "src/perf").exists())
+
+    def test_variante_pedida_sin_build_type_legible_se_trata_como_existente_y_avisa(self):
+        module = self.module(otra=PROFILEABLE)
+        out = self.instrument(module, "--variante", "otra").stdout
+        self.assertIn("Variante: otra (existente: declara <profileable>, sin verificar que no sea depurable", out)
+        self.assertIn("⚠ otra declara <profileable> pero no pude verificar su build type", out)
+        self.assertIn('getByName("otra").kotlin.directories', out)
+        self.assertNotIn('create("otra")', out)
+        self.assertNotIn("initWith", out)
+        self.assertNotIn("ya es profileable y no depurable", out)
+        self.assertFalse((module / "src/profiling").exists())
+        self.assertEqual((module / "src/otra/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+
+    def test_variante_pedida_depurable_se_rechaza(self):
+        module = self.module(staging=PROFILEABLE)
+        result = self.instrument(module, "--variante", "staging")
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("variante 'staging' es depurable", result.stderr)
+        self.assertNotIn('create("staging")', result.stdout)
+        self.assertFalse((module / "src/perf").exists())
+
+    def test_las_rutas_prohibidas_no_se_leen_al_buscar_la_variante(self):
+        module = self.module(benchmark=PROFILEABLE)
+        out = self.instrument(module, "--no-leer", "app/src/benchmark/").stdout
+        self.assertIn("Variante: profiling (nueva)", out)
+
+
+TRACKER = """package com.ejemplo.core.analytics
+
+fun interface ScreenTracker {
+    fun onScreenVisible(name: String, durationMs: Long = 0)
+}
+"""
+TRACKER_MODULE = """package com.ejemplo.core.analytics
+
+@Module
+@InstallIn(SingletonComponent::class)
+abstract class AnalyticsModule {
+    @Multibinds
+    abstract fun screenTrackers(): Set<@JvmSuppressWildcards ScreenTracker>
+}
+"""
+LOCAL_ONLY = """package com.ejemplo.ui
+
+val LocalContentReady = staticCompositionLocalOf<() -> Unit> { {} }
+interface ScreenViewModel { fun load() }
+"""
+
+
+class ContentHooksTest(PerfBase):
+    def project(self, **files):
+        write(self.dir / "app" / "build.gradle.kts", 'plugins { id("com.android.application") }\ndependencies { implementation(libs.hilt.android) }')
+        for name, text in files.items():
+            write(self.dir / name.replace("__", "/"), text)
+        return self.dir / "app"
+
+    def instrument(self, *extra):
+        return self.ok("instrumentar", "--modulo", self.dir / "app", "--paquete", "com.ejemplo.perf", "--sin-fragments",
+                       "--sin-red", *extra)
+
+    def test_detecta_la_interfaz_con_multibinding_en_otro_modulo_y_arma_el_binding(self):
+        self.project(**{"core__src__main__kotlin__ScreenTracker.kt": TRACKER,
+                        "core__src__main__kotlin__AnalyticsModule.kt": TRACKER_MODULE,
+                        "feature__src__main__kotlin__Otra.kt": "package x\ninterface ScreenViewModel { fun load() }\n"})
+        out = self.instrument()
+        self.assertIn("el proyecto ya tiene un punto de extensión (1 candidato)", out)
+        self.assertIn("interfaz ScreenTracker (core/src/main/kotlin/ScreenTracker.kt:3) · con multibinding", out)
+        self.assertIn("fun onScreenVisible(name: String, durationMs: Long)", out)
+        self.assertIn("@IntoSet", out)
+        self.assertIn("override fun onScreenVisible(name: String, durationMs: Long) { PerfHooks.mark(name) }", out)
+        self.assertNotIn("= 0", out)  # un override no puede repetir el valor por defecto
+        self.assertIn("com.ejemplo.core.analytics.ScreenTracker", out)
+        self.assertIn("release queda igual", out)
+        self.assertNotIn("{{", out)
+        self.assertNotIn("ScreenViewModel", out)
+
+    def test_el_override_lleva_el_tipo_de_retorno_suspend_y_parametros_de_tipo_funcion(self):
+        contract = ("package com.ejemplo.core\n\ninterface ContentReady {\n"
+                    "    suspend fun onReady(screen: String, done: (Int) -> Unit, tags: Map<String, Int> = emptyMap(),\n"
+                    "                        later: () -> Unit = { }): Boolean\n"
+                    "    fun withBody(): Int = 1\n    fun other() { }\n}\n")
+        module = "package com.ejemplo.core\n@Module\nabstract class M { @Multibinds abstract fun a(): Set<ContentReady> }\n"
+        self.project(**{"core__src__main__kotlin__ContentReady.kt": contract, "core__src__main__kotlin__M.kt": module})
+        out = self.instrument()
+        signature = "screen: String, done: (Int) -> Unit, tags: Map<String, Int>, later: () -> Unit"
+        self.assertIn("suspend fun onReady(%s): Boolean" % signature, out)
+        self.assertIn("override suspend fun onReady(%s): Boolean { PerfHooks.mark(screen); TODO(" % signature, out)
+        self.assertNotIn("emptyMap", out)
+        self.assertNotIn("= { }", out)
+        self.assertIn("(más los tipos de los parámetros)", out)
+        self.assertNotIn("withBody", out)
+
+    def test_lee_las_firmas_con_parentesis_anidados_y_sin_cuerpo(self):
+        text = ("interface Gancho {\n    fun a(x: String, f: (Int, String) -> Unit)\n    fun b(): Boolean\n"
+                "    fun c() = Unit\n    fun d(y: Int = 3) {}\n    suspend fun e(z: List<Pair<A, B>>,)\n}\n")
+        methods = perf.hook_methods(text, perf.INTERFACE_DECL.search(text))
+        self.assertEqual([(m[0], m[1], m[2]) for m in methods],
+                         [("a", "x: String, f: (Int, String) -> Unit", ""), ("b", "", "Boolean"),
+                          ("e", "z: List<Pair<A, B>>", "")])
+        self.assertEqual([m[3] for m in methods], [False, False, True])
+
+    def test_una_interfaz_java_con_multibinding_no_dice_que_no_hay_multibinding(self):
+        self.project(**{"core__src__main__java__ScreenReady.java": "package a;\npublic interface ScreenReady {\n void onReady(String name);\n}\n",
+                        "core__src__main__kotlin__M.kt": "package a\n@Module\nabstract class M { @Multibinds abstract fun a(): Set<ScreenReady> }\n"})
+        out = self.instrument()
+        self.assertIn("interfaz ScreenReady (core/src/main/java/ScreenReady.java:2) · con multibinding", out)
+        self.assertNotIn("Sin multibinding que lo reciba", out)
+        self.assertIn("ScreenReady tiene un multibinding pero no pude leer sus métodos", out)
+        self.assertIn("@IntoSet", out)
+        self.assertIn("PerfHooks.mark(<nombre>)", out)
+
+    def test_compositionlocal_sin_multibinding_indica_donde_poner_la_marca(self):
+        self.project(**{"app__src__main__kotlin__Locals.kt": LOCAL_ONLY})
+        out = self.instrument()
+        self.assertIn("CompositionLocal LocalContentReady (app/src/main/kotlin/Locals.kt:3)", out)
+        self.assertIn("Sin multibinding que lo reciba", out)
+        self.assertNotIn("@IntoSet", out)
+
+    def test_sin_puntos_de_extension_queda_el_fragmento_de_siempre(self):
+        self.project(**{"app__src__main__kotlin__Otra.kt": "package x\nclass Home\ninterface Repo { fun all() }\n"})
+        out = self.instrument()
+        self.assertIn("Contenido visible: reportFullyDrawn en la primera pantalla", out)
+        self.assertNotIn("ya tiene un punto de extensión", out)
+
+    def test_respeta_las_rutas_prohibidas_y_no_mira_tests_ni_codigo_generado(self):
+        self.project(**{"core__src__main__kotlin__ScreenTracker.kt": TRACKER,
+                        "core__src__test__kotlin__ScreenReadyFake.kt": "package t\ninterface ScreenReadyFake { fun a() }\n",
+                        "app__src__perf__kotlin__Gen.kt": "// Generated by hb-performance\ninterface ScreenReadyGen { fun a() }\n"})
+        self.assertIn("ya tiene un punto de extensión (1 candidato)", self.instrument())
+        denied = self.instrument("--no-leer", "core/")
+        self.assertNotIn("ya tiene un punto de extensión", denied)
+        self.assertNotIn("ScreenTracker", denied)
+
+    def test_interfaz_marcadora_sin_cuerpo_no_toma_los_metodos_de_la_siguiente(self):
+        scan = perf.scan_sources  # sin multibinding ni métodos: no inventa una firma
+        write(self.dir / "m" / "A.kt", "package a\ninterface ScreenReady\nclass Otra { fun load() {} }\n")
+        hooks = scan(self.dir, [])["ganchos"]
+        self.assertEqual([(h["nombre"], h["metodos"], h["multibinding"]) for h in hooks], [("ScreenReady", [], False)])
+
+
+class MultiModuleTest(PerfBase):
+    def project(self, **files):
+        write(self.dir / "settings.gradle.kts", 'include(":app", ":core", ":feature:home")')
+        write(self.dir / "app" / "build.gradle.kts", 'plugins { id("com.android.application") }\ndependencies { implementation(libs.okhttp) }')
+        write(self.dir / "core" / "build.gradle.kts", 'plugins { alias(libs.plugins.android.library) }')
+        write(self.dir / "feature" / "home" / "build.gradle.kts", 'plugins { id("com.android.library") }')
+        for name, text in files.items():
+            write(self.dir / name.replace("__", "/"), text)
+
+    def instrument(self, *extra):
+        return self.perf("instrumentar", "--modulo", self.dir / "app", "--paquete", "com.ejemplo.perf", "--sin-fragments",
+                         "--sin-hilt", *extra)
+
+    def test_lista_los_modulos_y_dice_donde_va_la_instrumentacion(self):
+        self.project()
+        modules = perf.list_modules(self.dir, [])
+        self.assertEqual(modules, [("app", "aplicación"), ("core", "librería"), ("feature/home", "librería")])
+        out = self.instrument().stdout
+        self.assertIn("Módulos: app (aplicación) · core (librería) · feature/home (librería)", out)
+        self.assertIn("La instrumentación va en el módulo app", out)
+
+    def test_un_proyecto_de_un_modulo_no_agrega_nada(self):
+        write(self.dir / "app" / "build.gradle.kts", 'plugins { id("com.android.application") }')
+        out = self.instrument().stdout
+        self.assertNotIn("Módulos:", out)
+        self.assertNotIn("módulos library", out)
+
+    def test_sin_punto_de_extension_ofrece_el_puente_por_interfaz_para_las_librerias(self):
+        self.project()
+        out = self.instrument().stdout
+        self.assertIn("Pantallas en módulos library", out)
+        self.assertIn("object ContentVisible", out)
+        self.assertIn("ContentVisible.onVisible = { PerfHooks.mark(it) }", out)
+        self.assertIn("import com.ejemplo.perf.PerfHooks", out)
+
+    def test_con_punto_de_extension_no_ofrece_el_puente(self):
+        self.project(**{"core__src__main__kotlin__T.kt": TRACKER, "core__src__main__kotlin__M.kt": TRACKER_MODULE})
+        out = self.instrument().stdout
+        self.assertIn("ya tiene un punto de extensión", out)
+        self.assertNotIn("object ContentVisible", out)
+
+    def test_avisa_si_el_cliente_okhttp_se_arma_en_una_libreria(self):
+        self.project(**{"core__src__main__kotlin__Net.kt": "package n\nval c = OkHttpClient.Builder().build()\n"})
+        out = self.instrument().stdout
+        self.assertIn("OkHttpClient se arma fuera del módulo app (core/src/main/kotlin/Net.kt:2)", out)
+        self.project(**{"app__src__main__kotlin__Net.kt": "package n\nval c = OkHttpClient.Builder().build()\n"})
+        write(self.dir / "core" / "src" / "main" / "kotlin" / "Net.kt", "package n\n")
+        self.assertNotIn("se arma fuera", self.instrument().stdout)
+
+    def test_recetas_de_views_y_rxjava_solo_si_el_proyecto_las_usa(self):
+        self.project(**{"feature__home__src__main__kotlin__Web.kt": "import android.webkit.WebView\nclass W : WebView()\n",
+                        "feature__home__src__main__kotlin__List.kt": "import io.reactivex.rxjava3.core.Single\nclass L(val r: RecyclerView)\n"})
+        out = self.instrument().stdout
+        self.assertIn("Pantallas con Views y RxJava (WebView, RecyclerView, RxJava en el proyecto)", out)
+        self.assertIn("postVisualStateCallback", out)
+        self.assertIn("doOnPreDraw", out)
+        self.project()
+        self.assertNotIn("Pantallas con Views", self.perf("instrumentar", "--modulo", self.dir / "app", "--paquete",
+                                                           "com.ejemplo.perf", "--sin-fragments", "--sin-hilt",
+                                                           "--no-leer", "feature/").stdout)
+
+
+AJENOS = ('"tipo","nombre","llamada","id","hilos","cpu_ms"\n'
+          '"hilo","ktor-nio-1","","",1,100\n"hilo","ktor-nio-2","","",1,50.5\n"hilo","pool-1","","",1,30\n'
+          '"red","ktor-nio-1","HTTP GET items/{id} #ab12",7,1,40\n"red","ktor-nio-2","HTTP GET items/{id} #ab12",7,1,10\n'
+          '"llamada","","HTTP GET items/{id} #ab12",7,0,0\n"llamada","","HTTP GET items/{id}",8,0,0\n')
+GROUPS = [{"nombre": "servidor", "patron": "^ktor-"}]
+
+
+class ForeignThreadsTest(DeviceBase):
+    def read_csv_at(self, path):
+        with Path(path).open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+    def sets(self, text=AJENOS):
+        lines = [[c.strip('"') for c in line.split(",")] for line in text.strip().splitlines()]
+        return [(lines[0], lines[1:])]
+
+    def test_clasifica_los_hilos_por_regex_y_separa_la_cpu_de_la_app(self):
+        metrics = {m[0]: m for m in perf.foreign_thread_metrics(self.sets(), GROUPS)}
+        self.assertEqual(metrics["hilos_servidor_cpu_ms"][1:], (150.5, "ms", "e2e"))
+        self.assertEqual(metrics["hilos_servidor_cantidad"][1:], (2, "hilos", "info"))
+        self.assertEqual(metrics["hilos_app_cpu_ms"][1:], (30.0, "ms", "app"))
+        # la llamada 7 usó 40 + 10 ms del grupo y la 8 nada: la mediana por llamada es 25 (el total de la corrida sería 50)
+        self.assertEqual(metrics["red GET items/{id} servidor_cpu_ms"][1:], (25.0, "ms", "e2e"))
+
+    def test_la_cpu_de_red_es_la_mediana_por_llamada_y_no_el_total_del_endpoint(self):
+        rows = ['"tipo","nombre","llamada","id","hilos","cpu_ms"']
+        for call, cpu in ((1, 10), (2, 20), (3, 90)):
+            rows.append('"red","ktor-nio-1","HTTP GET lista",%d,1,%d' % (call, cpu))
+            rows.append('"llamada","","HTTP GET lista",%d,0,0' % call)
+        rows.append('"llamada","","HTTP GET lista",4,0,0')  # una llamada sin CPU del grupo cuenta como 0
+        rows.append('"llamada","","HTTP POST otra",5,0,0')
+        metrics = {m[0]: m for m in perf.foreign_thread_metrics(self.sets("\n".join(rows)), GROUPS)}
+        self.assertEqual(metrics["red GET lista servidor_cpu_ms"][1:], (15.0, "ms", "e2e"))  # mediana de 10, 20, 90, 0
+        self.assertEqual(metrics["red POST otra servidor_cpu_ms"][1], 0.0)
+
+    def test_sin_filas_emite_ceros_y_la_familia_se_puede_elegir(self):
+        metrics = {m[0]: m for m in perf.foreign_thread_metrics(
+            [], [{"nombre": "bd", "patron": "room", "familia": "info"}], known={"red GET x bd_cpu_ms"})}
+        self.assertEqual(metrics["hilos_bd_cpu_ms"][1:], (0.0, "ms", "info"))
+        self.assertEqual(metrics["red GET x bd_cpu_ms"][1], 0.0)
+        self.assertEqual(metrics["hilos_app_cpu_ms"][1], 0.0)
+
+    def test_la_consulta_agrupa_por_llamada_y_lista_las_llamadas_sin_cpu(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.executescript("""
+            CREATE TABLE process (upid INT, pid INT, name TEXT, start_ts INT);
+            CREATE TABLE thread (utid INT, upid INT, tid INT, name TEXT);
+            CREATE TABLE thread_state (utid INT, ts INT, dur INT, state TEXT);
+            CREATE TABLE trace_bounds (start_ts INT);
+            CREATE TABLE slice (id INT, name TEXT, ts INT, dur INT);
+            INSERT INTO process VALUES (1, 100, 'com.ejemplo.app', 0);
+            INSERT INTO trace_bounds VALUES (0);
+            INSERT INTO thread VALUES (1, 1, 100, 'main'), (2, 1, 101, 'ktor-nio-1'), (3, 1, 102, 'pool-1');
+            INSERT INTO thread_state VALUES (1, 0, 900000000, 'Running'),
+                (2, 20000000, 30000000, 'Running'), (2, 210000000, 10000000, 'Running'), (2, 500000000, 5000000, 'Running'),
+                (3, 420000000, 10000000, 'Running');
+            INSERT INTO slice VALUES (10, 'HTTP GET a', 0, 100000000), (11, 'HTTP GET a', 200000000, 100000000),
+                (12, 'HTTP GET b', 400000000, 50000000), (13, 'HTTP GET a', 600000000, 0);
+        """)
+        sql = perf.fill_sql((ROOT / "skills/hb-performance/assets/queries/hilos_ajenos.sql").read_text(encoding="utf-8"),
+                            PKG, {"DESDE": 0, "HASTA": 10 ** 10})
+        cursor = db.execute(sql)
+        header = [d[0] for d in cursor.description]
+        rows = [dict(zip(header, r)) for r in cursor.fetchall()]
+        self.assertEqual(header, ["tipo", "nombre", "llamada", "id", "hilos", "cpu_ms"])
+        by_kind = lambda kind: sorted((r["nombre"], r["id"], r["cpu_ms"]) for r in rows if r["tipo"] == kind)  # noqa: E731
+        self.assertEqual(by_kind("hilo"), [("ktor-nio-1", 0, 45.0), ("pool-1", 0, 10.0)])
+        self.assertEqual(by_kind("red"), [("ktor-nio-1", 10, 30.0), ("ktor-nio-1", 11, 10.0), ("pool-1", 12, 10.0)])
+        self.assertEqual(sorted(r["id"] for r in rows if r["tipo"] == "llamada"), [10, 11, 12])  # la de dur 0 no cuenta
+        metrics = {m[0]: m[1] for m in perf.foreign_thread_metrics([(header, [[str(v) for v in r.values()] for r in rows])], GROUPS)}
+        self.assertEqual(metrics["red GET a servidor_cpu_ms"], 20.0)  # mediana de 30 y 10, no su suma (40)
+        self.assertEqual(metrics["red GET b servidor_cpu_ms"], 0.0)
+
+    def test_el_primer_grupo_que_calza_se_queda_el_hilo(self):
+        groups = [{"nombre": "a", "patron": "ktor"}, {"nombre": "b", "patron": "ktor-nio"}]
+        metrics = {m[0]: m[1] for m in perf.foreign_thread_metrics(self.sets(), groups)}
+        self.assertEqual((metrics["hilos_a_cpu_ms"], metrics["hilos_b_cpu_ms"]), (150.5, 0.0))
+
+    def test_la_consulta_recibe_la_ventana_y_el_paquete(self):
+        sql = (ROOT / "skills/hb-performance/assets/queries/hilos_ajenos.sql").read_text(encoding="utf-8")
+        filled = perf.fill_sql(sql, PKG, {"DESDE": 5, "HASTA": 10})
+        self.assertNotIn("{{", filled)
+        self.assertIn("name = 'com.ejemplo.app'", filled)
+
+    def test_el_plan_valida_los_hilos_ajenos(self):
+        for bad, message in (("x", "es una lista"), ([{"nombre": "s"}], "necesita 'nombre'"),
+                             ([{"nombre": "s", "patron": "(["}], "no es válida"),
+                             ([{"nombre": "s", "patron": "a", "familia": "zzz"}], "familia fuera de"),
+                             ([{"nombre": "s", "patron": "a"}, {"nombre": "s", "patron": "b"}], "nombre repetido")):
+            plan = json.loads(self.plan.read_text(encoding="utf-8"))
+            plan["hilos_ajenos"] = bad
+            write(self.plan, json.dumps(plan))
+            result = self.perf("capturar", "--plan", self.plan, "--prueba", "--paquete", PKG, "--carpeta", self.dir / "p")
+            self.assertEqual(result.returncode, 2, bad)
+            self.assertIn(message, result.stderr)
+
+    def test_capturar_agrega_las_metricas_de_hilos_ajenos_solo_si_el_plan_las_declara(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_TP_OTRA"] = AJENOS
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("hilos_servidor_cpu_ms", {k[1] for k in self.read_csv_at(self.plan.parent / "metricas.csv")})
+        self.assertNotIn("ajenos", (self.dir / "tp.sql").read_text(encoding="utf-8") if (self.dir / "tp.sql").exists() else "")
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["hilos_ajenos"] = GROUPS
+        write(self.plan, json.dumps(plan))
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "2")
+        data = self.read_csv_at(self.plan.parent / "metricas.csv")
+        self.assertEqual(data[("control", "hilos_servidor_cpu_ms", "1")]["valor"], "150.5")
+        self.assertEqual(data[("control", "hilos_servidor_cpu_ms", "1")]["familia"], "e2e")
+        self.assertEqual(data[("control", "hilos_app_cpu_ms", "2")]["valor"], "30")
+        self.assertEqual(data[("control", "red GET items/{id} servidor_cpu_ms", "1")]["valor"], "25")
+        sql = (self.dir / "tp.sql").read_text(encoding="utf-8")
+        self.assertIn("thread_state", sql)
+        self.assertNotIn("{{", sql)
+        # la ventana del flujo (si la hay) acota la consulta; sin ventana, toda la traza
+        self.assertRegex(sql, r"ts\.ts < 4000000000000000000")
+

@@ -4,7 +4,7 @@
   "config": "base",
   "compilacion": "completa",
   "instalar": "./gradlew :app:installProfiling",
-  "modelos": {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5"},
+  "modelos": {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": "Sonnet 5.5", "alto": "Opus 5.5"},
   "principales": ["home_hasta_datos_ms", "jank_app_pct", "hilo_slices_sobre_presupuesto"],
   "flujos": {
     "home-recarga": {

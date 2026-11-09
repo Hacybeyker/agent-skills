@@ -21,7 +21,7 @@ Cruza la evidencia con el código para encontrar las causas y propone un plan de
 | `estado_primeros_frames` | Los dos primeros frames: estado del hilo principal y qué otros hilos compiten por CPU |
 | `frames_por_tramo` | Frames y jank por tramo: cuánto dura un spinner o una ráfaga |
 | `cpu_por_tramo` | CPU por tramo del hilo principal, el RenderThread y el resto: qué trabaja mientras el usuario espera |
-| `cpu_por_hilo` | CPU, espera y sueño por grupo de hilos (base de datos, red, dispatchers) |
+| `cpu_por_hilo` | CPU, espera y sueño por grupo de hilos (base de datos, red, dispatchers). Si el plan declara `hilos_ajenos`, los grupos que calzan con esas expresiones no son de la app: no los cuentes como trabajo de la app |
 | `contencion_locks` | Hilos que esperan un lock, con su dueño y el lugar |
 | `binder_hilo_principal` | IPC síncrono que bloquea el hilo principal |
 | `jank_por_tipo` | Frames por tipo de jank |

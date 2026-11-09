@@ -26,6 +26,8 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | Refactor | `Refactoriza <clase o módulo>: <objetivo>. Sin cambiar el comportamiento; los tests existentes deben seguir en verde.` |
 | Solo el plan, sin tocar código | `Con hb-implement, dame solo el plan para <tarea>: archivos por capa, patrones y tests. No implementes todavía.` |
 | Seguir un plan aprobado | `Apruebo el plan. Implementa.` |
+| Con el alcance ya aprobado, sin esperar confirmación | `Con hb-implement, implementa <bloque> según <documento de alcance>. El alcance está aprobado: no esperes confirmación y anota tus decisiones en <archivo>.` |
+| Construir por bloques con un subagente cada uno | Primera línea, para ti: `Modelo · Esfuerzo: <p. ej. intermedio · medio>`. Luego: `Ejecuta <carpeta>/PLAN.md como orquestador: lanza un subagente de hb-implement por bloque con <carpeta>/brief-comun.md, lee la lógica de cada bloque, corre el DoD, commitea y sigue con el siguiente.` (la receta está en `references/orquestacion.md` de hb-implement) |
 
 ## hb-review · code review
 
@@ -36,6 +38,7 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | Un PR | `Revisa el PR #<n>.` |
 | Archivos concretos | `Revisa <ruta/Archivo.kt> y <ruta/Otro.kt>.` |
 | Rápida, sin correr el DoD | `Haz una revisión rápida, solo de lectura, de <qué>.` |
+| Un bloque delegado a un subagente (orquestadores) | `Con hb-review en modo rápido, revisa el diff del bloque <x> contra <documento de alcance>. No corras el DoD.` |
 | Solo seguridad | `Revisa <qué> solo con el checklist de seguridad del perfil.` |
 
 ## hb-commit · commits, push y PRs

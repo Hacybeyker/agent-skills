@@ -70,6 +70,28 @@ Empieza con un módulo y paquetes. Pasa a módulos Gradle cuando aparezca alguna
 - Offline-first cuando la app necesita funcionar sin red: la UI lee de la base local y la sincronización escribe en ella.
 - Nombres: por lo que respalda la implementación (`OfflineFirstXRepository`, `RoomXRepository`, `InMemoryXRepository`), o `DefaultXRepository` si no hay un nombre mejor. **Nunca el sufijo `Impl`**: no dice nada de la implementación. Los dobles de test: `FakeXRepository`.
 
+## Cachés en memoria e invalidación
+
+Una caché que nadie invalida muestra datos viejos justo después de que el usuario los cambió. Dónde vive y cuándo se descarta se decide antes de escribirla.
+
+- **Vive en el repositorio**, que es el dueño del dato (el Decorator "repositorio con caché" de la tabla de patrones). Ni el ViewModel ni la UI guardan copias de lo que el repositorio ya sirve.
+- **Se cachea** lo que varias pantallas piden seguido y cambia poco. Si el dato puede cambiar por otra vía (otro dispositivo, el servidor), la caché lleva un tiempo de vida además de la invalidación.
+- **Toda escritura que toca un dato cacheado lo invalida, también cuando el resultado es incierto.** Tras un error de red, un timeout o un 5xx, el servidor pudo haber aplicado el cambio: la caché se descarta. Solo un rechazo explícito de negocio (la validación del servidor, un 4xx) deja la caché intacta, porque nada cambió.
+
+```kotlin
+override suspend fun transfer(request: TransferRequest): Result<Unit> {
+    val result = suspendRunCatching { remote.transfer(request) }
+    // Un rechazo de negocio no cambió nada; cualquier otro resultado pudo haberlo cambiado.
+    if (result.isSuccess || result.exceptionOrNull() !is RejectedByServer) changes.markChanged()
+    return result
+}
+```
+
+- **Cómo se entera quien lee.** Lo mejor es que la lectura sea un `Flow` que vuelve a emitir al invalidar: el refresco queda dentro del flujo de datos (UDF). Si no, una **revisión**: un contador (`StateFlow<Int>`) que sube con cada escritura y que el use case combina con su lectura (`combine` o `flatMapLatest`) para volver a pedir. Un contador mutable que cada pantalla debe acordarse de leer funciona, pero un olvido deja datos viejos sin que nada falle.
+- **Refrescar al volver a una pantalla** no se hace en `onResume`: el ViewModel observa la revisión (o el `Flow`) y la pantalla se actualiza sola. Si hace falta decidir al volver, la pantalla recuerda la última revisión que mostró (su token de lo que vio) y refresca solo si cambió.
+- **La caché pertenece a una sesión.** Se descarta al cerrar sesión y al cambiar de usuario: la clave, o el repositorio, lleva el identificador de la sesión.
+- **Tests con un fake que sí cachea:** una segunda lectura no vuelve a la fuente; una escritura exitosa invalida; una escritura con error incierto invalida; un rechazo de negocio no invalida; volver a la pantalla refresca. Si el alcance pide una caché, cada uno de estos casos se hace o se declara pendiente.
+
 ## Use cases
 
 - Una acción de negocio por clase, con `operator fun invoke`.
