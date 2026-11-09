@@ -107,6 +107,7 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XCont
    ```bash
    android preview list androidApp --all --format json
    ```
+   Todo `@Preview` envuelve su contenido en `Surface` (o en el wrapper de tema del proyecto, si ya lo incluye): sin él, el tema no pinta el fondo y el render en modo oscuro sale con el fondo claro, inútil para revisar el contraste. Si falta en uno que escribiste o tocaste, agrégalo antes de dibujar.
 2. Dibújalos en `reports/previews` (cada `--fqn` es un nombre que devolvió `list`):
    ```bash
    android preview render app --fqn <fqn> --fqn <otro-fqn> --format json -o reports/previews
@@ -192,7 +193,7 @@ Lista solo lo que el DoD y los tests no ven: el ciclo de vida real, los permisos
 - [ ] Changelog actualizado si el proyecto lo usa.
 - [ ] Autorrevisión contra el alcance completo: estado y persistencia, `catch`, dependencias, casos pedidos y reglas del `AGENTS.md`.
 - [ ] DoD completo: cada paso en `pass` o `skipped` con motivo.
-- [ ] Si el cambio toca UI de Compose en Android y existe la CLI `android`: previews dibujados, revisados e incluidos en el reporte.
+- [ ] Si el cambio toca UI de Compose en Android y existe la CLI `android`: previews con `Surface`, dibujados, revisados e incluidos en el reporte.
 - [ ] Reporte generado y ruta entregada.
 - [ ] Ítems de verificación en el dispositivo priorizados, con tope, y cada uno con su test o "sin test".
 - [ ] Entrega en el idioma del proyecto.
