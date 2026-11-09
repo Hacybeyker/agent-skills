@@ -102,6 +102,28 @@ fun EditProfileScreen(onSaved: () -> Unit, viewModel: EditProfileViewModel = /* 
 | Hace | Obtiene el ViewModel, colecta con `collectAsStateWithLifecycle()`, reacciona a estados de navegación | Dibuja el estado y emite acciones |
 | Lo usan | El grafo de navegación | `@Preview`, tests de UI y screenshot tests |
 
+## Paginación
+
+- **La lógica no va en la UI.** Cuándo pedir la siguiente página, el cursor o el offset, evitar páginas duplicadas, el fin de la lista y el error por página viven en el **dominio** (un use case, o una clase de paginación en `domain`), o en un helper de una capa que la cobertura mida. Si queda en `ui/` junto a los composables, queda fuera del gate de Kover y sin tests, que es donde los defectos de paginación se esconden.
+- **El `UiState` expone el resultado:** los ítems, `isLoadingMore`, `endReached` y `loadMoreError`. La UI solo emite `LoadMore` cuando el usuario se acerca al final, y el ViewModel lo ignora mientras `isLoadingMore` o `endReached` (así repetir la acción no cuesta nada).
+- **Cuidado con `layoutInfo` antes del primer layout.** Antes de que la lista se mida, `layoutInfo.totalItemsCount` es 0 y `visibleItemsInfo` está vacío; "estar cerca del final" resulta cierto y se pide la página siguiente antes de mostrar la primera, o se encadenan páginas. Una guarda lo evita: sin ítem visible, no hay nada que pedir.
+
+```kotlin
+LaunchedEffect(listState) {
+    snapshotFlow {
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index   // null hasta el primer layout
+        lastVisible != null && lastVisible >= info.totalItemsCount - PREFETCH_DISTANCE
+    }
+        .distinctUntilChanged()
+        .filter { it }
+        .collect { onAction(MovementsAction.LoadMore) }
+}
+```
+
+- Un test de UI compone la lista con la primera página y comprueba que **no** se pidió la siguiente antes del primer layout, y que sí se pide al llegar al final.
+- En `RecyclerView`, la misma trampa: `findLastVisibleItemPosition()` devuelve `NO_POSITION` (-1) antes del primer layout, así que `-1 >= total - umbral` también puede dar cierto. Guarda ese caso.
+
 ## Estado que sobrevive
 
 | Estado | Dónde |
