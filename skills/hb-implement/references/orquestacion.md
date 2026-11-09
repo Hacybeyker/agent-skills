@@ -97,7 +97,10 @@ En otros sistemas, la que ofrezca la herramienta. Cierra con un resumen que llev
 ## Prompt para abrir el chat del orquestador
 
 ```text
+Modelo · Esfuerzo: <p. ej. intermedio · medio>
 Ejecuta <carpeta>/PLAN.md como orquestador: lanza un subagente de hb-implement por bloque con
 <carpeta>/brief-comun.md, lee la lógica de cada bloque, corre el DoD, commitea y sigue con el
 siguiente. Los cambios de plan van solo en PLAN.md.
 ```
+
+La primera línea es para quien pega el prompt: dice con qué modelo y esfuerzo abrir el chat (con los nombres de su herramienta) y no se le pasa al agente. Cada chat nuevo que se proponga, por ejemplo el de la verificación en el dispositivo o el del siguiente bloque grande, lleva la suya. En la experiencia que originó esta receta, un modelo intermedio construyó los bloques con el DoD en verde y a menor costo que el superior.

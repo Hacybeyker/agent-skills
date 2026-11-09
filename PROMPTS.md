@@ -27,6 +27,7 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | Solo el plan, sin tocar código | `Con hb-implement, dame solo el plan para <tarea>: archivos por capa, patrones y tests. No implementes todavía.` |
 | Seguir un plan aprobado | `Apruebo el plan. Implementa.` |
 | Con el alcance ya aprobado, sin esperar confirmación | `Con hb-implement, implementa <bloque> según <documento de alcance>. El alcance está aprobado: no esperes confirmación y anota tus decisiones en <archivo>.` |
+| Construir por bloques con un subagente cada uno | Primera línea, para ti: `Modelo · Esfuerzo: <p. ej. intermedio · medio>`. Luego: `Ejecuta <carpeta>/PLAN.md como orquestador: lanza un subagente de hb-implement por bloque con <carpeta>/brief-comun.md, lee la lógica de cada bloque, corre el DoD, commitea y sigue con el siguiente.` (la receta está en `references/orquestacion.md` de hb-implement) |
 
 ## hb-review · code review
 
