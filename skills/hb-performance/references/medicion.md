@@ -76,9 +76,21 @@ Corre las consultas de diagnóstico sobre la corrida mediana y la peor de la pri
 | --- | --- | --- |
 | `debuggable` | Conteos y orden de las llamadas, duplicados, fugas | Frames, CPU y tiempos: corre con chequeos extra |
 | `profileable` (profiling) | Todo | — |
-| Emulador | Conteos y fugas | Tiempos y frames |
+| Emulador | Conteos y fugas | Tiempos y frames (con `-gpu host` son orientativos; con render por software, no valen) |
 
 Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script usa `gfxinfo` (métricas `gfx_*`).
+
+### Emulador y render por software
+
+`capturar` (y `humo`) detecta el emulador (`ro.kernel.qemu`, `ro.hardware`, el modelo) y el renderer de GLES que reporta SurfaceFlinger, en una sola llamada a `adb`:
+
+| Entorno | `frames` | Qué pasa |
+| --- | --- | --- |
+| Dispositivo físico con GPU | `ok` | Nada |
+| Emulador con GPU del host (`-gpu host`) | `baja` | Aviso: valen los conteos (red, inflates) y las fugas; los tiempos y los frames son orientativos, y los reportes lo anotan en los avisos de `jank_*`, `frame_*` y `gfx_*` |
+| Render por software (SwiftShader, llvmpipe), en emulador o no | `no` | Aviso, y `comparar` y el reporte dan `no confiable` a los frames en lugar de un veredicto; los conteos y los tiempos que no son de frame siguen con el suyo |
+
+Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
 
 ## Familias de métricas
 

@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Opcional: android-profiler para heap dumps; Maestro (viene con testigo) para llevar la app al punto de partida en flujos largos."
 metadata:
   author: hacybeyker
-  version: "0.5.1"
+  version: "0.6.0"
   category: flow
 ---
 
@@ -70,7 +70,7 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 - [ ] Cada sesión en su chat, con `estado.md` y solo su referencia; se detuvo al terminar y pegó tal cual la salida de `perf.py siguiente`.
 - [ ] Setup listo y registrado en `AGENTS.md`; prueba de humo correcta.
 - [ ] Métricas principales fijadas antes de medir, al menos una de punta a punta (TTFD o una métrica de usuario hasta una marca de contenido visible); en flujos que no son el arranque, la ventana del flujo en el plan.
-- [ ] Corrida de prueba antes de medir; al menos 5 corridas válidas por fase (10 con recorrido automático).
+- [ ] Corrida de prueba antes de medir; al menos 5 corridas válidas por fase (10 con recorrido automático). Si `capturar` avisa de emulador o de render por software, los frames no son principales ni valen para decidir.
 - [ ] Hallazgos con evidencia; mejoras en `plan.json` con su métrica y lo esperado; decisión del usuario registrada con `perf.py decidir`.
 - [ ] Una mejora por chat y por commit propuesto, con su test y el DoD en verde.
 - [ ] Veredictos de `perf.py`, lectura de la comparación escrita; e2e marcado como dependiente del backend.

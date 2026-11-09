@@ -41,7 +41,7 @@ import textwrap
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -59,11 +59,13 @@ CORE = ["ttid_ms", "ttfd_ms", "bind_application_ms", "jit_ms", "jank_app_pct", "
         "hilo_slices_100ms", "hilo_max_ms", "inflate_cantidad", "inflate_ms", "red_llamadas", "red_solapadas",
         "red_repetidas_2s", "gfx_jank_pct", "gfx_p90_ms", "pss_mb", "java_heap_mb", "activities", "views"]
 FRAME_METRICS = ("jank_app_pct", "jank_total_pct", "frame_p50_ms", "frame_p90_ms", "frame_p99_ms")
+FRAMES_LEVEL = {"ok": 0, "baja": 1, "no": 2}
+SOFTWARE_RENDERER = re.compile(r"swiftshader|llvmpipe|softpipe|swrast|subzero|software", re.I)
 FRAMES_CHANGE_MAX = 0.5
 NOT_JANK = {"", "None", "Unknown", "Unknown Jank", "Buffer Stuffing", "SurfaceFlinger Stuffing"}
 COMMON_HZ = (24, 30, 48, 50, 60, 72, 75, 90, 96, 100, 120, 144, 165, 240)
 VERDICT_CLASS = {"mejora": "v-better", "regresión": "v-worse", "sin cambio": "v-same", "dentro del ruido": "v-same",
-                 "informativa": "v-same", "no comparable": "v-same"}
+                 "informativa": "v-same", "no comparable": "v-same", "no confiable": "v-same"}
 FICHA_REPORTE = ("alcance", "síntoma", "sintoma", "métricas principales", "metricas principales", "build",
                  "dispositivo", "modos")
 FAMILY_LABEL = {"app": "solo la app", "e2e": "app + backend", "info": "informativa"}
@@ -72,6 +74,7 @@ VERDICT_TEXT = {"mejora": "funcionó: mejoró más que el ruido de medición",
                 "sin cambio": "no cambió: la mediana de después queda dentro del rango de antes",
                 "dentro del ruido": "la diferencia no supera el ruido de medición",
                 "no comparable": "no comparable: cambió la cantidad de frames y el porcentaje mide otra cosa",
+                "no confiable": "no confiable: los frames se midieron con render por software, no dicen cómo se ve en un dispositivo real",
                 "informativa": "informativa: sin veredicto"}
 STATE_TEXT = {"propuesta": "propuesta · esperando tu decisión", "aprobada": "aprobada · se aplica en la sesión 3",
               "aplicada": "aplicada · implementada; se mide en la fase después", "descartada": "descartada · no se aplica",
@@ -82,7 +85,7 @@ GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rar
 - **Ruido de medición:** cuánto cambia la métrica entre dos mediciones **sin ningún cambio** en la app (antes contra control). Una diferencia menor que esto no prueba nada.
 - **Varía mucho (CV):** las corridas difieren entre sí más de un 10 %; suele ser el backend (red) o el dispositivo. El número sirve, pero con menos confianza.
 - **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
-- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames).
+- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen.
 - **Hallazgos:** una causa posible encontrada en el código o en las trazas. Solo los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y **no** es la causa (no hay nada que hacer); `sin veredicto estadístico`, que con estos datos no se pudo confirmar ni descartar (tampoco hay acción, salvo medir otra cosa).
 - **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -271,7 +274,21 @@ def frames_changed(groups, flow):
     return abs(after - before) > FRAMES_CHANGE_MAX * max(before, 1)
 
 
-def compare(rows, cv_max=CV_MAX):
+def frame_metric(name):
+    return name in FRAME_METRICS or name.startswith("gfx_")
+
+
+def frames_note(trust):
+    """Aviso para las métricas de frame según la confianza del dispositivo que las midió."""
+    level, motive = trust
+    if level == "no":
+        return "frames no confiables (%s)" % motive
+    if level == "baja":
+        return "frames orientativos (%s)" % motive
+    return ""
+
+
+def compare(rows, cv_max=CV_MAX, trust=("ok", "")):
     results, unmatched = [], []
     groups = group(rows)
     for (flow, metric), entry in sorted(groups.items()):
@@ -284,8 +301,13 @@ def compare(rows, cv_max=CV_MAX):
         delta = after["mediana"] - before["mediana"]
         noise = abs(statistics.median(control) - before["mediana"]) if control else None
         warnings = set(before["avisos"] + after["avisos"])
+        note = frames_note(trust) if frame_metric(metric) else ""
+        if note:
+            warnings.add(note)
         if entry["familia"] == "info":
             result = "informativa"
+        elif note and trust[0] == "no":
+            result = "no confiable"
         elif metric in FRAME_METRICS and frames_changed(groups, flow):
             result = "no comparable"
             warnings.add("frames distintos")
@@ -360,8 +382,9 @@ def priority(metric, plan):
     return (3, 0, metric)
 
 
-def summary_rows(rows, plan, phases=FASES, flows=None, everything=False):
+def summary_rows(rows, plan, phases=FASES, flows=None, everything=False, trust=("ok", "")):
     table, hidden = [], 0
+    note = frames_note(trust)
     for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
         if flows and flow not in flows:
             continue
@@ -377,7 +400,7 @@ def summary_rows(rows, plan, phases=FASES, flows=None, everything=False):
             unit = entry["unidad"]
             table.append([phase, flow, metric, entry["familia"], s["n"], fmt(s["mediana"], unit), fmt(s["p90"], unit),
                           "%s – %s" % (fmt(s["min"]), fmt(s["max"])), fmt_pct(s["cv"], signed=False),
-                          ", ".join(s["avisos"]) or "—"])
+                          ", ".join(s["avisos"] + ([note] if note and frame_metric(metric) else [])) or "—"])
     return table, hidden
 
 
@@ -974,6 +997,52 @@ def preflight(adb, package, force):
     return sdk, warnings, package_build(dump)
 
 
+def classify_environment(text):
+    """Emulador y render por software a partir de la salida de device_environment. 'frames' es la confianza en las
+    métricas de frame: 'no' con render por software, 'baja' en un emulador con GPU del host, 'ok' en un dispositivo real."""
+    values = dict(re.findall(r"^([qbhmcg])=(.*)$", text, re.M))
+    hardware, model = values.get("h", "").strip().lower(), values.get("m", "").strip().lower()
+    emulator = values.get("q", "").strip() == "1" or values.get("b", "").strip() == "1" \
+        or hardware in ("ranchu", "goldfish") or "emulator" in values.get("c", "").lower() \
+        or "emulator" in model or model.startswith("sdk_gphone") or "android sdk built for" in model
+    render = values.get("g", "").replace("GLES:", "").strip()
+    software = bool(SOFTWARE_RENDERER.search(render))
+    return {"emulador": emulator, "render": render, "software": software,
+            "frames": "no" if software else "baja" if emulator else "ok"}
+
+
+def device_environment(adb):
+    """Una sola llamada a adb: ro.kernel.qemu y afines, y el renderer de GLES que reporta SurfaceFlinger."""
+    out = adb.shell('echo "q=$(getprop ro.kernel.qemu)"; echo "b=$(getprop ro.boot.qemu)"; echo "h=$(getprop ro.hardware)"; '
+                    'echo "m=$(getprop ro.product.model)"; echo "c=$(getprop ro.build.characteristics)"; '
+                    'echo "g=$(dumpsys SurfaceFlinger | grep -m1 GLES)"').stdout
+    return classify_environment(out)
+
+
+def environment_warnings(env):
+    gpu = "reinicia el emulador con -gpu host (AVD: Graphics = Hardware) o usa un dispositivo físico"
+    if env["software"]:
+        return ["el dispositivo renderiza por software (%s): los frames (jank_*, frame_*, gfx_*) no son confiables y los "
+                "reportes los marcan; %s" % (env["render"] or "sin dato", gpu)]
+    if env["emulador"]:
+        return ["es un emulador%s: valen los conteos (red, inflates) y las fugas; los tiempos y los frames son orientativos. "
+                "Para decidir con frames, %s" % (" (render: %s)" % env["render"] if env["render"] else "", gpu)]
+    return []
+
+
+def frames_trust(folder):
+    """(nivel, motivo) más bajo de confianza en los frames entre las fases registradas en fases.json."""
+    level, motive = "ok", ""
+    for data in read_phases(folder).values():
+        env = data.get("entorno") or {}
+        value = env.get("frames", "ok")
+        if FRAMES_LEVEL.get(value, 0) > FRAMES_LEVEL[level]:
+            level = value
+            motive = ("emulador, " if env.get("emulador") else "") + ("render por software" if env.get("software")
+                                                                       else "sin GPU del host verificada")
+    return level, motive
+
+
 def resumed_activity(adb):
     text = adb.shell("dumpsys activity activities").stdout
     match = re.search(r"(?:topResumedActivity|mResumedActivity|ResumedActivity)[=:]\s*ActivityRecord\{[^}]*?\s(\S+/\S+)", text)
@@ -1562,6 +1631,8 @@ def cmd_capturar(args, plan=None):
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
     sdk, warnings, build = preflight(adb, package, args.forzar)
+    environment = device_environment(adb)
+    warnings += environment_warnings(environment)
     commit, dirty = git_info()
     if not args.prueba:
         warnings += check_build(folder, phase, build, commit, args.forzar)
@@ -1741,10 +1812,12 @@ def cmd_capturar(args, plan=None):
               % "/".join(str(h) for h in sorted(seen_hz)))
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
               "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation}
+    if environment["emulador"] or environment["software"]:
+        record["entorno"] = environment
     record.update(build)
     write_phase(folder, phase, record)
     rows = read_rows(csv_path)
-    table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,))
+    table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,), trust=frames_trust(folder))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
     write_summary(csv_path, rows, plan)
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
@@ -1753,10 +1826,11 @@ def cmd_capturar(args, plan=None):
 
 
 def write_summary(csv_path, rows, plan):
-    full, _ = summary_rows(rows, plan, everything=True)
+    trust = frames_trust(pathlib.Path(csv_path).parent)
+    full, _ = summary_rows(rows, plan, everything=True, trust=trust)
     pathlib.Path(csv_path).with_name("resumen.md").write_text(
         "# Resumen de métricas\n\n" + markdown_table(SUMMARY_HEADERS, full) + "\n", encoding="utf-8")
-    compact, hidden = summary_rows(rows, plan)
+    compact, hidden = summary_rows(rows, plan, trust=trust)
     block = markdown_table(SUMMARY_HEADERS, compact[:MAX_ROWS])
     if hidden or len(compact) > MAX_ROWS:
         block += "\n\nDetalle completo en `resumen.md`."
@@ -1923,7 +1997,7 @@ def cmd_diagnostico(args):
 def cmd_resumen(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
-    table, hidden = summary_rows(rows, plan, everything=args.todo)
+    table, hidden = summary_rows(rows, plan, everything=args.todo, trust=frames_trust(pathlib.Path(args.csv).parent))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS] if not args.todo else table))
     if hidden or (not args.todo and len(table) > MAX_ROWS):
         print("… %d métricas más en resumen.md (o usa --todo)" % (hidden + max(0, len(table) - MAX_ROWS)))
@@ -1986,6 +2060,12 @@ def builds_table(folder):
         notes.append("antes y después se midieron con distinta compilación de ART (%s · %s): los tiempos no son "
                      "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
                                                                       after.get("compilacion") or "sin registrar"))
+    level, motive = frames_trust(folder)
+    if level != "ok":
+        notes.append("las fases se midieron en un entorno con frames %s (%s): %s" % (
+            "no confiables" if level == "no" else "orientativos", motive,
+            "no uses jank_* ni frame_* para decidir; repite en un dispositivo físico o con -gpu host" if level == "no"
+            else "valen los conteos y las fugas; para decidir con frames, usa un dispositivo físico"))
     return table, notes
 
 
@@ -2013,7 +2093,7 @@ def improvement_result(item, r):
         return "✔ funcionó"
     if r["veredicto"] == "regresión":
         return "✖ empeoró"
-    if r["veredicto"] in ("informativa", "no comparable"):
+    if r["veredicto"] in ("informativa", "no comparable", "no confiable"):
         return "— sin veredicto"
     return "✖ no funcionó"
 
@@ -2024,7 +2104,9 @@ LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "
 def cmd_comparar(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
-    results, unmatched = compare(rows)
+    folder = pathlib.Path(args.csv).parent
+    trust = frames_trust(folder)
+    results, unmatched = compare(rows, trust=trust)
     chosen = compact_compare(results, plan, everything=args.todo)
     table = markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen[:None if args.todo else MAX_ROWS]])
     print(table)
@@ -2037,6 +2119,9 @@ def cmd_comparar(args):
     if counts.get("no comparable"):
         print("no comparable = la cantidad de frames cambió más de %d %%: los porcentajes y percentiles de frame "
               "miden otra cosa." % (FRAMES_CHANGE_MAX * 100))
+    if counts.get("no confiable"):
+        print("no confiable = los frames se midieron con render por software (emulador sin GPU del host): no dicen cómo "
+              "se ve en un dispositivo real.")
     if len(chosen) < len(results):
         print("… %d métricas sin cambios relevantes en comparacion.md" % (len(results) - len(chosen)))
     for u in unmatched[:5]:
@@ -2044,7 +2129,6 @@ def cmd_comparar(args):
     regressions = [r for r in results if r["veredicto"] == "regresión"]
     if regressions:
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
-    folder = pathlib.Path(args.csv).parent
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
     for note in notes:
@@ -2249,9 +2333,10 @@ def bars_svg(result):
             % (width, e(result["metrica"]), e(fmt(before, unit)), e(fmt(after, unit)), "".join(rows)))
 
 
-def initial_md(rows, plan):
+def initial_md(rows, plan, trust=("ok", "")):
     """Estado inicial de las métricas principales (antes y, si existe, el ruido del bloque de control)."""
     principales = plan.get("principales") or []
+    note = frames_note(trust)
     table = []
     for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
         if metric not in principales or "antes" not in entry["fases"]:
@@ -2262,7 +2347,8 @@ def initial_md(rows, plan):
             if control and s["mediana"] else None
         table.append([flow, metric, FAMILY_LABEL.get(entry["familia"], entry["familia"]), fmt(s["mediana"], entry["unidad"]),
                       fmt(s["p90"], entry["unidad"]), "%s – %s" % (fmt(s["min"]), fmt(s["max"])), s["n"],
-                      fmt_pct(noise, signed=False), human_warnings(s["avisos"], s["cv"], s["n"])])
+                      fmt_pct(noise, signed=False),
+                      human_warnings(s["avisos"] + ([note] if note and frame_metric(metric) else []), s["cv"], s["n"])])
     if not table:
         return ""
     intro = ("> Lo que midió la app antes de cambiar nada, por métrica principal. La **mediana** es el número que se "
@@ -2411,7 +2497,7 @@ def render_report(folder, name, title, subtitle, parts, charts="", extras=None):
     body = '<nav class="toc">%s</nav>' % nav
     for i, (section, content) in enumerate(shown):
         body += '<section id="s%d"><h2>%s</h2>%s%s</section>' % (i, e(section), extras.get(section, ""), md_to_html(content))
-    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable)( \(backend\))?</td>",
+    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable|no confiable)( \(backend\))?</td>",
                   lambda m: '<td><span class="verdict %s">%s</span>%s</td>' % (
                       VERDICT_CLASS[m.group(1)], m.group(1), m.group(2) or ""), body)
     body = re.sub(r"<td>(propuesta|aprobada|aplicada|descartada|pendiente)</td>",
@@ -2444,7 +2530,7 @@ def cmd_reporte(args):
                       "(`perf.py decidir`); las aprobadas se implementan en la fase siguiente y se vuelven a medir.\n\n")
         pending_intro = ("> No son tareas obligatorias. Es lo que esta investigación no pudo cerrar, y cómo se cerraría "
                          "si alguna vez importa.\n\n")
-        parts = [("Resumen", pick("resumen ejecutivo", "resumen")), ("Estado inicial", initial_md(rows, plan)),
+        parts = [("Resumen", pick("resumen ejecutivo", "resumen")), ("Estado inicial", initial_md(rows, plan, frames_trust(folder))),
                  ("Hallazgos", findings_md(pick("hallazgos"), plan)),
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
@@ -2462,7 +2548,7 @@ def cmd_reporte(args):
             print_next(folder, plan)
         return
 
-    results, unmatched = compare(rows)
+    results, unmatched = compare(rows, trust=frames_trust(folder))
     principales = plan.get("principales") or []
     primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
     missing = [m for m in principales if m not in {r["metrica"] for r in results}]
@@ -2529,7 +2615,9 @@ def device_summary(serial, package, need_activity):
     release = adb.shell("getprop ro.build.version.release").stdout.strip()
     sdk = adb.shell("getprop ro.build.version.sdk").stdout.strip()
     activity = launcher_activity(adb, package) if need_activity else ""
-    return "%s · Android %s (API %s)" % (model or "?", release or "?", sdk or "?"), activity
+    environment = device_environment(adb)
+    kind = " · emulador%s" % (" con render por software" if environment["software"] else "") if environment["emulador"] or environment["software"] else ""
+    return "%s · Android %s (API %s)%s" % (model or "?", release or "?", sdk or "?", kind), activity
 
 
 def ensure_ignored(folder):

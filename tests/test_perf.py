@@ -417,6 +417,10 @@ elif cmd.startswith("kill -0"):
     sys.exit(1)
 elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
+elif cmd.startswith('echo "q='):
+    emulator = os.environ.get("FAKE_EMULATOR")
+    print("q=%s\nb=\nh=%s\nm=%s\nc=\ng=%s" % ("1" if emulator else "", "ranchu" if emulator else "qcom",
+          "sdk_gphone64_arm64" if emulator else "Pixel Test", os.environ.get("FAKE_GLES", "")))
 '''
 
 FAKE_TP = r'''#!{python}
@@ -481,6 +485,109 @@ class DeviceBase(PerfBase):
         write(self.dir / "tp.txt", "===\n".join(outputs))
 
 
+GLES_REAL = "GLES: Qualcomm, Adreno (TM) 740, OpenGL ES 3.2 V@0615.0"
+GLES_HOST = "GLES: Google (Apple), Android Emulator OpenGL ES Translator (Apple M2 Pro), OpenGL ES 3.0 (4.1 Metal)"
+GLES_SOFT = "GLES: Google (Google Inc.), Android Emulator OpenGL ES Translator (Google SwiftShader), OpenGL ES 3.0"
+
+
+def environment_text(qemu="", hardware="qcom", model="Pixel Test", characteristics="", gles=GLES_REAL):
+    return "q=%s\nb=\nh=%s\nm=%s\nc=%s\ng=%s\n" % (qemu, hardware, model, characteristics, gles)
+
+
+class EnvironmentTest(unittest.TestCase):
+    def test_un_dispositivo_real_es_confiable(self):
+        env = perf.classify_environment(environment_text())
+        self.assertEqual((env["emulador"], env["software"], env["frames"]), (False, False, "ok"))
+        self.assertEqual(perf.environment_warnings(env), [])
+
+    def test_la_salida_vacia_no_inventa_un_emulador(self):
+        self.assertEqual(perf.classify_environment("")["frames"], "ok")
+
+    def test_emulador_con_gpu_del_host_da_frames_orientativos(self):
+        env = perf.classify_environment(environment_text(qemu="1", hardware="ranchu", gles=GLES_HOST))
+        self.assertEqual((env["emulador"], env["software"], env["frames"]), (True, False, "baja"))
+        self.assertIn("es un emulador", perf.environment_warnings(env)[0])
+        self.assertIn("-gpu host", perf.environment_warnings(env)[0])
+
+    def test_emulador_con_swiftshader_no_es_confiable(self):
+        env = perf.classify_environment(environment_text(qemu="1", hardware="ranchu", gles=GLES_SOFT))
+        self.assertEqual((env["emulador"], env["software"], env["frames"]), (True, True, "no"))
+        warning = perf.environment_warnings(env)[0]
+        self.assertIn("renderiza por software", warning)
+        self.assertIn("-gpu host", warning)
+        self.assertIn("dispositivo físico", warning)
+
+    def test_se_reconoce_el_emulador_por_cualquiera_de_sus_senales(self):
+        for kwargs in ({"qemu": "1"}, {"hardware": "goldfish"}, {"characteristics": "emulator"},
+                       {"model": "sdk_gphone64_arm64"}, {"model": "Android SDK built for x86"}):
+            self.assertTrue(perf.classify_environment(environment_text(**kwargs))["emulador"], kwargs)
+
+    def test_render_por_software_en_un_dispositivo_fisico_tampoco_es_confiable(self):
+        env = perf.classify_environment(environment_text(gles="GLES: Mesa, llvmpipe (LLVM 15.0.7), OpenGL ES 3.2"))
+        self.assertEqual((env["emulador"], env["frames"]), (False, "no"))
+
+
+class FramesTrustTest(PerfBase):
+    def rows(self):
+        return read_rows_from(rows("antes", "home", "jank_app_pct", [10, 11, 10, 12, 10], unit="%")
+                              + rows("despues", "home", "jank_app_pct", [2, 3, 2, 2, 3], unit="%")
+                              + rows("antes", "home", "red_llamadas", [4, 4, 4, 4, 4], unit="llamadas")
+                              + rows("despues", "home", "red_llamadas", [2, 2, 2, 2, 2], unit="llamadas"))
+
+    def verdicts(self, trust):
+        results, _ = perf.compare(self.rows(), trust=trust)
+        return {r["metrica"]: r for r in results}
+
+    def test_sin_aviso_el_veredicto_no_cambia(self):
+        results = self.verdicts(("ok", ""))
+        self.assertEqual(results["jank_app_pct"]["veredicto"], "mejora")
+        self.assertFalse([a for a in results["jank_app_pct"]["avisos"] if a.startswith("frames")])
+
+    def test_con_render_por_software_los_frames_no_tienen_veredicto_y_los_conteos_si(self):
+        results = self.verdicts(("no", "emulador, render por software"))
+        self.assertEqual(results["jank_app_pct"]["veredicto"], "no confiable")
+        self.assertIn("frames no confiables (emulador, render por software)", results["jank_app_pct"]["avisos"])
+        self.assertEqual(results["red_llamadas"]["veredicto"], "mejora")
+        self.assertEqual(results["red_llamadas"]["avisos"], [])
+
+    def test_con_gpu_del_host_el_veredicto_se_conserva_con_aviso(self):
+        results = self.verdicts(("baja", "emulador, sin GPU del host verificada"))
+        self.assertEqual(results["jank_app_pct"]["veredicto"], "mejora")
+        self.assertTrue(any(a.startswith("frames orientativos") for a in results["jank_app_pct"]["avisos"]))
+
+    def test_trust_lee_el_peor_entorno_de_las_fases(self):
+        self.assertEqual(perf.frames_trust(self.dir), ("ok", ""))
+        write(self.dir / "fases.json", json.dumps({
+            "antes": {"entorno": {"emulador": True, "software": False, "frames": "baja"}},
+            "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
+        self.assertEqual(perf.frames_trust(self.dir), ("no", "emulador, render por software"))
+
+    def test_comparar_y_resumen_marcan_los_frames_de_las_fases_medidas_en_software(self):
+        write(self.csv, HEADER + rows("antes", "home", "jank_app_pct", [10, 11, 10, 12, 10], unit="%")
+              + rows("despues", "home", "jank_app_pct", [2, 3, 2, 2, 3], unit="%")
+              + rows("antes", "home", "red_llamadas", [4] * 5, unit="llamadas")
+              + rows("despues", "home", "red_llamadas", [2] * 5, unit="llamadas"))
+        write(self.dir / "fases.json", json.dumps({
+            "antes": {"entorno": {"emulador": True, "software": True, "frames": "no"}},
+            "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
+        out = self.ok("comparar", self.csv)
+        self.assertRegex(out, r"jank_app_pct.*no confiable")
+        self.assertRegex(out, r"red_llamadas.*mejora")
+        self.assertIn("no confiable = los frames se midieron con render por software", out)
+        self.assertIn("frames no confiables", out)
+        comparison = (self.dir / "comparacion.md").read_text(encoding="utf-8")
+        self.assertRegex(comparison, r"jank_app_pct.*no confiable")
+        self.ok("resumen", self.csv)
+        self.assertIn("frames no confiables (emulador, render por software)", (self.dir / "resumen.md").read_text(encoding="utf-8"))
+
+
+def read_rows_from(text):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "metricas.csv"
+        path.write_text(HEADER + text, encoding="utf-8")
+        return perf.read_rows(path)
+
+
 class CaptureTest(DeviceBase):
     def test_captura_corridas_validas_escribe_csv_comprime_y_resume(self):
         self.tp_outputs(GOOD)
@@ -495,6 +602,26 @@ class CaptureTest(DeviceBase):
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("cmd package compile -f -m speed %s" % PKG, log)
         self.assertIn("kill -TERM 4242", log)
+
+    def test_en_un_emulador_con_render_por_software_avisa_recomienda_y_lo_registra_en_la_fase(self):
+        self.tp_outputs(GOOD)
+        self.env.update({"FAKE_EMULATOR": "1", "FAKE_GLES": GLES_SOFT})
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertIn("⚠ el dispositivo renderiza por software", out)
+        self.assertIn("-gpu host", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["entorno"]["frames"], "no")
+        self.assertTrue(phases["antes"]["entorno"]["emulador"])
+        self.assertRegex(out, r"jank_app_pct.*frames no confiables")
+        self.assertIn("frames no confiables", (self.plan.parent / "resumen.md").read_text(encoding="utf-8"))
+
+    def test_en_un_dispositivo_real_no_avisa_ni_agrega_entorno(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_GLES"] = GLES_REAL
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("emulador", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertNotIn("entorno", phases["antes"])
 
     def test_preparar_corre_antes_de_cada_corrida_y_del_calentamiento(self):
         self.tp_outputs(GOOD)
@@ -894,6 +1021,24 @@ class ReportTest(PerfBase):
         self.assertIn('<nav class="toc"><a href="#s0">', page)
         self.assertIn("<svg", page)
         self.assertNotIn("{{", page)
+
+    def test_reporte_marca_no_confiable_una_principal_de_frames_medida_con_render_por_software(self):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", "# Rendimiento · Home · 2026-11-09\n\n## Resumen ejecutivo\n\nTexto.\n")
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {}}, "principales": ["jank_app_pct"],
+                                                "mejoras": [{"id": "M1", "titulo": "Menos jank", "flujo": "f",
+                                                             "metrica": "jank_app_pct", "estado": "aplicada"}]}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "f", "jank_app_pct", [9, 10, 9, 10, 9], "%") +
+              rows("despues", "f", "jank_app_pct", [3] * 5, "%"))
+        write(folder / "fases.json", json.dumps({"antes": {"entorno": {"emulador": True, "software": True, "frames": "no"}},
+                                                  "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
+        self.ok("reporte", "--carpeta", folder, "--html")
+        md = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("| no confiable | no confiable: los frames se midieron con render por software", md)
+        self.assertNotIn("| mejora |", md)
+        self.assertIn("— sin veredicto", md)  # la mejora no se declara lograda con frames que no valen
+        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
+        self.assertIn('class="verdict v-same">no confiable', page)
 
     def test_reporte_inicial_con_plan_y_final_con_propuesto_contra_logrado(self):
         folder = self.dir / "inv"
