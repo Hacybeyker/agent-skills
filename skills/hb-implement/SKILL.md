@@ -165,6 +165,17 @@ Se genera siempre, salvo que el usuario diga que no.
   - La ruta del reporte (con los previews de UI, si los hubo).
   - Los commits propuestos, agrupados por unidad funcional y con mensajes según `hb-commit`.
   - El texto para el PR: qué cambia, por qué y cómo se verificó.
+  - **Riesgos:** lo que el DoD no cubre y no pudiste probar ("no probado en dispositivo", una dependencia de la plataforma, un caso del alcance que quedó fuera).
+  - Los **ítems de verificación en el dispositivo**, si hay algo que el DoD no pueda ver (siguiente apartado).
+
+### Verificación en el dispositivo
+
+Lista solo lo que el DoD y los tests no ven: el ciclo de vida real, los permisos de la plataforma, la red real, el hardware, la fluidez percibida. No es un recorrido de toda la feature.
+
+- **Prioridad.** Primero los *imprescindibles* (si fallan, la entrega no sirve) y después los *opcionales*. Tope: 8 imprescindibles y 5 opcionales por entrega, salvo que el pedido fije otro. Si hay más, quédate con los de mayor riesgo y di cuántos dejaste fuera.
+- **Respaldo.** Cada ítem cita el test que lo respalda (`Clase.nombre del test`) o queda marcado **sin test**. Dentro de su prioridad, los "sin test" van primero: ahí está el riesgo.
+- **No prometas lo que el código no hace.** Escribe cada ítem desde un test o desde lo que leíste en el código, no desde la intención. Si afirma un comportamiento ("volver al inicio pide las cuentas otra vez"), el test o el código deben mostrarlo; si no, corrige el código o quita el ítem.
+- **Formato:** qué hacer → qué debe verse → respaldo.
 
 ## Checklist
 
@@ -179,5 +190,6 @@ Se genera siempre, salvo que el usuario diga que no.
 - [ ] DoD completo: cada paso en `pass` o `skipped` con motivo.
 - [ ] Si el cambio toca UI de Compose en Android y existe la CLI `android`: previews dibujados, revisados e incluidos en el reporte.
 - [ ] Reporte generado y ruta entregada.
+- [ ] Ítems de verificación en el dispositivo priorizados, con tope, y cada uno con su test o "sin test".
 - [ ] Entrega en el idioma del proyecto.
 - [ ] Sin commit automático.
