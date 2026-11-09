@@ -92,12 +92,11 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 - `<métrica> hasta_ultima_red_ms`: para una métrica de usuario que termina en una llamada, cuánto hay desde su inicio hasta el fin de la última llamada de red. `comparar` avisa si se separan: la marca de fin dejó de ser la última llamada y la métrica cambió de definición.
 - El presupuesto de frame sale de `hz` (del plan o de la traza): 16,7 ms a 60 Hz, 11,1 ms a 90 Hz, 8,3 ms a 120 Hz.
 
-## Con testigo
+## Con Maestro y testigo
 
-- **Frames y CPU:** `recorrido` en el plan con el comando de testigo para un flujo, sin video ni red:
-  `testigo run --app <apk-profiling> --flows <flujo.yaml> --network none --no-record --out <carpeta>/testigo`.
-  testigo no reinstala un APK que no cambió, así que se conserva la compilación.
-- **Red con Chucker (build `debuggable`):** conteos, duplicados y solapadas por endpoint, sin instrumentación:
+- **Nunca como `recorrido`.** Medido en un A/A (misma app, mismo flujo, 10 corridas por lado), Maestro dando un solo toque sumó un 14 % al tiempo de punta a punta (284 → 325 ms, con un ruido adb-contra-adb del 0,4 %) y multiplicó por 3–10 la varianza del hilo principal; la traza creció seis veces. Su driver corre en el dispositivo y activa accesibilidad: trabajo extra para la app dentro de la ventana medida, y no depende del flow.
+- **Sí como `preparar`:** corre antes de que arranque la traza. Un flow de Maestro lleva la app al punto de partida (login, avisos, tab) y el tramo medido queda en uno o dos toques de `adb` ([ficha.md](ficha.md) · Flujos largos). `maestro --device <serial> test <flow.yaml> > /dev/null && sleep 2`; `testigo run` no, porque además instala la app si el artefacto cambió y arranca la evidencia.
+- **Red con Chucker (build `debuggable`), aparte de la medición:** conteos, duplicados y solapadas por endpoint, sin instrumentación:
   ```bash
   cd <raíz-del-proyecto> && testigo run --app <apk-debug> --flows <flujo.yaml> --repeat 5 --network chucker --network-format har --no-record --out <carpeta>/red-antes
   cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py har --fase antes --flujo <flujo> --csv <carpeta>/metricas.csv <carpeta>/red-antes/*/<flujo>/*/network.har

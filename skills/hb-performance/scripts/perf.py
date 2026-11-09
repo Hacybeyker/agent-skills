@@ -41,7 +41,7 @@ import textwrap
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -94,6 +94,9 @@ MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5", "alto": "Opus 5.5
 SECTION_PREFIXES = ("HTTP", "QUEUE", "CONN", "TTFB", "SCREEN", "NAV", "MARK")
 QUERY_TAG = re.compile(r" #[0-9a-f]{4,8}$")
 e = html.escape
+
+
+MAX_CONSECUTIVE_INVALID = 3
 
 
 class PerfError(Exception):
@@ -1623,20 +1626,41 @@ def cmd_capturar(args, plan=None):
             settle(1)
             reason, _ = launch(adb, package, startup)
         else:
-            prepare()
+            try:
+                prepare()
+            except Precondicion as error:
+                if not prepare_command:
+                    raise
+                print("⚠ calentamiento: %s" % error)
+                continue
             reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups))
         if reason:
             print("⚠ calentamiento: %s" % reason)
 
     target = 1 if args.prueba else args.corridas
     valid, attempts, seen_hz = 0, 0, set()
+    consecutive, last_invalid = 0, ""
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
     while valid < target:
+        if consecutive >= MAX_CONSECUTIVE_INVALID:
+            raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
+                                        "suerte. Revisa el recorrido, 'preparar' o el backend y vuelve a correr; las "
+                                        "%d válidas quedan guardadas" % (consecutive, last_invalid, valid))
         if attempts >= target + 3:
             raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones"
                                         % (valid, target, attempts))
         attempts += 1
-        prepare()
+        try:
+            prepare()
+        except Precondicion as error:
+            if not prepare_command or args.prueba:
+                raise
+            # 'preparar' falló (un login que no entró, un backend caído): la corrida no vale, se repite y cuenta
+            # para el tope de inválidas seguidas.
+            consecutive, last_invalid = consecutive + 1, str(error)
+            print("✖ corrida %d inválida: %s (se repite)" % (n, error))
+            n += 1
+            continue
         if sdk < 31:
             adb.shell("dumpsys gfxinfo %s reset" % package)
         local = out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))
@@ -1682,8 +1706,10 @@ def cmd_capturar(args, plan=None):
             if not args.sin_comprimir:
                 compress(target_name)
             print("✖ corrida %d inválida: %s (traza guardada para auditoría)" % (n, invalid))
+            consecutive, last_invalid = consecutive + 1, invalid
             n += 1
             continue
+        consecutive = 0
         saved = local if args.sin_comprimir else compress(local)
         if args.prueba:
             print(run_line("de prueba", size_mb, metrics))

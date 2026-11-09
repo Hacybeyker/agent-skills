@@ -507,9 +507,26 @@ class CaptureTest(DeviceBase):
         self.assertEqual(marker.read_text(encoding="utf-8").count("x"), 3)  # calentamiento + 2 corridas
         plan["flujos"]["home"]["preparar"] = "false"
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
-        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
-        self.assertEqual(result.returncode, 3)
-        self.assertIn("'preparar' terminó con código 1", result.stderr)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "10")
+        # Un 'preparar' que falla (login que no entra, backend caído) invalida la corrida y se repite; tres seguidas
+        # detienen la captura con el motivo, sin gastar los 13 intentos.
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("⚠ calentamiento: 'preparar' terminó con código 1", result.stdout)
+        self.assertEqual(result.stdout.count("inválida: 'preparar' terminó con código 1 (se repite)"), 3)
+        self.assertIn("3 corridas inválidas seguidas (última: 'preparar' terminó con código 1)", result.stderr)
+
+    def test_tres_corridas_invalidas_seguidas_detienen_la_captura(self):
+        self.tp_outputs(LOGIN, LOGIN, LOGIN, GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("inválida"), 3)
+        self.assertIn("3 corridas inválidas seguidas", result.stderr)
+        self.assertIn("las 0 válidas quedan guardadas", result.stderr)
+        self.tp_outputs(GOOD, LOGIN, LOGIN, GOOD, LOGIN, GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "3",
+                      "--calentamiento", "0", "--sin-compilar", "--rehacer")
+        self.assertIn("corrida 3/3", out)  # dos inválidas seguidas no detienen: el contador se reinicia con una válida
 
     def test_una_corrida_sin_la_ventana_o_sin_la_metrica_principal_es_invalida(self):
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
