@@ -121,7 +121,7 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XCont
 Se genera siempre, salvo que el usuario diga que no.
 
 1. Asegura que `reports/` esté en `.gitignore`. Si no está, agrégalo.
-2. Escribe `reports/meta.json` con lo que git no sabe:
+2. Escribe un meta **por tarea**, `reports/<AAAA-MM-DD>-<slug>.meta.json` (el mismo prefijo que tendrá el reporte), con lo que git no sabe. Un `reports/meta.json` compartido lo pisa el siguiente bloque.
 
 ```json
 {
@@ -136,6 +136,9 @@ Se genera siempre, salvo que el usuario diga que no.
     "ruta/al/ArchivoModificado.kt": { "before": "Qué limitación había.", "after": "Qué mejora el cambio." },
     "ruta/al/ArchivoEliminado.kt": { "why": "Por qué se elimina." }
   },
+  "groups": [
+    { "match": "app/src/test/screenshots/", "why": "Goldens regrabados de las pantallas del perfil." }
+  ],
   "dod": [
     { "icon": "🧪", "name": "Tests", "command": "./gradlew test", "status": "pass", "note": "", "output": "" }
   ],
@@ -146,13 +149,14 @@ Se genera siempre, salvo que el usuario diga que no.
 ```
    - `type`: `feature`, `bugfix`, `enhancement` o `refactor`. `status`: `pass`, `fail` o `skipped`. `date`: la fecha local.
    - Una explicación por archivo, sobre el impacto, no sobre el código. `output` solo en pasos que fallaron.
+   - Los archivos masivos o generados (goldens, fixtures, snapshots) **no llevan una explicación cada uno**: se explican en grupo con `groups`. `match` es una carpeta (termina en `/`) o un patrón (`*.png`), y el grupo sale como una sola entrada con su lista de rutas. Un archivo con entrada propia en `files` se muestra aparte del grupo.
    - `previews` es opcional (sección 5). `image` es la ruta que devolvió `android preview render`, absoluta o relativa al repo: el script incrusta la imagen en el reporte.
 3. Genera el reporte con el script de esta skill (la ruta es relativa a la carpeta de la skill):
    ```bash
-   python3 -I <carpeta-de-la-skill>/scripts/report.py --meta reports/meta.json
+   python3 -I <carpeta-de-la-skill>/scripts/report.py --meta reports/<AAAA-MM-DD>-<slug>.meta.json
    ```
    El script saca el antes, el después y el diff de git (contra `HEAD`, incluidos los archivos nuevos sin trackear): **no copies código en el meta**.
-4. Si el script avisa de archivos sin explicación, complétalos y vuelve a generarlo.
+4. Si el script avisa de archivos sin explicación, complétalos (o agrúpalos) y vuelve a generarlo.
 
 ## 7. Entrega
 

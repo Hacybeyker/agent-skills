@@ -4,13 +4,18 @@
 El código (antes, después y diff) sale de git: el agente solo escribe el meta.json
 con el contexto que git no sabe (título, tipo, por qué de cada archivo, resultado del DoD).
 
+Un meta por tarea (reports/<fecha>-<slug>.meta.json): así un bloque no pisa el de otro.
+Los archivos masivos o generados (goldens, fixtures) se explican en grupo, por carpeta o patrón,
+con "groups"; un archivo con su propia entrada en "files" se muestra aparte.
+
 Uso:
-  python3 -I report.py --meta reports/meta.json [--base HEAD] [--out reports] [--repo .]
+  python3 -I report.py --meta reports/<fecha>-<slug>.meta.json [--base HEAD] [--out reports] [--repo .]
 """
 import argparse
 import base64
 import datetime
 import difflib
+import fnmatch
 import html
 import json
 import pathlib
@@ -129,15 +134,26 @@ def summary(items):
     return f'<div class="change-summary">{cells}</div>' if cells else ""
 
 
+STATUS = {"A": ("status-new", "New"), "M": ("status-modified", "Modified"), "D": ("status-deleted", "Deleted")}
+
+
+def status_summary(status, info):
+    if status == "A":
+        return summary([("after", "✅ Por qué se crea", info.get("why"))])
+    if status == "D":
+        return summary([("before", "🗑️ Por qué se elimina", info.get("why"))])
+    return summary([("before", "⚠️ Antes", info.get("before")), ("after", "✅ Después", info.get("after") or info.get("why"))])
+
+
 def file_entry(index, f, info):
-    status = {"A": ("status-new", "New"), "M": ("status-modified", "Modified"), "D": ("status-deleted", "Deleted")}[f["status"]]
+    status = STATUS[f["status"]]
     path = f["path"] if f["status"] != "M" or f["old"] in (None, f["path"]) else f'{f["old"]} → {f["path"]}'
     head = (f'<div class="file-header" onclick="toggleFile(this)"><span class="file-status {status[0]}">{status[1]}</span>'
             f'<span class="file-path">{e(path)}</span><span class="file-toggle">▼</span></div>')
     if f["status"] == "A":
-        body = summary([("after", "✅ Por qué se crea", info.get("why"))]) + code_block(f["after"])
+        body = status_summary("A", info) + code_block(f["after"])
     elif f["status"] == "D":
-        body = summary([("before", "🗑️ Por qué se elimina", info.get("why"))]) + code_block(f["before"], dim=True)
+        body = status_summary("D", info) + code_block(f["before"], dim=True)
     else:
         fid = f"f{index}"
         tabs = "".join(
@@ -147,15 +163,35 @@ def file_entry(index, f, info):
         panels = (f'<div class="panel-content" id="{fid}-before">{code_block(f["before"])}</div>'
                   f'<div class="panel-content" id="{fid}-after">{code_block(f["after"])}</div>'
                   f'<div class="panel-content active" id="{fid}-diff">{diff_block(f["before"], f["after"])}</div>')
-        body = (summary([("before", "⚠️ Antes", info.get("before")), ("after", "✅ Después", info.get("after") or info.get("why"))])
-                + f'<div class="panel-tabs" id="tabs-{fid}">{tabs}</div>{panels}')
+        body = status_summary("M", info) + f'<div class="panel-tabs" id="tabs-{fid}">{tabs}</div>{panels}'
     return f'<div class="file-entry open">{head}<div class="file-body">{body}</div></div>'
 
 
-def section(icon, title, entries, empty):
+def group_for(path, groups):
+    """El primer grupo cuyo "match" cubre la ruta: una carpeta (termina en /) o un patrón fnmatch."""
+    for group in groups:
+        pattern = group.get("match") or ""
+        if pattern.endswith("/") and path.startswith(pattern):
+            return group
+        if pattern and not pattern.endswith("/") and fnmatch.fnmatchcase(path, pattern):
+            return group
+    return None
+
+
+def group_entry(group, status, paths):
+    label = STATUS[status]
+    total = f"{len(paths)} archivo" + ("" if len(paths) == 1 else "s")
+    head = (f'<div class="file-header" onclick="toggleFile(this)"><span class="file-status {label[0]}">{label[1]}</span>'
+            f'<span class="file-path">{e(group["match"])} · {total}</span><span class="file-toggle">▼</span></div>')
+    listing = '<pre class="code-block">' + e("\n".join(paths)) + "</pre>"
+    return f'<div class="file-entry open">{head}<div class="file-body">{status_summary(status, group)}{listing}</div></div>'
+
+
+def section(icon, title, entries, empty, count=None):
     content = "".join(entries) or f'<div class="empty-state">{empty}</div>'
+    count = len(entries) if count is None else count
     return (f'<div class="section"><div class="section-header"><span class="section-icon">{icon}</span>'
-            f'<span class="section-title">{title}</span><span class="section-count">{len(entries)}</span></div>{content}</div>')
+            f'<span class="section-title">{title}</span><span class="section-count">{count}</span></div>{content}</div>')
 
 
 def dod_section(steps):
@@ -233,13 +269,27 @@ def main():
     script = re.search(r"<script>.*?</script>", template, re.S).group(0)
 
     infos = meta.get("files", {})
+    group_defs = meta.get("groups", [])
     files = []
     for f in changed_files(repo, args.base, out_dir):
         f["before"] = decode(read_before(repo, args.base, f["old"])) if f["status"] != "A" else None
         f["after"] = decode(read_after(repo, f["path"])) if f["status"] != "D" else None
+        # Un archivo con su propia entrada en "files" se muestra aparte, aunque un grupo lo cubra.
+        f["group"] = None if f["path"] in infos else group_for(f["path"], group_defs)
         files.append(f)
 
-    groups = {k: [file_entry(i, f, infos.get(f["path"], {})) for i, f in enumerate(files) if f["status"] == k] for k in "AMD"}
+    groups = {k: [] for k in "AMD"}
+    counts = {k: sum(1 for f in files if f["status"] == k) for k in "AMD"}
+    for k in "AMD":
+        grouped = {}
+        for i, f in enumerate(files):
+            if f["status"] != k:
+                continue
+            if f["group"] is None:
+                groups[k].append(file_entry(i, f, infos.get(f["path"], {})))
+            else:
+                grouped.setdefault(id(f["group"]), (f["group"], []))[1].append(f["path"])
+        groups[k].extend(group_entry(group, k, paths) for group, paths in grouped.values())
     project = meta.get("project") or repo.name
     date = meta.get("date") or datetime.date.today().isoformat()
     badge_cls, badge_label = TYPES.get(meta.get("type", "feature"), TYPES["feature"])
@@ -260,15 +310,15 @@ def main():
 <div class="hero"><div class="hero-eyebrow"><span class="badge {badge_cls}">{badge_label}</span>{scope}</div>
 <h1 class="hero-title">{e(meta.get("title", ""))}</h1><p class="hero-desc">{e(meta.get("description", ""))}</p>
 <div class="stats-row">
-<div class="stat-card"><div class="stat-label">Archivos Nuevos</div><div class="stat-value green">{len(groups["A"])}</div></div>
-<div class="stat-card"><div class="stat-label">Archivos Modificados</div><div class="stat-value" style="color:var(--accent-blue)">{len(groups["M"])}</div></div>
-<div class="stat-card"><div class="stat-label">Archivos Eliminados</div><div class="stat-value red">{len(groups["D"])}</div></div>
+<div class="stat-card"><div class="stat-label">Archivos Nuevos</div><div class="stat-value green">{counts["A"]}</div></div>
+<div class="stat-card"><div class="stat-label">Archivos Modificados</div><div class="stat-value" style="color:var(--accent-blue)">{counts["M"]}</div></div>
+<div class="stat-card"><div class="stat-label">Archivos Eliminados</div><div class="stat-value red">{counts["D"]}</div></div>
 <div class="stat-card"><div class="stat-label">DoD</div><div class="stat-value {dod_color}">{dod_value}</div></div>
 </div></div>
 {previews}
-{section("🆕", "Archivos Nuevos", groups["A"], "No hay archivos nuevos.")}
-{section("✏️", "Archivos Modificados", groups["M"], "No hay archivos modificados.")}
-{section("🗑️", "Archivos Eliminados", groups["D"], "Ningún archivo fue eliminado.")}
+{section("🆕", "Archivos Nuevos", groups["A"], "No hay archivos nuevos.", counts["A"])}
+{section("✏️", "Archivos Modificados", groups["M"], "No hay archivos modificados.", counts["M"])}
+{section("🗑️", "Archivos Eliminados", groups["D"], "Ningún archivo fue eliminado.", counts["D"])}
 {dod_section(dod)}
 <div class="footer"><div><span class="footer-brand">{e(project)}</span> &nbsp;·&nbsp; Generado el {date}</div>
 <div>Generado con <strong>hb-implement</strong> · No hacer commit sin revisión manual</div></div>
@@ -285,9 +335,19 @@ def main():
         print(f"⚠️  {args.out}/ no está en .gitignore", file=sys.stderr)
     for path in missing_previews:
         print(f"⚠️  Preview sin imagen: {path}", file=sys.stderr)
-    missing = [f["path"] for f in files if f["path"] not in infos]
+    missing = [f["path"] for f in files if f["path"] not in infos and f["group"] is None]
     if missing:
         print("ℹ️  Archivos sin explicación en meta.json: " + ", ".join(missing), file=sys.stderr)
+        if len(missing) > 5:
+            print('ℹ️  Si son archivos generados o masivos (goldens, fixtures), explícalos en grupo con "groups".',
+                  file=sys.stderr)
+    for group in group_defs:
+        if not any(f["group"] is group for f in files):
+            print(f'ℹ️  El grupo "{group.get("match", "")}" no cubre ningún archivo cambiado.', file=sys.stderr)
+    meta_path = pathlib.Path(args.meta).resolve()
+    if meta_path.name == "meta.json" and meta_path.parent == out_dir.resolve():
+        print("ℹ️  reports/meta.json lo pisa la siguiente tarea: usa un meta por tarea, "
+              "reports/<fecha>-<slug>.meta.json.", file=sys.stderr)
 
 
 if __name__ == "__main__":
