@@ -83,7 +83,7 @@ Si el proyecto lleva `CHANGELOG.md` con `[Unreleased]`, o `AGENTS.md` pide docum
 
 El DoD no ve los fallos de diseño. Antes de correrlo, relee tu diff contra el **documento de alcance completo** (la spec, el `PLAN.md` o el issue entero), no solo contra el prompt de esta tarea: las contradicciones y los casos que el prompt no repite viven ahí. Recorre esta lista fija y corrige lo que encuentres:
 
-1. **Estado y persistencia frente a los requisitos.** ¿Qué sobrevive a un arranque en frío, a la muerte del proceso y a recrear la pantalla? Cada dato que el alcance exige conservar debe vivir donde sobrevive (base local, `SavedStateHandle`, backend), no solo en memoria. Si un requisito choca con otro ("se conserva" frente a "vive en memoria"), no lo resuelvas en silencio: decídelo y anótalo (sección 1).
+1. **Estado y persistencia frente a los requisitos.** ¿Qué sobrevive a un arranque en frío, a la muerte del proceso y a recrear la pantalla? Cada dato que el alcance exige conservar debe vivir donde sobrevive (base local, `SavedStateHandle`, backend), no solo en memoria. Si un requisito choca con otro ("se conserva" frente a "vive en memoria"), no lo resuelvas en silencio: con el alcance aprobado, decídelo y anótalo (sección 1); si no, pregúntalo.
 2. **`catch` demasiado amplios.** Atrapa las excepciones concretas, no `Exception`, `Throwable` ni una genérica como `IllegalArgumentException`, y nunca la cancelación de corrutinas. El mapeo de errores cubre todas las combinaciones que el contrato permite (un 401 sin cuerpo, por ejemplo).
 3. **Dependencias sin uso.** Cada dependencia que agregaste tiene al menos un import que la use; si no, quítala. Si el alcance pide declararla aunque nada la use todavía, anótalo.
 4. **Casos que el alcance pide y no se hicieron.** Recorre el alcance línea por línea: cachés, estados vacíos y de error, caminos negativos alcanzables desde la UI, valores de referencia, identificadores de test. Lo que quede fuera se hace o se declara en la entrega como pendiente.
@@ -116,7 +116,7 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XCont
    ```
    La primera vez la CLI descarga su paquete de render (unos 300 MB). Con `--daemon`, los renders siguientes son más rápidos.
 3. **Mira cada imagen** y compárala con los criterios de aceptación: textos, orden, estados y tema. Si algo no coincide, corrige y vuelve a dibujar. Para datos exactos, agrega `--component-tree`: el JSON trae bounds, semántica y el archivo y la línea de cada componente.
-4. Agrega cada imagen a `previews` en `meta.json`, con lo que muestra y qué criterio verifica.
+4. Agrega cada imagen a `previews` en el meta de la tarea (sección 6), con lo que muestra y qué criterio verifica.
 5. Si falta la CLI, el proyecto no tiene un módulo de app Android o el render falla, agrega al DoD del reporte un paso `Previews de UI` en `skipped` con el motivo, y sigue: no bloquea la entrega.
 
 ## 6. Reporte HTML
