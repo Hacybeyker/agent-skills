@@ -1769,13 +1769,49 @@ class ContentHooksTest(PerfBase):
         out = self.instrument()
         self.assertIn("el proyecto ya tiene un punto de extensión (1 candidato)", out)
         self.assertIn("interfaz ScreenTracker (core/src/main/kotlin/ScreenTracker.kt:3) · con multibinding", out)
-        self.assertIn("fun onScreenVisible(name: String, durationMs: Long = 0)", out)
+        self.assertIn("fun onScreenVisible(name: String, durationMs: Long)", out)
         self.assertIn("@IntoSet", out)
-        self.assertIn("override fun onScreenVisible(name: String, durationMs: Long = 0) { PerfHooks.mark(name) }", out)
+        self.assertIn("override fun onScreenVisible(name: String, durationMs: Long) { PerfHooks.mark(name) }", out)
+        self.assertNotIn("= 0", out)  # un override no puede repetir el valor por defecto
         self.assertIn("com.ejemplo.core.analytics.ScreenTracker", out)
         self.assertIn("release queda igual", out)
         self.assertNotIn("{{", out)
         self.assertNotIn("ScreenViewModel", out)
+
+    def test_el_override_lleva_el_tipo_de_retorno_suspend_y_parametros_de_tipo_funcion(self):
+        contract = ("package com.ejemplo.core\n\ninterface ContentReady {\n"
+                    "    suspend fun onReady(screen: String, done: (Int) -> Unit, tags: Map<String, Int> = emptyMap(),\n"
+                    "                        later: () -> Unit = { }): Boolean\n"
+                    "    fun withBody(): Int = 1\n    fun other() { }\n}\n")
+        module = "package com.ejemplo.core\n@Module\nabstract class M { @Multibinds abstract fun a(): Set<ContentReady> }\n"
+        self.project(**{"core__src__main__kotlin__ContentReady.kt": contract, "core__src__main__kotlin__M.kt": module})
+        out = self.instrument()
+        signature = "screen: String, done: (Int) -> Unit, tags: Map<String, Int>, later: () -> Unit"
+        self.assertIn("suspend fun onReady(%s): Boolean" % signature, out)
+        self.assertIn("override suspend fun onReady(%s): Boolean { PerfHooks.mark(screen); TODO(" % signature, out)
+        self.assertNotIn("emptyMap", out)
+        self.assertNotIn("= { }", out)
+        self.assertIn("(más los tipos de los parámetros)", out)
+        self.assertNotIn("withBody", out)
+
+    def test_lee_las_firmas_con_parentesis_anidados_y_sin_cuerpo(self):
+        text = ("interface Gancho {\n    fun a(x: String, f: (Int, String) -> Unit)\n    fun b(): Boolean\n"
+                "    fun c() = Unit\n    fun d(y: Int = 3) {}\n    suspend fun e(z: List<Pair<A, B>>,)\n}\n")
+        methods = perf.hook_methods(text, perf.INTERFACE_DECL.search(text))
+        self.assertEqual([(m[0], m[1], m[2]) for m in methods],
+                         [("a", "x: String, f: (Int, String) -> Unit", ""), ("b", "", "Boolean"),
+                          ("e", "z: List<Pair<A, B>>", "")])
+        self.assertEqual([m[3] for m in methods], [False, False, True])
+
+    def test_una_interfaz_java_con_multibinding_no_dice_que_no_hay_multibinding(self):
+        self.project(**{"core__src__main__java__ScreenReady.java": "package a;\npublic interface ScreenReady {\n void onReady(String name);\n}\n",
+                        "core__src__main__kotlin__M.kt": "package a\n@Module\nabstract class M { @Multibinds abstract fun a(): Set<ScreenReady> }\n"})
+        out = self.instrument()
+        self.assertIn("interfaz ScreenReady (core/src/main/java/ScreenReady.java:2) · con multibinding", out)
+        self.assertNotIn("Sin multibinding que lo reciba", out)
+        self.assertIn("ScreenReady tiene un multibinding pero no pude leer sus métodos", out)
+        self.assertIn("@IntoSet", out)
+        self.assertIn("PerfHooks.mark(<nombre>)", out)
 
     def test_compositionlocal_sin_multibinding_indica_donde_poner_la_marca(self):
         self.project(**{"app__src__main__kotlin__Locals.kt": LOCAL_ONLY})

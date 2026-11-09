@@ -2990,8 +2990,9 @@ PACKAGE_DECL = re.compile(r"^\s*package\s+([\w.]+)", re.M)
 OKHTTP_BUILDER = re.compile(r"\bOkHttpClient\s*\.\s*Builder\s*\(\s*\)|\bOkHttpClient\s*\(\s*\)")
 MODULE_PLUGINS = (("aplicación", re.compile(r"android[._-]?application|com\.android\.application", re.I)),
                   ("librería", re.compile(r"android[._-]?library|com\.android\.library", re.I)))
-FUN_DECL = re.compile(r"\bfun\s+(\w+)\s*\(([^)]*)\)(\s*:\s*[\w.<>?]+)?(\s*[{=])?")
-
+FUN_HEAD = re.compile(r"\bfun\s+(\w+)\s*\(")
+FUN_TAIL = re.compile(r"\s*(?::\s*([^{=]*))?([{=])?")
+PRIMITIVE_TYPES = ("String", "Int", "Long", "Boolean", "Float", "Double", "Unit")
 
 def walk_files(root, patterns, suffixes):
     """Archivos con esas extensiones bajo root, en orden, sin carpetas de build, ocultas ni de tests y sin las rutas
@@ -3009,15 +3010,66 @@ def walk_files(root, patterns, suffixes):
                 yield path
 
 
+def match_paren(text, start):
+    """Índice justo después del paréntesis que cierra el que está en text[start]."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def split_params(params):
+    """Parámetros de primer nivel de una lista de Kotlin, sin partir las comas de genéricos ni de tipos función."""
+    parts, depth, start, previous = [], 0, 0, ""
+    for i, char in enumerate(params):
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}" or (char == ">" and previous != "-"):  # el > de "->" no cierra nada
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(params[start:i])
+            start = i + 1
+        previous = char
+    parts.append(params[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def without_default(param):
+    """El parámetro sin su valor por defecto: un override no puede repetirlo."""
+    depth, previous = 0, ""
+    for i, char in enumerate(param):
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}" or (char == ">" and previous != "-"):
+            depth -= 1
+        elif char == "=" and depth == 0:
+            return param[:i].strip()
+        previous = char
+    return param
+
+
 def hook_methods(text, declaration):
-    """Funciones abstractas (sin cuerpo) de la interfaz que empieza en declaration: [(nombre, parámetros, retorno)]."""
+    """Funciones abstractas (sin cuerpo) de la interfaz Kotlin que empieza en declaration: [(nombre, parámetros sin valores
+    por defecto, retorno, suspend)]. Una interfaz Java no da métodos."""
     start = text.find("{", declaration.end())
     # entre el nombre y la llave solo van genéricos y supertipos; si aparece otra declaración, la interfaz no tiene cuerpo
     if start < 0 or re.search(r"\b(?:class|interface|object|fun|val|var)\b", text[declaration.end():start]):
         return []
     body = text[start:match_brace(text, start)]
-    return [(m.group(1), m.group(2).strip(), (m.group(3) or "").strip(": ").strip())
-            for m in FUN_DECL.finditer(body) if not m.group(4)]
+    methods = []
+    for head in FUN_HEAD.finditer(body):
+        close = match_paren(body, head.end() - 1)
+        tail = FUN_TAIL.match(body[close:].split("\n", 1)[0].split("//", 1)[0])
+        if tail and not tail.group(2):
+            params = ", ".join(without_default(p) for p in split_params(body[head.end():close - 1]))
+            methods.append((head.group(1), params, (tail.group(1) or "").strip(),
+                            bool(re.search(r"\bsuspend\s+$", body[:head.start()]))))
+    return methods
 
 
 def scan_sources(root, patterns):
@@ -3090,32 +3142,52 @@ def hook_snippet(hooks, variant):
     for hook in hooks[:6]:
         extra = ""
         if hook["metodos"]:
-            extra = " · " + "; ".join("fun %s(%s)" % (m[0], m[1]) for m in hook["metodos"][:2])
+            extra = " · " + "; ".join("%sfun %s(%s)%s" % ("suspend " if m[3] else "", m[0], m[1], ": %s" % m[2] if m[2] else "")
+                                      for m in hook["metodos"][:2])
         lines.append("//  - %s %s (%s:%d)%s%s" % (
             "interfaz" if hook["tipo"] == "interfaz" else "CompositionLocal", hook["nombre"], hook["archivo"], hook["linea"],
             " · con multibinding" if hook["multibinding"] else "", extra))
     chosen = next((h for h in hooks if h["tipo"] == "interfaz" and h["multibinding"] and h["metodos"]), None)
-    if chosen:
-        method = chosen["metodos"][0]
-        name_param = next(iter(re.findall(r"(\w+)\s*:\s*String\b", method[1])), None)
+    unreadable = next((h for h in hooks if h["tipo"] == "interfaz" and h["multibinding"] and not h["metodos"]), None)
+    target = chosen or unreadable
+    if target:
+        method = target["metodos"][0] if chosen else None
+        types = []
+        if method:
+            types = [p.split(":", 1)[1].strip().rstrip("?") for p in split_params(method[1]) if ":" in p]
+            types += [method[2].rstrip("?")] if method[2] else []
         lines += [
             "//",
-            "// Binding en el source set perf (debug y %s; release queda igual, el multibinding ya existe):" % variant,
+            "// Binding en el source set perf (debug y %s; release queda igual, el multibinding ya existe):" % variant]
+        if not method:
+            lines += ["// %s tiene un multibinding pero no pude leer sus métodos (¿interfaz Java o una firma que no reconozco?): "
+                      "ábrela," % target["nombre"],
+                      "// implementa cada método y, en el que avisa que el contenido está a la vista, llama a PerfHooks.mark(<nombre>)."]
+        lines += [
             "@Module",
             "@InstallIn(SingletonComponent::class)",
             "object PerfVisibleContentModule {",
             "    @Provides",
             "    @IntoSet",
-            "    fun perf%s(): %s = object : %s {" % (chosen["nombre"], chosen["nombre"], chosen["nombre"]),
-            "        override fun %s(%s) { PerfHooks.mark(%s) }" % (
-                method[0], method[1], name_param or '"<pantalla>" /* arma el nombre con los parámetros */'),
+            "    fun perf%s(): %s = object : %s {" % (target["nombre"], target["nombre"], target["nombre"])]
+        if method:
+            name_param = next(iter(re.findall(r"(\w+)\s*:\s*String\b", method[1])), None)
+            returns = method[2] and method[2] != "Unit"
+            mark = "PerfHooks.mark(%s)" % (name_param or '"<pantalla>" /* arma el nombre con los parámetros */')
+            lines += ["        override %sfun %s(%s)%s { %s%s }" % (
+                "suspend " if method[3] else "", method[0], method[1], ": %s" % method[2] if returns else "", mark,
+                '; TODO("devuelve lo que espera quien lo llama")' if returns else "")]
+            if returns:
+                lines.insert(len(lines) - 1, "        // %s devuelve %s: reemplaza el TODO por el valor que el proyecto espera." % (method[0], method[2]))
+        else:
+            lines.append("        // PerfHooks.mark(<nombre>) en el método que avisa que el contenido está a la vista")
+        lines += [
             "    }",
             "}",
             "// imports: %s.%s, {{PAQUETE}}.PerfHooks, dagger.Module, dagger.Provides, dagger.hilt.InstallIn, "
             "dagger.hilt.components.SingletonComponent, dagger.multibindings.IntoSet%s" % (
-                chosen["paquete"] or "<paquete>", chosen["nombre"],
-                " (más los tipos de los parámetros)" if any(t not in ("String", "Int", "Long", "Boolean", "Float", "Double")
-                                                          for t in re.findall(r":\s*([\w.]+)", method[1])) else ""),
+                target["paquete"] or "<paquete>", target["nombre"],
+                " (más los tipos de los parámetros)" if any(t not in PRIMITIVE_TYPES for t in types) else ""),
             "// Con un Map usa @IntoMap y la clave del proyecto; con Dagger 2 sin Hilt, agrega el módulo a la lista del componente.",
             "// Si el componente no es Singleton (retained, activity), cambia @InstallIn."]
     else:
