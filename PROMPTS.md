@@ -26,6 +26,7 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | Refactor | `Refactoriza <clase o módulo>: <objetivo>. Sin cambiar el comportamiento; los tests existentes deben seguir en verde.` |
 | Solo el plan, sin tocar código | `Con hb-implement, dame solo el plan para <tarea>: archivos por capa, patrones y tests. No implementes todavía.` |
 | Seguir un plan aprobado | `Apruebo el plan. Implementa.` |
+| Con el alcance ya aprobado, sin esperar confirmación | `Con hb-implement, implementa <bloque> según <documento de alcance>. El alcance está aprobado: no esperes confirmación y anota tus decisiones en <archivo>.` |
 
 ## hb-review · code review
 

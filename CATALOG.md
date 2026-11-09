@@ -9,7 +9,7 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 | Skill | Tipo | Versión |
 | --- | --- | --- |
 | `hb-setup` | Flujo | 1.1.0 |
-| `hb-implement` | Flujo | 1.3.1 |
+| `hb-implement` | Flujo | 1.4.0 |
 | `hb-review` | Flujo | 1.0.1 |
 | `hb-performance` | Flujo | 0.5.1 |
 | `hb-commit` | Flujo | 1.0.0 |

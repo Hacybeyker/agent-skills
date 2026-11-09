@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose."
 metadata:
   author: hacybeyker
-  version: "1.3.1"
+  version: "1.4.0"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -29,7 +29,17 @@ El flujo es el mismo para cualquier stack. La arquitectura, los comandos y las r
 
 - **Criterios de aceptación.** Si el pedido no los trae, escríbelos en formato Given / When / Then, y confírmalos si el pedido es ambiguo.
 - Lista los archivos que vas a crear, modificar o eliminar, por capa, y los patrones de diseño que vas a aplicar y por qué (ver los principios del perfil: SOLID, GRASP, GoF, KISS, YAGNI, DRY).
-- **Presenta el plan y espera confirmación** si la tarea toca más de una feature, cambia un contrato público (API, esquema de base de datos, navegación compartida), agrega dependencias o exige una decisión de arquitectura. Si no, sigue.
+- **Presenta el plan y espera confirmación** si la tarea toca más de una feature, cambia un contrato público (API, esquema de base de datos, navegación compartida), agrega dependencias o exige una decisión de arquitectura. Si no, sigue. La excepción es el alcance aprobado (abajo).
+
+### Con el alcance aprobado (modo autónomo o subagente)
+
+Si el pedido trae un alcance aprobado (un documento de alcance, un `PLAN.md` o un brief que dice "el plan ya está aprobado", "sin aprobaciones"), o corres como subagente de un orquestador, **no esperes la confirmación del plan**: el pedido ya la dio. El resto del flujo no cambia.
+
+- **Decide y anota.** Cuando el alcance sea ambiguo o se contradiga, o debas elegir algo que una persona querría revisar, elige la opción más conservadora y reversible, anótala y sigue. Cada decisión: qué, por qué, la alternativa descartada y dónde se aplicó.
+- **Dónde se anota:** en el archivo que indique el pedido (por ejemplo `decisiones.md`). Si no indica ninguno, en "Decisiones" de la entrega. No inventes archivos.
+- **Para revisar:** lo que cambia una regla del alcance para cumplir otra, un contrato, una dependencia o la configuración de un gate va además a "Para revisar" en la entrega, para que el orquestador o la persona lo vea sin leer todo.
+- **Te detienes igual** si el mismo paso del DoD falla tres veces, si hace falta algo fuera del alcance (credenciales, push, publicar, borrar datos) o si dos reglas se contradicen y ninguna opción se puede deshacer.
+- Sigue valiendo la regla de no commitear (sección 7), salvo que el pedido lo autorice por escrito.
 
 ## 2. Implementación
 
