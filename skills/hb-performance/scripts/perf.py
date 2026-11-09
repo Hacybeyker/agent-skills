@@ -102,6 +102,13 @@ e = html.escape
 MAX_CONSECUTIVE_INVALID = 3
 
 
+def max_attempts(target):
+    """Intentos totales de una captura: las corridas pedidas más una reserva de 3 como mínimo y de la mitad de las pedidas
+    si son más (5 → 8, 10 → 15, 20 → 30). Así las inválidas sueltas de un backend inestable no cortan una captura larga;
+    las seguidas ya las corta MAX_CONSECUTIVE_INVALID."""
+    return target + max(3, target // 2)
+
+
 class PerfError(Exception):
     code = 2
 
@@ -1865,7 +1872,7 @@ def cmd_capturar(args, plan=None):
             raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
                                         "suerte. Revisa el recorrido, 'preparar' o el backend y vuelve a correr; las "
                                         "%d válidas quedan guardadas" % (consecutive, last_invalid, valid))
-        if attempts >= target + 3:
+        if attempts >= max_attempts(target):
             raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones"
                                         % (valid, target, attempts))
         attempts += 1

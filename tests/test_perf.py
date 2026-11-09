@@ -676,7 +676,7 @@ class CaptureTest(DeviceBase):
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "10")
         # Un 'preparar' que falla (login que no entra, backend caído) invalida la corrida y se repite; tres seguidas
-        # detienen la captura con el motivo, sin gastar los 13 intentos.
+        # detienen la captura con el motivo, sin gastar los 15 intentos.
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         self.assertIn("⚠ calentamiento: 'preparar' terminó con código 1", result.stdout)
         self.assertEqual(result.stdout.count("inválida: 'preparar' terminó con código 1 (se repite)"), 3)
@@ -694,6 +694,24 @@ class CaptureTest(DeviceBase):
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "3",
                       "--calentamiento", "0", "--sin-compilar", "--rehacer")
         self.assertIn("corrida 3/3", out)  # dos inválidas seguidas no detienen: el contador se reinicia con una válida
+
+    def test_el_tope_de_intentos_crece_con_las_corridas_pedidas(self):
+        self.assertEqual([perf.max_attempts(n) for n in (1, 5, 6, 10, 20)], [4, 8, 9, 15, 30])
+
+    def test_invalidas_sueltas_no_cortan_una_captura_de_diez_corridas(self):
+        # cuatro inválidas sin dos seguidas: el tope viejo (corridas + 3 = 13) las cortaba con 9 válidas
+        self.tp_outputs(GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, GOOD, GOOD, GOOD, GOOD, GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(out.count("✖ corrida"), 4)
+        self.assertIn("corrida 10/10", out)
+
+    def test_con_pocas_corridas_el_tope_sigue_siendo_tres_intentos_de_mas(self):
+        self.tp_outputs(LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "4",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("solo 3 de 4 corridas válidas en 7 intentos", result.stderr)
 
     def test_una_corrida_sin_la_ventana_o_sin_la_metrica_principal_es_invalida(self):
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
