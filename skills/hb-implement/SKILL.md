@@ -157,6 +157,7 @@ Se genera siempre, salvo que el usuario diga que no.
 ## 7. Entrega
 
 - **No hagas commit** salvo que el usuario lo pida y `AGENTS.md` lo permita.
+- **Entrega en el idioma del proyecto**: el resumen, las explicaciones del reporte, los commits propuestos, el texto del PR y la verificación van en el idioma que fija `AGENTS.md` (si no lo dice, el del `README`, el `CHANGELOG` o los últimos commits), aunque el pedido o el brief estén en otro. Revisa el idioma de lo que escribiste, no solo el del código.
 - Entrega:
   - Un resumen de dos o tres líneas.
   - Los archivos creados, modificados y eliminados.
@@ -178,4 +179,5 @@ Se genera siempre, salvo que el usuario diga que no.
 - [ ] DoD completo: cada paso en `pass` o `skipped` con motivo.
 - [ ] Si el cambio toca UI de Compose en Android y existe la CLI `android`: previews dibujados, revisados e incluidos en el reporte.
 - [ ] Reporte generado y ruta entregada.
+- [ ] Entrega en el idioma del proyecto.
 - [ ] Sin commit automático.
