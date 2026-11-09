@@ -3119,6 +3119,7 @@ adapter.submitList(items) { recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla
 //   cuando empieza una carga nueva."""
 
 VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+PRODUCTION_VARIANTS = ("debug", "release")  # build types del proyecto: jamás llevan el source set ni el provider de perf
 DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
 DEBUGGABLE_OFF = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)false\b")
 BUILD_TYPE_HEADER = re.compile(r"(?:(?:create|register|getByName|maybeCreate)\s*\(\s*[\"'](\w+)[\"']\s*\)"
@@ -3179,7 +3180,7 @@ def find_profileable_variants(module, root, patterns):
     found = []
     for manifest in sorted((module / "src").glob("*/AndroidManifest.xml")):
         name = manifest.parent.name
-        if name == "main" or is_denied(manifest, root, patterns):
+        if name == "main" or name.lower() in PRODUCTION_VARIANTS or is_denied(manifest, root, patterns):
             continue
         text = manifest.read_text(encoding="utf-8", errors="ignore")
         profileable = re.search(r"<profileable\b[^>]*>", text)
@@ -3211,6 +3212,10 @@ def cmd_instrumentar(args):
         raise PerfError("paquete '%s' no válido: usa algo como com.ejemplo.app.perf" % args.paquete)
     if args.variante and not VARIANT_NAME.fullmatch(args.variante):
         raise PerfError("variante '%s' no válida: usa el nombre del build type (profiling, benchmark, releaseLike)" % args.variante)
+    if args.variante and args.variante.lower() in PRODUCTION_VARIANTS:
+        raise PerfError("variante '%s' no válida: release y debug son los build types del proyecto y la instrumentación "
+                        "no puede entrar en el release que se publica; usa otra variante o deja que se cree `profiling`"
+                        % args.variante)
     root = project_root(module)
     denied = read_no_leer(root, extra=args.no_leer)
     found_variants = find_profileable_variants(module, root, denied)

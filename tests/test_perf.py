@@ -1617,6 +1617,26 @@ class VariantTest(PerfBase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("variante '../x' no válida", result.stderr)
 
+    def test_release_y_debug_nunca_son_candidatas_aunque_declaren_profileable(self):
+        module = self.module(release=PROFILEABLE, debug=PROFILEABLE)
+        found = perf.find_profileable_variants(module, self.dir, [])
+        self.assertEqual([c["nombre"] for c in found], [])
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertNotIn('getByName("release").kotlin.directories', out)
+        self.assertNotIn("Variante: release", out)
+        self.assertEqual((module / "src/release/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+        self.assertNotIn("PerfInstaller", (module / "src/release/AndroidManifest.xml").read_text(encoding="utf-8"))
+
+    def test_variante_release_o_debug_se_rechaza_porque_instrumentarian_produccion(self):
+        module = self.module(release=PROFILEABLE)
+        for name in ("release", "debug", "Release"):
+            result = self.instrument(module, "--variante", name)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn("variante '%s' no válida" % name, result.stderr)
+            self.assertIn("release y debug", result.stderr)
+        self.assertFalse((module / "src/perf").exists())
+
     def test_las_rutas_prohibidas_no_se_leen_al_buscar_la_variante(self):
         module = self.module(benchmark=PROFILEABLE)
         out = self.instrument(module, "--no-leer", "app/src/benchmark/").stdout
