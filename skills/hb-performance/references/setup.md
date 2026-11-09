@@ -6,7 +6,7 @@ Deja el proyecto listo para medir. Las investigaciones siguientes lo reutilizan 
 
 | Pieza | ¿Obligatoria? | Para qué |
 | --- | --- | --- |
-| Build type `profiling` (`profileable`, no `debuggable`, R8 como release) | Sí | Sin él solo valen los conteos de red y las fugas |
+| Variante `profileable`, no `debuggable`, con R8 como release (`profiling`, o una que el proyecto ya tenga) | Sí | Sin ella solo valen los conteos de red y las fugas |
 | `reportFullyDrawn` en la primera pantalla | Recomendada | TTFD: el arranque hasta el contenido visible, no solo hasta el primer frame. También lo usa Android vitals |
 | Secciones `SCREEN` (ciclo de vida de actividades y fragments) | Recomendada | Cuánto dura cada `onCreate`/`onResume` y qué pantalla precede a cada llamada |
 | Secciones `HTTP`, `QUEUE`, `CONN` y `TTFB` | Si la app usa OkHttp (Retrofit, Ktor con motor OkHttp, Apollo) | Tiempos por endpoint, duplicados (con un hash de la query) y separar cola, conexión, servidor y cliente |
@@ -21,7 +21,9 @@ cd <raíz-del-proyecto> && grep -rhoE 'okhttp|retrofit|ktor-client|apollo|fragme
 
 ## Build de profiling
 
-El fragmento de `build.gradle.kts` lo imprime `perf.py instrumentar` (build type `profiling` con `initWith(release)` y firma de debug, el source set `perf` en `debug` y `profiling`, la exclusión de cobertura); en Groovy es lo mismo con su sintaxis. Los manifests de `debug` y `profiling` los genera el script. Revisa antes de proponerlo:
+**Reutiliza una variante que ya exista.** `perf.py instrumentar` busca en el módulo los `src/<variante>/AndroidManifest.xml` con `<profileable>` (sin `android:enabled="false"`) y lee su build type en `build.gradle(.kts)`: si no es depurable (no declara `isDebuggable = true` ni hereda de `debug`), la usa en lugar de crear `profiling` y lo dice en la línea `Variante: <nombre> (existente…)`. Entonces no se crea otro build type: solo el source set `perf` en `debug` y en esa variante, y el `<provider>` en su manifest. Con varias candidatas se detiene y pide `--variante <nombre>` (`--variante profiling` fuerza la propia); la que creó la skill gana. Las variantes con sabores o con un build type que no se pueda leer salen como "no pude verificar" y no se usan solas: revísalas tú y pásala con `--variante`. Donde esta guía dice `profiling` (`assembleProfiling`, `installProfiling`, `src/profiling/`, el mapping), léelo como la variante elegida; el `paquete` del plan es su `applicationId`, con su sufijo si lo tiene.
+
+Si no hay ninguna, el comportamiento de siempre: el fragmento de `build.gradle.kts` lo imprime `perf.py instrumentar` (build type `profiling` con `initWith(release)` y firma de debug, el source set `perf` en `debug` y `profiling`, la exclusión de cobertura); en Groovy es lo mismo con su sintaxis. Los manifests de `debug` y `profiling` los genera el script. Revisa antes de proponerlo:
 
 - **Firma e `applicationId`:** dos opciones. Sin sufijo, con la firma del build que ya está instalado en el dispositivo de pruebas, se instala encima y conserva los datos (sesión, base). Con `applicationIdSuffix = ".profiling"`, convive con los demás builds pero arranca sin datos: el `paquete` del plan es el id con el sufijo. Si no hay nada instalado, `install` es una instalación nueva y Android puede restaurar el backup de la nube: si la app se cae al abrir, revisa `firstInstallTime` y las exclusiones de backup.
 - **Backend o mocks:** si el proyecto tiene un modo con datos simulados (un flag de `BuildConfig`, un interceptor de mocks), pregunta si el build de profiling lo usa: saca el backend de la medición y las métricas de usuario pasan a familia `app`. Sin mocks, con backend real, quedan en `e2e`.

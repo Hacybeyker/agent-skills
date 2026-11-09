@@ -1505,3 +1505,120 @@ class InstrumentTest(PerfBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GRADLE_KTS = """
+plugins { id("com.android.application") }
+android {
+    buildTypes {
+        release { isMinifyEnabled = true }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+        }
+        create("staging") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging"
+        }
+    }
+}
+dependencies { implementation(libs.okhttp) }
+"""
+PROFILEABLE = '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application>' \
+              '<profileable android:shell="true" /></application></manifest>'
+
+
+class VariantTest(PerfBase):
+    def module(self, gradle=GRADLE_KTS, **manifests):
+        module = self.dir / "app"
+        write(module / "build.gradle.kts", gradle)
+        for name, text in manifests.items():
+            write(module / "src" / name / "AndroidManifest.xml", text)
+        return module
+
+    def instrument(self, module, *extra):
+        return self.perf("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments", *extra)
+
+    def test_lee_los_build_types_de_kotlin_y_groovy_y_si_son_depurables(self):
+        kotlin = perf.build_types(GRADLE_KTS)
+        self.assertEqual(sorted(kotlin), ["benchmark", "release", "staging"])
+        self.assertFalse(perf.is_debuggable("benchmark", kotlin["benchmark"]))
+        self.assertTrue(perf.is_debuggable("staging", kotlin["staging"]))  # hereda de debug
+        groovy = perf.build_types("""android { buildTypes {
+            release { minifyEnabled true; proguardFiles getDefaultProguardFile('x') }
+            benchmark { initWith release; debuggable false; matchingFallbacks = ['release'] }
+            qa { initWith debug }
+            lab { debuggable true }
+        } }""")
+        self.assertEqual(sorted(groovy), ["benchmark", "lab", "qa", "release"])
+        self.assertFalse(perf.is_debuggable("benchmark", groovy["benchmark"]))
+        self.assertTrue(perf.is_debuggable("qa", groovy["qa"]))
+        self.assertTrue(perf.is_debuggable("lab", groovy["lab"]))
+        self.assertEqual(perf.build_types("android { }"), {})
+
+    def test_sin_variante_profileable_crea_profiling_como_antes(self):
+        module = self.module()
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertIn('create("profiling")', out)
+        self.assertIn("assembleProfiling", out)
+        self.assertTrue((module / "src/profiling/AndroidManifest.xml").is_file())
+
+    def test_reutiliza_la_variante_profileable_y_no_depurable_que_ya_existe(self):
+        module = self.module(benchmark=PROFILEABLE)
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: benchmark (existente: profileable y no depurable, no se crea otro build type)", out)
+        self.assertFalse((module / "src/profiling").exists())
+        self.assertEqual((module / "src/benchmark/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+        self.assertIn("= ya existe, no se toca", out)
+        self.assertNotIn('create("profiling")', out)
+        self.assertNotIn('create("benchmark")', out)
+        self.assertIn('getByName("benchmark").kotlin.directories', out)
+        self.assertIn('"benchmarkImplementation"', out)
+        self.assertIn("installBenchmark", out)
+        self.assertIn("assembleBenchmark", out)
+        hint = out[out.index("Manifest existente"):]
+        self.assertNotIn("<profileable", hint.split("\n\n")[0])  # ya la tiene: solo falta el <provider>
+        self.assertTrue((module / "src/perf/kotlin/com/ejemplo/perf/PerfInstaller.kt").is_file())
+
+    def test_una_variante_depurable_o_sin_verificar_no_se_reutiliza(self):
+        module = self.module(staging=PROFILEABLE, otra=PROFILEABLE)
+        out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertIn("staging también declara <profileable> pero es depurable", out)
+        self.assertIn("otra también declara <profileable> pero no pude verificar su build type", out)
+
+    def test_una_profileable_con_enabled_false_no_cuenta(self):
+        off = PROFILEABLE.replace("<profileable ", '<profileable android:enabled="false" ')
+        out = self.ok("instrumentar", "--modulo", self.module(benchmark=off), "--paquete", "com.ejemplo.perf", "--sin-fragments")
+        self.assertIn("Variante: profiling (nueva)", out)
+
+    def test_dos_variantes_validas_obligan_a_elegir_con_variante(self):
+        gradle = GRADLE_KTS.replace('create("staging") {\n            initWith(getByName("debug"))',
+                                    'create("macro") {\n            initWith(getByName("release"))')
+        module = self.module(gradle, benchmark=PROFILEABLE, macro=PROFILEABLE)
+        result = self.instrument(module)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("2 variantes profileable y no depurables (benchmark, macro)", result.stderr)
+        out = self.instrument(module, "--variante", "macro").stdout
+        self.assertIn("Variante: macro (existente", out)
+        self.assertIn("Variante: profiling (nueva)", self.instrument(module, "--variante", "profiling").stdout)
+
+    def test_la_que_creo_la_skill_gana_si_hay_otra(self):
+        gradle = GRADLE_KTS.replace('create("staging") {\n            initWith(getByName("debug"))',
+                                    'create("profiling") {\n            initWith(getByName("release"))')
+        module = self.module(gradle, benchmark=PROFILEABLE,
+                             profiling="<!-- Generated by hb-performance -->" + PROFILEABLE)
+        self.assertIn("Variante: profiling (existente", self.instrument(module).stdout)
+
+    def test_variante_con_nombre_invalido_se_rechaza(self):
+        result = self.instrument(self.module(), "--variante", "../x")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("variante '../x' no válida", result.stderr)
+
+    def test_las_rutas_prohibidas_no_se_leen_al_buscar_la_variante(self):
+        module = self.module(benchmark=PROFILEABLE)
+        out = self.instrument(module, "--no-leer", "app/src/benchmark/").stdout
+        self.assertIn("Variante: profiling (nueva)", out)
+

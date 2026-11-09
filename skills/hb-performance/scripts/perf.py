@@ -1185,8 +1185,9 @@ def crash_excerpt(adb, package):
 
 
 def mapping_hint():
-    found = sorted(pathlib.Path(".").glob("*/build/outputs/mapping/profiling/mapping.txt"))
-    target = str(found[0]) if found else "<módulo>/build/outputs/mapping/profiling/mapping.txt"
+    found = sorted(f for f in pathlib.Path(".").glob("*/build/outputs/mapping/*/mapping.txt")
+                   if f.parent.name not in ("release", "debug"))
+    target = str(found[0]) if found else "<módulo>/build/outputs/mapping/<variante>/mapping.txt"
     return "desofusca la pila con: retrace %s <archivo-con-la-pila> (cmdline-tools del SDK)" % target
 
 
@@ -2824,22 +2825,31 @@ def is_generated(path):
 
 
 SNIPPETS = {
+    "gradle_existente": """android {
+    // La variante "{{VARIANTE}}" ya es profileable y no depurable: no se crea otro build type.
+    sourceSets {
+        getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
+        getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
+    }
+}
+// Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): si la variante no las
+// recibe ya, repítelas como "{{VARIANTE}}Implementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
     "gradle": """android {
     buildTypes {
-        create("profiling") {
+        create("{{VARIANTE}}") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".profiling" // opcional: convive con el build instalado; el paquete del plan lleva el sufijo
+            applicationIdSuffix = ".{{VARIANTE}}" // opcional: convive con el build instalado; el paquete del plan lleva el sufijo
             matchingFallbacks += listOf("release") // solo con módulos de librería
         }
     }
     sourceSets {
         getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
-        getByName("profiling").kotlin.directories += "{{FUENTE}}"
+        getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
     }
 }
 // Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): repítelas como
-// "profilingImplementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
+// "{{VARIANTE}}Implementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
     "red_hilt": """// Donde se arma el OkHttpClient (Hilt): inyecta el set y aplica la primera factory.
 @Provides fun okHttp(@PerfEventListeners factories: Set<@JvmSuppressWildcards EventListener.Factory>): OkHttpClient =
     OkHttpClient.Builder()
@@ -2861,12 +2871,103 @@ LaunchedEffect(uiState.isLoading) { if (!uiState.isLoading) PerfHooks.mark("<pan
 }
 
 
+VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
+DEBUGGABLE_OFF = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)false\b")
+BUILD_TYPE_HEADER = re.compile(r"(?:(?:create|register|getByName|maybeCreate)\s*\(\s*[\"'](\w+)[\"']\s*\)"
+                               r"|(?:val\s+)?(\w+)\s+by\s+(?:creating|getting)|(?<![\w.\"'])(\w+))\s*\{")
+
+
+def match_brace(text, start):
+    """Índice justo después de la llave que cierra la que está en text[start]."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def build_types(text):
+    """{nombre: cuerpo} de los build types de un build.gradle(.kts); solo los de primer nivel de buildTypes { }."""
+    found = re.search(r"\bbuildTypes\s*\{", text)
+    if not found:
+        return {}
+    start = found.end() - 1
+    body = text[start + 1:match_brace(text, start) - 1]
+    types, pos = {}, 0
+    while True:
+        header = BUILD_TYPE_HEADER.search(body, pos)
+        if not header:
+            return types
+        brace = header.end() - 1
+        end = match_brace(body, brace)
+        types[header.group(1) or header.group(2) or header.group(3)] = body[brace + 1:end - 1]
+        pos = end
+
+
+def is_debuggable(name, body):
+    """True si el build type es depurable: lo declara, o hereda de debug con initWith y no lo apaga."""
+    if DEBUGGABLE_ON.search(body):
+        return True
+    if DEBUGGABLE_OFF.search(body):
+        return False
+    base = re.search(r"initWith\s*\(?([^)\n;]*)", body)  # initWith(getByName("debug")) o, en Groovy, initWith debug
+    if base:
+        words = re.findall(r"\w+", base.group(1))
+        return bool(words) and words[-1] == "debug"
+    return name == "debug"
+
+
+def find_profileable_variants(module, root, patterns):
+    """Variantes del módulo cuyo manifest declara <profileable>: [{nombre, manifest, estado, generada}]. 'estado': 'ok'
+    (build type no depurable), 'depurable' o 'sin build type' (no se pudo verificar: sabores, otro plugin)."""
+    gradle = next((module / n for n in ("build.gradle.kts", "build.gradle") if (module / n).is_file()), None)
+    types = {}
+    if gradle and not is_denied(gradle, root, patterns):
+        types = build_types(gradle.read_text(encoding="utf-8", errors="ignore"))
+    found = []
+    for manifest in sorted((module / "src").glob("*/AndroidManifest.xml")):
+        name = manifest.parent.name
+        if name == "main" or is_denied(manifest, root, patterns):
+            continue
+        text = manifest.read_text(encoding="utf-8", errors="ignore")
+        profileable = re.search(r"<profileable\b[^>]*>", text)
+        if not profileable or re.search(r"android:enabled\s*=\s*[\"']false[\"']", profileable.group(0)):
+            continue
+        state = "sin build type" if name not in types else "depurable" if is_debuggable(name, types[name]) else "ok"
+        found.append({"nombre": name, "manifest": manifest, "estado": state, "generada": GENERATED in text[:400]})
+    return found
+
+
+def resolve_variant(found, requested):
+    """(variante, existente): la pedida con --variante; si no, la única profileable y no depurable del módulo (la que
+    creó la skill gana si hay varias); si no hay ninguna, 'profiling' nueva."""
+    if requested:
+        return requested, any(c["nombre"] == requested and c["estado"] == "ok" for c in found)
+    valid = [c for c in found if c["estado"] == "ok"]
+    chosen = [c for c in valid if c["generada"]] or valid
+    if len(chosen) > 1:
+        raise PerfError("hay %d variantes profileable y no depurables (%s): elige una con --variante, o --variante "
+                        "profiling para crear una propia" % (len(chosen), ", ".join(c["nombre"] for c in chosen)))
+    return (chosen[0]["nombre"], True) if chosen else ("profiling", False)
+
+
 def cmd_instrumentar(args):
     module = pathlib.Path(args.modulo)
     if not (module / "build.gradle.kts").is_file() and not (module / "build.gradle").is_file():
         raise PerfError("%s no parece un módulo Gradle (falta build.gradle o build.gradle.kts)" % module)
     if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", args.paquete):
         raise PerfError("paquete '%s' no válido: usa algo como com.ejemplo.app.perf" % args.paquete)
+    if args.variante and not VARIANT_NAME.fullmatch(args.variante):
+        raise PerfError("variante '%s' no válida: usa el nombre del build type (profiling, benchmark, releaseLike)" % args.variante)
+    root = project_root(module)
+    denied = read_no_leer(root, extra=args.no_leer)
+    found_variants = find_profileable_variants(module, root, denied)
+    variant, existing = resolve_variant(found_variants, args.variante)
     network = choose(args.red, detect(module, ["okhttp", "retrofit"]))
     retrofit = network and choose(args.retrofit, detect(module, ["retrofit"]))
     fragments = choose(args.fragments, detect(module, ["fragment", "appcompat"]))
@@ -2894,8 +2995,8 @@ def cmd_instrumentar(args):
             mains.append(("PerfHooksModule.kt", "PerfHooksModule.kt"))
     plan = [(templates / src, module / args.fuente / package_path / dst) for src, dst in files]
     plan += [(templates / "main" / src, module / main_dir / package_path / dst) for src, dst in mains]
-    plan += [(templates / "manifests" / ("%s.xml" % kind), module / "src" / kind / "AndroidManifest.xml")
-             for kind in ("debug", "profiling")]
+    plan += [(templates / "manifests" / ("%s.xml" % kind), module / "src" / folder / "AndroidManifest.xml")
+             for kind, folder in (("debug", "debug"), ("profiling", variant))]
     if not args.sin_tests:
         plan += [(templates / "test" / src, module / args.tests / package_path / dst) for src, dst in tests]
     pending = []
@@ -2905,8 +3006,9 @@ def cmd_instrumentar(args):
                 target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
                 print("~ actualizado: %s" % target)
             elif target.suffix == ".xml":
+                lacks = target.parent.name == variant and "<profileable" not in target.read_text(encoding="utf-8", errors="ignore")
                 print("= ya existe, no se toca: %s (agrega el <provider> de abajo%s)" % (
-                    target, " y <profileable android:shell=\"true\" />" if "profiling" in str(target) else ""))
+                    target, " y <profileable android:shell=\"true\" />" if lacks else ""))
                 pending.append("manifest")
             else:
                 print("= ya existe, no se toca: %s%s" % (target, "" if is_generated(target) else " (no lo generó la skill)"))
@@ -2915,10 +3017,17 @@ def cmd_instrumentar(args):
         target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
         print("+ %s" % target)
     yes_no = lambda flag: "sí" if flag else "no"  # noqa: E731
-    print("Red: %s · Retrofit: %s · Fragments: %s · Hilt: %s · código principal en %s" % (
+    print("Variante: %s (%s) · Red: %s · Retrofit: %s · Fragments: %s · Hilt: %s · código principal en %s" % (
+        variant, "existente: profileable y no depurable, no se crea otro build type" if existing else "nueva",
         yes_no(network), yes_no(retrofit), yes_no(fragments), yes_no(hilt), main_dir))
+    for other in found_variants:
+        if other["nombre"] != variant and other["estado"] != "ok":
+            print("  · %s también declara <profileable> pero %s: no se usa" % (
+                other["nombre"], "es depurable" if other["estado"] == "depurable" else "no pude verificar su build type"))
     print("\nFalta pegar, con el paquete ya puesto (references/setup.md explica cada pieza):\n")
-    snippets = [("1. Build type profiling, source set y cobertura (build.gradle.kts del módulo)", SNIPPETS["gradle"])]
+    snippets = [("1. %s (build.gradle.kts del módulo)" % ("Source set y cobertura de la variante %s" % variant if existing
+                                                           else "Build type %s, source set y cobertura" % variant),
+                 SNIPPETS["gradle_existente" if existing else "gradle"])]
     if network:
         snippets.append(("2. Red: cada OkHttpClient pasa por el gancho", SNIPPETS["red_hilt" if hilt else "red_sinhilt"]))
     snippets.append(("%d. Navegación sin cambio de actividad (Compose, Navigation 3)" % (3 if network else 2), SNIPPETS["nav"]))
@@ -2930,10 +3039,13 @@ def cmd_instrumentar(args):
                          'android:exported="false" />'))
     for title, body in snippets:
         print(title)
-        print(textwrap.indent(body.replace("{{PAQUETE}}", args.paquete).replace("{{FUENTE}}", args.fuente), "   "))
+        print(textwrap.indent(body.replace("{{PAQUETE}}", args.paquete).replace("{{FUENTE}}", args.fuente)
+                              .replace("{{VARIANTE}}", variant), "   "))
         print()
-    print("Después: el formateador del proyecto en una invocación de Gradle aparte y, en otra, el DoD más assembleProfiling "
-          "con el log en un archivo (setup.md · DoD).")
+    print("El `paquete` del plan es el applicationId de la variante %s (con su sufijo, si lo tiene); se instala con "
+          "install%s." % (variant, variant[:1].upper() + variant[1:]))
+    print("Después: el formateador del proyecto en una invocación de Gradle aparte y, en otra, el DoD más assemble%s "
+          "con el log en un archivo (setup.md · DoD)." % (variant[:1].upper() + variant[1:]))
 
 
 # ── Entrada ──────────────────────────────────────────────────────────────────
@@ -3082,6 +3194,10 @@ def main(argv=None):
     p.add_argument("--sin-hilt", dest="hilt", action="store_false", help="gancho de red con PerfHooks.okHttp")
     p.add_argument("--principal", help="carpeta del código principal (src/main/kotlin o src/main/java; si no, se detecta)")
     p.add_argument("--sin-tests", action="store_true")
+    p.add_argument("--variante", help="build type que lleva la instrumentación (profileable y no depurable). Por defecto se "
+                                      "reutiliza el que el módulo ya tenga; si no hay ninguno, se crea 'profiling'")
+    p.add_argument("--no-leer", dest="no_leer", action="append", default=[], metavar="RUTA",
+                   help="ruta o patrón que el escaneo no debe leer; se repite (se suma a la línea 'No leer:' de AGENTS.md)")
     p.add_argument("--actualizar", action="store_true",
                    help="sobrescribe los archivos que generó la skill (los que llevan su encabezado); nunca los del proyecto")
     p.set_defaults(func=cmd_instrumentar)
