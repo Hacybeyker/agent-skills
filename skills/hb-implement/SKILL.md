@@ -55,6 +55,8 @@ De adentro hacia afuera, con la estructura del perfil:
 
 Una tarea a la vez. No toques código que no tenga que ver con ella.
 
+**Pantallas con estado.** Si la pantalla guarda estado (un formulario, un campo con error, una lista con scroll, un paso de un flujo), el DoD verde no basta: los fallos de recreación y de arranque en frío solo aparecían al ejecutar la app. Escribe tests **en la JVM** de la **recreación de la vista** y de la **muerte del proceso**: en Compose, `StateRestorationTester`; en Views, `recreate()` de `ActivityScenario` o Robolectric, y la restauración desde `savedInstanceState`. Recetas en [ciclo-de-vida.md](references/ciclo-de-vida.md).
+
 ### Bugfix
 
 1. **Reproduce:** pasos, comportamiento esperado y comportamiento actual.
@@ -169,6 +171,7 @@ Se genera siempre, salvo que el usuario diga que no.
 - [ ] Criterios de aceptación claros; plan confirmado si hacía falta.
 - [ ] Estructura y regla de dependencias del perfil respetadas.
 - [ ] Tests nuevos con fakes; en un bugfix, el test que reproduce el bug.
+- [ ] Pantallas con estado: tests en la JVM de recreación de la vista y de muerte del proceso.
 - [ ] Patrones aplicados solo donde el problema los pedía.
 - [ ] Changelog actualizado si el proyecto lo usa.
 - [ ] Autorrevisión contra el alcance completo: estado y persistencia, `catch`, dependencias, casos pedidos y reglas del `AGENTS.md`.
