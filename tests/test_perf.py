@@ -551,7 +551,7 @@ class FramesTrustTest(PerfBase):
         self.assertEqual(results["red_llamadas"]["avisos"], [])
 
     def test_con_gpu_del_host_el_veredicto_se_conserva_con_aviso(self):
-        results = self.verdicts(("baja", "emulador, sin GPU del host verificada"))
+        results = self.verdicts(("baja", "emulador (render: Translator)"))
         self.assertEqual(results["jank_app_pct"]["veredicto"], "mejora")
         self.assertTrue(any(a.startswith("frames orientativos") for a in results["jank_app_pct"]["avisos"]))
 
@@ -561,6 +561,17 @@ class FramesTrustTest(PerfBase):
             "antes": {"entorno": {"emulador": True, "software": False, "frames": "baja"}},
             "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
         self.assertEqual(perf.frames_trust(self.dir), ("no", "emulador, render por software"))
+
+    def test_el_motivo_de_la_confianza_baja_dice_el_render_y_no_que_falta_la_gpu(self):
+        host = {"emulador": True, "software": False, "render": "Android Emulator OpenGL ES Translator (Apple M2 Pro)",
+                "frames": "baja"}
+        write(self.dir / "fases.json", json.dumps({"antes": {"entorno": host}}))
+        level, motive = perf.frames_trust(self.dir)
+        self.assertEqual(level, "baja")
+        self.assertEqual(motive, "emulador (render: Android Emulator OpenGL ES Translator (Apple M2 Pro))")
+        self.assertNotIn("sin GPU del host", motive)
+        write(self.dir / "fases.json", json.dumps({"antes": {"entorno": dict(host, render="")}}))
+        self.assertEqual(perf.frames_trust(self.dir), ("baja", "emulador (render: sin dato)"))
 
     def test_comparar_y_resumen_marcan_los_frames_de_las_fases_medidas_en_software(self):
         write(self.csv, HEADER + rows("antes", "home", "jank_app_pct", [10, 11, 10, 12, 10], unit="%")

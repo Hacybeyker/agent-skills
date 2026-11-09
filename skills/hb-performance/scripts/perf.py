@@ -1107,8 +1107,8 @@ def frames_trust(folder):
         value = env.get("frames", "ok")
         if FRAMES_LEVEL.get(value, 0) > FRAMES_LEVEL[level]:
             level = value
-            motive = ("emulador, " if env.get("emulador") else "") + ("render por software" if env.get("software")
-                                                                       else "sin GPU del host verificada")
+            motive = ("%srender por software" % ("emulador, " if env.get("emulador") else "") if env.get("software")
+                      else "emulador (render: %s)" % (env.get("render") or "sin dato"))
     return level, motive
 
 
