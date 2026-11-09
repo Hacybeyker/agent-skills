@@ -1428,19 +1428,44 @@ def project_root(folder):
     return pathlib.Path.cwd()
 
 
-NO_LEER_LINE = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(?:no leer|do not read)\s*\**\s*:\s*\**\s*(.+?)\s*$", re.I | re.M)
+NO_LEER_LINE = re.compile(r"^(?P<indent>[ \t]*)(?P<bullet>(?:[-*][ \t]+)|(?:-(?=\*)))?\**[ \t]*(?:no leer|do not read)[ \t]*\**[ \t]*:"
+                          r"[ \t]*\**[ \t]*(?P<rest>.*?)[ \t]*$", re.I)
+BULLET_LINE = re.compile(r"^(?P<indent>[ \t]*)[-*][ \t]+(?P<item>.+?)[ \t]*$")
+
+
+def no_leer_in(text):
+    """Patrones de la línea 'No leer:' de un AGENTS.md: en la misma línea, separados por coma o punto y coma, o uno por
+    viñeta en las líneas siguientes (sin línea en blanco en medio; si la línea es ella misma una viñeta, solo cuentan las
+    viñetas más indentadas)."""
+    lines = text.splitlines()
+    found = []
+    for index, line in enumerate(lines):
+        head = NO_LEER_LINE.match(line)
+        if not head:
+            continue
+        items = [head.group("rest")] if head.group("rest") else []
+        if not items:
+            depth = len(head.group("indent").expandtabs(4))
+            for following in lines[index + 1:]:
+                bullet = BULLET_LINE.match(following)
+                if not bullet or (head.group("bullet") and len(bullet.group("indent").expandtabs(4)) <= depth):
+                    break
+                items.append(bullet.group("item"))
+        for item in items:
+            found += [part.strip().strip("`'\"") for part in re.split(r"[,;]", item)]
+    return found
 
 
 def read_no_leer(root, plan=None, extra=()):
     """Rutas que el agente no debe leer (pruebas a ciegas): los --no-leer, 'no_leer' del plan y la línea 'No leer:' de
-    la sección Performance de AGENTS.md. Sin duplicados y en ese orden."""
+    la sección Performance de AGENTS.md. Sin duplicados y en ese orden. Los patrones se comparan con la ruta desde la
+    raíz del proyecto (is_denied)."""
     patterns = list(extra) + list((plan or {}).get("no_leer") or [])
     try:
         text = (pathlib.Path(root) / "AGENTS.md").read_text(encoding="utf-8")
     except OSError:
         text = ""
-    for match in NO_LEER_LINE.finditer(text):
-        patterns += [p.strip().strip("`'\"") for p in re.split(r"[,;]", match.group(1))]
+    patterns += no_leer_in(text)
     out = []
     for pattern in patterns:
         if pattern and pattern not in out:

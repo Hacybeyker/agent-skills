@@ -1182,6 +1182,32 @@ class NoLeerTest(DeviceBase):
         found = perf.read_no_leer(self.dir, plan={"no_leer": ["docs/ALCANCE-*", "tmp/"]}, extra=["casos/"])
         self.assertEqual(found, ["casos/", "docs/ALCANCE-*", "tmp/", "secretos/", "~/otro/proyecto"])
 
+    def read_agents(self, text):
+        write(self.dir / "AGENTS.md", text)
+        return perf.read_no_leer(self.dir)
+
+    def test_la_lista_en_las_lineas_siguientes_se_lee_como_viñetas(self):
+        self.assertEqual(self.read_agents("## Performance\n\nNo leer:\n- docs/ALCANCE-*\n- `casos/`\n* secretos/, tmp/\n\n- Otra: x\n"),
+                         ["docs/ALCANCE-*", "casos/", "secretos/", "tmp/"])
+        self.assertEqual(self.read_agents("## Performance\n- **No leer:**\n  - docs/ALCANCE-*\n  - `casos/`\n- Otra línea: x\n"),
+                         ["docs/ALCANCE-*", "casos/"])
+        self.assertEqual(self.read_agents("**No leer:**\n- casos/\n"), ["casos/"])
+
+    def test_no_leer_sin_lista_no_se_come_la_linea_siguiente(self):
+        self.assertEqual(self.read_agents("No leer:\nTexto normal sin viñeta\n"), [])
+        self.assertEqual(self.read_agents("- No leer:\n- Otra línea: x\n"), [])
+        self.assertEqual(self.read_agents("No leer:\n\n- Otra: x\n"), [])
+        self.assertEqual(self.read_agents("No leer: casos/\n- Otra: x\nTexto\n"), ["casos/"])
+        self.assertEqual(self.read_agents("**No leer**: casos/, `tmp/`\n"), ["casos/", "tmp/"])
+
+    def test_los_patrones_se_comparan_desde_la_raiz_del_proyecto(self):
+        denied = lambda pattern, rel: perf.is_denied(self.dir / rel, self.dir, [pattern])  # noqa: E731
+        self.assertFalse(denied("ALCANCE-*", "docs/ALCANCE-x.md"))  # sin carpeta solo cubre la raíz
+        self.assertTrue(denied("ALCANCE-*", "ALCANCE-x.md"))
+        self.assertTrue(denied("docs/ALCANCE-*", "docs/ALCANCE-x.md"))
+        self.assertTrue(denied("**/ALCANCE-*", "docs/ALCANCE-x.md"))
+        self.assertTrue(denied("**/ALCANCE-*", "ALCANCE-x.md"))
+
     def test_sin_agents_md_ni_lista_no_hay_rutas(self):
         self.assertEqual(perf.read_no_leer(self.dir), [])
         write(self.dir / "AGENTS.md", "# P\nno hay nada\n")

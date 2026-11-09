@@ -90,7 +90,7 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
 | `mejoras` | Vacío: lo completa la sesión 2; `estado` lo cambia `perf.py decidir` |
 | `hilos_ajenos` | Hilos del proceso que no son de la app (un servidor embebido, por ejemplo): lista de `{"nombre": "servidor", "patron": "^(ktor\|nio)-", "familia": "e2e"}`; `patron` es una expresión regular de Python sobre el nombre del hilo y `familia` es opcional (`e2e` por defecto). Con ellos `capturar` agrega las métricas de hilo y de red de [medicion.md](medicion.md) · Hilos ajenos |
-| `no_leer` | Rutas o patrones que el agente no debe leer ni buscar (prueba a ciegas): `docs/ALCANCE-*`, `casos/`, `~/otro/proyecto`. `nuevo --no-leer` (repetible) y la línea `No leer:` de `AGENTS.md` los suman; `siguiente` los repite en cada chat nuevo |
+| `no_leer` | Rutas o patrones que el agente no debe leer ni buscar (prueba a ciegas): `docs/ALCANCE-*`, `casos/`, `~/otro/proyecto`. `nuevo --no-leer` (repetible) y la línea `No leer:` de `AGENTS.md` (en la misma línea, o una viñeta por ruta debajo) los suman; se comparan con la ruta desde la raíz del proyecto (`**/ALCANCE-*` cubre cualquier carpeta); `siguiente` los repite en cada chat nuevo |
 | `profundidad` | `riguroso` (por defecto) o `triage`: 3 corridas de antes, sin control, termina en el reporte inicial |
 | `modelos` | Nombres de los modelos `economico`, `intermedio` y `alto` que imprime `siguiente` (por defecto Haiku, Sonnet y Opus); cámbialos si el usuario usa otra herramienta |
 
