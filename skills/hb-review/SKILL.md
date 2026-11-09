@@ -18,7 +18,7 @@ Revisión de solo lectura. Cada hallazgo cita la regla o el estándar que incump
 ## 1. Alcance y contexto
 
 1. Define qué revisar:
-   - Sin indicación: `git diff HEAD` (working tree y staged). Si está limpio, la rama actual contra la principal (`git diff <principal>...HEAD`).
+   - Sin indicación: `git diff HEAD` (working tree y staged) **y los archivos sin trackear** (`git ls-files --others --exclude-standard`), que `git diff` no muestra: las clases nuevas de un cambio que aún no se commitea viven ahí; léelos completos. Si no hay ni lo uno ni lo otro, la rama actual contra la principal (`git diff <principal>...HEAD`).
    - Un PR: `gh pr diff <n>` y `gh pr view <n>` (descripción, checks).
    - Archivos o una feature: esos archivos completos.
 2. Lee `AGENTS.md` y el perfil `hb-stack-*` del proyecto, y solo las referencias que el cambio toca (UI, testing, seguridad…). Sin `AGENTS.md`, revisa contra el perfil del stack detectado y los estándares generales, y dilo en el reporte.
@@ -79,7 +79,7 @@ Ordena por severidad. Agrupa los hallazgos repetidos en uno solo con todas sus u
 
 Para quien delegó un bloque a un subagente y debe revisarlo antes de commitear, sin repetir el DoD que ya corrió. Se activa cuando el pedido lo dice ("revisión rápida del bloque", "modo rápido") o cuando un plan lo invoca por cada bloque.
 
-- **Qué revisas:** el diff del bloque (`git diff HEAD`, o `git diff <base>...<rama>` si ya está commiteado; el orquestador lo indica) **contra el documento de alcance** y el `AGENTS.md`. Lee completos los archivos con lógica (reglas de negocio, estado, persistencia, manejo de errores): la lista de archivos y el DoD en verde no bastan. Carga solo las referencias del perfil que toca el bloque.
+- **Qué revisas:** el diff del bloque (`git diff HEAD`, o `git diff <base>...<rama>` si ya está commiteado; el orquestador lo indica) **más los archivos sin trackear** (`git ls-files --others --exclude-standard`: el orquestador no commitea antes de revisar, así que las clases nuevas del bloque no salen en `git diff`), **contra el documento de alcance** y el `AGENTS.md`. Lee completos los archivos nuevos y los que tienen lógica (reglas de negocio, estado, persistencia, manejo de errores): la lista de archivos y el DoD en verde no bastan. Carga solo las referencias del perfil que toca el bloque.
 - **No corres el DoD:** lo corre el orquestador. Márcalo `skipped` con el motivo "lo corre el orquestador".
 - **Qué buscas** (lo que el DoD no ve): estado y persistencia frente a los requisitos; `catch` demasiado amplios; dependencias sin uso; casos que el alcance pide y no están; decisiones del agente que cambian una regla del alcance; reglas del `AGENTS.md` (comentarios, palabras prohibidas, idioma); tests que no fallarían si el código se rompiera.
 - **Qué no haces:** no repites lo que el linter ya cubre, no propones migraciones, no tocas código.
