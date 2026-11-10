@@ -7,7 +7,7 @@ Convierte el pedido en un plan de medición concreto. Termina con **una sola apr
 ## 1. Contexto mínimo
 
 1. **`AGENTS.md`:** solo `## Stack`, `## DoD` y la sección de rendimiento. Sin `AGENTS.md`, avisa y ofrece `hb-setup`, o sigue con la detección.
-2. **Setup:** si la sección de rendimiento no dice "setup listo" y el plan necesita secciones o el build de profiling, la siguiente sesión es la 0 ([setup.md](setup.md)).
+2. **Setup:** si la sección de rendimiento no dice "setup listo" y el plan necesita secciones o el build de profiling, la siguiente sesión es la 0 ([setup.md](setup.md)). Que lo diga no alcanza: el código tiene que estar. `perf.py nuevo` comprueba que la instrumentación exista en el repo (busca `PerfHooks.kt`, que deja `instrumentar` en el código principal) y avisa si falta, con la forma de reaplicarla que diga `AGENTS.md` (un setup guardado como parche, por ejemplo). Si avisa, detente y dile al usuario qué paso falta: sin la instrumentación no salen las marcas y la variante medida puede no compilar.
 3. **Verifica el stack** con una búsqueda en el catálogo y los archivos de build. Si no coincide con `AGENTS.md`, dilo y propone corregirlo.
    ```bash
    cd <raíz-del-proyecto> && grep -rhoE 'compose|rxjava[23]?|kotlinx-coroutines|livedata|okhttp|retrofit|ktor-client|apollo|coil|glide|picasso|epoxy|paging|navigation3|navigation-(compose|fragment)|hilt|koin|baselineprofile|benchmark-macro' --include='*.toml' --include='*.gradle' --include='*.gradle.kts' . | sort | uniq -c
@@ -25,33 +25,133 @@ Convierte el pedido en un plan de medición concreto. Termina con **una sola apr
 Pregúntalas todas juntas, en un solo mensaje, **con este texto**: cada opción dice lo que le va a tocar hacer al usuario. Recomienda la que corresponda al flujo y márcala.
 
 1. **¿Cómo se recorre el flujo en cada corrida?**
-   - **Comando adb** (recomendada siempre que el tramo medido sean uno o dos toques: "tocar el primer ítem", "abrir X desde Home"): el script toca por ti; 10 corridas por fase sin que hagas nada. Yo busco las coordenadas con `uiautomator dump` y las dejo en el plan.
+   - **Comando adb** (recomendada siempre que el tramo medido sean uno o dos toques: "tocar el primer ítem", "abrir X desde Home"): el script toca por ti; 10 corridas por fase sin que hagas nada. Yo busco las coordenadas con `perf.py nodos` y dejo los toques en `recorrido.sh`, comentados.
    - **Comando adb, con Maestro/testigo para llegar al punto de partida** (recomendada si antes del tramo medido hay login, avisos, varias pantallas o un tab): un flow de Maestro deja la app lista antes de cada corrida (`preparar`, fuera de la traza) y el tramo medido sigue siendo uno o dos toques de `adb`. Ver "Flujos largos", abajo. Maestro **nunca** da los toques medidos: su driver vive en el dispositivo y, medido en un A/A, sumó un 14 % al tiempo de punta a punta y multiplicó por 3–10 la varianza del hilo principal.
    - **Deep link** (`am start -d ...`): abre la pantalla directo, sin el toque desde la anterior. Mide solo la pantalla.
    - **Manual** (gestos, elegir con criterio, OTP en cada corrida): tú recorres el flujo en el dispositivo y presionas Enter en cada corrida; 5 corridas por fase (más una de calentamiento), y algo más de variación.
 2. **¿Dónde empieza cada flujo y qué pantallas no deberían aparecer** (login, onboarding)? El script no graba si la app está en otra pantalla.
-3. **¿Qué datos de prueba necesita el flujo** (un usuario con movimientos, una lista no vacía, "la primera película que aparezca")? Quedan fijos hasta el cierre.
-4. **¿La sesión del ambiente expira? ¿Cada cuánto?** Si expira a mitad de una corrida, esa corrida no vale.
-5. **Dispositivo:** modelo y tasa de refresco **fija** (sin modo adaptativo). Para frames hace falta Android 12 o superior.
-6. **Profundidad:** *riguroso* (antes, control y después; recomendado si se van a aplicar mejoras) o *triage* (3 corridas y directo al diagnóstico; termina en el reporte inicial, sin línea base ni medición después). Con triage, `profundidad: "triage"` en el plan.
+3. **¿Qué pantallas salen solo la primera vez** (términos y condiciones, permisos, huella o biometría, onboarding, coach marks)? Se pasan una vez antes de medir y `preparar` las contempla por si vuelven (ver "Pantallas de una sola vez", abajo).
+4. **¿Qué datos de prueba necesita el flujo** (un usuario con historial, una lista no vacía, "la primera película que aparezca")? Quedan fijos hasta el cierre.
+5. **¿La sesión del ambiente expira? ¿Cada cuánto?** Si expira a mitad de una corrida, esa corrida no vale.
+6. **Dispositivo:** modelo y tasa de refresco **fija** (sin modo adaptativo). No le pidas que la cambie a mano sin mirar antes: `perf.py nuevo` lee la que el dispositivo ya tiene fijada y la deja en el plan (ver "Tasa de refresco", abajo). Para frames hace falta Android 12 o superior.
+7. **Profundidad:** *riguroso* (antes, control y después; recomendado si se van a aplicar mejoras) o *triage* (3 corridas y directo al diagnóstico; termina en el reporte inicial, sin línea base ni medición después). Con triage, `profundidad: "triage"` en el plan.
 
-Con recorrido por comando, busca las coordenadas tú, **solo con `uiautomator dump` y `grep`**, nunca con capturas de pantalla (leer una imagen cuesta decenas de miles de tokens): `adb -s <serial> shell uiautomator dump /sdcard/ui.xml && adb -s <serial> pull /sdcard/ui.xml <carpeta>/logs/` y lee solo el nodo que importa (`grep -o '<node[^>]*text="Nombre"[^>]*>' | head -3`; el centro del `bounds` es el tap). Para confirmar que el tap llegó, otro `dump` y `grep` de un texto de la pantalla destino. El `recorrido` del plan queda como `adb -s <serial> shell input tap <x> <y> && sleep <s>`; las esperas se calibran con la corrida de prueba. **No corras tú una captura manual**: espera a alguien que toque el dispositivo, así que se la entregas al usuario como comando.
+Con recorrido por comando, busca las coordenadas tú con `perf.py nodos`, nunca con capturas de pantalla (leer una imagen cuesta decenas de miles de tokens) ni sacando el centro a mano de un `grep`:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nodos <carpeta>/logs/ui.xml --volcar --serial <serial> --texto "<texto del elemento>"
+```
+
+Vuelca la pantalla (`uiautomator dump`), busca el nodo por `--texto`, por `--id` (`resource-id`) o por `--desc` (`content-desc`) e imprime el centro de sus bounds ya como comando `adb -s <serial> shell input tap <x> <y>`. Avisa de lo que hace fallar un toque: que la pantalla todavía muestre un cargando (espera y vuelve a volcar: el contenido y las coordenadas cambian), que el centro caiga también dentro de otro nodo clickeable (algo flotante o superpuesto: confírmalo o toca otro punto del nodo), que el nodo esté deshabilitado o que varios coincidan (`--exacto`). Sin `--volcar` lee un volcado que ya tienes. Para confirmar que el toque llegó, otro `nodos --volcar` con un texto de la pantalla destino. Cada toque va a `<carpeta>/recorrido.sh` como `adb -s "$SERIAL" shell input tap <x> <y> && sleep <s>`, con su comentario (sección 5); las esperas se calibran con la corrida de prueba. Dos límites de `nodos`, que son heurísticas: el cargando lo reconoce por la clase de las barras de progreso o por un id, un texto o una descripción con las palabras usuales (progress, loading, shimmer, "Cargando"), así que no ve uno hecho a mano y puede avisar por una barra de progreso que no es de carga; y el aviso de superposición no sabe cuál de los dos nodos está encima. **No corras tú una captura manual**: espera a alguien que toque el dispositivo, así que se la entregas al usuario como comando.
+
+**Regla dura: nunca escribes claves ni autorizas transacciones o pagos.** No ingreses contraseñas, PIN ni códigos de un solo uso, y no toques un botón que confirme una transacción o un pago. Las credenciales las escribe `preparar` desde variables de entorno que carga el usuario ("Credenciales", abajo), no tú. Toca solo nodos que identificaste con `nodos`, nunca coordenadas estimadas: un toque mal dado puede abrir una operación real. Si aparece una pantalla de autorización, de pago o de confirmación de una operación, también por error, **detente**: no toques nada más, dile al usuario qué pantalla quedó abierta y espera a que la cierre.
+
+**Objetivo determinista: el elemento que se toca es siempre el mismo.** En todas las corridas y en todas las fases, el toque medido cae sobre el mismo elemento, con el mismo contenido detrás. "El ítem que quede a media pantalla después del scroll" no lo es: el scroll no se detiene siempre en el mismo lugar, otro ítem abre otro detalle (otros datos, otro peso) y eso entra como ruido. Hazlo determinista: toca un elemento que está a la vista **sin scroll previo** (el primero de la lista); si el scroll es parte de lo que se mide, que el toque vaya antes del scroll o sobre un elemento fijo (un tab, un botón), o usa datos de prueba con un solo ítem posible. Si no hay forma, dilo en la ficha y no elijas como principal una métrica que dependa de qué ítem se abrió.
+
+**Tasa de refresco: se lee, no se adivina.** `perf.py nuevo` consulta `settings get system min_refresh_rate` y `peak_refresh_rate` en el dispositivo. Si las dos están puestas y coinciden, la tasa ya está fija: la deja en `hz` del plan y en la fila "Dispositivo" de la ficha, y no hay que pedirle nada al usuario. Si no, imprime el comando que la fija (`adb -s <serial> shell settings put system min_refresh_rate <hz> && adb -s <serial> shell settings put system peak_refresh_rate <hz>`) y el que la restaura al cerrar (los valores que había, o `settings delete system ...` si no había ninguno): si la pantalla es adaptativa, dáselos al usuario, anota el de restaurar en "Precondiciones" y pon `hz` en el plan. Algunos fabricantes ignoran esos ajustes; la corrida de prueba imprime la tasa que midió la traza y avisa si no es la del plan, y `capturar` deja ese aviso en `estado.md` y en `fases.json`.
 
 **`preparar` es obligatorio con recorrido automático en un flujo que no es el arranque:** un comando que deja la app en el punto de partida antes de **cada** corrida (y después de fijar la compilación de ART, que puede cerrar la app). Corre **antes de que arranque la traza**, así que lo que haga no entra en las métricas. En una app de una sola actividad, `inicio` no distingue pantallas: sin `preparar`, la segunda corrida tocaría sobre la pantalla donde terminó la primera. Opciones: `adb -s <serial> shell input keyevent KEYCODE_BACK && sleep 1` si el flujo es ida y vuelta; `adb -s <serial> shell am force-stop <paquete> && adb -s <serial> shell am start -n <paquete>/<actividad> && sleep <s>` para arrancar siempre igual; o un flow de Maestro (abajo) cuando hay que atravesar varias pantallas. Si `preparar` falla (código distinto de 0), esa corrida se descarta y se repite; tres fallos seguidos detienen la captura con el motivo. Sin `preparar`, el script avisa y, si la app no está al frente, la relanza.
 
 ### Flujos largos: login y varias pantallas antes de lo que se mide
 
-El caso típico: abrir la app, iniciar sesión, aceptar términos, omitir la huella y dos avisos, llegar al Home, cambiar de tab… 30 o 40 segundos antes del tramo que importa (elegir una tarjeta de una lista, abrir su detalle, abrir el desglose), con algún microservicio que a veces falla. Se divide en dos partes y cada una usa la herramienta que le corresponde:
+El caso típico: login, pantallas de primera vez y varias pantallas más antes del tramo que importa (elegir un ítem de una lista, abrir su detalle, abrir una pantalla secundaria), con un backend que a veces falla. Se divide en dos partes y cada una usa la herramienta que le corresponde:
 
-1. **Llegar al punto de partida es `preparar`**, con un flow de Maestro que termina con la lista a la vista. Maestro resuelve lo que `adb` no puede: elegir por texto o `id`, esperar a que algo aparezca (`extendedWaitUntil`) y **actuar según la pantalla** (`runFlow` con `when: visible`): si la sesión sigue abierta, solo vuelve a la lista; si expiró, hace el login; si sale el aviso de huella, lo omite. Así cada corrida parte del mismo lugar aunque la anterior haya fallado a la mitad. El estado no se limpia (`clearState`) salvo que el flujo sea el arranque. Patrón en el plan:
+1. **Llegar al punto de partida es `preparar`**, con un flow de Maestro que termina con la lista a la vista. Maestro resuelve lo que `adb` no puede: elegir por texto o `id`, esperar a que algo aparezca (`extendedWaitUntil`) y **actuar según la pantalla** (`runFlow` con `when: visible`): si la sesión sigue abierta, solo vuelve a la lista; si expiró, hace el login; si sale el aviso de huella, lo omite. Así cada corrida parte del mismo lugar aunque la anterior haya fallado a la mitad. El estado no se limpia (`clearState`): borrar datos trae de vuelta las pantallas de una sola vez y cambia el estado entre fases. Patrón en el plan:
    ```json
-   "preparar": "maestro --device <serial> test <carpeta>/preparar.yaml > /dev/null && sleep 2",
-   "recorrido": "adb -s <serial> shell input tap <x1> <y1> && sleep 4 && adb -s <serial> shell input tap <x2> <y2> && sleep 4"
+   "preparar": "maestro --device <serial> test -e PERF_USUARIO=\"$PERF_USUARIO\" -e PERF_CLAVE=\"$PERF_CLAVE\" <carpeta>/preparar.yaml > /dev/null 2>&1 && sleep 2",
+   "requiere_env": ["PERF_USUARIO", "PERF_CLAVE"],
+   "recorrido": "bash <carpeta>/recorrido.sh"
    ```
-   El `sleep` final de `preparar` deja que el driver de Maestro termine antes de que arranque la traza. Con `testigo` instalado, Maestro ya está (`testigo setup`), y el flow puede vivir en la suite de testigo del equipo y servir también como prueba funcional.
-2. **El tramo medido es `recorrido`, solo con `adb`:** uno o dos toques con esperas generosas (las esperas no afectan a las métricas: la `ventana` va de marca a marca). Una métrica de usuario por salto (`lista_a_detalle_ms`: del `NAV` del detalle a su `MARK`; `detalle_a_desglose_ms`), y la ventana desde el primer `NAV` hasta el último `MARK`. Si el detalle o el desglose no tienen `PerfHooks.mark`, se agregan en el setup antes de medir.
+   Los `-e` solo hacen falta si el flow usa credenciales: Maestro no lee las variables del entorno por su cuenta (salvo las que empiezan con `MAESTRO_`), así que hay que pasárselas. El `sleep` final de `preparar` deja que el driver de Maestro termine antes de que arranque la traza. Con `testigo` instalado, Maestro ya está (`testigo setup`), y el flow puede vivir en la suite de testigo del equipo y servir también como prueba funcional. Lo que hay que cuidar al llamar a Maestro desde `preparar` está en "Maestro en `preparar`", abajo.
+2. **El tramo medido es `recorrido`, solo con `adb`:** uno o dos toques con esperas generosas (las esperas no afectan a las métricas: la `ventana` va de marca a marca). Una métrica de usuario por salto (`lista_a_detalle_ms`: del `NAV` del detalle a su `MARK`; `detalle_a_secundaria_ms`), y la ventana desde el primer `NAV` hasta el último `MARK`. Si el detalle o la pantalla secundaria no tienen `PerfHooks.mark`, se agregan en el setup antes de medir.
 3. **Lo que falla, se descarta solo:** `invalidar_si` con las pantallas de error del proyecto (`SCREEN *Error*`, `MARK error_*`); una corrida sin la ventana o sin una métrica principal (el toque que no navegó, el backend que no respondió) se repite; tres inválidas seguidas detienen la captura y lo dicen, y el total de intentos tiene una reserva proporcional a las corridas ([medicion.md](medicion.md)), así que un backend que falla de vez en cuando no la corta.
-4. **Tiempos:** la traza solo cubre el tramo medido (segundos, no minutos), así que pesa poco; el reloj lo pone `preparar`: con la sesión abierta, unos segundos por corrida; con login en cada corrida, lo que tarde el login. Diez corridas más el calentamiento suelen ir de 5 a 15 minutos por fase. Pregunta si la sesión expira (pregunta 4) para que el flow lo contemple.
+4. **Tiempos:** la traza solo cubre el tramo medido (segundos, no minutos), así que pesa poco; el reloj lo pone `preparar`: con la sesión abierta, unos segundos por corrida; con login en cada corrida, lo que tarde el login. Diez corridas más el calentamiento suelen ir de 5 a 15 minutos por fase. Pregunta si la sesión expira (pregunta 5) para que el flow lo contemple.
+
+### Maestro en `preparar`
+
+- **El flow siempre en un archivo:** `<carpeta>/preparar.yaml`, y se corre con `maestro --device <serial> test <carpeta>/preparar.yaml`. Nunca por la entrada estándar (un heredoc, `maestro test -`): se queda esperando y la sesión se cuelga.
+- **Sin analítica ni chequeo de versión:** `export MAESTRO_CLI_NO_ANALYTICS=1 MAESTRO_DISABLE_UPDATE_CHECK=true` antes de llamarlo (o al principio de `preparar`). `testigo` ya lo hace; llamado directo, no.
+- **Su salida va a `/dev/null`** (`> /dev/null 2>&1`): Maestro imprime cada paso con su valor, así que la línea de un `inputText` trae lo que escribió, claves incluidas. No leas esa salida ni la filtres con `grep` (la línea del paso que falló puede ser justo la de la clave): si necesitas saber por qué falla, pídele al usuario que corra el flow en su terminal y te diga en qué paso se detuvo. Tampoco leas la carpeta donde Maestro guarda cada corrida (`~/.maestro/tests/`): ahí el valor sigue visible aunque el paso tenga `label`. En el flow, ponle `label` a cada `inputText` de una credencial: el `label` reemplaza la descripción del paso y el valor deja de imprimirse.
+- **Tipeo:** el teclado puede poner en mayúscula la primera letra de un campo que no lo impide, y un usuario en minúsculas queda mal escrito sin que nada falle hasta el login. Después de escribir, comprueba lo escrito. En Maestro, `assertVisible` con el texto esperado detecta que no se escribió, pero compara como expresión regular y sin distinguir mayúsculas: para una comparación exacta, `copyTextFrom` sobre el campo y `assertTrue: ${maestro.copiedText == PERF_USUARIO}`. Con `adb`, `nodos --id <campo>` imprime el texto que quedó, y `nodos --texto "<esperado>" --exacto` solo lo encuentra si es idéntico. Si sale cambiado: escribe un carácter de sobra al principio y bórralo al final (con `adb`: `input keyevent KEYCODE_MOVE_HOME` y `KEYCODE_FORWARD_DEL`), o desactiva la mayúscula automática en el teclado del dispositivo de pruebas y anótalo en "Precondiciones". Nunca compruebes así un campo de clave.
+- **No cambies el modo que eligió el usuario sin preguntar.** Si pidió Maestro para `preparar` y no funciona (no está instalado, el flow no pasa de una pantalla), no lo reemplaces por un script de `adb` por tu cuenta, ni al revés: pregunta antes, en una línea, con el motivo y la consecuencia ("Maestro no logra escribir el usuario: ¿paso `preparar` a un script de adb? Pierde la espera por texto y necesita coordenadas fijas").
+
+### Pantallas de una sola vez
+
+Términos, permisos, huella, onboarding y coach marks aparecen la primera vez y no vuelven… hasta que se borran los datos, se reinstala la app o se cambia de dispositivo. Si `preparar` no las contempla, ese día todas las corridas salen inválidas.
+
+1. **Precondición "primer uso hecho".** Antes de medir, se pasan una vez todas esas pantallas, a mano o con un flow aparte, y se anota en la fila "Precondiciones" de la ficha: "primer uso hecho: términos, huella y coach marks ya pasados".
+2. **`preparar` es idempotente:** mira qué hay en pantalla y actúa según eso, así que llega al mismo punto de partida aparezcan o no. Con Maestro, `runFlow` con `when: visible` para un bloque y `optional: true` para un toque suelto:
+   ```yaml
+   appId: com.example.app
+   ---
+   - launchApp:
+       clearState: false            # nunca se borran datos entre corridas ni entre fases
+   - runFlow:                        # términos: solo si aparecen
+       when:
+         visible: "Aceptar términos"
+       commands:
+         - tapOn: "Aceptar términos"
+   - runFlow:                        # la sesión expiró: login con las variables del usuario
+       when:
+         visible:
+           id: "campo_usuario"
+       commands:
+         - tapOn:
+             id: "campo_usuario"
+         - inputText:
+             text: ${PERF_USUARIO}
+             label: "Escribe el usuario"   # con label, el valor no sale en la salida de Maestro
+         - assertVisible:
+             text: ${PERF_USUARIO}
+             label: "El usuario quedó escrito"
+         - tapOn:
+             id: "campo_clave"
+         - inputText:
+             text: ${PERF_CLAVE}
+             label: "Escribe la clave"
+         - tapOn: "Ingresar"
+   - tapOn:                          # aviso de huella: si sale, se omite
+       text: "Ahora no"
+       optional: true
+   - extendedWaitUntil:              # el punto de partida, a la vista
+       visible: "Inicio"
+       timeout: 20000
+   ```
+   Con `adb`, un `uiautomator dump` antes de cada toque:
+   ```bash
+   #!/usr/bin/env bash
+   # preparar.sh: deja la app en el punto de partida, estén o no las pantallas de una sola vez.
+   set -euo pipefail
+   S="${ANDROID_SERIAL:-emulator-5554}"
+   hay() {  # ¿ese texto está a la vista? Borra el volcado anterior: si el nuevo falla, no hay nada que leer
+     adb -s "$S" shell rm -f /sdcard/ui.xml
+     adb -s "$S" shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1 || true
+     adb -s "$S" shell cat /sdcard/ui.xml 2> /dev/null | grep -q "text=\"$1\""
+   }
+   adb -s "$S" shell am start -n com.example.app/.MainActivity > /dev/null && sleep 3
+   if hay "Aceptar términos"; then adb -s "$S" shell input tap 540 2100 && sleep 2; fi
+   if hay "Ahora no"; then adb -s "$S" shell input tap 300 1900 && sleep 2; fi
+   hay "Inicio"   # si no llegó al punto de partida, termina con error y la corrida no vale
+   ```
+   Las coordenadas de cada toque salen de `perf.py nodos`, con esa pantalla a la vista.
+3. **Sus marcas van en `invalidar_si`** (`SCREEN *Terminos*`, `MARK onboarding`, `SCREEN *Login*`): si una de esas pantallas aparece dentro del tramo medido, la corrida no vale y se repite.
+4. **Nunca se borran datos entre fases** (`pm clear`, `clearState`, desinstalar): vuelven las pantallas de primera vez y el estado de la app deja de ser el mismo en antes y en después.
+
+### Credenciales en `preparar`
+
+- **Nunca en el plan, en el flow ni en el chat:** van en variables de entorno que carga el usuario, y el flow las lee (`${PERF_CLAVE}` en Maestro, pasadas con `-e PERF_CLAVE="$PERF_CLAVE"`; `"$PERF_CLAVE"` en un script).
+- **Decláralas en el flujo del plan:** `"requiere_env": ["PERF_USUARIO", "PERF_CLAVE"]` (los nombres, nunca los valores). `capturar` comprueba que existan **antes de empezar** y, si falta alguna, se detiene y dice cuál, sin gastar el calentamiento ni tres corridas. Si `preparar` falla, muestra las últimas líneas de su salida con el valor de esas variables enmascarado (`***`) y deja esa cola en `<carpeta>/logs/preparar.log` (solo si falla); si el comando manda su salida a `/dev/null`, lo dice y hay que correrlo a mano para ver el error. Sin `requiere_env`, la salida estándar de `preparar` se descarta y solo se lee la de error: decláralas siempre que el flow escriba una credencial. La salida de `preparar` ya no se ve mientras corre, así que no puede ser un comando que pregunte algo.
+- **Se exportan en la terminal antes de abrir el agente.** Un agente solo ve las variables de la terminal desde la que se abrió: si el usuario las exporta después, o en otra terminal, la corrida de prueba que corre el agente no las tiene. Díselo al pedirlas: "expórtalas (`export PERF_USUARIO=... PERF_CLAVE=...`) en la terminal donde vas a medir y, si quieres que yo corra la prueba, antes de abrir este chat". Tú no las lees, no las imprimes y no las pides por el chat.
+
+### Flujos que pasan por otra app
+
+Una autorización externa, un pago, un login con otra app o un navegador: el flujo sale de la app medida y vuelve.
+
+- **La traza no se corta** al cambiar de app, pero el tiempo que pasa en la otra app no es de la app medida, y no se compara.
+- **Dos marcas y dos métricas, una a cada lado:** una marca justo antes de lanzar la otra app (`MARK <paso>_salida`) y otra donde llega el resultado (`MARK <paso>_resultado`, en el callback o en el `onNewIntent` que lo recibe). Una métrica de usuario termina en la marca de salida (lo que tarda la app en llegar hasta ahí) y otra empieza en la de resultado (lo que tarda en mostrar lo que sigue). Nunca una métrica de un lado al otro: mediría a la otra app y a quien la opera.
+- **La ventana, en uno de los lados,** no a través del salto: si importan los dos, son dos flujos (o dos `segmentos`).
+- **Lo que pasa en la otra app lo hace el usuario:** a mano (`--recorrido manual`) o con un flow que corre él, con sus credenciales. El agente nunca opera la otra app ni autoriza nada (regla dura de arriba).
+- **Si Android mata la app medida** mientras está en segundo plano, vuelve con un arranque en frío y esa corrida no se compara: pon en `invalidar_si` la marca que lo delata (el `SCREEN ... onCreate` de la actividad de inicio, por ejemplo) y, si pasa seguido, mide con más memoria libre o parte el flujo en dos.
 
 ## 4. Métricas principales (antes de medir)
 
@@ -62,11 +162,14 @@ Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después in
 - **Prefiere la familia `app`**, que no depende del backend: `jank_app_pct`, `hilo_slices_sobre_presupuesto`, `hilo_max_ms`, `inflate_cantidad`, `red_llamadas`, `red_solapadas`, `red <endpoint> cliente_ms`.
 - **Percentiles y porcentajes de frame** solo en flujos de régimen estable (scroll, animaciones). En un arranque o una carga los dominan unos pocos frames, y si cambia la cantidad de frames `perf.py` los marca "no comparable". En una ventana corta (menos de unos 100 frames: abrir una pantalla) `jank_app_pct` no sirve como principal: con 50 frames, cada frame mueve un 2 % y el CV pasa del 30 % en un A/A sin cambios. Ahí, `hilo_max_ms`, `hilo_slices_sobre_presupuesto` o `frame_p90_ms` (CV 6–8 % en el mismo A/A) y la métrica de usuario.
 - **`jank_app_pct` (App Deadline Missed) es de la app;** `jank_total_pct` suma el del sistema y es informativa.
+- **Una métrica de usuario mide un solo salto:** de la marca de la acción (`NAV`, o la marca de inicio de abajo) a la marca de su contenido. Si entre sus dos marcas hay otros toques o swipes del recorrido, lo que mide son las esperas del script, no la app: la corrida de prueba lo avisa ("incluye pasos del recorrido"). Para el recorrido completo ya está `ventana_ms`, que es informativa.
+- **Marca de inicio para una acción que no navega.** Una búsqueda, un filtro, un scroll o un pull-to-refresh no cambian de pantalla: no hay `NAV` donde empezar a medir, y `input text` o `input swipe` no dejan ninguna marca. Cuando el tramo empieza así, propón una marca en el inicio de la acción, en el código que la recibe (`PerfHooks.mark("busqueda_inicio")` donde llega el texto o se dispara la carga; en un módulo que no ve `PerfHooks`, la marca temporal de [setup.md](setup.md) · Cambios temporales) y úsala como `desde` de la métrica, del tramo o de la ventana. Sin ella, la métrica tendría que empezar en el `NAV` anterior y abarcaría el tipeo del script.
+- **Métricas por tramo (`segmentos`), cuando un pico de una pantalla se diluye en la ventana.** Las métricas de frames y del hilo principal cubren toda la ventana: en un flujo de varias pantallas, un frame largo al entrar a una de ellas mueve poco el P90 del recorrido completo. Declara ese tramo en `segmentos` del flujo, con dos marcas, y `perf.py` calcula en **todas** las corridas `<tramo> hilo_max_ms`, `<tramo> frame_p90_ms` y `<tramo> jank_app_pct`, con ruido y veredicto como cualquier métrica; pueden ir en `principales`. Conviene cuando la hipótesis apunta a una pantalla o a un gesto concretos (entrar al detalle, un scroll, una búsqueda) y cuando el usuario pide "el jank de esta parte". En un tramo corto vale lo de arriba: prefiere `<tramo> hilo_max_ms` a un porcentaje sobre pocos frames.
 
 ## 5. `plan.json` y `estado.md`
 
 ```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --paquete <applicationId> --carpeta <evidencias>/<alcance>/<AAAA-MM-DD> --flujo <nombre> --alcance "<alcance>" --instalar "<comando que instala el build de profiling>"
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --paquete <applicationId> --serial <serial> --carpeta <evidencias>/<alcance>/<AAAA-MM-DD> --flujo <nombre> --alcance "<alcance>" --instalar "<comando que instala el build de profiling>"
 ```
 
 Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega a `.git/info/exclude` si git no la ignora (local: el repo no cambia; no toques `.gitignore`) y deja las plantillas. Complétalas:
@@ -74,7 +177,8 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega
 | Campo | Qué es |
 | --- | --- |
 | `paquete` | `applicationId` instalado |
-| `hz` | Opcional: tasa de refresco fija. Sin él, `perf.py` la lee de cada traza |
+| `hz` | Opcional: tasa de refresco fija; `nuevo` lo pone si el dispositivo ya la tiene fijada. Sin él, `perf.py` la lee de cada traza. Si no coincide con la que mide la traza (más de un 6 %), la prueba y `capturar` lo avisan |
+| `input_slices` | Opcional: patrón `GLOB` de los slices con los que Android entrega un toque a la app (por defecto `deliverInputEvent*`). Con ellos, la corrida de prueba avisa si una métrica de usuario abarca pasos del recorrido. El nombre depende de la versión de Android: si la prueba dice que no encontró ninguno, búscalo en la traza y ponlo aquí |
 | `config` | `base` (por defecto), `completa` (más pesada, para entender una corrida) o la ruta de una propia |
 | `compilacion` | `completa` (por defecto, para comparar cambios de código) o `perfil` (Baseline Profile; para medir uno) |
 | `instalar` | Comando que compila e instala el build de profiling (`nuevo --instalar`): aparece en la medición después |
@@ -82,13 +186,15 @@ Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega
 | `flujos.<nombre>.pasos` | Los pasos exactos en el dispositivo |
 | `flujos.<nombre>.inicio` | Parte del nombre de la actividad donde empieza: si es otra, no se graba |
 | `flujos.<nombre>.invalidar_si` | Patrones (`fnmatch`) de secciones que invalidan la corrida, por ejemplo `SCREEN *Login*` |
-| `flujos.<nombre>.recorrido` | `manual` (Enter), un comando con los toques medidos (`adb -s <serial> shell input tap ...`; nunca Maestro) o `{"tipo": "arranque-frio", "actividad", "espera_s"}` |
+| `flujos.<nombre>.recorrido` | `manual` (Enter), un comando con los toques medidos (`bash <carpeta>/recorrido.sh`, o `adb -s <serial> shell input tap ...` en línea; nunca Maestro) o `{"tipo": "arranque-frio", "actividad", "espera_s"}` |
 | `flujos.<nombre>.preparar` | Comando que deja la app en el punto de partida antes de cada corrida (obligatorio con recorrido automático fuera del arranque; ver arriba) |
+| `flujos.<nombre>.requiere_env` | Opcional: nombres de las variables de entorno que `preparar` o el recorrido necesitan (credenciales): `["PERF_USUARIO", "PERF_CLAVE"]`. `capturar` comprueba que existan antes de empezar y enmascara sus valores en la salida de `preparar` |
 | `flujos.<nombre>.ventana` | **Obligatoria si el flujo no es el arranque:** `desde` y `hasta` (marcas, como en las métricas de usuario) y `margen_ms`. Frames, jank e hilo principal se calculan solo dentro de ella; sin ventana dependen de cuánto tarda el usuario en presionar Enter |
 | `flujos.<nombre>.metricas_usuario` | `nombre`, `desde` y `hasta` (cada una con `marca`, `punto`: `inicio` o `fin`, y `cual`: `primera` o `ultima`) y `familia` |
+| `flujos.<nombre>.segmentos` | Opcional: tramos del flujo con sus propias métricas, `[{"nombre": "detalle", "desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}}]`; `nombre` sin espacios, y `desde` y `hasta` como en `metricas_usuario` (más `margen_ms`, opcional). Agrega `<nombre> hilo_max_ms`, `<nombre> frame_p90_ms` y `<nombre> jank_app_pct` ([medicion.md](medicion.md) · Métricas por tramo) |
 | `flujos.<nombre>.familias` | Cambia la familia de una métrica (nombre o patrón), por ejemplo `{"ttfd_ms": "e2e"}` |
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
-| `mejoras` | Vacío: lo completa la sesión 2; `estado` lo cambia `perf.py decidir` |
+| `mejoras` | Vacío: lo completa la sesión 2 (también las mejoras a prueba, con `a_prueba` e `hipotesis`); `estado` lo cambia `perf.py decidir` |
 | `hilos_ajenos` | Hilos del proceso que no son de la app (un servidor embebido, por ejemplo): lista de `{"nombre": "servidor", "patron": "^(ktor\|nio)-", "familia": "e2e"}`; `patron` es una expresión regular de Python sobre el nombre del hilo y `familia` es opcional (`e2e` por defecto). Con ellos `capturar` agrega las métricas de hilo y de red de [medicion.md](medicion.md) · Hilos ajenos |
 | `no_leer` | Rutas o patrones que el agente no debe leer ni buscar (prueba a ciegas): `docs/ALCANCE-*`, `casos/`, `~/otro/proyecto`. `nuevo --no-leer` (repetible) y la línea `No leer:` de `AGENTS.md` (en la misma línea, o una viñeta por ruta debajo) los suman; se comparan con la ruta desde la raíz del proyecto (`**/ALCANCE-*` cubre cualquier carpeta); `siguiente` los repite en cada chat nuevo |
 | `profundidad` | `riguroso` (por defecto) o `triage`: 3 corridas de antes, sin control, termina en el reporte inicial |
@@ -98,9 +204,11 @@ Las marcas se buscan entre las secciones propias (`HTTP`, `QUEUE`, `CONN`, `TTFB
 
 **Recorrido por comando:** si el flujo se puede reproducir con adb (`input tap`, `input keyevent`, `am start` con un deep link), es mejor que el manual: 10 corridas sin costo humano y siempre iguales.
 
+**El recorrido va en un archivo.** `nuevo` deja `<carpeta>/recorrido.sh` con el esqueleto: escribe ahí los toques del tramo medido, **con un comentario por paso** que diga qué elemento toca y qué debe abrirse, y apunta el plan a él: `"recorrido": "bash <carpeta>/recorrido.sh"` (un comando en línea se sigue aceptando, pero una línea de coordenadas dentro de un JSON no se puede leer ni revisar). Lo mismo con `preparar`: `<carpeta>/preparar.sh` o `<carpeta>/preparar.yaml`. `perf.py` escribe en "Cómo se recorre" de `estado.md` el `preparar` y el `recorrido` de cada flujo y el comando para verlos correr a mano, sin medir: dáselo al usuario antes de aprobar, para que vea en el dispositivo lo que se va a medir. La carpeta de la investigación está fuera de git y se borra al limpiar: si el recorrido o el flow se van a reutilizar (otra investigación, otra persona), díselo al usuario para que los archive fuera de `reports/`.
+
 ## 6. Corrida de prueba
 
-Antes de aprobar, una corrida que imprime las métricas y no escribe el CSV. Valida que las marcas existan (las de la ventana y las de las métricas: si falta alguna, el script lo dice), que los valores tengan sentido y, con recorrido por comando, que las esperas alcancen. Si el recorrido es manual, se la entregas al usuario; si es automático, puedes correrla tú:
+Antes de aprobar, una corrida que imprime las métricas y no escribe el CSV. Valida que las marcas existan (las de la ventana, las de los tramos y las de las métricas: si falta alguna, el script lo dice), que los valores tengan sentido y, con recorrido por comando, que las esperas alcancen. Corrige el plan antes de seguir si avisa algo de esto: la tasa de refresco del plan no es la de la traza; una métrica de usuario incluye pasos del recorrido (el gesto que la dispara no cuenta, aunque sea un swipe largo; lo que cuenta es otro toque después); o una marca salió más de una vez en una misma carga (el gancho no es "una vez por carga": [setup.md](setup.md) · Contenido visible). Ese último aviso es una heurística: mira si entre dos apariciones de la misma marca hubo una navegación, otra pantalla, otra marca o una llamada de red, así que una recarga legítima de la misma pantalla no lo dispara, y un duplicado con una llamada en medio se le puede pasar. Si el recorrido es manual, se la entregas al usuario; si es automático, puedes correrla tú:
 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --flujo <flujo> --prueba
@@ -108,4 +216,4 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 
 ## Entregable
 
-`estado.md` con la ficha, el mapa y las hipótesis. Muestra la ficha y el plan (pasos, métricas principales, ventana y recorrido) y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2, con lo que le toca hacer al usuario en cada uno. Pégalo tal cual y detente. Presupuesto: 15 pasos; el mapa va a un subagente económico y las preguntas van todas en un mensaje.
+`estado.md` con la ficha, el mapa y las hipótesis. **Llena la tabla "Ficha" que ya trae `estado.md`**, fila por fila, reemplazando cada texto entre `<>` (Síntoma, Métricas principales, Build y ambiente, Modos, Stack; en Precondiciones, "primer uso hecho" y lo que haya que restaurar): no escribas una sección de ficha aparte, porque el reporte publica esa tabla y una fila con el texto de la plantilla sale como "sin completar". `perf.py siguiente` avisa de las filas que falten. Muestra la ficha y el plan (pasos, métricas principales, ventana y recorrido) y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2, con lo que le toca hacer al usuario en cada uno. Pégalo tal cual y detente. Presupuesto: 15 pasos, o 25 en un flujo largo (login, pantallas de una sola vez o `preparar` con varias pantallas); el mapa va a un subagente económico, las preguntas van todas en un mensaje y las coordenadas salen de `perf.py nodos`, un paso por elemento.

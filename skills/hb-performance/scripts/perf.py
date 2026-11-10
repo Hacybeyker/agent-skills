@@ -17,6 +17,7 @@ Comandos (cada uno con --help):
   siguiente     el paso que sigue, con sus comandos completos; también lo escribe en estado.md
   consumo       anota el costo de una sesión en estado.md (sin chat)
   instrumentar  copia la instrumentación genérica (secciones HTTP, QUEUE, CONN, TTFB, SCREEN y NAV) a un módulo
+  nodos         busca un nodo en un volcado de uiautomator y da el centro de sus bounds para tocarlo con adb
 
 Códigos de salida: 0 bien · 2 uso o datos inválidos · 3 precondición (dispositivo, app o herramientas) ·
 4 captura fallida · 5 no se juntaron las corridas válidas pedidas.
@@ -39,9 +40,10 @@ import sys
 import tempfile
 import textwrap
 import time
+import xml.etree.ElementTree as ElementTree
 from urllib.parse import urlsplit
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -59,11 +61,22 @@ CORE = ["ttid_ms", "ttfd_ms", "bind_application_ms", "jit_ms", "jank_app_pct", "
         "hilo_slices_100ms", "hilo_max_ms", "inflate_cantidad", "inflate_ms", "red_llamadas", "red_solapadas",
         "red_repetidas_2s", "gfx_jank_pct", "gfx_p90_ms", "pss_mb", "java_heap_mb", "activities", "views"]
 FRAME_METRICS = ("jank_app_pct", "jank_total_pct", "frame_p50_ms", "frame_p90_ms", "frame_p99_ms")
+# Métricas por tramo (segmentos del flujo): "<tramo> <métrica>", entre dos marcas y con lo que se solapa con el tramo.
+SEGMENT_METRICS = ("hilo_max_ms", "frame_p90_ms", "jank_app_pct")
+SEGMENT_FRAME_SUFFIXES = (" frame_p90_ms", " jank_app_pct")
+SEGMENT_NAME = re.compile(r"[A-Za-z][\w-]*")
 FRAMES_LEVEL = {"ok": 0, "baja": 1, "no": 2}
 SOFTWARE_RENDERER = re.compile(r"swiftshader|llvmpipe|softpipe|swrast|subzero|software", re.I)
 FRAMES_CHANGE_MAX = 0.5
 NOT_JANK = {"", "None", "Unknown", "Unknown Jank", "Buffer Stuffing", "SurfaceFlinger Stuffing"}
 COMMON_HZ = (24, 30, 48, 50, 60, 72, 75, 90, 96, 100, 120, 144, 165, 240)
+HZ_TOLERANCE = 0.06  # la tasa del plan y la de la traza son "la misma" si difieren menos que esto
+# Slices con los que la plataforma entrega un evento de input a la app (toques, swipes), como GLOB de trace_processor.
+# Es una heurística: el nombre depende de la versión de Android; el plan lo cambia con 'input_slices'.
+INPUT_SLICES = "deliverInputEvent*"
+INPUT_GLOB = re.compile(r"[\w .:=#()\[\]*?-]+")
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+INPUT_GRACE_NS = 100_000_000  # los eventos del mismo gesto que dispara una métrica no cuentan como "pasos del recorrido"
 VERDICT_CLASS = {"mejora": "v-better", "regresión": "v-worse", "sin cambio": "v-same", "dentro del ruido": "v-same",
                  "informativa": "v-same", "no comparable": "v-same", "no confiable": "v-same"}
 FICHA_REPORTE = ("alcance", "síntoma", "sintoma", "métricas principales", "metricas principales", "build",
@@ -86,8 +99,11 @@ GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rar
 - **Varía mucho (CV):** las corridas difieren entre sí más de un 10 %; suele ser el backend (red) o el dispositivo. El número sirve, pero con menos confianza.
 - **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
 - **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen.
-- **Hallazgos:** una causa posible encontrada en el código o en las trazas. Solo los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y **no** es la causa (no hay nada que hacer); `sin veredicto estadístico`, que con estos datos no se pudo confirmar ni descartar (tampoco hay acción, salvo medir otra cosa).
-- **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente."""
+- **Hallazgos:** una causa posible encontrada en el código o en las trazas. Los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y la traza muestra que **no** es la causa (no hay nada que hacer); `sin confirmar` (antes `sin veredicto estadístico`), que no se pudo confirmar ni descartar.
+- **`sin confirmar` no quiere decir que falten trazas ni que la captura fallara.** Separa dos cosas: el **síntoma** puede ser estable (tiene su métrica, medida en todas las corridas) y aun así la **causa** no estar probada, porque nada une ese síntoma con una línea de código. Repetir las mismas corridas no lo cambia: la columna "Qué falta para decidir" dice qué sí (una métrica propia del tramo, otra clase de captura o probar un cambio). Si el síntoma es estable y está fuera de presupuesto, puede ir como mejora a prueba.
+- **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente.
+- **Mejora a prueba:** el síntoma está medido y es estable, pero su causa no se pudo probar. Se aplica el cambio más probable y la medición de después dice si la hipótesis era cierta (`✔ hipótesis confirmada`) o no (`✖ hipótesis refutada`).
+- **Métricas por tramo (`<tramo> …`):** el hilo principal y los frames solo entre dos marcas del flujo (una pantalla, un salto), contando lo que se solapa con ese tramo, para que un pico no se diluya en el recorrido completo."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
@@ -274,9 +290,20 @@ def verdict(before, after, sense, control=None):
     return "sin cambio"
 
 
-def frames_changed(groups, flow):
+def frames_key(metric):
+    """La métrica que cuenta los frames sobre los que se calcula `metric` ("frames", o "<tramo> frames"); None si
+    `metric` no es un porcentaje ni un percentil de frames."""
+    if metric in FRAME_METRICS:
+        return "frames"
+    for suffix in SEGMENT_FRAME_SUFFIXES:
+        if metric.endswith(suffix):
+            return metric[:-len(suffix)] + " frames"
+    return None
+
+
+def frames_changed(groups, flow, key="frames"):
     """True si la mediana de frames cambió más de FRAMES_CHANGE_MAX entre antes y después."""
-    entry = groups.get((flow, "frames"))
+    entry = groups.get((flow, key))
     if not entry or "antes" not in entry["fases"] or "despues" not in entry["fases"]:
         return False
     before = statistics.median(entry["fases"]["antes"])
@@ -285,7 +312,7 @@ def frames_changed(groups, flow):
 
 
 def frame_metric(name):
-    return name in FRAME_METRICS or name.startswith("gfx_")
+    return name in FRAME_METRICS or name.startswith("gfx_") or name.endswith(SEGMENT_FRAME_SUFFIXES)
 
 
 def frames_note(trust):
@@ -318,7 +345,7 @@ def compare(rows, cv_max=CV_MAX, trust=("ok", "")):
             result = "informativa"
         elif note and trust[0] == "no":
             result = "no confiable"
-        elif metric in FRAME_METRICS and frames_changed(groups, flow):
+        elif frames_key(metric) and frames_changed(groups, flow, frames_key(metric)):
             result = "no comparable"
             warnings.add("frames distintos")
         else:
@@ -376,8 +403,15 @@ def load_plan_beside(csv_path):
     return load_plan(plan_path) if plan_path.is_file() else {}
 
 
+def segment_metric_names(flow):
+    return ["%s %s" % (s["nombre"], m) for s in flow.get("segmentos") or [] for m in SEGMENT_METRICS]
+
+
 def user_metric_names(plan):
-    return [m["nombre"] for flow in (plan.get("flujos") or {}).values() for m in flow.get("metricas_usuario", [])]
+    """Las métricas que define el plan: las de usuario y las de cada tramo (segmentos)."""
+    flows = list((plan.get("flujos") or {}).values())
+    return [m["nombre"] for flow in flows for m in flow.get("metricas_usuario", [])] \
+        + [name for flow in flows for name in segment_metric_names(flow)]
 
 
 def priority(metric, plan):
@@ -452,6 +486,20 @@ def update_block(folder, name, content):
 
 # ── Plan ─────────────────────────────────────────────────────────────────────
 
+def check_marker(marker):
+    return bool(marker.get("marca")) and marker.get("punto", "inicio") in ("inicio", "fin") \
+        and marker.get("cual", "primera") in ("primera", "ultima")
+
+
+def check_margin(spec):
+    """True si 'margen_ms' falta o es un número (lo que después lee int())."""
+    try:
+        int(spec.get("margen_ms", 0))
+        return True
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def load_plan(path):
     path = pathlib.Path(path)
     try:
@@ -478,17 +526,31 @@ def load_plan(path):
                     or not isinstance(spec.get("hasta"), dict):
                 raise PerfError("métrica de usuario inválida en '%s': necesita nombre, desde y hasta" % name)
             for side in ("desde", "hasta"):
-                marker = spec[side]
-                if not marker.get("marca") or marker.get("punto", "inicio") not in ("inicio", "fin") \
-                        or marker.get("cual", "primera") not in ("primera", "ultima"):
+                if not check_marker(spec[side]):
                     raise PerfError("'%s.%s' en '%s': usa marca, punto (inicio|fin) y cual (primera|ultima)"
                                     % (spec["nombre"], side, name))
+        segments = flow.get("segmentos") or []
+        seen = set()
+        for spec in segments if isinstance(segments, list) else [None]:
+            if not isinstance(spec, dict) or not isinstance(spec.get("nombre"), str) \
+                    or not SEGMENT_NAME.fullmatch(spec["nombre"]) or spec["nombre"] == "red" or spec["nombre"] in seen \
+                    or not all(isinstance(spec.get(side), dict) and check_marker(spec[side]) for side in ("desde", "hasta")) \
+                    or not check_margin(spec):
+                raise PerfError("'%s.segmentos' es una lista de tramos: cada uno con 'nombre' (letras, números, _ o -; sin "
+                                "repetir y distinto de 'red'), 'desde' y 'hasta' (marcas, como en metricas_usuario) y, si "
+                                "quieres, 'margen_ms' (un número)" % name)
+            seen.add(spec["nombre"])
     for item in plan.get("mejoras", []):
         if not isinstance(item, dict) or not item.get("id") or not item.get("titulo"):
             raise PerfError("%s: cada mejora necesita al menos 'id' y 'titulo'" % path)
         if item.get("estado", "propuesta") not in ESTADOS:
             raise PerfError("%s: la mejora %s tiene estado '%s': usa %s" % (path, item["id"], item.get("estado"),
                                                                            ", ".join(ESTADOS)))
+        if not isinstance(item.get("a_prueba", False), bool):
+            raise PerfError("%s: 'a_prueba' de la mejora %s es true o false" % (path, item["id"]))
+        if item.get("a_prueba") and not all(str(item.get(key) or "").strip() for key in ("hipotesis", "metrica", "esperado")):
+            raise PerfError("%s: la mejora a prueba %s necesita 'hipotesis', 'metrica' y 'esperado': la medición de después "
+                            "confirma o refuta la hipótesis con esa métrica" % (path, item["id"]))
     if plan.get("instalar") is not None and not isinstance(plan["instalar"], str):
         raise PerfError("%s: 'instalar' es el comando que compila e instala el build de profiling (texto)" % path)
     if plan.get("profundidad", "riguroso") not in ("riguroso", "triage"):
@@ -496,9 +558,19 @@ def load_plan(path):
     for name, flow in plan["flujos"].items():
         if flow.get("preparar") is not None and not isinstance(flow["preparar"], str):
             raise PerfError("%s: flujos.%s.preparar es un comando (texto) que deja la app en el punto de partida" % (path, name))
+        needed = flow.get("requiere_env", [])
+        if not isinstance(needed, list) or any(not isinstance(v, str) or not ENV_NAME.fullmatch(v) for v in needed):
+            raise PerfError("%s: flujos.%s.requiere_env es una lista de nombres de variables de entorno, por ejemplo "
+                            "[\"PERF_USUARIO\", \"PERF_CLAVE\"] (los nombres, nunca los valores)" % (path, name))
         window = flow.get("ventana")
         if window is not None and not (isinstance(window, dict) and "desde" in window and "hasta" in window):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
+        if window is not None and not check_margin(window):
+            raise PerfError("%s: flujos.%s.ventana.margen_ms es un número de milisegundos" % (path, name))
+    if plan.get("input_slices") is not None and not (isinstance(plan["input_slices"], str)
+                                                     and INPUT_GLOB.fullmatch(plan["input_slices"])):
+        raise PerfError("%s: 'input_slices' es un patrón GLOB con el nombre de los slices de input (por defecto %s)"
+                        % (path, INPUT_SLICES))
     if not isinstance(plan.get("modelos", {}), dict):
         raise PerfError("%s: 'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico" % path)
     foreign = plan.get("hilos_ajenos", [])
@@ -671,11 +743,62 @@ def resolve_marker(sections, marker, default_point, default_which, after=None):
     return min(times) if which == "primera" else max(times)
 
 
+def user_metric_bounds(sections, spec):
+    """(inicio, fin) en ns de una métrica de usuario; None en el que no tenga su marca."""
+    start = resolve_marker(sections, spec["desde"], "inicio", "primera")
+    end = resolve_marker(sections, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
+    return start, end
+
+
+def metrics_spanning_input(sections, specs, inputs):
+    """{métrica de usuario: eventos de input entre sus marcas}. Una métrica que contiene toques o swipes del recorrido
+    mide el script (sus toques y sus esperas), no la app. No cuentan los eventos de los primeros INPUT_GRACE_NS: son
+    del mismo gesto que dispara la métrica."""
+    out = {}
+    for spec in specs:
+        start, end = user_metric_bounds(sections, spec)
+        if start is None or end is None:
+            continue
+        count, previous = 0, start
+        for ts in inputs:
+            if not start < ts < end:
+                continue
+            if count == 0 and ts - previous < INPUT_GRACE_NS:
+                previous = ts  # sigue el gesto que disparó la métrica (el ACTION_UP de un toque, los MOVE de un swipe)
+                continue
+            count += 1
+        if count:
+            out[spec["nombre"]] = count
+    return out
+
+
+def repeated_marks(sections):
+    """{marca: veces} de las marcas MARK que salieron más de una vez en una misma carga: apariciones seguidas de la
+    misma marca sin nada entre ellas que indique una carga nueva (una navegación NAV, el ciclo de vida de otra pantalla
+    en SCREEN, otra marca o una llamada de red que empieza). Es una heurística: no avisa de una recarga legítima de la
+    misma pantalla (un filtro, un pull-to-refresh) y puede no ver un duplicado con una llamada de red en medio."""
+    out, last, streak, screen = {}, None, 0, None
+    for section in sorted(sections, key=lambda r: r[1]):
+        name = section[4]
+        if name.startswith("MARK "):
+            streak = streak + 1 if name == last else 1
+            last = name
+            if streak > 1:
+                out[name] = max(out.get(name, 0), streak)
+        elif name.startswith("SCREEN "):
+            current = (name.split(" ") + [""])[1]
+            if screen is not None and current != screen:
+                last, streak = None, 0
+            screen = current
+        elif name.startswith(("NAV ", "HTTP ")):
+            last, streak = None, 0
+    return out
+
+
 def user_metrics(sections, specs):
     out, missing = [], []
     for spec in specs:
-        start = resolve_marker(sections, spec["desde"], "inicio", "primera")
-        end = resolve_marker(sections, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
+        start, end = user_metric_bounds(sections, spec)
         if start is None or end is None:
             missing.append(spec["nombre"])
             continue
@@ -700,6 +823,32 @@ def resolve_window(markers, spec):
     return start, end + int(spec.get("margen_ms", 0)) * 1_000_000
 
 
+def segment_metrics(markers, frames, main, specs):
+    """Métricas por tramo (segmentos del flujo): el slice más largo del hilo principal, el P90 de frame y el jank de la
+    app entre dos marcas, con los slices y los frames que se solapan con el tramo. Así un pico de una sola pantalla no
+    se diluye en la ventana del flujo. `frames` y `main` son los de toda la traza. Devuelve (métricas, tramos sin marcas)."""
+    out, missing = [], []
+    for spec in specs:
+        bounds = resolve_window(markers, spec)
+        if not bounds:
+            missing.append(spec["nombre"])
+            continue
+        start, end = bounds
+        name = spec["nombre"]
+        top = [r for r in main if r[3] == 0 and r[2] >= MAIN_SLICE_MIN_NS and r[1] <= end and r[1] + r[2] >= start]
+        out.append(("%s hilo_max_ms" % name, max((r[2] for r in top), default=0) / 1e6, "ms", "app"))
+        inside = [f for f in frames if f[1] <= end and f[1] + max(f[2], 0) >= start]
+        if not inside:
+            continue
+        out += [("%s frames" % name, len(inside), "frames", "info"),
+                ("%s jank_app_pct" % name, sum(1 for f in inside if "App Deadline Missed" in f[4]) / len(inside) * 100,
+                 "%", "app")]
+        durations = [f[2] / 1e6 for f in inside if f[2] > 0]
+        if durations:
+            out.append(("%s frame_p90_ms" % name, percentile(durations, 0.9), "ms", "app"))
+    return out, missing
+
+
 def merged_top_level(intervals):
     """Intervalos que no están dentro de otro (para no contar dos veces un inflate anidado)."""
     top, end = [], -1
@@ -717,6 +866,20 @@ def hz_from_vsync(period_ns):
     raw = 1e9 / period_ns
     near = min(COMMON_HZ, key=lambda hz: abs(hz - raw))
     return near if abs(near - raw) <= near * 0.06 else int(round(raw))
+
+
+def hz_warning(hz, seen):
+    """Aviso si la tasa de refresco del plan (o de --hz) no es la que midió la traza, o si cambió entre corridas."""
+    seen = sorted({h for h in seen if h})
+    measured = "/".join(str(h) for h in seen)
+    if hz and any(abs(h - hz) > hz * HZ_TOLERANCE for h in seen):
+        return ("TASA DE REFRESCO: el plan dice %s Hz y la traza midió %s Hz. El presupuesto de frame "
+                "(hilo_slices_sobre_presupuesto) se calculó con %s Hz: corrige 'hz' en plan.json (o quítalo, y se lee de "
+                "cada traza) y repite lo medido así con --rehacer" % (hz, measured, hz))
+    if not hz and len(seen) > 1:
+        return ("TASA DE REFRESCO: cambió entre corridas (%s Hz): el dispositivo no la tiene fija. Fíjala (ficha.md · "
+                "Dispositivo), pon 'hz' en plan.json y repite lo medido así con --rehacer" % measured)
+    return ""
 
 
 def with_families(metrics, overrides):
@@ -742,7 +905,9 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     bounds = [r for r in rows if r[0] == "limites"]
     vsync = next((r[2] for r in rows if r[0] == "vsync" and r[2] > 0), 0)
     jit = next((r for r in rows if r[0] == "jit"), None)
-    info = {"frames": len(frames), "secciones": len(sections),
+    inputs = sorted(r[1] for r in rows if r[0] == "input")
+    info = {"frames": len(frames), "secciones": len(sections), "input": len(inputs),
+            "marcas_repetidas": repeated_marks(sections),
             "duracion_s": bounds[0][2] / 1e9 if bounds and bounds[0][2] > 0 else None,
             "nombres": {}, "hz_traza": hz_from_vsync(vsync), "arranque": bool(launches)}
     hz = hz or info["hz_traza"] or 60
@@ -753,6 +918,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     if not process:
         return [], "la app no aparece en la traza", info
     markers = sorted(sections + main + launches, key=lambda r: r[1])
+    all_frames, all_main = frames, main
     window = resolve_window(markers, flow_spec.get("ventana"))
     info["ventana_ns"] = window
     if window:  # frames e hilo solo dentro de la ventana: lo que pasa antes o después (esperar, dar Enter) no cuenta
@@ -804,7 +970,11 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     out += network_metrics(sections, known_endpoints, force="red_llamadas" in known)
     users, missing = user_metrics(markers, flow_spec.get("metricas_usuario", []))
     out += users
-    info["faltantes"] = missing + (["ventana"] if info.get("ventana_faltante") else [])
+    info["con_input"] = metrics_spanning_input(markers, flow_spec.get("metricas_usuario", []), inputs)
+    segments, missing_segments = segment_metrics(markers, all_frames, all_main, flow_spec.get("segmentos") or [])
+    out += segments
+    info["faltantes"] = missing + ["tramo %s" % name for name in missing_segments] \
+        + (["ventana"] if info.get("ventana_faltante") else [])
     return with_families(out, flow_spec.get("familias")), None, info
 
 
@@ -1157,6 +1327,39 @@ def git_is_ancestor(commit):
 
 # ── capturar ─────────────────────────────────────────────────────────────────
 
+def missing_env(names):
+    """Las variables de 'requiere_env' que no están en el entorno o están vacías. Solo nombres: nunca valores."""
+    return [name for name in names if not os.environ.get(name)]
+
+
+def mask_secrets(text, names):
+    """El texto con el valor de cada variable de 'requiere_env' reemplazado por ***."""
+    for value in sorted({os.environ.get(name, "") for name in names}, key=len, reverse=True):
+        if value:
+            text = text.replace(value, "***")
+    return text
+
+
+def run_prepare(command, folder, secret_names):
+    """Corre 'preparar' y devuelve (código, últimas líneas de su salida, ruta del log). Si funciona, su salida no se
+    muestra ni se guarda. Si falla, queda su cola en <carpeta>/logs/preparar.log después de pasar por mask_secrets. La
+    salida estándar solo se mira cuando el flujo declara 'requiere_env' (y se enmascaran sus valores); sin esa lista se
+    descarta, como siempre, porque puede traer lo que el comando escribe, y solo se lee la salida de error."""
+    with tempfile.TemporaryFile() as raw:
+        result = subprocess.run(command, shell=True, stdout=raw if secret_names else subprocess.DEVNULL,
+                                stderr=subprocess.STDOUT if secret_names else raw)
+        raw.seek(0)
+        text = mask_secrets(raw.read().decode("utf-8", "replace"), secret_names)
+    lines = [line.rstrip()[:200] for line in text.splitlines() if line.strip()][-40:]
+    log = pathlib.Path(folder) / "logs" / "preparar.log"
+    if result.returncode != 0:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    elif log.is_file():
+        log.unlink()  # el de un fallo anterior ya no dice nada
+    return result.returncode, lines[-8:], log
+
+
 def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "motivo"
 
@@ -1301,19 +1504,88 @@ def read_phases(folder):
         return {}
 
 
-def write_phase(folder, phase, data):
-    """Registra la fase sumando las corridas de otra tanda. El 'entorno' conserva el peor nivel de frames de las tandas:
-    relanzar el emulador con la GPU del host o seguir en un dispositivo real no vuelve confiables las corridas de antes."""
-    phases = read_phases(folder)
-    previous = phases.get(phase) or {}
-    data["corridas"] = previous.get("corridas", 0) + data.get("corridas", 0)
-    data["fecha"] = previous.get("fecha") or data["fecha"]
-    environments = [e for e in (previous.get("entorno"), data.get("entorno")) if e]
-    if environments:
-        data["entorno"] = max(environments, key=lambda e: FRAMES_LEVEL.get(e.get("frames", "ok"), 0))  # empate: la anterior
-    phases[phase] = data
+def worst_environment(environments):
+    """El entorno con menos confianza en los frames; con empate, el primero. None si no hay ninguno."""
+    environments = [e for e in environments if e]
+    return max(environments, key=lambda e: FRAMES_LEVEL.get(e.get("frames", "ok"), 0)) if environments else None
+
+
+def merge_run_data(previous, data):
+    """Lo que se acumula entre tandas de una fase (o de un flujo): corridas, tasa de cada corrida, avisos y el peor
+    entorno."""
+    out = {"corridas": previous.get("corridas", 0) + data.get("corridas", 0)}
+    rates = list(previous.get("hz_corridas") or []) + list(data.get("hz_corridas") or [])
+    if rates:
+        out["hz_corridas"] = rates
+    warnings = list(previous.get("avisos") or [])
+    warnings += [w for w in data.get("avisos") or [] if w not in warnings]
+    if warnings:
+        out["avisos"] = warnings
+    environment = worst_environment([previous.get("entorno"), data.get("entorno")])
+    if environment:
+        out["entorno"] = environment
+    return out
+
+
+def save_phases(folder, phases):
     (pathlib.Path(folder) / "fases.json").write_text(json.dumps(phases, ensure_ascii=False, indent=2) + "\n",
                                                      encoding="utf-8")
+
+
+def write_phase(folder, phase, data, flow=None):
+    """Registra la fase sumando las corridas de otra tanda. El 'entorno' conserva el peor nivel de frames de las tandas:
+    relanzar el emulador con la GPU del host o seguir en un dispositivo real no vuelve confiables las corridas de antes.
+    Con `flow`, guarda también lo de ese flujo en 'flujos', para poder rehacer un flujo sin perder lo de los demás."""
+    phases = read_phases(folder)
+    previous = phases.get(phase) or {}
+    flows = dict(previous.get("flujos") or {})
+    if flow:
+        flows[flow] = merge_run_data(flows.get(flow) or {}, data)
+    merged = merge_run_data(previous, data)
+    for key in ("hz_corridas", "avisos", "entorno"):
+        data.pop(key, None)
+    data.update(merged)
+    data["fecha"] = previous.get("fecha") or data["fecha"]
+    if flows:
+        data["flujos"] = flows
+    phases[phase] = data
+    save_phases(folder, phases)
+
+
+def forget_flow(folder, csv_path, phase, flow):
+    """--rehacer: quita de fases.json solo lo del flujo que se rehace. Si la fase tiene corridas de otros flujos, su
+    registro sigue (commit, build), sin la fecha, que la pone la tanda nueva; las corridas salen del CSV y el entorno,
+    los avisos y las tasas, de lo guardado por flujo. Un registro sin datos por flujo (de una versión anterior), o con
+    datos incompletos, conserva los de la fase."""
+    phases = read_phases(folder)
+    record = phases.get(phase)
+    if record is None:
+        return
+    others = {}
+    if csv_path.is_file():
+        for row in read_rows(csv_path):
+            if row["fase"] == phase and row["flujo"] != flow:
+                others.setdefault(row["flujo"], set()).add(row["corrida"])
+    if not others:
+        phases.pop(phase)
+    else:
+        tracked = {name: data for name, data in (record.get("flujos") or {}).items() if name in others}
+        record["corridas"] = sum(len(runs) for runs in others.values())
+        # La tanda que viene pone su fecha: `siguiente` compara la fecha de 'despues' con la de la última mejora
+        # aplicada, y con la fecha vieja seguiría pidiendo rehacer la fase.
+        record.pop("fecha", None)
+        complete = set(tracked) == set(others) and all(tracked[name].get("corridas") == len(others[name]) for name in others)
+        if complete:  # lo que queda tiene su registro entero: se recalcula sin el flujo que se rehace
+            for key in ("hz_corridas", "avisos", "entorno"):
+                record.pop(key, None)
+            rest = {}
+            for data in tracked.values():
+                rest = merge_run_data(rest, dict(data, corridas=0))
+            record.update({k: v for k, v in rest.items() if k != "corridas"})
+        record.pop("flujos", None)
+        if tracked:
+            record["flujos"] = tracked
+    save_phases(folder, phases)
 
 
 def check_build(folder, phase, build, commit, force):
@@ -1392,7 +1664,8 @@ def fix_compilation(adb, package, mode):
 
 
 def discard_phase(folder, csv_path, phase, flow):
-    """--rehacer: saca del CSV las filas de la fase y aparta sus trazas, para medirla de nuevo desde cero."""
+    """--rehacer: saca del CSV las filas del flujo en esa fase, aparta sus trazas y olvida su registro, para medirlo de
+    nuevo desde cero. Lo de los otros flujos de la fase no se toca."""
     stamp = datetime.datetime.now().strftime("%H%M%S")
     if csv_path.is_file():
         with csv_path.open(newline="", encoding="utf-8") as f:
@@ -1409,13 +1682,16 @@ def discard_phase(folder, csv_path, phase, flow):
             writer.writerows(kept)
         print("✔ --rehacer: %d filas de '%s' fuera del CSV" % (dropped, phase))
     old = folder / phase
-    if old.is_dir() and any(old.iterdir()):
-        old.rename(folder / ("%s-descartada-%s" % (phase, stamp)))
+    mine = re.compile(r"%s_\d+(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?" % re.escape(flow))
+    traces = sorted(f for f in old.iterdir() if mine.fullmatch(f.name)) if old.is_dir() else []
+    if traces:
+        target = folder / ("%s-descartada-%s" % (phase, stamp))
+        target.mkdir(parents=True, exist_ok=True)
+        for trace in traces:
+            trace.rename(target / trace.name)
         print("✔ --rehacer: trazas anteriores en %s-descartada-%s/" % (phase, stamp))
-    (folder / phase).mkdir(parents=True, exist_ok=True)
-    phases = read_phases(folder)
-    if phases.pop(phase, None) is not None:
-        (folder / "fases.json").write_text(json.dumps(phases, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    old.mkdir(parents=True, exist_ok=True)
+    forget_flow(folder, csv_path, phase, flow)
 
 
 def resolve_config(plan, folder, override):
@@ -1502,8 +1778,11 @@ def is_denied(path, root, patterns):
     absolute = pathlib.Path(path).resolve()
     try:
         relative = absolute.relative_to(pathlib.Path(root).resolve()).as_posix()
-    except ValueError:
-        relative = None
+    except ValueError:  # fuera de la raíz (un módulo incluido desde otra carpeta): la ruta relativa, con sus '..'
+        try:
+            relative = pathlib.Path(os.path.relpath(str(absolute), str(pathlib.Path(root).resolve()))).as_posix()
+        except ValueError:
+            relative = None
     for raw in patterns:
         pattern = os.path.expanduser(raw.strip())
         if os.path.isabs(pattern):  # con y sin enlaces simbólicos (en macOS /var es /private/var)
@@ -1601,7 +1880,9 @@ def next_steps(folder, plan, flow=None):
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         return "sesión 3 · %s" % first["id"], [
             chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
-                 "sesión 3: aplica %s con su test y el DoD, propone el commit y marca la mejora aplicada" % first["id"], plan)]
+                 "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada" % (
+                     first["id"], " (a prueba: la medición de después confirma o refuta su hipótesis)"
+                     if first.get("a_prueba") else ""), plan)]
     if "despues" in phases and not stale:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -1620,6 +1901,25 @@ def next_steps(folder, plan, flow=None):
                      "deja en cada lista los ids que correspondan (- es ninguno); mira las mejoras en estado.md")]
     if mejoras:
         return "sesión 4 · cierre sin mejoras aplicadas", [session4]
+    if initial.is_file():
+        # La sesión 2 ya entregó su reporte y no propuso mejoras: no se repite. Queda el cierre corto y, si el
+        # diagnóstico dejó una captura pendiente en estado.md, esa captura como comando.
+        steps = []
+        for pending in pending_captures(state):
+            own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
+            if pending.startswith("cd "):
+                pass  # ya es un comando completo
+            elif own:  # un comando de perf.py, con o sin "python3 -I .../perf.py" delante: se arma con la ruta de este script
+                pending = command(own.group(1))
+            else:
+                pending = "cd %s && %s" % (root, pending)
+            steps.append(terminal(pending, "la captura que el diagnóstico dejó pendiente (opcional: cierra un pendiente)",
+                                  "córrela solo si quieres cerrar ese pendiente antes de terminar; lo que salga se "
+                                  "analiza en un chat aparte (prompts.md · Una pregunta sobre una traza)"))
+        steps.append(chat("%s: cierra la investigación sin fase después" % resume, "economico", "bajo",
+                          "sesión 4 corta: no hay mejoras que medir; escribe el resumen con el estado inicial y genera "
+                          "el reporte final", plan))
+        return "sesión 4 · cierre sin mejoras", steps
     if (state.parent / "diagnostico.md").is_file():
         return "sesión 2 · diagnóstico", [session2]
     steps = []
@@ -1641,6 +1941,50 @@ def next_steps(folder, plan, flow=None):
     return ("medición antes (sin chat)" if triage and "antes" not in phases else
             "medición antes y control (sin chat)" if "antes" not in phases else
             "control y diagnóstico (sin chat)" if "control" not in phases and not triage else "diagnóstico (sin chat)"), steps
+
+
+PENDING_CAPTURE = re.compile(r"captura pendiente[^`\n]*`([^`\n]+)`", re.I)
+
+
+def pending_captures(state):
+    """Los comandos que la sección Pendientes de estado.md deja como "Captura pendiente: `<comando>`"."""
+    try:
+        _, sections = state_sections(pathlib.Path(state).read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    text = next((body for title, body in sections.items() if title.startswith("pendientes")), "")
+    return [found.strip() for found in PENDING_CAPTURE.findall(without_placeholders(text)) if "<" not in found]
+
+
+def code_span(text):
+    """El texto como código en línea de markdown, también si trae un acento grave."""
+    return "`` %s ``" % text if "`" in text else "`%s`" % text
+
+
+def route_block(plan, root):
+    """La sección "Cómo se recorre" de estado.md: 'preparar' y 'recorrido' de cada flujo y el comando para verlos
+    correr a mano, fuera de una captura."""
+    lines = []
+    for name, flow in plan["flujos"].items():
+        prepare = (flow.get("preparar") or "").strip()
+        route = flow.get("recorrido") or "manual"
+        lines.append("**%s**" % name)
+        lines.append("- `preparar` (antes de cada corrida, fuera de la traza): %s" % (code_span(prepare) if prepare else "no tiene"))
+        if startup_spec(flow):
+            lines.append("- `recorrido`: arranque en frío; `perf.py` detiene la app y la abre (`am start -W`)")
+        elif route == "manual":
+            lines.append("- `recorrido`: manual; lo recorres tú en el dispositivo, con los pasos del plan")
+        else:
+            lines.append("- `recorrido` (el tramo medido): %s" % code_span(route))
+            lines.append("- Para verlo correr a mano, sin medir: %s" % code_span(
+                "cd %s && %s" % (root, " && ".join(part for part in (prepare, route) if part))))
+        if flow.get("requiere_env"):
+            lines.append("- Variables de entorno que necesita (expórtalas antes): %s"
+                         % ", ".join("`%s`" % v for v in flow["requiere_env"]))
+    lines.append("")
+    lines.append("Los archivos del recorrido (`recorrido.sh`, `preparar.sh`, `preparar.yaml`) viven en esta carpeta, que git "
+                 "ignora y que se borra al limpiar: si los vas a reutilizar, archívalos fuera de `reports/`.")
+    return "\n".join(lines)
 
 
 def render_steps(steps, markdown):
@@ -1671,8 +2015,8 @@ def cost_command(folder):
         folder = folder.relative_to(root)
     except ValueError:
         pass
-    return ("cd %s && python3 -I %s consumo --carpeta %s --sesion \"<sesión>\" --costo \"<lo que muestre /cost>\" "
-            "--modelo \"<modelo>\"" % (root, HERE / "perf.py", folder))
+    return ("cd %s && python3 -I %s consumo --carpeta %s --sesion \"<sesión>\" --costo \"<lo que muestre tu "
+            "herramienta>\" --modelo \"<modelo>\"" % (root, HERE / "perf.py", folder))
 
 
 def write_next(folder, title, steps):
@@ -1698,11 +2042,21 @@ def print_next(folder, plan, flow=None):
     if any(step["tipo"] == "chat" for step in steps):
         print("  Al cerrar cada chat, anota su costo (terminal): %s" % cost_command(folder))
     write_next(folder, title, steps)
+    update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder).resolve()).resolve()))
 
 
 def cmd_siguiente(args):
     folder = pathlib.Path(args.carpeta)
-    print_next(folder, load_plan(folder / "plan.json"), args.flujo)
+    plan = load_plan(folder / "plan.json")
+    state = folder / "estado.md"
+    if state.is_file():
+        # La Ficha se completa en la sesión 1; el Resumen y los Hallazgos, desde que la sesión 2 entrega su reporte.
+        # Con mejoras aprobadas o aplicadas (sesión 3 y medición después), el resumen que falta es el del cierre: no
+        # se avisa todavía.
+        delivered = any((folder / name).is_file() for name in ("reporte-inicial.md", "reporte-final.md", "reporte.md"))
+        in_progress = any(m.get("estado") in ("aprobada", "aplicada") for m in plan.get("mejoras", []))
+        warn_unfilled(folder, state_sections(state.read_text(encoding="utf-8"))[1], findings=delivered and not in_progress)
+    print_next(folder, plan, args.flujo)
 
 
 def cmd_consumo(args):
@@ -1765,7 +2119,7 @@ def cmd_decidir(args):
         state.write_text(re.sub(r"(## Decisiones\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S),
                          encoding="utf-8")
     rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
-    update_block(folder, "mejoras", markdown_table(PLAN_HEADERS, plan_rows(plan, rows)))
+    update_block(folder, "mejoras", plan_table_md(plan, rows))
     print("✔ %s" % line[2:])
     print_next(folder, plan)
 
@@ -1785,6 +2139,11 @@ def cmd_capturar(args, plan=None):
     if flow_name not in plan["flujos"]:
         raise PerfError("el flujo '%s' no está en el plan (flujos: %s)" % (flow_name, ", ".join(plan["flujos"])))
     flow = plan["flujos"][flow_name]
+    secret_names = flow.get("requiere_env") or []
+    if missing_env(secret_names):
+        raise Precondicion("faltan variables de entorno que el flujo '%s' necesita (requiere_env): %s. Expórtalas en esta "
+                           "terminal antes de correr el comando; si lo corre un agente, antes de abrir el agente (solo ve "
+                           "las de la terminal donde se abrió)" % (flow_name, ", ".join(missing_env(secret_names))))
     phase = "antes" if args.prueba else normalize_phase(args.fase)
     package = plan["paquete"]
     hz = args.hz or (plan.get("hz") if isinstance(plan.get("hz"), int) else None)
@@ -1806,7 +2165,9 @@ def cmd_capturar(args, plan=None):
     if free_gb < 3:
         print("⚠ quedan %.1f GB libres: cada traza puede pesar decenas o cientos de MB" % free_gb)
     config = resolve_config(plan, folder, args.config).read_text(encoding="utf-8").replace("{{PAQUETE}}", package)
-    queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), package, {}))]
+    input_glob = plan.get("input_slices") or INPUT_SLICES
+    queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), package,
+                                     {"INPUT_GLOB": input_glob}))]
     queries += custom_queries(flow, folder, package)
     csv_path = folder / "metricas.csv"
     out_dir = folder / ("prueba" if args.prueba else phase)
@@ -1828,15 +2189,27 @@ def cmd_capturar(args, plan=None):
                 return
         raise Precondicion("la pantalla activa es '%s' y el flujo empieza en '%s'" % (current or "?", start_screen))
 
+    prepare_shown = []
+
     def prepare():
         """Deja la app en el punto de partida antes de cada corrida: el comando 'preparar' del plan o, si la app no
         está al frente (la compilación de ART o una corrida anterior la cerraron), la relanza."""
         if startup:
             return
         if prepare_command:
-            result = subprocess.run(prepare_command, shell=True, stdout=subprocess.DEVNULL)  # solo sus errores
-            if result.returncode != 0:
-                raise Precondicion("'preparar' terminó con código %d" % result.returncode)
+            code, tail, log = run_prepare(prepare_command, folder, secret_names)
+            if code != 0:
+                if not prepare_shown:  # una vez por captura: las corridas siguientes fallan igual
+                    prepare_shown.append(True)
+                    if tail:
+                        print("✖ 'preparar' falló (código %d). Sus últimas líneas, con los valores de requiere_env "
+                              "enmascarados (más en %s):" % (code, log))
+                        print("\n".join("    " + line for line in tail))
+                    else:
+                        print("✖ 'preparar' falló (código %d) sin dejar salida: si el comando la manda a /dev/null (o el "
+                              "flujo no declara requiere_env, y entonces solo se lee su salida de error), córrelo a "
+                              "mano en tu terminal para ver el error" % code)
+                raise Precondicion("'preparar' terminó con código %d" % code)
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
             component = launcher_activity(adb, package)
             if component:
@@ -1872,7 +2245,7 @@ def cmd_capturar(args, plan=None):
             print("⚠ calentamiento: %s" % reason)
 
     target = 1 if args.prueba else args.corridas
-    valid, attempts, seen_hz = 0, 0, set()
+    valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
     while valid < target:
@@ -1912,9 +2285,16 @@ def cmd_capturar(args, plan=None):
             if not invalid and not args.prueba:
                 # Sin la ventana o sin una métrica principal, el recorrido no llegó a donde debía (un tap que no
                 # navegó, la pantalla que no cargó a tiempo): la corrida no vale y se repite.
-                essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in plan.get("principales", [])]
+                principales = plan.get("principales") or []
+                measured = {m[0] for m in metrics}
+                absent = [m for m in segment_metric_names(flow) if m in principales and m not in measured]
+                unmarked = [m for m in absent if "tramo %s" % m.rsplit(" ", 1)[0] in info.get("faltantes", [])]
+                essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in principales] + unmarked
                 if essential:
                     invalid = "sin marcas para %s: el recorrido no completó el flujo" % ", ".join(essential)
+                elif absent:  # el tramo tiene sus marcas pero ningún frame: no hay porcentaje ni percentil que calcular
+                    invalid = ("sin frames en el tramo para %s: en un tramo sin frames (o sin FrameTimeline, Android 11 o "
+                               "anterior) usa '<tramo> hilo_max_ms' como principal" % ", ".join(absent))
             if not invalid and plan.get("hilos_ajenos"):
                 window = info.get("ventana_ns")
                 foreign_sql = fill_sql((ASSETS / "queries" / "hilos_ajenos.sql").read_text(encoding="utf-8"), package,
@@ -1926,8 +2306,6 @@ def cmd_capturar(args, plan=None):
             for name, _ in queries[1:]:
                 for header, body in results[name]:
                     metrics += sql_metrics(header, body, name)
-            if info.get("hz_traza"):
-                seen_hz.add(info["hz_traza"])
         if not invalid and sdk < 31:
             metrics += parse_gfxinfo(adb.shell("dumpsys gfxinfo %s" % package).stdout)
         if not invalid and args.memoria:
@@ -1958,8 +2336,22 @@ def cmd_capturar(args, plan=None):
             print("Secciones propias: %s" % sections_summary(info["nombres"]))
             print("Tasa de refresco: %s Hz (%s)" % (
                 info["hz"], "plan" if hz else "traza" if info.get("hz_traza") else "60 por defecto"))
+            rate_warning = hz_warning(hz, [info.get("hz_traza")])
+            if rate_warning:
+                print("⚠ " + rate_warning)
             if info.get("faltantes"):
                 print("⚠ Sin marcas en la traza para: %s" % ", ".join(info["faltantes"]))
+            for name, count in sorted(info.get("con_input", {}).items()):
+                print("⚠ %s incluye pasos del recorrido (%d eventos de input entre sus marcas): mide el script, no la "
+                      "app. Acórtala a un solo salto, de la marca de la acción a la de su contenido" % (name, count))
+            if flow.get("metricas_usuario") and not startup and not info.get("input"):
+                print("  Sin slices de input ('%s') en la traza: si el recorrido da toques, no se pudo comprobar si una "
+                      "métrica de usuario los incluye (el nombre cambia con la versión de Android: 'input_slices' en el "
+                      "plan)" % input_glob)
+            for name, count in sorted(info.get("marcas_repetidas", {}).items()):
+                print("⚠ '%s' salió %d veces en una misma carga (sin navegación ni otra carga entre ellas): el gancho que la emite se "
+                      "llama más de una vez por carga y una métrica con 'cual: ultima' terminaría en la última. Déjalo "
+                      "en una vez por carga (setup.md · Contenido visible)" % (name, count))
             if startup and "ttfd_ms" not in {m[0] for m in metrics}:
                 print("⚠ Sin ttfd_ms: la app no llama a reportFullyDrawn() (ver setup.md · Contenido visible)")
             print("Traza: %s" % saved)
@@ -1971,20 +2363,22 @@ def cmd_capturar(args, plan=None):
         print(run_line("%d/%d" % (valid + 1, target), size_mb, metrics))
         if info.get("faltantes"):
             print("  ⚠ sin marcas para: %s" % ", ".join(info["faltantes"]))
+        run_hz.append(info.get("hz_traza"))
         valid += 1
         n += 1
-    if hz and seen_hz and any(abs(h - hz) > hz * 0.05 for h in seen_hz):
-        print("⚠ La traza indica %s Hz y el plan dice %s: corrige 'hz' en plan.json (fija el presupuesto de frame)"
-              % ("/".join(str(h) for h in sorted(seen_hz)), hz))
-    elif not hz and len(seen_hz) > 1:
-        print("⚠ La tasa de refresco cambió entre corridas (%s Hz): fíjala en el dispositivo o pon 'hz' en el plan"
-              % "/".join(str(h) for h in sorted(seen_hz)))
+    seen_hz = {h for h in run_hz if h}
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
               "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation}
+    if seen_hz:
+        record["hz_corridas"] = run_hz
+    rate_warning = hz_warning(hz, seen_hz)
+    if rate_warning:
+        record["avisos"] = [rate_warning]
+        print("⚠ " + rate_warning)
     if environment["emulador"] or environment["software"]:
         record["entorno"] = environment
     record.update(build)
-    write_phase(folder, phase, record)
+    write_phase(folder, phase, record, flow_name)
     rows = read_rows(csv_path)
     table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,), trust=frames_trust(folder))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
@@ -1992,6 +2386,12 @@ def cmd_capturar(args, plan=None):
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
     if args.plan:
         print_next(folder, plan, flow_name)
+
+
+def phase_warnings(folder):
+    """Los avisos que las capturas dejaron en fases.json, como "fase: aviso"."""
+    phases = read_phases(folder)
+    return ["%s: %s" % (phase, warning) for phase in FASES for warning in (phases.get(phase) or {}).get("avisos") or []]
 
 
 def write_summary(csv_path, rows, plan):
@@ -2003,6 +2403,9 @@ def write_summary(csv_path, rows, plan):
     block = markdown_table(SUMMARY_HEADERS, compact[:MAX_ROWS])
     if hidden or len(compact) > MAX_ROWS:
         block += "\n\nDetalle completo en `resumen.md`."
+    notes = phase_warnings(pathlib.Path(csv_path).parent)
+    if notes:
+        block += "\n\n" + "\n".join("> ⚠ %s" % note for note in notes)
     if update_block(pathlib.Path(csv_path).parent, "metricas", block):
         print("✔ estado.md actualizado (Métricas)")
 
@@ -2229,6 +2632,7 @@ def builds_table(folder):
         notes.append("antes y después se midieron con distinta compilación de ART (%s · %s): los tiempos no son "
                      "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
                                                                       after.get("compilacion") or "sin registrar"))
+    notes += phase_warnings(folder)
     level, motive = frames_trust(folder)
     if level != "ok":
         notes.append("las fases se midieron en un entorno con frames %s (%s): %s" % (
@@ -2245,7 +2649,7 @@ def logrado_rows(plan, results):
     for item in plan.get("mejoras", []):
         r = by_metric.get((item.get("flujo") or default_flow, item.get("metrica")))
         unit = r["unidad"] if r else ""
-        out.append([item["id"], item["titulo"], item.get("metrica", "—"),
+        out.append([item["id"], improvement_title(item), item.get("metrica", "—"),
                     fmt(r["antes"]["mediana"], unit) if r else "—", item.get("esperado", "—"),
                     fmt(r["despues"]["mediana"], unit) if r else "—", fmt_pct(r["delta_pct"]) if r else "—",
                     r["veredicto"] if r else "—", item.get("estado", "—"), improvement_result(item, r)])
@@ -2253,18 +2657,36 @@ def logrado_rows(plan, results):
 
 
 def improvement_result(item, r):
-    """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica."""
+    """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica. En una mejora a prueba
+    (a_prueba), la medición de después confirma o refuta su hipótesis."""
+    trial = bool(item.get("a_prueba"))
     if item.get("estado") != "aplicada":
         return "— no aplicada"
     if r is None:
         return "— sin medir"
     if r["veredicto"] == "mejora":
-        return "✔ funcionó"
+        return "✔ hipótesis confirmada" if trial else "✔ funcionó"
     if r["veredicto"] == "regresión":
-        return "✖ empeoró"
+        return "✖ hipótesis refutada (empeoró)" if trial else "✖ empeoró"
     if r["veredicto"] in ("informativa", "no comparable", "no confiable"):
         return "— sin veredicto"
-    return "✖ no funcionó"
+    return "✖ hipótesis refutada" if trial else "✖ no funcionó"
+
+
+def improvement_title(item):
+    return item["titulo"] + (" (a prueba)" if item.get("a_prueba") else "")
+
+
+def trial_md(plan):
+    """Las mejoras a prueba del plan, con su hipótesis y lo que la confirma: van debajo de la tabla del plan."""
+    items = [m for m in plan.get("mejoras", []) if m.get("a_prueba")]
+    if not items:
+        return ""
+    lines = ["", "", "**Mejoras a prueba** (la causa no está probada: el cambio se aplica y la medición de después confirma o "
+                 "refuta la hipótesis):", ""]
+    lines += ["- **%s** · hipótesis: %s · se confirma si `%s` mejora (esperado: %s)" % (
+        m["id"], m["hipotesis"], m["metrica"], m["esperado"]) for m in items]
+    return "\n".join(lines)
 
 
 LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "Δ %", "Veredicto", "Estado", "Resultado"]
@@ -2392,6 +2814,89 @@ def cmd_har(args):
 
 # ── reporte ──────────────────────────────────────────────────────────────────
 
+DEVICE_PLACEHOLDER = "<modelo · Android · Hz fijos>"
+UNFILLED = "sin completar"
+TEMPLATE_MARKER = re.compile(r"<[^<>\n!/][^<>\n]*>")
+# Marcadores <…> de la plantilla de estado.md de versiones anteriores que ya no están en la actual.
+LEGACY_MARKERS = (
+    "<modelo · Android · Hz>",
+    "<3 a 5 líneas: estado inicial → estado final con las métricas principales, la causa en una frase y qué depende del "
+    "backend>",
+    '<qué dice cada métrica principal, cada regresión y cada "no comparable"; la evidencia de consultas, rotulada "sin '
+    'veredicto estadístico">',
+)
+# Textos de relleno que esa plantilla traía sin <>, y <alcance>, que deja `nuevo` sin --alcance: son "sin completar"
+# solo si son la celda o la línea entera (dentro de un texto más largo pueden ser contenido real).
+WHOLE_PLACEHOLDERS = (
+    "<alcance>",
+    "las de `principales` en plan.json, y el objetivo",
+    "build de profiling (R8, no debuggable, profileable) · backend real o mocks",
+    "guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage",
+    "UI · asincronía · listas · red",
+    "- `ruta/al/Archivo.kt:línea`: qué es, en una línea.",
+    "- **M1** · `archivos` · test que la fija · DoD · commit propuesto: `perf(<scope>): ...`",
+    "- **H3** · causa verificada · `archivo:línea` · cambio propuesto · test · métrica que lo mide · commit sugerido",
+)
+_PLACEHOLDERS = []
+
+
+def placeholders():
+    """Los marcadores <…> de relleno de la plantilla de estado.md: los de más de una palabra (uno de una sola, como
+    <carpeta>, puede ser texto legítimo) y los de versiones anteriores."""
+    if not _PLACEHOLDERS:
+        template = (ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        found = {m for m in TEMPLATE_MARKER.findall(template) if " " in m}
+        _PLACEHOLDERS.extend(sorted(found | set(LEGACY_MARKERS) | {DEVICE_PLACEHOLDER}, key=len, reverse=True))
+    return _PLACEHOLDERS
+
+
+def has_placeholder(text):
+    """True si el texto (una línea o una celda) sigue con el relleno de la plantilla."""
+    if any(marker in text for marker in placeholders()):
+        return True
+    pieces = {text.strip()} | {cell.strip() for cell in text.split("|")}
+    return any(whole in pieces for whole in WHOLE_PLACEHOLDERS)
+
+
+def without_placeholders(text):
+    """El texto de una sección sin las líneas que siguen siendo relleno de la plantilla."""
+    return "\n".join(line for line in text.splitlines() if not has_placeholder(line)).strip()
+
+
+def unfilled_parts(sections, findings=False):
+    """Lo que estado.md todavía tiene sin completar, para avisarlo: filas de la Ficha con el texto de la plantilla y,
+    con `findings` (desde que existe el diagnóstico), el Resumen y los Hallazgos."""
+    def pick(*names):
+        return next((sections[k] for k in sections for n in names if k.startswith(n)), None)
+
+    out = []
+    ficha = pick("ficha")
+    if ficha:
+        rows = [row[0] for row in parse_table(ficha)[1] if len(row) > 1 and row[0].strip().lower().startswith(FICHA_REPORTE)
+                and has_placeholder(" | ".join(row[1:]))]
+        if rows:
+            out.append("Ficha (%s)" % ", ".join(rows))
+    if findings:
+        summary = pick("resumen ejecutivo", "resumen")
+        if summary is not None and not without_placeholders(summary):
+            out.append("Resumen ejecutivo (de 3 a 5 líneas)")
+        table = pick("hallazgos")
+        if table is not None:
+            rows = parse_table(table)[1]
+            if not rows:
+                out.append("Hallazgos (la tabla está vacía)")
+            elif any(has_placeholder(" | ".join(row)) for row in rows):
+                out.append("Hallazgos (%s)" % ", ".join(row[0] for row in rows if has_placeholder(" | ".join(row))))
+    return out
+
+
+def warn_unfilled(folder, sections, findings):
+    parts = unfilled_parts(sections, findings)
+    if parts:
+        print("⚠ %s tiene partes sin completar: %s. El reporte no las publica (las omite o dice \"%s\"): complétalas y "
+              "vuelve a generar." % (pathlib.Path(folder) / "estado.md", "; ".join(parts), UNFILLED))
+    return parts
+
 def state_sections(text):
     """{título en minúsculas: contenido} de los ## de estado.md, sin los bloques que escribe el script."""
     title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), "Rendimiento")
@@ -2415,8 +2920,11 @@ def ficha_subset(text):
     for line in text.splitlines():
         if line.lstrip().startswith("|"):
             in_table = True
-            first = line.strip().strip("|").split("|")[0].strip().lower()
+            cells = line.strip().strip("|").split("|")
+            first = cells[0].strip().lower()
             if first in ("campo", "") or re.fullmatch(r":?-{3,}:?", first) or first.startswith(FICHA_REPORTE):
+                if has_placeholder(line):  # la fila sigue con el texto de la plantilla: no se publica
+                    line = "| %s | %s |" % (cells[0].strip(), UNFILLED)
                 out.append(line)
         elif in_table:
             break
@@ -2533,7 +3041,7 @@ def plan_rows(plan, rows):
     out = []
     for item in plan.get("mejoras", []):
         before = medians.get((item.get("flujo") or default_flow, item.get("metrica")))
-        out.append([item["id"], item["titulo"], item.get("hallazgo", "—"), item.get("metrica", "—"),
+        out.append([item["id"], improvement_title(item), item.get("hallazgo", "—"), item.get("metrica", "—"),
                     fmt(before[0], before[1]) if before else "—", item.get("esperado", "—"),
                     item.get("prioridad", "—"), item.get("esfuerzo", "—"), item.get("riesgo", "—"),
                     item.get("estado", "propuesta")])
@@ -2541,6 +3049,10 @@ def plan_rows(plan, rows):
 
 
 PLAN_HEADERS = ["#", "Mejora", "Hallazgo", "Métrica", "Antes", "Esperado", "Prioridad", "Esfuerzo", "Riesgo", "Estado"]
+
+
+def plan_table_md(plan, rows):
+    return markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) + trial_md(plan)
 
 
 def parse_table(md):
@@ -2573,6 +3085,11 @@ def finding_outcome(finding_id, tipo, plan, results=None):
                     text = "%s: no se aplicó (%s)" % (m["id"], estado)
                 elif r is None:
                     text = "%s: aplicada, sin medición de su métrica" % m["id"]
+                elif m.get("a_prueba") and r["veredicto"] not in ("informativa", "no comparable", "no confiable"):
+                    confirmed = r["veredicto"] == "mejora"
+                    text = "%s %s: hipótesis %s (%s %s)" % ("✔" if confirmed else "✖", m["id"],
+                                                             "confirmada" if confirmed else "refutada",
+                                                             m.get("metrica"), r["veredicto"])
                 elif r["veredicto"] == "mejora":
                     text = "✔ %s funcionó: %s" % (m["id"], m.get("metrica"))
                 elif r["veredicto"] == "regresión":
@@ -2597,15 +3114,81 @@ def findings_md(text, plan, results=None):
         return text
     tipo_index = next((i for i, h in enumerate(headers) if h.lower().startswith("tipo")), None)
     if tipo_index is None:
-        return text
-    new_headers = headers[:tipo_index] + ["Tipo", "Resultado" if results is not None else "Qué pasa con él"]
-    new_rows = [row[:tipo_index] + [row[tipo_index] if tipo_index < len(row) else "—",
-                                    finding_outcome(row[0], row[tipo_index] if tipo_index < len(row) else "", plan, results)]
-                for row in rows if row]
+        return without_placeholders(text)
+    # Las columnas que siguen a Tipo (la opcional "Qué falta para decidir") se conservan; al final va qué pasa con él.
+    new_headers = headers[:tipo_index] + ["Tipo"] + headers[tipo_index + 1:] \
+        + ["Resultado" if results is not None else "Qué pasa con él"]
+    new_rows = []
+    for row in rows:
+        if not row:
+            continue
+        row = [UNFILLED if has_placeholder(cell) else cell for cell in row] + ["—"] * (len(headers) - len(row))
+        row = row[:tipo_index + 1] + [cell or "—" for cell in row[tipo_index + 1:len(headers)]]
+        new_rows.append(row + [finding_outcome(row[0], row[tipo_index], plan, results)])
     intro = ("> Un hallazgo es una causa posible. **No todos se convierten en mejoras:** los de tipo `bug` o `mejorable` "
-             "sí; `descartado` significa que se investigó y no es la causa; `sin veredicto estadístico`, que con estos "
-             "datos no se pudo confirmar ni descartar.\n\n")
+             "sí; `descartado` significa que se investigó y la traza muestra que no es la causa; `sin confirmar` (antes "
+             "`sin veredicto estadístico`), que el síntoma puede estar bien medido pero su causa no se pudo probar: no "
+             "faltan trazas ni falló la captura, y solo genera una mejora si va a prueba.\n\n")
     return intro + markdown_table(new_headers, new_rows)
+
+
+def finding_kind(tipo):
+    """El tipo de un hallazgo, normalizado; el rótulo anterior `sin veredicto estadístico` es `sin confirmar`."""
+    low = tipo.lower()
+    for kind, words in (("descartado", ("descart",)), ("sin confirmar", ("sin veredicto", "confirmar")),
+                        ("consecuencia", ("consecuencia",)), ("bug", ("bug",)), ("mejorable", ("mejorable",))):
+        if any(word in low for word in words):
+            return kind
+    return tipo.strip() or "sin tipo"
+
+
+def result_md(findings_text, plan):
+    """El recuadro "Resultado" del reporte inicial, antes de todo: con mejoras, cuántas y cuáles; sin mejoras, "Sin
+    mejoras aplicables" con una línea de razón por hallazgo, tomada de la tabla de hallazgos."""
+    headers, rows = parse_table(findings_text)
+    lower = [h.lower() for h in headers]
+
+    def column(prefix):
+        return next((i for i, h in enumerate(lower) if h.startswith(prefix)), None)
+
+    tipo_i, symptom_i, cause_i, missing_i = column("tipo"), column("síntoma"), column("causa"), column("qué falta")
+    if symptom_i is None:
+        symptom_i = column("sintoma")
+
+    def cell(row, index):
+        value = row[index].strip() if index is not None and index < len(row) else ""
+        return "" if value in ("", "—", "-") or has_placeholder(value) else value
+
+    rows = [row for row in rows if row and row[0].strip()]
+    mejoras = plan.get("mejoras", [])
+    if mejoras:
+        trial = sum(1 for m in mejoras if m.get("a_prueba"))
+        lines = ["**%d %s**%s%s. Tú decides cuáles se aplican." % (
+            len(mejoras), "mejora propuesta" if len(mejoras) == 1 else "mejoras propuestas",
+            " para %d %s" % (len(rows), "hallazgo" if len(rows) == 1 else "hallazgos") if rows else "",
+            " (%d a prueba: la causa no está probada y la medición de después la confirma o la refuta)" % trial
+            if trial else ""), ""]
+        for m in mejoras:
+            detail = [improvement_title(m)]
+            if m.get("hallazgo"):
+                detail.append("ataca %s" % m["hallazgo"])
+            if m.get("metrica"):
+                detail.append("mide `%s`" % m["metrica"])
+            if m.get("esperado"):
+                detail.append("esperado: %s" % m["esperado"])
+            lines.append("- **%s** · %s" % (m["id"], " · ".join(detail)))
+        return "\n".join(lines)
+    if not rows:
+        return "**Sin mejoras aplicables.** El diagnóstico no dejó hallazgos en `estado.md`."
+    kinds = [finding_kind(cell(row, tipo_i)) for row in rows]
+    counts = ", ".join("`%s`: %d" % (kind, kinds.count(kind)) for kind in sorted(set(kinds), key=kinds.index))
+    lines = ["**Sin mejoras aplicables.** %d %s (%s). Por qué, uno por uno:" % (
+        len(rows), "hallazgo" if len(rows) == 1 else "hallazgos", counts), ""]
+    for row, kind in zip(rows, kinds):
+        reason = cell(row, missing_i)
+        reason = "falta: %s" % reason if reason else cell(row, cause_i) or finding_outcome(row[0], cell(row, tipo_i), plan)
+        lines.append("- **%s** · %s · `%s` · %s" % (row[0], cell(row, symptom_i) or "—", kind, reason))
+    return "\n".join(lines)
 
 
 def improvements_summary(plan, results, n_findings=None):
@@ -2624,7 +3207,9 @@ def improvements_summary(plan, results, n_findings=None):
             why = "%s: %s → %s (%s) · %s" % (m.get("metrica"), fmt(r["antes"]["mediana"], r["unidad"]),
                                             fmt(r["despues"]["mediana"], r["unidad"]), fmt_pct(r["delta_pct"]),
                                             VERDICT_TEXT.get(r["veredicto"], r["veredicto"]))
-        rows.append([m["id"], m["titulo"], m.get("hallazgo", "—"), result, why])
+        if m.get("a_prueba"):
+            why = "hipótesis: %s · %s" % (m["hipotesis"], why)
+        rows.append([m["id"], improvement_title(m), m.get("hallazgo", "—"), result, why])
     if not rows:
         return ""
     counts = flow_counts(plan, rows, n_findings)
@@ -2665,7 +3250,9 @@ def render_report(folder, name, title, subtitle, parts, charts="", extras=None):
     nav = "".join('<a href="#s%d">%s</a>' % (i, e(section)) for i, (section, _) in enumerate(shown))
     body = '<nav class="toc">%s</nav>' % nav
     for i, (section, content) in enumerate(shown):
-        body += '<section id="s%d"><h2>%s</h2>%s%s</section>' % (i, e(section), extras.get(section, ""), md_to_html(content))
+        body += '<section id="s%d"%s><h2>%s</h2>%s%s</section>' % (
+            i, ' class="resultado"' if section == "Resultado" else "", e(section), extras.get(section, ""),
+            md_to_html(content))
     body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable|no confiable)( \(backend\))?</td>",
                   lambda m: '<td><span class="verdict %s">%s</span>%s</td>' % (
                       VERDICT_CLASS[m.group(1)], m.group(1), m.group(2) or ""), body)
@@ -2691,19 +3278,27 @@ def cmd_reporte(args):
     def pick(*names):
         return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
 
+    def filled(*names):
+        """La sección sin las líneas que siguen siendo relleno de la plantilla ('' si no queda nada)."""
+        return without_placeholders(pick(*names))
+
+    warn_unfilled(folder, sections, findings=True)
+    pending_intro = ("> No son mejoras ni tareas obligatorias: es lo que esta investigación no pudo cerrar. De cada uno "
+                     "importa el síntoma y qué tan estable es, qué falta para cerrarlo, cuánto cuesta y la acción "
+                     "sugerida.\n\n")
     if args.inicial:
-        plan_md = markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) if plan.get("mejoras") else ""
+        plan_md = plan_table_md(plan, rows) if plan.get("mejoras") else ""
         if plan_md and update_block(folder, "mejoras", plan_md):
             print("✔ estado.md actualizado (Plan de mejoras)")
         plan_intro = ("> Lo que se propone cambiar, una mejora por hallazgo. **Tú decides** cuáles se aplican "
                       "(`perf.py decidir`); las aprobadas se implementan en la fase siguiente y se vuelven a medir.\n\n")
-        pending_intro = ("> No son tareas obligatorias. Es lo que esta investigación no pudo cerrar, y cómo se cerraría "
-                         "si alguna vez importa.\n\n")
-        parts = [("Resumen", pick("resumen ejecutivo", "resumen")), ("Estado inicial", initial_md(rows, plan, frames_trust(folder))),
+        parts = [("Resultado", result_md(pick("hallazgos"), plan)),
+                 ("Resumen", filled("resumen ejecutivo", "resumen")),
+                 ("Estado inicial", initial_md(rows, plan, frames_trust(folder))),
                  ("Hallazgos", findings_md(pick("hallazgos"), plan)),
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
-                 ("Queda abierto (opcional)", pending_intro + pick("pendientes") if pick("pendientes") else ""),
+                 ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") if filled("pendientes") else ""),
                  ("Cómo leer este reporte", GLOSSARY)]
         subtitle = "Reporte inicial · %s · hb-performance %s" % (date, VERSION)
         page = render_report(folder, "reporte-inicial", title, subtitle, parts)
@@ -2737,17 +3332,15 @@ def cmd_reporte(args):
                      "Familia `app` = solo la app, `e2e` = app + backend; Ruido (A/A) = antes contra control.\n\n"
                      + markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen])) if chosen else \
         "No hay métricas con antes y después."
-    pending_intro = ("> No son tareas obligatorias. Es lo que esta investigación no pudo cerrar, y cómo se cerraría si "
-                     "alguna vez importa.\n\n")
-    parts = [("Resumen ejecutivo", pick("resumen ejecutivo")),
+    parts = [("Resumen ejecutivo", filled("resumen ejecutivo")),
              ("De los hallazgos al resultado", improvements_summary(plan, results, n_findings)),
              ("Métricas principales", primary_md),
              ("Mejoras: esperado contra logrado", logrado_md),
              ("Hallazgos", findings_md(pick("hallazgos"), plan, results_by_metric)),
-             ("Mejoras aplicadas", pick("mejoras aplicadas")),
-             ("Lectura de la comparación", pick("lectura de la comparación", "lectura de la comparacion")),
+             ("Mejoras aplicadas", filled("mejoras aplicadas")),
+             ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
              ("Comparación completa", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
-             ("Queda abierto (opcional)", pending_intro + pick("pendientes") if pick("pendientes") else ""),
+             ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") if filled("pendientes") else ""),
              ("Cómo leer este reporte", GLOSSARY)]
     charts = "".join('<figure class="chart"><figcaption>%s · %s <span class="verdict %s">%s</span></figcaption>%s</figure>'
                      % (e(r["metrica"]), e(r["flujo"]), VERDICT_CLASS[r["veredicto"]], e(r["veredicto"]), bars_svg(r))
@@ -2768,25 +3361,229 @@ def cmd_reporte(args):
         print_next(folder, plan)
 
 
+# ── nodos ────────────────────────────────────────────────────────────────────
+
+BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+# Heurística de "la pantalla todavía carga": la clase estándar de las barras de progreso, o un id, texto o descripción
+# con las palabras usuales. No reconoce un cargando hecho a mano sin ninguna de esas pistas.
+LOADING_CLASS = re.compile(r"ProgressBar$")
+LOADING_WORDS = re.compile(r"progress|loading|spinner|shimmer|skeleton|cargando", re.I)
+
+
+def ui_nodes(text):
+    """Los nodos de un volcado de uiautomator, en orden de documento: [{"attrs", "bounds", "ancestros"}], con los
+    bounds como (x1, y1, x2, y2) o None y los ancestros como índices de la misma lista."""
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as error:
+        raise PerfError("no es un volcado de uiautomator (XML) válido: %s" % error)
+    nodes = []
+
+    def walk(element, ancestors):
+        index = len(nodes)
+        match = BOUNDS.fullmatch(element.get("bounds", ""))
+        nodes.append({"attrs": dict(element.attrib), "bounds": tuple(int(v) for v in match.groups()) if match else None,
+                      "ancestros": ancestors})
+        for child in element:
+            walk(child, ancestors + [index])
+
+    for child in root:
+        walk(child, [])
+    return nodes
+
+
+def node_label(node):
+    attrs = node["attrs"]
+    parts = ['"%s"' % attrs["text"]] if attrs.get("text") else []
+    if attrs.get("content-desc"):
+        parts.append('desc "%s"' % attrs["content-desc"])
+    if attrs.get("resource-id"):
+        parts.append("id %s" % attrs["resource-id"].split("/")[-1])
+    parts.append(attrs.get("class", "nodo").split(".")[-1])
+    return " · ".join(parts)
+
+
+def node_matches(attrs, text=None, rid=None, desc=None, exact=False):
+    def hit(value, wanted):
+        value, wanted = (value or "").strip(), wanted.strip()
+        return value == wanted if exact else wanted.lower() in value.lower()
+
+    checks = []
+    if text is not None:
+        checks.append(hit(attrs.get("text"), text))
+    if desc is not None:
+        checks.append(hit(attrs.get("content-desc"), desc))
+    if rid is not None:
+        value = attrs.get("resource-id") or ""
+        checks.append(value == rid or value.endswith("/" + rid) or (not exact and rid.lower() in value.lower()))
+    return bool(checks) and all(checks)
+
+
+def node_report(nodes, index):
+    """(centro o None, avisos) de un nodo: si no se ve, si está deshabilitado, si nada recibe el toque y si el centro
+    cae también dentro de otro nodo clickeable que no es su contenedor ni su contenido."""
+    node = nodes[index]
+    if not node["bounds"] or node["bounds"][2] <= node["bounds"][0] or node["bounds"][3] <= node["bounds"][1]:
+        return None, ["sin bounds visibles: el nodo no está a la vista (¿hace falta scroll?)"]
+    x1, y1, x2, y2 = node["bounds"]
+    center = ((x1 + x2) // 2, (y1 + y2) // 2)
+    warnings = []
+    if node["attrs"].get("enabled") == "false":
+        warnings.append("el nodo está deshabilitado: el toque no va a hacer nada")
+    family = [index] + node["ancestros"]
+    if not any(nodes[i]["attrs"].get("clickable") == "true" for i in family):
+        warnings.append("ni el nodo ni sus contenedores son clickeables: puede que el toque no haga nada")
+    for other_index, other in enumerate(nodes):
+        box = other["bounds"]
+        if other_index in family or index in other["ancestros"] or other["attrs"].get("clickable") != "true" or not box:
+            continue
+        if box[0] <= center[0] < box[2] and box[1] <= center[1] < box[3]:
+            warnings.append("el centro también cae dentro de otro nodo clickeable (%s, bounds [%d,%d][%d,%d]): si está "
+                            "encima, el toque va a ese; confirma con otro volcado o toca otro punto del nodo"
+                            % ((node_label(other),) + box))
+    return center, warnings
+
+
+def loading_nodes(nodes):
+    """Los nodos que parecen un cargando a la vista (barra de progreso, shimmer, "Cargando…")."""
+    found = []
+    for node in nodes:
+        attrs, box = node["attrs"], node["bounds"]
+        if not box or box[2] <= box[0] or box[3] <= box[1]:
+            continue
+        if LOADING_CLASS.search(attrs.get("class", "")) or any(
+                LOADING_WORDS.search(attrs.get(key) or "") for key in ("resource-id", "text", "content-desc")):
+            found.append(node)
+    return found
+
+
+def cmd_nodos(args):
+    path = pathlib.Path(args.xml)
+    if args.texto is None and args.id is None and args.desc is None:
+        raise PerfError("indica qué nodo buscar con --texto, --id o --desc")
+    serial = None
+    if args.volcar:
+        serial = select_device(args.serial)
+        adb = Adb(serial)
+        # uiautomator puede fallar con código 0 (una animación que no termina, un cargando): sin borrar antes, el pull
+        # traería el volcado de la pantalla anterior y el toque iría a un nodo que ya no está.
+        adb.shell("rm -f /sdcard/hbperf-ui.xml")
+        dumped = adb.shell("uiautomator dump /sdcard/hbperf-ui.xml")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+        pulled = adb.run("pull", "/sdcard/hbperf-ui.xml", str(path))
+        if dumped.returncode != 0 or pulled.returncode != 0 or not path.is_file():
+            raise Precondicion("no se pudo volcar la pantalla con uiautomator (¿una animación o un cargando que no "
+                               "termina?): %s. Espera a que la pantalla se quede quieta y vuelve a intentarlo"
+                               % ((dumped.stderr or dumped.stdout or pulled.stderr or pulled.stdout).strip()[-200:] or "sin salida"))
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise PerfError("no se pudo leer %s: %s (usa --volcar para tomarlo del dispositivo)" % (path, error))
+    nodes = ui_nodes(text)
+    loading = loading_nodes(nodes)
+    if loading:
+        print("⚠ La pantalla todavía muestra un cargando (%s): espera a que termine y vuelve a volcar; el contenido y las "
+              "coordenadas pueden cambiar." % node_label(loading[0]))
+    matches = [i for i, node in enumerate(nodes) if node_matches(node["attrs"], args.texto, args.id, args.desc, args.exacto)]
+    if not matches:
+        seen = []
+        for node in nodes:
+            label = node["attrs"].get("text") or node["attrs"].get("content-desc")
+            if label and label not in seen:
+                seen.append(label)
+        raise PerfError("ningún nodo coincide en %s (%d nodos). A la vista: %s" % (
+            path, len(nodes), ", ".join('"%s"' % label[:40] for label in seen[:12]) or "ningún texto"))
+    if len(matches) > 1:
+        print("%d nodos coinciden: afina con --exacto, --id o --desc, o elige por sus bounds." % len(matches))
+    tap = "adb%s shell input tap" % (" -s %s" % (serial or args.serial) if (serial or args.serial) else "")
+    for position, index in enumerate(matches[:args.limite], start=1):
+        center, warnings = node_report(nodes, index)
+        box = nodes[index]["bounds"]
+        print("%d. %s · bounds %s" % (position, node_label(nodes[index]), "[%d,%d][%d,%d]" % box if box else "—"))
+        if center:
+            print("   Toque (centro): %s %d %d" % ((tap,) + center))
+        for warning in warnings:
+            print("   ⚠ " + warning)
+    if len(matches) > args.limite:
+        print("… %d más (sube --limite)" % (len(matches) - args.limite))
+
+
 # ── nuevo ────────────────────────────────────────────────────────────────────
 
+ROUTE_TEMPLATE = """#!/usr/bin/env bash
+# Recorrido medido del flujo "{{FLUJO}}": solo los toques del tramo que se mide, con adb (nunca Maestro).
+# Un comentario por paso, con el elemento que toca. Las coordenadas salen de `perf.py nodos` (centro de los bounds).
+# Las esperas (sleep) no entran en las métricas: la ventana va de marca a marca; calíbralas con la corrida de prueba.
+# El plan apunta aquí: "recorrido": "bash {{CARPETA}}/recorrido.sh". Para verlo correr a mano: bash {{CARPETA}}/recorrido.sh
+set -euo pipefail
+SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
+
+# Paso 1: <qué elemento toca y qué debe abrirse>
+# adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
+
+# Paso 2: <qué elemento toca y qué debe abrirse>
+# adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
+"""
 STARTUP_FAMILIES = {"jank_app_pct": "info", "frame_p50_ms": "info", "frame_p90_ms": "info", "frame_p99_ms": "info"}
 
 
+REFRESH_SETTINGS = ("min_refresh_rate", "peak_refresh_rate")
+
+
+def refresh_settings(adb):
+    """Los ajustes del sistema que fijan la tasa de refresco, como [(nombre, valor, crudo)]. `valor` es un número, o None
+    si el ajuste no está puesto ('null'), no existe o no es una tasa (Infinity, 0); `crudo` es lo que había, tal cual,
+    para poder restaurarlo ('' si no había nada)."""
+    out = []
+    for name in REFRESH_SETTINGS:
+        raw = adb.shell("settings get system %s" % name).stdout.strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = None
+        value = value if value is not None and math.isfinite(value) and value > 0 else None
+        out.append((name, value, raw if raw != "null" and re.fullmatch(r"[\w.+-]+", raw) else ""))
+    return out
+
+
+def fixed_refresh_rate(settings):
+    """Los Hz si la mínima y la máxima están puestas y coinciden (la tasa ya está fija); si no, None."""
+    values = [value for _, value, _ in settings]
+    if len(values) == 2 and all(values) and abs(values[0] - values[1]) < 1:
+        return int(round(values[0]))
+    return None
+
+
+def refresh_commands(settings, serial):
+    """(comando que fija la tasa, comando que la restaura a lo que había, Hz que fija) para un dispositivo sin tasa
+    fija. Fija la más alta de las que estén puestas; si no hay ninguna, deja <hz> para completar."""
+    adb = "adb%s shell settings" % (" -s %s" % serial if serial else "")
+    top = max((value for _, value, _ in settings if value), default=None)
+    target = fmt(top) if top else "<hz>"
+    fix = " && ".join("%s put system %s %s" % (adb, name, target) for name, _, _ in settings)
+    restore = " && ".join("%s put system %s %s" % (adb, name, raw) if raw else "%s delete system %s" % (adb, name)
+                          for name, _, raw in settings)
+    return fix, restore, target
+
+
 def device_summary(serial, package, need_activity):
-    """(texto del dispositivo, actividad de inicio) si hay un dispositivo; ('', '') si no, con el motivo."""
+    """(texto del dispositivo, actividad de inicio, ajustes de la tasa de refresco) si hay un dispositivo; ('', '', [])
+    si no, con el motivo."""
     try:
-        adb = Adb(select_device(serial))
+        chosen = select_device(serial)
+        adb = Adb(chosen)
     except PerfError as error:
         print("⚠ Sin dispositivo para completar la ficha y la actividad de inicio: %s" % error)
-        return "", ""
+        return "", "", []
     model = adb.shell("getprop ro.product.model").stdout.strip()
     release = adb.shell("getprop ro.build.version.release").stdout.strip()
     sdk = adb.shell("getprop ro.build.version.sdk").stdout.strip()
     activity = launcher_activity(adb, package) if need_activity else ""
     environment = device_environment(adb)
     kind = " · emulador%s" % (" con render por software" if environment["software"] else "") if environment["emulador"] or environment["software"] else ""
-    return "%s · Android %s (API %s)%s" % (model or "?", release or "?", sdk or "?", kind), activity
+    return "%s · Android %s (API %s)%s" % (model or "?", release or "?", sdk or "?", kind), activity, refresh_settings(adb)
 
 
 def ensure_ignored(folder):
@@ -2808,6 +3605,31 @@ def ensure_ignored(folder):
         print("⚠ no pude comprobar si git ignora %s: que la evidencia no entre a un commit" % folder)
 
 
+def read_request(path):
+    """El flujo que el usuario pidió en la sesión 0 (reports/perf/setup/pedido.json): {"flujo", "llegar"}, o None."""
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except OSError:
+        return None  # no hay pedido guardado
+    except ValueError:  # no es JSON, o no es UTF-8
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("flujo"), str) or not data["flujo"].strip() \
+            or not isinstance(data.get("llegar", ""), str):
+        print("⚠ %s no tiene la forma {\"flujo\": \"...\", \"llegar\": \"...\"}: no lo uso" % path)
+        return None
+    return data
+
+
+def session1_prompt(request, serial):
+    """El texto del chat de la sesión 1: el de "flujo largo" si para llegar al tramo hay login u otras pantallas."""
+    flow = request["flujo"].strip().rstrip(".")
+    reach = (request.get("llegar") or "").strip().rstrip(".")
+    if reach:
+        return ("Usa hb-performance: medir %s. Para llegar ahí hay que %s: usa un flow de Maestro en preparar y adb para "
+                "el tramo medido. Dispositivo %s." % (flow, reach, serial))
+    return "Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial)
+
+
 def cmd_humo(args):
     """Prueba de humo del setup: una corrida de arranque en frío, sin crear una investigación."""
     folder = pathlib.Path(args.carpeta)
@@ -2820,6 +3642,9 @@ def cmd_humo(args):
     plan = {"paquete": args.paquete, "serial": serial, "compilacion": "completa", "flujos": {"humo": {
         "recorrido": {"tipo": "arranque-frio", "actividad": activity, "espera_s": args.espera},
         "familias": dict(STARTUP_FAMILIES)}}}
+    missing_setup = setup_warning(project_root(pathlib.Path.cwd()).resolve())
+    if missing_setup:
+        print("⚠ " + missing_setup)
     folder.mkdir(parents=True, exist_ok=True)
     ensure_ignored(folder)
     capture = argparse.Namespace(plan=None, prueba=True, paquete=args.paquete, carpeta=str(folder), flujo="humo", fase=None,
@@ -2832,12 +3657,24 @@ def cmd_humo(args):
              "reports/perf/arranque-frio/%s" % datetime.date.today().isoformat()]
     if args.instalar:
         nuevo += ["--instalar", json.dumps(args.instalar, ensure_ascii=False)]
-    print("Siguiente, según lo que se va a investigar:")
-    print("  · Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
-    print("    cd %s && python3 -I %s %s%s" % (root, HERE / "perf.py", " ".join(nuevo),
-                                               " [--red si la primera pantalla carga de la red]"))
-    print("  · Otra pantalla o flujo · Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio"))
-    print("    Texto: \"Usa hb-performance: <qué pantalla o flujo analizar y qué se nota>. Dispositivo %s.\"" % serial)
+    recipe = "cd %s && python3 -I %s %s%s" % (root, HERE / "perf.py", " ".join(nuevo),
+                                              " [--red si la primera pantalla carga de la red]")
+    request = read_request(args.pedido)
+    chat_line = "Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio")
+    if missing_setup:
+        print("⚠ Antes de seguir: %s" % missing_setup)
+    if request:
+        print("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · %s" % chat_line)
+        print("  Texto: \"%s\"" % session1_prompt(request, serial))
+        print("  (el flujo sale de %s; ábrelo en un chat nuevo, no en el del setup)" % args.pedido)
+        print("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
+        print("  %s" % recipe)
+    else:
+        print("Siguiente, según lo que se va a investigar:")
+        print("  · Una pantalla o un flujo · %s" % chat_line)
+        print("    Texto: \"%s\"" % session1_prompt({"flujo": "<flujo: de dónde a dónde y qué debe verse al final>"}, serial))
+        print("  · Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
+        print("    %s" % recipe)
 
 
 def cmd_nuevo(args):
@@ -2847,15 +3684,16 @@ def cmd_nuevo(args):
     if not re.fullmatch(r"[A-Za-z]\w*(\.[A-Za-z]\w*)+", args.paquete):
         raise PerfError("paquete '%s' no válido: usa el applicationId instalado" % args.paquete)
     startup = args.receta == "arranque-frio"
-    device, activity = device_summary(args.serial, args.paquete, startup and not args.actividad)
+    device, activity, refresh = device_summary(args.serial, args.paquete, startup and not args.actividad)
     activity = args.actividad or activity
+    fixed_hz = fixed_refresh_rate(refresh)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "logs").mkdir(exist_ok=True)
     plan = {"paquete": args.paquete}
     if args.serial:
         plan["serial"] = args.serial
-    if args.hz:
-        plan["hz"] = args.hz
+    if args.hz or fixed_hz:
+        plan["hz"] = args.hz or fixed_hz
     plan["config"] = "base"
     plan["compilacion"] = "completa"
     if args.instalar:
@@ -2883,15 +3721,55 @@ def cmd_nuevo(args):
         plan.update({"principales": [], "flujos": {args.flujo: {
             "pasos": ["<paso exacto 1 en el dispositivo>"], "inicio": "<parte del nombre de la actividad>",
             "invalidar_si": [], "recorrido": "manual", "metricas_usuario": []}}, "mejoras": []})
-        scope = args.alcance or "<alcance>"
+        scope = args.alcance or "flujo %s" % args.flujo
     (folder / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     state = (ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+    if startup:
+        for marker, value in (
+                ('<lo que nota el usuario, o "exploratoria">', "exploratoria (receta de arranque en frío)"),
+                ("<las de `principales` en plan.json, y el objetivo de cada una>",
+                 "`ttid_ms`, `ttfd_ms` y `hilo_max_ms` · el objetivo lo fija el diagnóstico"),
+                ("<variante medida (R8, no depurable, profileable) · backend real o mocks>",
+                 "variante medida (R8, no depurable, profileable)%s" % (" · la primera pantalla carga de la red" if args.red else "")),
+                ("<guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage>",
+                 "guiado · recorrido arranque-frio · %s" % ("triage" if args.triage else "riguroso"))):
+            state = state.replace(marker, value)
+    rate = ("%d Hz fijos" % fixed_hz if fixed_hz else "%d Hz (del plan; sin fijar en el dispositivo)" % args.hz if args.hz
+            else "tasa de refresco sin fijar: la corrida de prueba dice la que midió")
     state = state.replace("{{ALCANCE}}", scope).replace("{{FECHA}}", datetime.date.today().isoformat()) \
-        .replace("{{PAQUETE}}", args.paquete).replace("{{DISPOSITIVO}}", device or "<modelo · Android · Hz>") \
+        .replace("{{PAQUETE}}", args.paquete) \
+        .replace("{{DISPOSITIVO}}", "%s · %s" % (device, rate) if device else DEVICE_PLACEHOLDER) \
         .replace("{{NO_LEER}}", ", ".join("`%s`" % x for x in no_leer) or "ninguna")
     (folder / "estado.md").write_text(state, encoding="utf-8")
     print("✔ %s y %s" % (folder / "plan.json", folder / "estado.md"))
+    if not startup:
+        route = folder / "recorrido.sh"
+        if route.exists():
+            print("= %s ya existe, no se toca: el plan apunta a él con \"recorrido\": \"bash %s\"" % (route, route))
+        else:
+            route.write_text(ROUTE_TEMPLATE.replace("{{FLUJO}}", args.flujo).replace("{{SERIAL}}", args.serial or "<serial>")
+                             .replace("{{CARPETA}}", str(folder)), encoding="utf-8")
+            route.chmod(route.stat().st_mode | 0o111)
+            print("✔ %s: el recorrido medido va ahí, un comentario por paso; cuando esté, el plan apunta a él con "
+                  "\"recorrido\": \"bash %s\"" % (route, route))
     ensure_ignored(folder)
+    missing_setup = setup_warning(project_root(folder).resolve())
+    if missing_setup:
+        print("⚠ " + missing_setup)
+    if fixed_hz:
+        print("✔ Tasa de refresco ya fija en el dispositivo: %d Hz (%s). Queda en 'hz' del plan: no hace falta cambiarla."
+              % (fixed_hz, ", ".join("%s=%s" % (name, fmt(value)) for name, value, _ in refresh)))
+        if args.hz and abs(args.hz - fixed_hz) > fixed_hz * HZ_TOLERANCE:
+            print("⚠ --hz %d no coincide con los %d Hz fijados en el dispositivo: el plan lleva %d; corrígelo si no es a "
+                  "propósito" % (args.hz, fixed_hz, args.hz))
+    elif device:
+        fix, restore, target = refresh_commands(refresh, args.serial)
+        print("⚠ La tasa de refresco no está fija en el dispositivo (%s). Si la pantalla tiene una sola tasa, no hace "
+              "falta nada; si es adaptativa, cambia entre corridas y con ella el presupuesto de frame:"
+              % ", ".join("%s=%s" % (name, raw or "sin poner") for name, _, raw in refresh))
+        print("    Fijarla antes de medir:  %s" % fix)
+        print("    Restaurarla al cerrar:   %s" % restore)
+        print("    Después, \"hz\": %s en plan.json. La corrida de prueba imprime la tasa que midió la traza." % target)
     if startup:
         print_next(folder, plan)
     else:
@@ -2968,6 +3846,31 @@ SNIPPETS = {
 }
 // Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): repítelas como
 // "{{VARIANTE}}Implementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
+    "gradle_propiedad": """// Para un proyecto que decide cosas por el nombre del build type: en vez de crear otro, mide sobre el que ya usas
+// para probar ("<buildType>") solo cuando se pasa -Pperf. Sin -Pperf, ese build type no cambia.
+// Es un ejemplo: ajústalo a tu proyecto y a tu versión de AGP.
+val perf = providers.gradleProperty("perf").isPresent
+android {
+    buildTypes {
+        getByName("<buildType>") {
+            if (perf) {
+                isDebuggable = false
+                isProfileable = true
+            }
+        }
+    }
+    sourceSets {
+        getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
+        if (perf) {
+            getByName("<buildType>").kotlin.directories += "{{FUENTE}}"
+            // El <provider> de PerfInstaller está en el manifest que generó la skill. srcFile reemplaza el manifest de
+            // ese source set: si src/<buildType>/AndroidManifest.xml ya existe, copia antes su contenido a este.
+            getByName("<buildType>").manifest.srcFile("src/{{VARIANTE}}/AndroidManifest.xml")
+        }
+    }
+}
+// Instalar: ./gradlew :<módulo>:install<BuildType> -Pperf. El `paquete` del plan es el applicationId de ese build type.
+// Con -Pperf el build deja de ser depurable: mira los avisos de <debug-overrides> y de BuildConfig.DEBUG.""",
     "red_hilt": """// Donde se arma el OkHttpClient (Hilt): inyecta el set y aplica la primera factory.
 @Provides fun okHttp(@PerfEventListeners factories: Set<@JvmSuppressWildcards EventListener.Factory>): OkHttpClient =
     OkHttpClient.Builder()
@@ -3005,20 +3908,30 @@ PACKAGE_DECL = re.compile(r"^\s*package\s+([\w.]+)", re.M)
 OKHTTP_BUILDER = re.compile(r"\bOkHttpClient\s*\.\s*Builder\s*\(\s*\)|\bOkHttpClient\s*\(\s*\)")
 MODULE_PLUGINS = (("aplicación", re.compile(r"android[._-]?application|com\.android\.application", re.I)),
                   ("librería", re.compile(r"android[._-]?library|com\.android\.library", re.I)))
+BUILD_CONFIG_USE = re.compile(r"\bBuildConfig\s*\.\s*(BUILD_TYPE|FLAVOR\w*|DEBUG)\b")  # FLAVOR_<dimensión> también
+# Lógica de Gradle que depende del nombre de un build type, un sabor o una variante. No cuenta el nombre de un proyecto.
+GRADLE_NAME_LOGIC = re.compile(r"(?<![pP]roject\.)\b(?:name|getName\(\))\s*(?:\.\s*\w+\(\)\s*)*"
+                               r"(?:(?:==|!=)\s*[\"']\w|\.\s*(?:endsWith|startsWith|contains|equals|matches)\s*\()")
+# Líneas que miran el nombre de otra cosa (tareas, dependencias, archivos, proyectos): no deciden por build type.
+GRADLE_TASK_LINE = re.compile(r"\btasks?\b|Task\b|\brequested\b|\b(?:sub|all)projects\b|\.(?:jar|aar)\b")
+SETTINGS_HINT = re.compile(r"\bprojectDir\s*=|\bincludeBuild\b")
+SETTINGS_PATH = re.compile(r"projectDir\s*=\s*(?:new\s+)?[fF]ile\s*\(\s*(?:\w+\s*,\s*)?[\"']([^\"']+)[\"']"
+                           r"|includeBuild\s*\(?\s*[\"']([^\"']+)[\"']")
 FUN_HEAD = re.compile(r"\bfun\s+(\w+)\s*\(")
 FUN_TAIL = re.compile(r"\s*(?::\s*([^{=]*))?([{=])?")
 PRIMITIVE_TYPES = ("String", "Int", "Long", "Boolean", "Float", "Double", "Unit")
 
-def walk_files(root, patterns, suffixes):
+def walk_files(root, patterns, suffixes, project=None):
     """Archivos con esas extensiones bajo root, en orden, sin carpetas de build, ocultas ni de tests y sin las rutas
-    prohibidas; los que generó la skill tampoco."""
-    count = 0
+    prohibidas; los que generó la skill tampoco. `project` es la raíz del proyecto contra la que se comparan las rutas
+    prohibidas cuando root es otra carpeta (un módulo que settings.gradle incluye desde fuera)."""
+    count, project = 0, project or root
     for current, dirs, files in os.walk(str(root)):
         dirs[:] = sorted(d for d in dirs if d not in SCAN_SKIP and not d.startswith(".")
-                         and not is_denied(os.path.join(current, d), root, patterns))
+                         and not is_denied(os.path.join(current, d), project, patterns))
         for name in sorted(files):
             path = pathlib.Path(current) / name
-            if name.endswith(suffixes) and not is_denied(path, root, patterns) and not is_generated(path):
+            if name.endswith(suffixes) and not is_denied(path, project, patterns) and not is_generated(path):
                 count += 1
                 if count > SCAN_MAX_FILES:
                     return
@@ -3087,14 +4000,73 @@ def hook_methods(text, declaration):
     return methods
 
 
-def scan_sources(root, patterns):
-    """Un solo recorrido de los .kt y .java: interfaces y CompositionLocal con un nombre de 'contenido visible'
-    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. También dónde se arma un OkHttpClient y cuántos
-    archivos usan WebView, RecyclerView o RxJava. Devuelve {"ganchos", "archivos", "okhttp", "vistas"}."""
+def relative_to_root(path, root):
+    """La ruta desde la raíz del proyecto, con '..' si está fuera (un módulo incluido desde otra carpeta)."""
+    return pathlib.Path(os.path.relpath(os.path.realpath(str(path)), os.path.realpath(str(root)))).as_posix()
+
+
+def external_roots(root, patterns):
+    """(carpetas fuera de la raíz que settings.gradle(.kts) incluye, rutas que no se pudieron seguir). Mira los
+    `projectDir = file("...")` (o File(dir, "...")) y los `includeBuild("...")`; una ruta con variables no se resuelve."""
+    root = pathlib.Path(root).resolve()
+    found, unresolved = [], []
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        settings = root / name
+        if not settings.is_file() or is_denied(settings, root, patterns):
+            continue
+        for line in settings.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not SETTINGS_HINT.search(line) or line.lstrip().startswith(("//", "*", "/*")):
+                continue
+            match = SETTINGS_PATH.search(line)
+            if not match:  # una ruta armada con variables u otra forma que no se sabe leer: se avisa, no se ignora
+                unresolved.append(line.strip()[:100])
+                continue
+            raw = match.group(1) or match.group(2)
+            for variable in ("${rootDir}", "$rootDir", "${settingsDir}", "$settingsDir"):
+                raw = raw.replace(variable, str(root))
+            if "$" in raw:
+                unresolved.append(raw)
+                continue
+            path = pathlib.Path(os.path.normpath(str(root / raw)))
+            # dentro de la raíz ya se recorre; una carpeta que contiene a la raíz (includeBuild("..")) la repetiría entera
+            if is_under(path, root) or is_under(root, path) or is_denied(path, root, patterns):
+                continue
+            if path.is_dir() and path not in found:
+                found.append(path)
+            elif not path.is_dir() and raw not in unresolved:
+                unresolved.append(raw)
+    return found, unresolved
+
+
+def scan_gradle(root, patterns, extra=()):
+    """Líneas de los build.gradle(.kts) que deciden algo por el nombre de un build type, un sabor o una variante
+    (`name == "qa"`, `name.endsWith("Release")`): [(archivo, línea, texto)]."""
+    root = pathlib.Path(root)
+    found = []
+    for base in [root] + list(extra):
+        for path in walk_files(base, patterns, (".gradle", ".gradle.kts"), root):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError:
+                continue
+            found += [(relative_to_root(path, root), number, line.strip()[:120])
+                      for number, line in enumerate(lines, start=1)
+                      if GRADLE_NAME_LOGIC.search(line) and not GRADLE_TASK_LINE.search(line)]
+    return found
+
+
+def scan_sources(root, patterns, extra=()):
+    """Un solo recorrido de los .kt y .java (los de la raíz y los de las carpetas de `extra`, los módulos que
+    settings.gradle incluye desde fuera): interfaces y CompositionLocal con un nombre de 'contenido visible'
+    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. También dónde se arma un OkHttpClient, cuántos
+    archivos usan WebView, RecyclerView o RxJava y dónde se lee BuildConfig.BUILD_TYPE, FLAVOR o DEBUG.
+    Devuelve {"ganchos", "archivos", "okhttp", "vistas", "buildconfig"}."""
     hooks, multi, files, builders = [], set(), 0, []
     views = {"WebView": 0, "RecyclerView": 0, "RxJava": 0}
+    build_config = {"BUILD_TYPE": [], "FLAVOR": [], "DEBUG": []}
     root = pathlib.Path(root)
-    for path in walk_files(root, patterns, (".kt", ".java")):
+    paths = [path for base in [root] + list(extra) for path in walk_files(base, patterns, (".kt", ".java"), root)]
+    for path in paths:
         try:
             if path.stat().st_size > SCAN_MAX_BYTES:
                 continue
@@ -3102,14 +4074,17 @@ def scan_sources(root, patterns):
         except OSError:
             continue
         files += 1
+        relative = relative_to_root(path, root)
         for name, found in (("WebView", "WebView" in text), ("RecyclerView", "RecyclerView" in text),
                             ("RxJava", "io.reactivex" in text or "rxjava" in text.lower())):
             views[name] += 1 if found else 0
         for builder in OKHTTP_BUILDER.finditer(text):
-            builders.append((path.relative_to(root).as_posix(), text.count("\n", 0, builder.start()) + 1))
+            builders.append((relative, text.count("\n", 0, builder.start()) + 1))
+        for use in BUILD_CONFIG_USE.finditer(text):
+            build_config["FLAVOR" if use.group(1).startswith("FLAVOR") else use.group(1)].append(
+                (relative, text.count("\n", 0, use.start()) + 1))
         multi.update(SET_OF.findall(text))
         multi.update(INTO_BINDING.findall(text))
-        relative = path.relative_to(root).as_posix()
         package_match = PACKAGE_DECL.search(text)
         package = package_match.group(1) if package_match else ""
         for declaration in INTERFACE_DECL.finditer(text):
@@ -3123,7 +4098,7 @@ def scan_sources(root, patterns):
                               "linea": text.count("\n", 0, local.start()) + 1, "metodos": []})
     for hook in hooks:
         hook["multibinding"] = hook["tipo"] == "interfaz" and hook["nombre"] in multi
-    return {"ganchos": hooks, "archivos": files, "okhttp": builders, "vistas": views}
+    return {"ganchos": hooks, "archivos": files, "okhttp": builders, "vistas": views, "buildconfig": build_config}
 
 
 def is_under(path, folder):
@@ -3243,6 +4218,44 @@ adapter.submitList(items) { recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla
 
 VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PRODUCTION_VARIANTS = ("debug", "release")  # build types del proyecto: jamás llevan el source set ni el provider de perf
+FLAVORED_PRODUCTION = re.compile(r"[A-Za-z0-9](?:Release|Debug)$")  # una variante con sabores: <sabor>Release, <sabor>Debug
+PROFILEABLE_ON = re.compile(r"\b(?:isProfileable|profileable)\s*(?:=\s*|\s+)true\b")
+
+
+def outer_level(body):
+    """El cuerpo de un build type sin sus bloques anidados: lo que declara siempre, no dentro de un `if (...) { }`."""
+    out, depth = [], 0
+    for char in body:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(char)
+    return "".join(out)
+
+
+def always_profileable(body):
+    """True si el build type se declara profileable sin condiciones. Uno que lo es solo con una propiedad (dentro de
+    `if (perf) { }`) no es una variante existente: sin esa propiedad no es profileable ni lleva la instrumentación."""
+    return bool(PROFILEABLE_ON.search(outer_level(body)))
+
+
+def is_production(name, declared=()):
+    """True si la variante es release o debug, sola o con sabores (demoRelease, freeDebug): nunca lleva la
+    instrumentación, porque es el build que se publica o el depurable del día a día. `declared` son los build types que
+    el módulo declara: uno propio con un nombre así (preRelease) no es un sabor de release."""
+    if name.lower() in PRODUCTION_VARIANTS:
+        return True
+    return name not in declared and bool(FLAVORED_PRODUCTION.search(name))
+
+
+def module_build_types(module, root, patterns):
+    """{nombre: cuerpo} de los build types del build.gradle(.kts) del módulo ({} si no se puede leer)."""
+    gradle = next((module / n for n in ("build.gradle.kts", "build.gradle") if (module / n).is_file()), None)
+    if not gradle or is_denied(gradle, root, patterns):
+        return {}
+    return build_types(gradle.read_text(encoding="utf-8", errors="ignore"))
 DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
 DEBUGGABLE_OFF = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)false\b")
 BUILD_TYPE_HEADER = re.compile(r"(?:(?:create|register|getByName|maybeCreate)\s*\(\s*[\"'](\w+)[\"']\s*\)"
@@ -3294,24 +4307,101 @@ def is_debuggable(name, body):
 
 
 def find_profileable_variants(module, root, patterns):
-    """Variantes del módulo cuyo manifest declara <profileable>: [{nombre, manifest, estado, generada}]. 'estado': 'ok'
-    (build type no depurable), 'depurable' o 'sin build type' (no se pudo verificar: sabores, otro plugin)."""
-    gradle = next((module / n for n in ("build.gradle.kts", "build.gradle") if (module / n).is_file()), None)
-    types = {}
-    if gradle and not is_denied(gradle, root, patterns):
-        types = build_types(gradle.read_text(encoding="utf-8", errors="ignore"))
+    """Variantes profileable del módulo: las que lo declaran en su manifest (<profileable>) y los build types que lo
+    declaran en Gradle (isProfileable = true, o `profileable true`): [{nombre, manifest, estado, generada, gradle}].
+    'estado': 'ok' (build type no depurable), 'depurable' o 'sin build type' (no se pudo verificar: sabores, otro
+    plugin). release y debug, solos o con sabores, nunca son candidatas."""
+    types = module_build_types(module, root, patterns)
     found = []
     for manifest in sorted((module / "src").glob("*/AndroidManifest.xml")):
         name = manifest.parent.name
-        if name == "main" or name.lower() in PRODUCTION_VARIANTS or is_denied(manifest, root, patterns):
+        if name == "main" or is_production(name, types) or is_denied(manifest, root, patterns):
             continue
         text = manifest.read_text(encoding="utf-8", errors="ignore")
         profileable = re.search(r"<profileable\b[^>]*>", text)
         if not profileable or re.search(r"android:enabled\s*=\s*[\"']false[\"']", profileable.group(0)):
             continue
         state = "sin build type" if name not in types else "depurable" if is_debuggable(name, types[name]) else "ok"
-        found.append({"nombre": name, "manifest": manifest, "estado": state, "generada": GENERATED in text[:400]})
+        found.append({"nombre": name, "manifest": manifest, "estado": state, "generada": GENERATED in text[:400],
+                      "gradle": always_profileable(types.get(name, ""))})
+    for name, body in types.items():  # los que lo declaran solo en Gradle, sin <profileable> en su manifest
+        if is_production(name, types) or any(c["nombre"] == name for c in found) or not always_profileable(body):
+            continue
+        manifest = module / "src" / name / "AndroidManifest.xml"
+        if manifest.is_file() and is_denied(manifest, root, patterns):
+            continue
+        found.append({"nombre": name, "manifest": manifest if manifest.is_file() else None, "gradle": True,
+                      "estado": "depurable" if is_debuggable(name, body) else "ok", "generada": False})
     return found
+
+
+def source_set_files(module, name, limit=10):
+    """Los archivos del source set de un build type (src/<nombre>/), para decir qué no copia initWith."""
+    base = module / "src" / name
+    if not base.is_dir():
+        return []
+    files = sorted(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file())
+    return files[:limit] + (["…"] if len(files) > limit else [])
+
+
+def debug_overrides(module, root, patterns):
+    """Los XML de res/xml del módulo que usan <debug-overrides> (network security config): ese bloque solo aplica en
+    builds depurables, así que la variante medida lo pierde."""
+    found = []
+    for path in sorted((module / "src").glob("*/res/xml*/*.xml")):
+        if is_denied(path, root, patterns):
+            continue
+        try:
+            if "<debug-overrides" in path.read_text(encoding="utf-8", errors="ignore"):
+                found.append(path)
+        except OSError:
+            continue
+    return found
+
+
+def find_instrumentation(root):
+    """(hay un source set `perf`, hay PerfHooks.kt) bajo la raíz del proyecto: lo que deja `instrumentar`."""
+    perf_set = hooks = False
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = [d for d in dirs if d not in ("build", "node_modules", "reports", "out") and not d.startswith(".")]
+        perf_set = perf_set or (os.path.basename(current) == "src" and "perf" in dirs)
+        hooks = hooks or "PerfHooks.kt" in files
+        if perf_set and hooks:
+            break
+    return perf_set, hooks
+
+
+REAPPLY_HINT = re.compile(r"git apply|parche|\.patch\b", re.I)
+
+
+def setup_warning(root):
+    """Aviso si la instrumentación del setup no está en el repo ('' si está). Si AGENTS.md dice "setup listo" y el
+    código no está (el setup se guarda como parche, o se revirtió), dice cómo reaplicarlo."""
+    perf_set, hooks = find_instrumentation(root)
+    if hooks:
+        return ""  # con PerfHooks.kt alcanza: el source set puede tener otro nombre (instrumentar --fuente)
+    try:
+        agents = (pathlib.Path(root) / "AGENTS.md").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        agents = ""
+    missing = "no encontré la instrumentación en el repo (ni PerfHooks.kt%s, bajo %s)" % (
+        "" if perf_set else " ni un source set src/perf", root)
+    if not re.search(r"setup\s+listo", agents, re.I):
+        return "%s: falta la sesión 0 (setup) antes de medir; sin ella no salen las marcas ni las secciones" % missing
+    # La línea que dice cómo reaplicarlo: la de "setup listo" si lo dice ahí; si no, una de la sección de rendimiento.
+    hint, section = "", False
+    for line in agents.splitlines():
+        if line.startswith("#"):
+            section = bool(re.search(r"rendimiento|performance", line, re.I))
+        elif REAPPLY_HINT.search(line) and (re.search(r"setup\s+listo", line, re.I) or (section and not hint)):
+            hint = line.strip(" -*\t")[:200]
+            if re.search(r"setup\s+listo", line, re.I):
+                break
+    how = ('según AGENTS.md: "%s"' % hint if hint else
+           "si el setup se guarda como parche, aplícalo (git apply <parche>); si se perdió, repite la sesión 0 "
+           "(perf.py instrumentar no pisa lo que exista)")
+    return ('AGENTS.md dice "setup listo" pero %s: las marcas no van a salir y la variante medida puede no compilar. '
+            "Reaplícala antes de seguir: %s" % (missing, how))
 
 
 def resolve_variant(found, requested):
@@ -3341,17 +4431,21 @@ def cmd_instrumentar(args):
         raise PerfError("paquete '%s' no válido: usa algo como com.ejemplo.app.perf" % args.paquete)
     if args.variante and not VARIANT_NAME.fullmatch(args.variante):
         raise PerfError("variante '%s' no válida: usa el nombre del build type (profiling, benchmark, releaseLike)" % args.variante)
-    if args.variante and args.variante.lower() in PRODUCTION_VARIANTS:
-        raise PerfError("variante '%s' no válida: release y debug son los build types del proyecto y la instrumentación "
-                        "no puede entrar en el release que se publica; usa otra variante o deja que se cree `profiling`"
-                        % args.variante)
     root = project_root(module)
     denied = read_no_leer(root, extra=args.no_leer)
+    if args.variante and is_production(args.variante, module_build_types(module, root, denied)):
+        raise PerfError("variante '%s' no válida: release y debug (también con sabores, como demoRelease) son los build "
+                        "types del proyecto y la instrumentación no puede entrar en el release que se publica; usa otra "
+                        "variante o deja que se cree `profiling`. Un nombre que termina en Release o Debug solo se acepta "
+                        "si el build.gradle del módulo lo declara como build type propio" % args.variante)
     found_variants = find_profileable_variants(module, root, denied)
     variant, existing = resolve_variant(found_variants, args.variante)
     unverified = any(c["nombre"] == variant and c["estado"] == "sin build type" for c in found_variants)
+    in_gradle = any(c["nombre"] == variant and c.get("gradle") for c in found_variants)
     modules = list_modules(root, denied)
-    scan = scan_sources(root, denied)
+    outside_roots, unresolved_roots = external_roots(root, denied)
+    scan = scan_sources(root, denied, outside_roots)
+    name_logic = scan_gradle(root, denied, outside_roots)
     network = choose(args.red, detect(module, ["okhttp", "retrofit"]))
     retrofit = network and choose(args.retrofit, detect(module, ["retrofit"]))
     fragments = choose(args.fragments, detect(module, ["fragment", "appcompat"]))
@@ -3379,8 +4473,9 @@ def cmd_instrumentar(args):
             mains.append(("PerfHooksModule.kt", "PerfHooksModule.kt"))
     plan = [(templates / src, module / args.fuente / package_path / dst) for src, dst in files]
     plan += [(templates / "main" / src, module / main_dir / package_path / dst) for src, dst in mains]
+    # Si Gradle ya declara la variante profileable, su manifest solo necesita el <provider>.
     plan += [(templates / "manifests" / ("%s.xml" % kind), module / "src" / folder / "AndroidManifest.xml")
-             for kind, folder in (("debug", "debug"), ("profiling", variant))]
+             for kind, folder in (("debug", "debug"), ("debug" if in_gradle else "profiling", variant))]
     if not args.sin_tests:
         plan += [(templates / "test" / src, module / args.tests / package_path / dst) for src, dst in tests]
     pending = []
@@ -3390,7 +4485,8 @@ def cmd_instrumentar(args):
                 target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
                 print("~ actualizado: %s" % target)
             elif target.suffix == ".xml":
-                lacks = target.parent.name == variant and "<profileable" not in target.read_text(encoding="utf-8", errors="ignore")
+                lacks = target.parent.name == variant and not in_gradle \
+                    and "<profileable" not in target.read_text(encoding="utf-8", errors="ignore")
                 print("= ya existe, no se toca: %s (agrega el <provider> de abajo%s)" % (
                     target, " y <profileable android:shell=\"true\" />" if lacks else ""))
                 pending.append("manifest")
@@ -3414,6 +4510,18 @@ def cmd_instrumentar(args):
         shown = ["%s (%s)" % m for m in modules[:12]]
         print("Módulos: %s%s. La instrumentación va en el módulo app (--modulo %s); las librerías emiten marcas por una interfaz." % (
             " · ".join(shown), " …" if len(modules) > 12 else "", module.as_posix()))
+    if outside_roots:
+        print("También busqué en lo que settings.gradle incluye desde fuera de la raíz: %s." % ", ".join(
+            relative_to_root(path, root) for path in outside_roots))
+    if unresolved_roots:
+        print("⚠ No pude seguir estas rutas de settings.gradle (%s): si el punto de extensión de contenido visible o el "
+              "OkHttpClient viven ahí, búscalos a mano en esas carpetas (una interfaz de pantalla o de contenido con "
+              "multibinding; `OkHttpClient.Builder()`)." % ", ".join(unresolved_roots[:5]))
+    if network and not scan["okhttp"]:
+        print("⚠ El proyecto usa OkHttp pero no encontré dónde se arma el OkHttpClient: puede venir de una librería ya "
+              "compilada. Sin acceso a su Builder no hay dónde poner el gancho: las métricas de red serán solo de punta "
+              "a punta (sin secciones HTTP, QUEUE, CONN ni TTFB). Díselo al usuario; las alternativas están en setup.md "
+              "· OkHttp dentro de una librería publicada.")
     outside = [(f, n) for f, n in scan["okhttp"] if not is_under(root / f, module)]
     if outside:
         print("⚠ OkHttpClient se arma fuera del módulo app (%s%s): PerfHooks y el multibinding de red viven en el código "
@@ -3422,12 +4530,45 @@ def cmd_instrumentar(args):
               % (", ".join("%s:%d" % o for o in outside[:3]), " …" if len(outside) > 3 else ""))
     for other in found_variants:
         if other["nombre"] != variant and other["estado"] != "ok":
-            print("  · %s también declara <profileable> pero %s: no se usa" % (
-                other["nombre"], "es depurable" if other["estado"] == "depurable" else "no pude verificar su build type"))
+            print("  · %s también declara %s pero %s: no se usa" % (
+                other["nombre"], "<profileable>" if other.get("manifest") and not other.get("gradle") else "que es profileable",
+                "es depurable" if other["estado"] == "depurable" else "no pude verificar su build type"))
+    by_name = scan["buildconfig"]["BUILD_TYPE"] + scan["buildconfig"]["FLAVOR"]
+    depends_on_name = bool(by_name or name_logic) and not existing
+    if depends_on_name:
+        where = ["BuildConfig.BUILD_TYPE o FLAVOR en %s" % ", ".join("%s:%d" % use for use in by_name[:3])] if by_name else []
+        where += ["lógica de Gradle por nombre en %s" % ", ".join("%s:%d" % (f, n) for f, n, _ in name_logic[:3])] if name_logic else []
+        print("⚠ El proyecto parece decidir cosas por el nombre del build type o del sabor (%s). Un build type nuevo (\"%s\") "
+              "tiene otro nombre: lo que dependa de él (configuración por ambiente, toggles, endpoints) puede quedar sin "
+              "valor y romper el arranque o el login. Recomendado: no crees otro build type; mide sobre el que ya usas "
+              "con una propiedad (-Pperf), el fragmento \"Alternativa\" de abajo. Si lo creas igual, revisa cada uno de "
+              "esos puntos. La búsqueda es por texto: confirma que cada línea decide por un build type, un sabor o una "
+              "variante (y no por otra cosa que también tenga nombre)." % ("; ".join(where), variant))
+    if not existing:
+        inherited = source_set_files(module, "release")
+        if inherited:
+            print("⚠ initWith(release) copia la configuración del build type, no su source set: lo que hay en "
+                  "src/release/ no llega a \"%s\" (%s). Cópialo a src/%s/ o haz que ese source set lo incluya; lo mismo "
+                  "con src/<otro>/ si heredas de otro build type." % (variant, ", ".join(inherited), variant))
+    for path in debug_overrides(module, root, denied):
+        print("⚠ %s usa <debug-overrides>: ese bloque solo aplica en builds depurables, y la variante medida no lo es. "
+              "Lo que dependa de él (la CA de usuario de un proxy de pruebas, un certificado propio) deja de valer y la "
+              "app puede no conectarse. Si las pruebas lo necesitan, propón una copia solo para la variante medida "
+              "(src/%s/res/xml/%s, con esas reglas en <base-config>), nunca en release (setup.md · Lo que cambia al no "
+              "ser depurable)." % (relative_to_root(path, root), variant, path.name))
+    debug_uses = scan["buildconfig"]["DEBUG"]
+    if debug_uses:
+        print("BuildConfig.DEBUG se lee en %d lugar%s (%s%s): en la variante medida vale false. Revisa lo que dependa de él "
+              "o del flag de depurable (logs, herramientas de depuración, endpoints o proxies de prueba)." % (
+                  len(debug_uses), "" if len(debug_uses) == 1 else "es", ", ".join("%s:%d" % use for use in debug_uses[:3]),
+                  ", …" if len(debug_uses) > 3 else ""))
     print("\nFalta pegar, con el paquete ya puesto (references/setup.md explica cada pieza):\n")
     snippets = [("1. %s (build.gradle.kts del módulo)" % ("Source set y cobertura de la variante %s" % variant if existing
                                                            else "Build type %s, source set y cobertura" % variant),
                  SNIPPETS["gradle_existente" if existing else "gradle"])]
+    if depends_on_name:
+        snippets.append(("Alternativa recomendada: medir sobre un build type que ya existe, con -Pperf (sin crear \"%s\")"
+                         % variant, SNIPPETS["gradle_propiedad"]))
     if network:
         snippets.append(("2. Red: cada OkHttpClient pasa por el gancho", SNIPPETS["red_hilt" if hilt else "red_sinhilt"]))
     snippets.append(("%d. Navegación sin cambio de actividad (Compose, Navigation 3)" % (3 if network else 2), SNIPPETS["nav"]))
@@ -3495,6 +4636,9 @@ def main(argv=None):
     p.add_argument("--actividad", help="actividad de inicio (paquete/.Actividad); si no, la del launcher")
     p.add_argument("--espera", type=float, default=5)
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (se repite en el paso siguiente)")
+    p.add_argument("--pedido", default="reports/perf/setup/pedido.json",
+                   help="el flujo que se pidió en el setup ({\"flujo\", \"llegar\"}): con él, el paso siguiente es el chat "
+                        "de la sesión 1 ya escrito")
     p.add_argument("--hz", type=int)
     p.add_argument("--tp")
     p.add_argument("--forzar", action="store_true")
@@ -3538,7 +4682,8 @@ def main(argv=None):
     p.add_argument("--sin-comprimir", action="store_true", help="deja las trazas sin gzip")
     p.add_argument("--prueba", action="store_true", help="una corrida que imprime las métricas y no escribe el CSV")
     p.add_argument("--forzar", action="store_true", help="sigue aunque el dispositivo esté caliente o el build no cambie")
-    p.add_argument("--rehacer", action="store_true", help="descarta lo medido en esta fase y la mide de nuevo")
+    p.add_argument("--rehacer", action="store_true",
+                   help="descarta lo medido de este flujo en esta fase y lo mide de nuevo (lo de otros flujos no se toca)")
     p.add_argument("--compilacion", choices=COMPILATIONS,
                    help="completa (por defecto: todo compilado, para comparar cambios de código) o perfil (Baseline "
                         "Profile + speed-profile); si no, la del plan")
@@ -3593,8 +4738,21 @@ def main(argv=None):
     p.add_argument("--html", action="store_true")
     p.set_defaults(func=cmd_reporte)
 
+    p = sub.add_parser("nodos", help="busca un nodo en un volcado de uiautomator y da el centro de sus bounds para tocarlo")
+    p.add_argument("xml", help="archivo del volcado (uiautomator dump), por ejemplo <carpeta>/logs/ui.xml")
+    p.add_argument("--texto", help="texto del nodo (contiene, sin distinguir mayúsculas)")
+    p.add_argument("--id", help="resource-id del nodo, completo o solo lo que sigue a ':id/'")
+    p.add_argument("--desc", help="content-desc del nodo (contiene, sin distinguir mayúsculas)")
+    p.add_argument("--exacto", action="store_true",
+                   help="el texto, el id o la descripción tienen que ser iguales (también en mayúsculas y minúsculas), no contener")
+    p.add_argument("--volcar", action="store_true", help="vuelca primero la pantalla del dispositivo a ese archivo")
+    p.add_argument("--serial", help="dispositivo para --volcar y para el comando de toque que imprime")
+    p.add_argument("--limite", type=int, default=5)
+    p.set_defaults(func=cmd_nodos)
+
     p = sub.add_parser("instrumentar", help="copia la instrumentación y el cableado genéricos a un módulo Android")
-    p.add_argument("--modulo", required=True, help="carpeta del módulo de la app (el de com.android.application)")
+    p.add_argument("--modulo", required=True,
+                   help="carpeta del módulo que genera el APK (el de com.android.application; normalmente app)")
     p.add_argument("--paquete", required=True, help="paquete Kotlin para las clases, por ejemplo com.ejemplo.app.perf")
     p.add_argument("--fuente", default="src/perf/kotlin")
     p.add_argument("--tests", default="src/testDebug/kotlin")

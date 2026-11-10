@@ -18,7 +18,9 @@ Imprime las métricas principales, las de usuario, las centrales y cualquier mej
 | `no comparable` | Métrica de frames y la cantidad de frames cambió más de 50 %: el porcentaje o el percentil mide otra cosa |
 | `sin cambio` | Cualquier otro caso |
 
-Sin mejoras aplicadas (todas descartadas o pendientes) no hay fase después: salta la comparación, escribe el resumen con el estado inicial y genera el reporte, que documenta el diagnóstico y los pendientes.
+Sin mejoras aplicadas (el diagnóstico no propuso ninguna, o quedaron todas descartadas o pendientes) no hay fase después: es un cierre corto. Salta la comparación, escribe el resumen con el estado inicial y por qué no hay mejoras, y genera el reporte, que documenta el diagnóstico y los pendientes.
+
+Si una mejora a prueba salió `✖ hipótesis refutada`, dilo en la lectura: qué se descartó como causa, que el cambio se revierte (salvo que el usuario lo quiera por otro motivo) y qué queda como pendiente.
 
 Si `comparar` avisa que la **marca de fin de una métrica dejó de ser la última llamada de red** (`hasta_ultima_red_ms`), la métrica cambió de definición: su veredicto no prueba la mejora. Dilo en la lectura y usa la última llamada (o una marca de contenido visible, midiendo de nuevo) como evidencia.
 
@@ -30,7 +32,7 @@ Escribe en `estado.md` ("Lectura de la comparación") una línea por cada métri
 
 ## 3. Resumen ejecutivo
 
-De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las métricas principales, la causa en una frase y qué parte depende del backend.
+De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las métricas principales, la causa en una frase y qué parte depende del backend. **Reemplaza el que dejó la sesión 2** para el reporte inicial: ya no es relleno de plantilla, así que nada avisa si se queda, y el reporte final publicaría el resumen del diagnóstico.
 
 ## 4. Reporte
 
@@ -38,7 +40,7 @@ De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
 
-Genera `reporte-final.md` y `reporte-final.html` (autocontenido, con gráficos antes y después, pensado para alguien que no siguió la investigación): resumen ejecutivo; de los hallazgos al resultado (cuántos hallazgos, cuántas mejoras, cuántas aplicadas y cuáles funcionaron ✔ o no ✖); métricas principales con qué significa cada veredicto; esperado contra logrado; hallazgos con su resultado; mejoras aplicadas; lectura de la comparación; comparación completa; las filas de la ficha que sirven al lector; lo que queda abierto; y un glosario ("Cómo leer este reporte"). Lleva solo métricas agregadas: se puede compartir. El reporte inicial (`reporte-inicial.*`, sesión 2) no se toca.
+Genera `reporte-final.md` y `reporte-final.html` (autocontenido, con gráficos antes y después, pensado para alguien que no siguió la investigación): resumen ejecutivo; de los hallazgos al resultado (cuántos hallazgos, cuántas mejoras, cuántas aplicadas y cuáles funcionaron ✔ o no ✖; en una mejora a prueba, si su hipótesis quedó confirmada ✔ o refutada ✖); métricas principales con qué significa cada veredicto; esperado contra logrado; hallazgos con su resultado; mejoras aplicadas; lectura de la comparación; comparación completa; las filas de la ficha que sirven al lector; los pendientes ("no son mejoras"); y un glosario ("Cómo leer este reporte"). Lleva solo métricas agregadas: se puede compartir. Lo que en `estado.md` siga con el texto de la plantilla no se publica: el comando avisa qué falta, omite esa sección o pone "sin completar" en la fila; complétalo y vuelve a generar. El reporte inicial (`reporte-inicial.*`, sesión 2) no se toca.
 
 ## 5. Guarda de regresión
 
@@ -50,6 +52,7 @@ Propón cómo proteger la mejora: el test de la sesión 3 y, si el flujo es crí
 - Los commits propuestos y el texto del PR, solo con métricas agregadas.
 - Pendientes y hallazgos fuera del alcance, para una próxima investigación.
 - Cómo validarlo en campo después del release (Android vitals: TTID y TTFD si la app llama a `reportFullyDrawn`).
-- Limpieza, cuando se mergee: las trazas (`antes/`, `control/`, `despues/`, `prueba/`) y los heap dumps se borran; `metricas.csv`, los `.md` y el reporte se pueden conservar.
+- "Cambios temporales por revertir" de `estado.md`: comprueba que cada fila esté revertida (en su repo o módulo) y dilo; si queda alguna, es lo primero de la entrega.
+- Limpieza, cuando se mergee: las trazas (`antes/`, `control/`, `despues/`, `prueba/`) y los heap dumps se borran; `metricas.csv`, los `.md` y el reporte se pueden conservar. `reports/` no está en git: si `recorrido.sh` o el flow de `preparar` se van a reutilizar, se archivan fuera antes de borrar.
 - "Consumo" la completa el usuario con `perf.py consumo`; no se lo pidas. Si faltan filas, dilo en una línea con el comando.
 - `perf.py reporte` deja "Siguiente paso" como investigación cerrada.
