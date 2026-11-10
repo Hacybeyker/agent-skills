@@ -104,6 +104,24 @@ Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulat
 - `<métrica> hasta_ultima_red_ms`: para una métrica de usuario que termina en una llamada, cuánto hay desde su inicio hasta el fin de la última llamada de red. `comparar` avisa si se separan: la marca de fin dejó de ser la última llamada y la métrica cambió de definición.
 - El presupuesto de frame sale de `hz` (del plan o de la traza): 16,7 ms a 60 Hz, 11,1 ms a 90 Hz, 8,3 ms a 120 Hz.
 
+## Métricas por tramo (`segmentos`)
+
+Las métricas de frames y del hilo principal cubren la ventana entera del flujo. Si el plan declara `segmentos` ([ficha.md](ficha.md)), cada corrida agrega, por tramo:
+
+| Métrica | Qué es | Familia |
+| --- | --- | --- |
+| `<tramo> hilo_max_ms` | El slice de primer nivel más largo del hilo principal dentro del tramo (0 si no hay ninguno de 5 ms o más) | `app` |
+| `<tramo> frame_p90_ms` | P90 de la duración de los frames del tramo | `app` |
+| `<tramo> jank_app_pct` | Porcentaje de frames del tramo con App Deadline Missed | `app` |
+| `<tramo> frames` | Cuántos frames tuvo el tramo: el denominador de las dos anteriores | `info` |
+
+- El tramo va de la marca `desde` a la marca `hasta` (más `margen_ms`, si lo tiene) y cuenta los slices y los frames que **se solapan** con él: el frame o el slice que ya estaba en curso cuando sale la marca de inicio también entra. Se calcula sobre toda la traza, así que un tramo puede quedar fuera de la ventana.
+- Las métricas de la ventana (`hilo_max_ms`, `frame_p90_ms`, `jank_app_pct`) no cambian por declarar tramos.
+- Si falta una marca del tramo, esa corrida no trae sus métricas y la salida lo dice (`sin marcas para: tramo <nombre>`); si una de ellas es principal, la corrida es inválida y se repite.
+- Un tramo sin frames (muy corto, o en Android 11 o anterior, que no tiene FrameTimeline) solo trae `<tramo> hilo_max_ms`: ahí, esa es la que puede ser principal. Con `<tramo> frame_p90_ms` o `<tramo> jank_app_pct` como principal, la corrida sale inválida (`sin frames en el tramo`).
+- Con pocos frames valen las mismas reservas que en la ventana: si `<tramo> frames` cambia más de un 50 % entre antes y después, el P90 y el porcentaje salen `no comparable`; con render por software, `no confiable`.
+- Agregar un tramo después de medir `antes` deja esa métrica sin línea base: decláralos en la sesión 1, o repite `antes` (y `control`) con `--rehacer`.
+
 ## Hilos ajenos a la app
 
 Si hay un servidor (o cualquier trabajo que no es de la app) en el mismo proceso, sus hilos suman CPU, memoria y tiempo de respuesta que no se arreglan en la app. Decláralos en `plan.json` con una expresión regular del nombre del hilo (`hilos_ajenos`, [ficha.md](ficha.md)); mira los nombres en `cpu_por_hilo`. Cuando hay `hilos_ajenos`, cada corrida hace una **segunda pasada** por la traza (unos segundos más) y agrega, por grupo declarado:

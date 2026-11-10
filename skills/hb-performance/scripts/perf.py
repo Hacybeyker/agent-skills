@@ -59,6 +59,10 @@ CORE = ["ttid_ms", "ttfd_ms", "bind_application_ms", "jit_ms", "jank_app_pct", "
         "hilo_slices_100ms", "hilo_max_ms", "inflate_cantidad", "inflate_ms", "red_llamadas", "red_solapadas",
         "red_repetidas_2s", "gfx_jank_pct", "gfx_p90_ms", "pss_mb", "java_heap_mb", "activities", "views"]
 FRAME_METRICS = ("jank_app_pct", "jank_total_pct", "frame_p50_ms", "frame_p90_ms", "frame_p99_ms")
+# Métricas por tramo (segmentos del flujo): "<tramo> <métrica>", entre dos marcas y con lo que se solapa con el tramo.
+SEGMENT_METRICS = ("hilo_max_ms", "frame_p90_ms", "jank_app_pct")
+SEGMENT_FRAME_SUFFIXES = (" frame_p90_ms", " jank_app_pct")
+SEGMENT_NAME = re.compile(r"[A-Za-z][\w-]*")
 FRAMES_LEVEL = {"ok": 0, "baja": 1, "no": 2}
 SOFTWARE_RENDERER = re.compile(r"swiftshader|llvmpipe|softpipe|swrast|subzero|software", re.I)
 FRAMES_CHANGE_MAX = 0.5
@@ -87,7 +91,9 @@ GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rar
 - **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
 - **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen.
 - **Hallazgos:** una causa posible encontrada en el código o en las trazas. Solo los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y **no** es la causa (no hay nada que hacer); `sin veredicto estadístico`, que con estos datos no se pudo confirmar ni descartar (tampoco hay acción, salvo medir otra cosa).
-- **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente."""
+- **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente.
+- **Mejora a prueba:** el síntoma está medido y es estable, pero su causa no se pudo probar. Se aplica el cambio más probable y la medición de después dice si la hipótesis era cierta (`✔ hipótesis confirmada`) o no (`✖ hipótesis refutada`).
+- **Métricas por tramo (`<tramo> …`):** el hilo principal y los frames solo entre dos marcas del flujo (una pantalla, un salto), contando lo que se solapa con ese tramo, para que un pico no se diluya en el recorrido completo."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
@@ -274,9 +280,20 @@ def verdict(before, after, sense, control=None):
     return "sin cambio"
 
 
-def frames_changed(groups, flow):
+def frames_key(metric):
+    """La métrica que cuenta los frames sobre los que se calcula `metric` ("frames", o "<tramo> frames"); None si
+    `metric` no es un porcentaje ni un percentil de frames."""
+    if metric in FRAME_METRICS:
+        return "frames"
+    for suffix in SEGMENT_FRAME_SUFFIXES:
+        if metric.endswith(suffix):
+            return metric[:-len(suffix)] + " frames"
+    return None
+
+
+def frames_changed(groups, flow, key="frames"):
     """True si la mediana de frames cambió más de FRAMES_CHANGE_MAX entre antes y después."""
-    entry = groups.get((flow, "frames"))
+    entry = groups.get((flow, key))
     if not entry or "antes" not in entry["fases"] or "despues" not in entry["fases"]:
         return False
     before = statistics.median(entry["fases"]["antes"])
@@ -285,7 +302,7 @@ def frames_changed(groups, flow):
 
 
 def frame_metric(name):
-    return name in FRAME_METRICS or name.startswith("gfx_")
+    return name in FRAME_METRICS or name.startswith("gfx_") or name.endswith(SEGMENT_FRAME_SUFFIXES)
 
 
 def frames_note(trust):
@@ -318,7 +335,7 @@ def compare(rows, cv_max=CV_MAX, trust=("ok", "")):
             result = "informativa"
         elif note and trust[0] == "no":
             result = "no confiable"
-        elif metric in FRAME_METRICS and frames_changed(groups, flow):
+        elif frames_key(metric) and frames_changed(groups, flow, frames_key(metric)):
             result = "no comparable"
             warnings.add("frames distintos")
         else:
@@ -376,8 +393,15 @@ def load_plan_beside(csv_path):
     return load_plan(plan_path) if plan_path.is_file() else {}
 
 
+def segment_metric_names(flow):
+    return ["%s %s" % (s["nombre"], m) for s in flow.get("segmentos") or [] for m in SEGMENT_METRICS]
+
+
 def user_metric_names(plan):
-    return [m["nombre"] for flow in (plan.get("flujos") or {}).values() for m in flow.get("metricas_usuario", [])]
+    """Las métricas que define el plan: las de usuario y las de cada tramo (segmentos)."""
+    flows = list((plan.get("flujos") or {}).values())
+    return [m["nombre"] for flow in flows for m in flow.get("metricas_usuario", [])] \
+        + [name for flow in flows for name in segment_metric_names(flow)]
 
 
 def priority(metric, plan):
@@ -452,6 +476,20 @@ def update_block(folder, name, content):
 
 # ── Plan ─────────────────────────────────────────────────────────────────────
 
+def check_marker(marker):
+    return bool(marker.get("marca")) and marker.get("punto", "inicio") in ("inicio", "fin") \
+        and marker.get("cual", "primera") in ("primera", "ultima")
+
+
+def check_margin(spec):
+    """True si 'margen_ms' falta o es un número (lo que después lee int())."""
+    try:
+        int(spec.get("margen_ms", 0))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def load_plan(path):
     path = pathlib.Path(path)
     try:
@@ -478,17 +516,31 @@ def load_plan(path):
                     or not isinstance(spec.get("hasta"), dict):
                 raise PerfError("métrica de usuario inválida en '%s': necesita nombre, desde y hasta" % name)
             for side in ("desde", "hasta"):
-                marker = spec[side]
-                if not marker.get("marca") or marker.get("punto", "inicio") not in ("inicio", "fin") \
-                        or marker.get("cual", "primera") not in ("primera", "ultima"):
+                if not check_marker(spec[side]):
                     raise PerfError("'%s.%s' en '%s': usa marca, punto (inicio|fin) y cual (primera|ultima)"
                                     % (spec["nombre"], side, name))
+        segments = flow.get("segmentos") or []
+        seen = set()
+        for spec in segments if isinstance(segments, list) else [None]:
+            if not isinstance(spec, dict) or not isinstance(spec.get("nombre"), str) \
+                    or not SEGMENT_NAME.fullmatch(spec["nombre"]) or spec["nombre"] == "red" or spec["nombre"] in seen \
+                    or not all(isinstance(spec.get(side), dict) and check_marker(spec[side]) for side in ("desde", "hasta")) \
+                    or not check_margin(spec):
+                raise PerfError("'%s.segmentos' es una lista de tramos: cada uno con 'nombre' (letras, números, _ o -; sin "
+                                "repetir y distinto de 'red'), 'desde' y 'hasta' (marcas, como en metricas_usuario) y, si "
+                                "quieres, 'margen_ms' (un número)" % name)
+            seen.add(spec["nombre"])
     for item in plan.get("mejoras", []):
         if not isinstance(item, dict) or not item.get("id") or not item.get("titulo"):
             raise PerfError("%s: cada mejora necesita al menos 'id' y 'titulo'" % path)
         if item.get("estado", "propuesta") not in ESTADOS:
             raise PerfError("%s: la mejora %s tiene estado '%s': usa %s" % (path, item["id"], item.get("estado"),
                                                                            ", ".join(ESTADOS)))
+        if not isinstance(item.get("a_prueba", False), bool):
+            raise PerfError("%s: 'a_prueba' de la mejora %s es true o false" % (path, item["id"]))
+        if item.get("a_prueba") and not all(str(item.get(key) or "").strip() for key in ("hipotesis", "metrica", "esperado")):
+            raise PerfError("%s: la mejora a prueba %s necesita 'hipotesis', 'metrica' y 'esperado': la medición de después "
+                            "confirma o refuta la hipótesis con esa métrica" % (path, item["id"]))
     if plan.get("instalar") is not None and not isinstance(plan["instalar"], str):
         raise PerfError("%s: 'instalar' es el comando que compila e instala el build de profiling (texto)" % path)
     if plan.get("profundidad", "riguroso") not in ("riguroso", "triage"):
@@ -499,6 +551,8 @@ def load_plan(path):
         window = flow.get("ventana")
         if window is not None and not (isinstance(window, dict) and "desde" in window and "hasta" in window):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
+        if window is not None and not check_margin(window):
+            raise PerfError("%s: flujos.%s.ventana.margen_ms es un número de milisegundos" % (path, name))
     if not isinstance(plan.get("modelos", {}), dict):
         raise PerfError("%s: 'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico" % path)
     foreign = plan.get("hilos_ajenos", [])
@@ -700,6 +754,32 @@ def resolve_window(markers, spec):
     return start, end + int(spec.get("margen_ms", 0)) * 1_000_000
 
 
+def segment_metrics(markers, frames, main, specs):
+    """Métricas por tramo (segmentos del flujo): el slice más largo del hilo principal, el P90 de frame y el jank de la
+    app entre dos marcas, con los slices y los frames que se solapan con el tramo. Así un pico de una sola pantalla no
+    se diluye en la ventana del flujo. `frames` y `main` son los de toda la traza. Devuelve (métricas, tramos sin marcas)."""
+    out, missing = [], []
+    for spec in specs:
+        bounds = resolve_window(markers, spec)
+        if not bounds:
+            missing.append(spec["nombre"])
+            continue
+        start, end = bounds
+        name = spec["nombre"]
+        top = [r for r in main if r[3] == 0 and r[2] >= MAIN_SLICE_MIN_NS and r[1] <= end and r[1] + r[2] >= start]
+        out.append(("%s hilo_max_ms" % name, max((r[2] for r in top), default=0) / 1e6, "ms", "app"))
+        inside = [f for f in frames if f[1] <= end and f[1] + max(f[2], 0) >= start]
+        if not inside:
+            continue
+        out += [("%s frames" % name, len(inside), "frames", "info"),
+                ("%s jank_app_pct" % name, sum(1 for f in inside if "App Deadline Missed" in f[4]) / len(inside) * 100,
+                 "%", "app")]
+        durations = [f[2] / 1e6 for f in inside if f[2] > 0]
+        if durations:
+            out.append(("%s frame_p90_ms" % name, percentile(durations, 0.9), "ms", "app"))
+    return out, missing
+
+
 def merged_top_level(intervals):
     """Intervalos que no están dentro de otro (para no contar dos veces un inflate anidado)."""
     top, end = [], -1
@@ -753,6 +833,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     if not process:
         return [], "la app no aparece en la traza", info
     markers = sorted(sections + main + launches, key=lambda r: r[1])
+    all_frames, all_main = frames, main
     window = resolve_window(markers, flow_spec.get("ventana"))
     info["ventana_ns"] = window
     if window:  # frames e hilo solo dentro de la ventana: lo que pasa antes o después (esperar, dar Enter) no cuenta
@@ -804,7 +885,10 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     out += network_metrics(sections, known_endpoints, force="red_llamadas" in known)
     users, missing = user_metrics(markers, flow_spec.get("metricas_usuario", []))
     out += users
-    info["faltantes"] = missing + (["ventana"] if info.get("ventana_faltante") else [])
+    segments, missing_segments = segment_metrics(markers, all_frames, all_main, flow_spec.get("segmentos") or [])
+    out += segments
+    info["faltantes"] = missing + ["tramo %s" % name for name in missing_segments] \
+        + (["ventana"] if info.get("ventana_faltante") else [])
     return with_families(out, flow_spec.get("familias")), None, info
 
 
@@ -1601,7 +1685,9 @@ def next_steps(folder, plan, flow=None):
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         return "sesión 3 · %s" % first["id"], [
             chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
-                 "sesión 3: aplica %s con su test y el DoD, propone el commit y marca la mejora aplicada" % first["id"], plan)]
+                 "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada" % (
+                     first["id"], " (a prueba: la medición de después confirma o refuta su hipótesis)"
+                     if first.get("a_prueba") else ""), plan)]
     if "despues" in phases and not stale:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -1765,7 +1851,7 @@ def cmd_decidir(args):
         state.write_text(re.sub(r"(## Decisiones\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S),
                          encoding="utf-8")
     rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
-    update_block(folder, "mejoras", markdown_table(PLAN_HEADERS, plan_rows(plan, rows)))
+    update_block(folder, "mejoras", plan_table_md(plan, rows))
     print("✔ %s" % line[2:])
     print_next(folder, plan)
 
@@ -1912,9 +1998,16 @@ def cmd_capturar(args, plan=None):
             if not invalid and not args.prueba:
                 # Sin la ventana o sin una métrica principal, el recorrido no llegó a donde debía (un tap que no
                 # navegó, la pantalla que no cargó a tiempo): la corrida no vale y se repite.
-                essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in plan.get("principales", [])]
+                principales = plan.get("principales") or []
+                measured = {m[0] for m in metrics}
+                absent = [m for m in segment_metric_names(flow) if m in principales and m not in measured]
+                unmarked = [m for m in absent if "tramo %s" % m.rsplit(" ", 1)[0] in info.get("faltantes", [])]
+                essential = [m for m in info.get("faltantes", []) if m == "ventana" or m in principales] + unmarked
                 if essential:
                     invalid = "sin marcas para %s: el recorrido no completó el flujo" % ", ".join(essential)
+                elif absent:  # el tramo tiene sus marcas pero ningún frame: no hay porcentaje ni percentil que calcular
+                    invalid = ("sin frames en el tramo para %s: en un tramo sin frames (o sin FrameTimeline, Android 11 o "
+                               "anterior) usa '<tramo> hilo_max_ms' como principal" % ", ".join(absent))
             if not invalid and plan.get("hilos_ajenos"):
                 window = info.get("ventana_ns")
                 foreign_sql = fill_sql((ASSETS / "queries" / "hilos_ajenos.sql").read_text(encoding="utf-8"), package,
@@ -2245,7 +2338,7 @@ def logrado_rows(plan, results):
     for item in plan.get("mejoras", []):
         r = by_metric.get((item.get("flujo") or default_flow, item.get("metrica")))
         unit = r["unidad"] if r else ""
-        out.append([item["id"], item["titulo"], item.get("metrica", "—"),
+        out.append([item["id"], improvement_title(item), item.get("metrica", "—"),
                     fmt(r["antes"]["mediana"], unit) if r else "—", item.get("esperado", "—"),
                     fmt(r["despues"]["mediana"], unit) if r else "—", fmt_pct(r["delta_pct"]) if r else "—",
                     r["veredicto"] if r else "—", item.get("estado", "—"), improvement_result(item, r)])
@@ -2253,18 +2346,36 @@ def logrado_rows(plan, results):
 
 
 def improvement_result(item, r):
-    """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica."""
+    """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica. En una mejora a prueba
+    (a_prueba), la medición de después confirma o refuta su hipótesis."""
+    trial = bool(item.get("a_prueba"))
     if item.get("estado") != "aplicada":
         return "— no aplicada"
     if r is None:
         return "— sin medir"
     if r["veredicto"] == "mejora":
-        return "✔ funcionó"
+        return "✔ hipótesis confirmada" if trial else "✔ funcionó"
     if r["veredicto"] == "regresión":
-        return "✖ empeoró"
+        return "✖ hipótesis refutada (empeoró)" if trial else "✖ empeoró"
     if r["veredicto"] in ("informativa", "no comparable", "no confiable"):
         return "— sin veredicto"
-    return "✖ no funcionó"
+    return "✖ hipótesis refutada" if trial else "✖ no funcionó"
+
+
+def improvement_title(item):
+    return item["titulo"] + (" (a prueba)" if item.get("a_prueba") else "")
+
+
+def trial_md(plan):
+    """Las mejoras a prueba del plan, con su hipótesis y lo que la confirma: van debajo de la tabla del plan."""
+    items = [m for m in plan.get("mejoras", []) if m.get("a_prueba")]
+    if not items:
+        return ""
+    lines = ["", "**Mejoras a prueba** (la causa no está probada: el cambio se aplica y la medición de después confirma o "
+                 "refuta la hipótesis):", ""]
+    lines += ["- **%s** · hipótesis: %s · se confirma si `%s` mejora (esperado: %s)" % (
+        m["id"], m["hipotesis"], m["metrica"], m["esperado"]) for m in items]
+    return "\n".join(lines)
 
 
 LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "Δ %", "Veredicto", "Estado", "Resultado"]
@@ -2533,7 +2644,7 @@ def plan_rows(plan, rows):
     out = []
     for item in plan.get("mejoras", []):
         before = medians.get((item.get("flujo") or default_flow, item.get("metrica")))
-        out.append([item["id"], item["titulo"], item.get("hallazgo", "—"), item.get("metrica", "—"),
+        out.append([item["id"], improvement_title(item), item.get("hallazgo", "—"), item.get("metrica", "—"),
                     fmt(before[0], before[1]) if before else "—", item.get("esperado", "—"),
                     item.get("prioridad", "—"), item.get("esfuerzo", "—"), item.get("riesgo", "—"),
                     item.get("estado", "propuesta")])
@@ -2541,6 +2652,10 @@ def plan_rows(plan, rows):
 
 
 PLAN_HEADERS = ["#", "Mejora", "Hallazgo", "Métrica", "Antes", "Esperado", "Prioridad", "Esfuerzo", "Riesgo", "Estado"]
+
+
+def plan_table_md(plan, rows):
+    return markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) + trial_md(plan)
 
 
 def parse_table(md):
@@ -2573,6 +2688,11 @@ def finding_outcome(finding_id, tipo, plan, results=None):
                     text = "%s: no se aplicó (%s)" % (m["id"], estado)
                 elif r is None:
                     text = "%s: aplicada, sin medición de su métrica" % m["id"]
+                elif m.get("a_prueba") and r["veredicto"] not in ("informativa", "no comparable", "no confiable"):
+                    confirmed = r["veredicto"] == "mejora"
+                    text = "%s %s: hipótesis %s (%s %s)" % ("✔" if confirmed else "✖", m["id"],
+                                                             "confirmada" if confirmed else "refutada",
+                                                             m.get("metrica"), r["veredicto"])
                 elif r["veredicto"] == "mejora":
                     text = "✔ %s funcionó: %s" % (m["id"], m.get("metrica"))
                 elif r["veredicto"] == "regresión":
@@ -2624,7 +2744,9 @@ def improvements_summary(plan, results, n_findings=None):
             why = "%s: %s → %s (%s) · %s" % (m.get("metrica"), fmt(r["antes"]["mediana"], r["unidad"]),
                                             fmt(r["despues"]["mediana"], r["unidad"]), fmt_pct(r["delta_pct"]),
                                             VERDICT_TEXT.get(r["veredicto"], r["veredicto"]))
-        rows.append([m["id"], m["titulo"], m.get("hallazgo", "—"), result, why])
+        if m.get("a_prueba"):
+            why = "hipótesis: %s · %s" % (m["hipotesis"], why)
+        rows.append([m["id"], improvement_title(m), m.get("hallazgo", "—"), result, why])
     if not rows:
         return ""
     counts = flow_counts(plan, rows, n_findings)
@@ -2692,7 +2814,7 @@ def cmd_reporte(args):
         return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
 
     if args.inicial:
-        plan_md = markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) if plan.get("mejoras") else ""
+        plan_md = plan_table_md(plan, rows) if plan.get("mejoras") else ""
         if plan_md and update_block(folder, "mejoras", plan_md):
             print("✔ estado.md actualizado (Plan de mejoras)")
         plan_intro = ("> Lo que se propone cambiar, una mejora por hallazgo. **Tú decides** cuáles se aplican "

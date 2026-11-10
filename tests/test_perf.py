@@ -2131,3 +2131,258 @@ class ForeignThreadsTest(DeviceBase):
         # la ventana del flujo (si la hay) acota la consulta; sin ventana, toda la traza
         self.assertRegex(sql, r"ts\.ts < 4000000000000000000")
 
+
+
+class SegmentsTest(PerfBase):
+    """Métricas por tramo (`segmentos`): el pico de una pantalla no se diluye en la ventana del flujo."""
+
+    def flow(self):
+        return {"ventana": {"desde": {"marca": "NAV lista"}, "hasta": {"marca": "MARK detalle"}},
+                "segmentos": [{"nombre": "detalle", "desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}}]}
+
+    def trace(self, peak_ms=60):
+        frames = [("frame", i * 20 * MS, 16 * MS, 0, "None") for i in range(50)]  # la lista, de 0 a 1000 ms, sin jank
+        frames += [("frame", 1100 * MS, peak_ms * MS, 0, "App Deadline Missed"),  # el pico al entrar al detalle
+                   ("frame", 1200 * MS, 16 * MS, 0, "None"), ("frame", 1220 * MS, 16 * MS, 0, "None")]
+        main = [("hilo", 100 * MS, 8 * MS, 0, "Choreographer#doFrame"), ("hilo", 1100 * MS, peak_ms * MS, 0, "Choreographer#doFrame"),
+                ("hilo", 1105 * MS, 30 * MS, 1, "traversal")]
+        marks = [("seccion", 0, 0, 0, "NAV lista"), ("seccion", 1090 * MS, 0, 0, "NAV detalle"),
+                 ("seccion", 1250 * MS, 0, 0, "MARK detalle")]
+        return [("proceso", 0, 0, 0, PKG), ("limites", 0, 5000 * MS, 0, "")] + frames + main + marks
+
+    def metrics(self, rows, flow):
+        out, invalid, info = perf.trace_metrics(rows, 60, flow, set(), 34)
+        self.assertIsNone(invalid)
+        return {m[0]: m for m in out}, info
+
+    def test_el_tramo_aisla_el_pico_que_la_ventana_diluye(self):
+        m, info = self.metrics(self.trace(), self.flow())
+        self.assertEqual(m["frame_p90_ms"][1], 16)  # 53 frames en la ventana: el pico no mueve el P90
+        self.assertAlmostEqual(m["jank_app_pct"][1], 100 / 53)
+        self.assertEqual(m["detalle hilo_max_ms"][1:], (60, "ms", "app"))
+        self.assertEqual(m["detalle frame_p90_ms"][1:], (60, "ms", "app"))
+        self.assertAlmostEqual(m["detalle jank_app_pct"][1], 100 / 3)
+        self.assertEqual(m["detalle frames"][1:], (3, "frames", "info"))
+        self.assertEqual(info["faltantes"], [])
+
+    def test_declarar_tramos_no_cambia_las_metricas_de_la_ventana(self):
+        with_segments, _ = self.metrics(self.trace(), self.flow())
+        flow = self.flow()
+        del flow["segmentos"]
+        without, _ = self.metrics(self.trace(), flow)
+        self.assertEqual({k: v for k, v in with_segments.items() if not k.startswith("detalle ")}, without)
+
+    def test_cuenta_lo_que_se_solapa_con_el_tramo_aunque_empiece_antes_y_lo_que_queda_fuera_de_la_ventana(self):
+        rows = self.trace() + [("hilo", 1080 * MS, 90 * MS, 0, "deliverInputEvent"),  # empezó antes del NAV y sigue
+                               ("hilo", 2000 * MS, 300 * MS, 0, "tarde")]  # después del tramo: no cuenta
+        flow = self.flow()
+        flow["ventana"] = {"desde": {"marca": "NAV lista"}, "hasta": {"marca": "NAV detalle"}}  # el tramo queda fuera
+        m, _ = self.metrics(rows, flow)
+        self.assertEqual(m["detalle hilo_max_ms"][1], 90)
+        self.assertEqual(m["hilo_max_ms"][1], 90)  # la ventana sigue contando por inicio: el slice de 1080 ms entra
+        flow["segmentos"][0]["margen_ms"] = 800
+        self.assertEqual(self.metrics(rows, flow)[0]["detalle hilo_max_ms"][1], 300)
+
+    def test_un_tramo_sin_marcas_no_trae_metricas_y_queda_en_faltantes(self):
+        flow = self.flow()
+        flow["segmentos"].append({"nombre": "desglose", "desde": {"marca": "NAV desglose"}, "hasta": {"marca": "MARK desglose"}})
+        m, info = self.metrics(self.trace(), flow)
+        self.assertEqual(info["faltantes"], ["tramo desglose"])
+        self.assertIn("detalle hilo_max_ms", m)
+        self.assertFalse([k for k in m if k.startswith("desglose ")])
+
+    def test_un_tramo_sin_frames_solo_trae_el_hilo(self):
+        rows = [r for r in self.trace() if not (r[0] == "frame" and r[1] >= 1000 * MS)]
+        m, _ = self.metrics(rows, self.flow())
+        self.assertEqual(m["detalle hilo_max_ms"][1], 60)
+        self.assertNotIn("detalle frame_p90_ms", m)
+        self.assertNotIn("detalle jank_app_pct", m)
+
+    def test_las_familias_del_flujo_tambien_valen_para_un_tramo(self):
+        flow = self.flow()
+        flow["familias"] = {"detalle jank_app_pct": "info"}
+        self.assertEqual(self.metrics(self.trace(), flow)[0]["detalle jank_app_pct"][3], "info")
+
+    def test_el_plan_valida_los_tramos(self):
+        base = {"paquete": PKG, "flujos": {"f": self.flow()}}
+        path = self.dir / "plan.json"
+        write(path, json.dumps(base))
+        self.assertEqual(perf.user_metric_names(perf.load_plan(path)),
+                         ["detalle hilo_max_ms", "detalle frame_p90_ms", "detalle jank_app_pct"])
+        good = base["flujos"]["f"]["segmentos"][0]
+        for bad in ([dict(good, nombre="con espacio")], [dict(good, nombre="red")], [good, good], [{"nombre": "x"}],
+                    [dict(good, nombre=None)], [dict(good, nombre=True)], [dict(good, margen_ms="mucho")],
+                    [dict(good, hasta={"marca": "MARK x", "punto": "medio"})], {"nombre": "detalle"}, ["detalle"]):
+            base["flujos"]["f"]["segmentos"] = bad
+            write(path, json.dumps(base))
+            with self.assertRaises(perf.PerfError, msg=str(bad)) as caught:
+                perf.load_plan(path)
+            self.assertIn("'f.segmentos' es una lista de tramos", str(caught.exception))
+        base["flujos"]["f"]["segmentos"] = [dict(good, margen_ms="250")]  # lo que int() lee, vale: como en la ventana
+        base["flujos"]["f"]["ventana"]["margen_ms"] = "mucho"
+        write(path, json.dumps(base))
+        with self.assertRaises(perf.PerfError) as caught:
+            perf.load_plan(path)
+        self.assertIn("flujos.f.ventana.margen_ms es un número", str(caught.exception))
+
+    def test_comparar_da_veredicto_por_tramo_y_no_compara_si_cambian_sus_frames(self):
+        text = rows("antes", "f", "detalle hilo_max_ms", [60, 61, 59, 60, 62]) \
+            + rows("despues", "f", "detalle hilo_max_ms", [20, 21, 19, 20, 22]) \
+            + rows("antes", "f", "detalle frames", [10] * 5, "frames", family="info") \
+            + rows("despues", "f", "detalle frames", [30] * 5, "frames", family="info") \
+            + rows("antes", "f", "detalle frame_p90_ms", [40, 41, 39, 40, 42]) \
+            + rows("despues", "f", "detalle frame_p90_ms", [20] * 5) \
+            + rows("antes", "f", "frames", [100] * 5, "frames", family="info") \
+            + rows("despues", "f", "frames", [100] * 5, "frames", family="info") \
+            + rows("antes", "f", "frame_p90_ms", [40, 41, 39, 40, 42]) + rows("despues", "f", "frame_p90_ms", [20] * 5)
+        verdicts = {r["metrica"]: r for r in perf.compare(read_rows_from(text))[0]}
+        self.assertEqual(verdicts["detalle hilo_max_ms"]["veredicto"], "mejora")
+        self.assertEqual(verdicts["detalle frame_p90_ms"]["veredicto"], "no comparable")  # sus frames pasaron de 10 a 30
+        self.assertEqual(verdicts["frame_p90_ms"]["veredicto"], "mejora")  # los de la ventana no cambiaron
+        software = {r["metrica"]: r for r in perf.compare(read_rows_from(text), trust=("no", "render por software"))[0]}
+        self.assertEqual(software["detalle frame_p90_ms"]["veredicto"], "no confiable")
+        self.assertEqual(software["detalle hilo_max_ms"]["veredicto"], "mejora")
+
+    def test_las_metricas_por_tramo_salen_en_la_salida_compacta(self):
+        plan = {"flujos": {"f": self.flow()}}
+        self.assertEqual(perf.priority("detalle hilo_max_ms", plan)[0], 1)
+        self.assertEqual(perf.priority("otra cosa", plan)[0], 3)
+
+
+class SegmentsCaptureTest(DeviceBase):
+    def test_capturar_guarda_las_metricas_del_tramo_en_todas_las_corridas_y_repite_la_que_no_lo_recorrio(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["principales"] = ["detalle hilo_max_ms"]
+        plan["flujos"]["home"]["segmentos"] = [{"nombre": "detalle", "desde": {"marca": "NAV detalle"},
+                                                 "hasta": {"marca": "MARK detalle"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        marks = GOOD + '"seccion",5000000,0,0,"NAV detalle"\n"seccion",250000000,0,0,"MARK detalle"\n'
+        self.tp_outputs(GOOD, marks, marks)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertIn("sin marcas para detalle hilo_max_ms: el recorrido no completó el flujo", out)
+        self.assertIn("corrida 2/2", out)
+        data = self.read_csv_at(self.plan.parent / "metricas.csv")
+        values = sorted((k[2], v["valor"], v["familia"]) for k, v in data.items() if k[1] == "detalle hilo_max_ms")
+        self.assertEqual(values, [("2", "30", "app"), ("3", "30", "app")])
+        self.assertEqual(len([k for k in data if k[1] == "detalle frame_p90_ms"]), 2)
+        self.assertIn("detalle hilo_max_ms", out[out.index("| Fase |"):])  # en el resumen compacto de la fase
+
+    def test_un_tramo_con_marcas_pero_sin_frames_no_sirve_para_una_principal_de_frames_y_lo_dice(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["principales"] = ["detalle frame_p90_ms"]
+        plan["flujos"]["home"]["segmentos"] = [{"nombre": "detalle", "desde": {"marca": "NAV detalle"},
+                                                 "hasta": {"marca": "MARK detalle"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        late = GOOD + '"seccion",3000000000,0,0,"NAV detalle"\n"seccion",3100000000,0,0,"MARK detalle"\n'  # sin frames ahí
+        self.tp_outputs(late)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("inválida: sin frames en el tramo para detalle frame_p90_ms", result.stdout)
+        self.assertNotIn("sin marcas para", result.stdout)
+        self.assertIn("usa '<tramo> hilo_max_ms' como principal", result.stderr)
+
+    def read_csv_at(self, path):
+        with path.open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+
+FINDINGS = "# Rendimiento · Detalle · 2026-11-09\n\n## Resumen ejecutivo\n\nTexto.\n\n## Hallazgos\n\n" \
+           "| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n" \
+           "| H1 | Carga lenta | 131 ms | Red en el hilo | bug |\n" \
+           "| H2 | Frame largo al entrar | 60 ms en las 10 corridas | sin probar | sin confirmar |\n" \
+           "| H3 | Frame largo al volver | 58 ms en las 10 corridas | sin probar | sin confirmar |\n\n" \
+           "## Plan de mejoras\n\n<!-- perf:mejoras -->\n<!-- /perf:mejoras -->\n\n## Decisiones\n\n"
+
+
+class TrialImprovementTest(PerfBase):
+    """Mejora a prueba: un síntoma estable sin causa probada; la medición de después confirma o refuta la hipótesis."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["carga_ms"], "flujos": {"f": {}}, "mejoras": [
+            {"id": "M1", "titulo": "Caché", "hallazgo": "H1", "metrica": "carga_ms", "estado": "propuesta"},
+            {"id": "M2", "titulo": "Diferir la animación", "hallazgo": "H2", "a_prueba": True,
+             "hipotesis": "el pico es la animación de entrada", "metrica": "detalle hilo_max_ms", "esperado": "≤ 16 ms",
+             "estado": "propuesta"},
+            {"id": "M3", "titulo": "Quitar el blur", "hallazgo": "H3", "a_prueba": True,
+             "hipotesis": "el pico es el blur del fondo", "metrica": "volver hilo_max_ms", "esperado": "≤ 16 ms",
+             "estado": "propuesta"}]}
+        write(self.folder / "estado.md", FINDINGS)
+        self.save()
+        self.before = rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131]) \
+            + rows("antes", "f", "detalle hilo_max_ms", [60, 61, 59, 60, 62]) \
+            + rows("antes", "f", "volver hilo_max_ms", [58, 59, 57, 58, 60])
+        write(self.folder / "metricas.csv", HEADER + self.before)
+
+    def save(self):
+        write(self.folder / "plan.json", json.dumps(self.plan))
+
+    def test_el_plan_exige_hipotesis_metrica_y_esperado_en_una_mejora_a_prueba(self):
+        for missing in ("hipotesis", "metrica", "esperado"):
+            plan = json.loads(json.dumps(self.plan))
+            del plan["mejoras"][1][missing]
+            write(self.folder / "plan.json", json.dumps(plan))
+            result = self.perf("siguiente", "--carpeta", self.folder)
+            self.assertEqual(result.returncode, 2, missing)
+            self.assertIn("la mejora a prueba M2 necesita 'hipotesis', 'metrica' y 'esperado'", result.stderr)
+        self.plan["mejoras"][1]["a_prueba"] = "sí"
+        self.save()
+        self.assertIn("'a_prueba' de la mejora M2 es true o false", self.perf("siguiente", "--carpeta", self.folder).stderr)
+
+    def test_el_reporte_inicial_la_propone_con_su_hipotesis_y_el_usuario_la_decide_como_cualquier_otra(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertIn("| M1 | Caché | H1 | carga_ms | 131 ms |", initial)
+        self.assertIn("| M2 | Diferir la animación (a prueba) | H2 | detalle hilo_max_ms | 60 ms | ≤ 16 ms |", initial)
+        self.assertIn("**Mejoras a prueba**", initial)
+        self.assertIn("- **M2** · hipótesis: el pico es la animación de entrada · se confirma si `detalle hilo_max_ms` mejora "
+                      "(esperado: ≤ 16 ms)", initial)
+        self.assertIn("| H2 | Frame largo al entrar | 60 ms en las 10 corridas | sin probar | sin confirmar | M2 (propuesta) |",
+                      initial)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("- **M3** · hipótesis: el pico es el blur del fondo", state)
+        out = self.ok("decidir", "--carpeta", self.folder, "--aprobar", "M2,M3", "--pendiente", "M1")
+        self.assertIn("sesión 3, aplica M2", out)
+        self.assertIn("aplica M2 (a prueba: la medición de después confirma o refuta su hipótesis)", out)
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual([m["estado"] for m in plan["mejoras"]], ["pendiente", "aprobada", "aprobada"])
+        self.assertTrue(plan["mejoras"][1]["a_prueba"])
+        self.assertIn("| M2 | Diferir la animación (a prueba) |", (self.folder / "estado.md").read_text(encoding="utf-8"))
+
+    def test_el_reporte_final_dice_si_la_hipotesis_se_confirmo_o_se_refuto(self):
+        for item in self.plan["mejoras"]:
+            item["estado"] = "aplicada"
+        self.save()
+        write(self.folder / "metricas.csv", HEADER + self.before
+              + rows("despues", "f", "carga_ms", [46, 45, 47, 46, 44])
+              + rows("despues", "f", "detalle hilo_max_ms", [12, 13, 11, 12, 14])
+              + rows("despues", "f", "volver hilo_max_ms", [58, 59, 57, 58, 59]))
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("| M1 | Caché | H1 | ✔ funcionó | carga_ms: 131 ms → 46 ms", final)
+        self.assertIn("| M2 | Diferir la animación (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
+                      "animación de entrada · detalle hilo_max_ms: 60 ms → 12 ms (-80 %)", final)
+        self.assertIn("| M3 | Quitar el blur (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el blur del fondo · "
+                      "volver hilo_max_ms: 58 ms → 58 ms", final)
+        self.assertIn("| sin confirmar | ✔ M2: hipótesis confirmada (detalle hilo_max_ms mejora) |", final)
+        self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (volver hilo_max_ms sin cambio) |", final)
+        self.assertIn("3 hallazgos → 3 mejoras propuestas → 3 aplicadas → 2 funcionaron", final)
+        self.assertIn("| ≤ 16 ms | 12 ms | -80 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
+        page = (self.folder / "reporte-final.html").read_text(encoding="utf-8")
+        self.assertIn('<td class="ok">✔ hipótesis confirmada</td>', page)
+        self.assertIn('<td class="ko">✖ hipótesis refutada</td>', page)
+        self.assertIn("Mejora a prueba:", final)  # el glosario la explica
+        out = self.ok("comparar", self.folder / "metricas.csv")
+        self.assertIn("estado.md actualizado (Plan de mejoras", out)
+        self.assertIn("✖ hipótesis refutada", (self.folder / "estado.md").read_text(encoding="utf-8"))
+
+    def test_una_regresion_refuta_la_hipotesis_y_sin_medicion_no_hay_resultado(self):
+        trial = {"a_prueba": True, "estado": "aplicada"}
+        self.assertEqual(perf.improvement_result(trial, {"veredicto": "regresión"}), "✖ hipótesis refutada (empeoró)")
+        self.assertEqual(perf.improvement_result(trial, {"veredicto": "dentro del ruido"}), "✖ hipótesis refutada")
+        self.assertEqual(perf.improvement_result(trial, {"veredicto": "no confiable"}), "— sin veredicto")
+        self.assertEqual(perf.improvement_result(trial, None), "— sin medir")
+        self.assertEqual(perf.improvement_result(dict(trial, estado="aprobada"), {"veredicto": "mejora"}), "— no aplicada")
+        self.assertEqual(perf.improvement_result({"estado": "aplicada"}, {"veredicto": "mejora"}), "✔ funcionó")

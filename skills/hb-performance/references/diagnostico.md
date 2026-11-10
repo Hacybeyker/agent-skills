@@ -49,6 +49,8 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py cons
 
 Las librerías nativas sin símbolos muestran la librería y no la función; el código Java o Kotlin sale ofuscado por R8: desofúscalo con el mapping de profiling.
 
+**Compose y R8: qué nombres trae la traza.** Sin composition tracing, la traza no nombra los composables: muestra los frames y cuánto duran, no qué función los ocupa. Con R8, las clases y los métodos de las muestras de CPU, las pilas y el heap salen ofuscados; las secciones propias (`MARK`, `NAV`, `HTTP`…) son texto y no cambian. Antes de atribuir un frame largo a un composable o a un método, consigue el nombre ([setup.md](setup.md) · Atribución en Compose y con R8); si no lo consigues, el hallazgo queda `sin confirmar` y, si el síntoma es estable, puede ir como mejora a prueba (abajo).
+
 `android-profiler` queda para heap dumps y fugas, o el triage guiado de una traza anómala; su documentación es extensa: cárgala una vez, para esa pregunta. Para Compose, `jetpack-compose-performance`. Para ANR, `anr-audit-and-fix`.
 
 ## 5. Leer la red
@@ -57,7 +59,16 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
 - **Dónde se va el tiempo de una llamada:** `ms` = `cola_ms` (cola del dispatcher e interceptores) + conexión nueva (`red_conexion_ms`: DNS, TCP y TLS) + `ttfb_ms` (servidor y red) + `cliente_ms` (envío, lectura del body y conversión). La lectura de cada una está en [red.md](patrones/red.md).
 - **Huecos:** antes de la llamada, con el hilo principal ocupado, la app tarda en dispararla; después, antes de que cambie la UI, el parseo o el mapeo es pesado.
 
-## 6. Entregable
+## 6. Descartar exige evidencia de la traza
+
+Un hallazgo `descartado` afirma que la causa **no** ocurrió, y eso también se prueba: con un slice o una marca que muestran que corrió otro camino, o con una ausencia medible (0 llamadas, ningún slice con ese nombre, 0 ms en ese tramo). El valor de una configuración estática no alcanza.
+
+- **Lo que se resuelve al ejecutarse se comprueba en la traza.** Si un camino del código depende de remote config, de un toggle por ambiente o por build type, de un experimento o de un dato del backend, el valor que se lee en el código (una constante, un valor por defecto) puede no ser el que corrió en la variante medida. Busca en la traza cuál camino se ejecutó: una sección o un slice propios de ese camino (`perf.py consulta` con un `GLOB` del nombre), una llamada de red que solo hace uno de los dos, o la duración del tramo donde debería notarse.
+- **Si la traza no los distingue,** no descartes: pide una marca temporal en cada camino ([setup.md](setup.md) · Cambios temporales) y una corrida de prueba, o deja el hallazgo `sin confirmar` y di qué falta.
+- **Cruza cada hipótesis de la ficha con los picos medidos.** Un pico estable en el tramo donde la hipótesis lo predice es evidencia a favor aunque el código parezca decir lo contrario: explica el pico antes de descartar la hipótesis.
+- **Un pico de una sola pantalla se diluye en la ventana.** Si el síntoma vive en un tramo (entrar a una pantalla, un scroll) y el plan no tiene su métrica, propón un `segmentos` para ese tramo ([ficha.md](ficha.md)): sale en todas las corridas, con ruido y veredicto.
+
+## 7. Entregable
 
 1. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo" usa una de estas palabras, porque el reporte las explica al lector: `bug` (hay que corregirlo), `mejorable` (intencional, se decide con el negocio), `consecuencia de H#` (lo arregla otro hallazgo), `descartado` (se investigó y no es la causa: no genera mejora) o `sin veredicto estadístico` (salió de consultas y no de una métrica: no se pudo confirmar ni descartar). Solo `bug` y `mejorable` dan lugar a una mejora.
 2. **`mejoras` en `plan.json`**, una por cambio que se pueda commitear solo:
@@ -70,6 +81,14 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
    - Si la métrica no es principal ni existe, dilo: puede hacer falta una marca o una métrica propia antes de medir después.
    - `estado` siempre `propuesta`; el resto lo escribe `perf.py decidir`: `aprobada`, `descartada` o `pendiente` (la decisión del usuario) y `aplicada` (al terminar la sesión 3).
    - Si una mejora **reordena o paraleliza llamadas** y la métrica termina en una de ellas, la marca de fin puede dejar de ser la última: propón antes la marca de contenido visible (`PerfHooks.mark`) como fin de la métrica, o la última llamada.
+   - **Mejora a prueba**, para un síntoma con métrica estable (sale en todas las corridas, con poco ruido) y fuera de presupuesto cuya causa no pudiste probar. En vez de dejarlo sin acción, propón el cambio más probable y deja que la medición de después decida:
+     ```json
+     {"id": "M2", "hallazgo": "H4", "a_prueba": true, "titulo": "<cambio propuesto>",
+      "hipotesis": "<causa probable, en una frase, y por qué: el pico coincide con X>", "flujo": "<flujo>",
+      "metrica": "<la métrica estable del síntoma, por ejemplo 'desglose hilo_max_ms'>", "esperado": "<efecto esperado, ≤ 16 ms>",
+      "prioridad": "media", "esfuerzo": "bajo", "riesgo": "bajo", "estado": "propuesta"}
+     ```
+     Con `a_prueba`, `hipotesis`, `metrica` y `esperado` son obligatorios. El usuario la aprueba con `perf.py decidir`, como cualquier otra, y el reporte final dice `✔ hipótesis confirmada` o `✖ hipótesis refutada` según el veredicto de su métrica. No la uses si el síntoma no tiene métrica propia en todas las corridas (primero un `segmentos` o una métrica de usuario) ni para un cambio grande o riesgoso: una hipótesis refutada se revierte.
 3. **Pendientes** con receta completa (causa, `archivo:línea`, cambio, test, métrica y commit sugerido), para aplicarlos sin repetir el diagnóstico.
 4. **Reporte inicial**, que también dibuja el plan en `estado.md`:
    ```bash

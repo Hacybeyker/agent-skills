@@ -32,6 +32,20 @@ Si no hay ninguna, el comportamiento de siempre: el fragmento de `build.gradle.k
 - **CI:** si no quieres compilar `profiling` en CI, filtra la variante con `beforeVariants`.
 - **R8:** los nombres salen ofuscados en CPU y heap. El mapping queda en `<módulo>/build/outputs/mapping/profiling/mapping.txt`.
 
+### Atribución en Compose y con R8
+
+La variante medida usa R8 y no trae nombres de composables por defecto. Sirve para medir; para saber **qué** función ocupa un frame largo hace falta algo más, y conviene saberlo antes del diagnóstico:
+
+- **Con R8, las clases y los métodos salen ofuscados** en el muestreo de CPU (`--config cpu`), en las pilas de un crash y en los heap dumps. Se traducen con el `mapping.txt` de la variante medida (`retrace`, de las cmdline-tools del SDK). Las secciones propias (`SCREEN`, `NAV`, `MARK`, `HTTP`) son texto y salen tal cual.
+- **Sin composition tracing, la traza no nombra los composables:** se ve cuánto dura cada frame, no qué composable lo ocupa. La guía oficial de Android ([Composition tracing](https://developer.android.com/develop/ui/compose/tooling/tracing)) lo activa así:
+  - la dependencia `androidx.compose.runtime:runtime-tracing` (pide Compose UI y compilador de Compose 1.3.0 o superior, y un dispositivo con API 30 o superior);
+  - para capturar desde la terminal con Perfetto, además `androidx.tracing:tracing-perfetto` y `androidx.tracing:tracing-perfetto-binary`. Agrégalas **solo a la variante medida** (`"<variante>Implementation"`): la guía pide no publicar `tracing-perfetto-binary` con la app de producción por lo que pesa;
+  - la fuente de datos `track_event` en la configuración de Perfetto: copia `assets/perfetto/base.pbtx` a la carpeta de la investigación y agrégale la fuente `track_event` tal como está en el ejemplo de la guía (`data_sources { config { name: "track_event" } }`, más lo que ese ejemplo traiga);
+  - y, **con la app ya abierta** en la pantalla de partida, el broadcast que lo enciende en ese proceso: `adb -s <serial> shell am broadcast -a androidx.tracing.perfetto.action.ENABLE_TRACING <paquete>/androidx.tracing.perfetto.TracingReceiver`. Justo después, `capturar --prueba --sin-compilar --config <archivo>`: sin `--sin-compilar`, `capturar` detiene la app para fijar la compilación de ART y el proceso nuevo arranca sin el tracing encendido. Por lo mismo, que `preparar` no cierre la app en esa corrida, y no sirve tal cual para un arranque en frío.
+
+  Los nombres de los composables los escribe el compilador de Compose y, según esa guía, no se ofuscan; si la variante medida tiene la regla de R8 que la misma guía ofrece para quitarlos de producción (`-assumenosideeffects` sobre `androidx.compose.runtime.ComposerKt`), no van a salir. Es un cambio de dependencias: propónselo al usuario, úsalo en una corrida de diagnóstico y no lo mezcles a mitad de una investigación (si queda en el build, que esté igual en antes y en después). La skill no lo activa sola ni lo verificó en un dispositivo: si los nombres no aparecen, sigue la guía oficial.
+- **Si no se activa,** dilo en el diagnóstico: la causa dentro de Compose queda `sin confirmar`, y un síntoma estable puede ir como mejora a prueba ([diagnostico.md](diagnostico.md)). Para revisar el código de Compose sin la traza, `jetpack-compose-performance`.
+
 ## Requisitos de la máquina
 
 `perf.py` necesita `adb` (del SDK de Android) y `trace_processor` de Perfetto: el programa que abre una traza (`.perfetto-trace`) y permite consultarla con SQL; con él calcula frames, hilo principal, secciones de red y métricas. Si falta, cualquier comando que lo use se detiene con el comando de instalación, que no pide root (un script de Python en `~/.local/bin` que descarga el binario la primera vez). Si el entorno del usuario lo instala por su cuenta (un script de bootstrap), basta con que quede en el `PATH` o en `TRACE_PROCESSOR`. Compruébalo al empezar el setup, antes de tocar el proyecto:

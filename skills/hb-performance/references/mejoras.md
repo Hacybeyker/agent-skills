@@ -6,6 +6,7 @@ Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazg
 
 - **Frescura de la línea base:** mira `antes` en `fases.json` (fecha y commit). Si pasaron más de 14 días, si `git merge-base --is-ancestor <commit> HEAD` falla o si entraron otros cambios al alcance desde entonces, la línea base ya no representa este código: vuelve a medir `antes` (y `control`) antes de aplicar la mejora.
 - **Una mejora por sesión.** Si el usuario aprobó varias, esta sesión hace la primera y "Siguiente paso" apunta a la siguiente en un chat nuevo. Se pueden medir juntas en `despues`, pero cada una lleva su commit.
+- **Mejora a prueba** (`a_prueba` en `plan.json`): la causa no está probada, así que el cambio pone a prueba una hipótesis. Aplícala igual que las demás, con su test y su commit propuesto, y **sola en su fase después** si puedes: medida junto con otras, no se sabe cuál movió la métrica. Anota en "Mejoras aplicadas" la hipótesis y qué resultado la refuta. Si la medición la refuta (`✖ hipótesis refutada`), el cambio se revierte salvo que el usuario quiera conservarlo por otro motivo, y el hallazgo vuelve a `sin confirmar` con lo aprendido.
 
 ## Reglas
 

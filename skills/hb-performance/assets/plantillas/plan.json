@@ -30,6 +30,13 @@
           "familia": "e2e"
         }
       ],
+      "segmentos": [
+        {
+          "nombre": "detalle",
+          "desde": {"marca": "NAV detalle", "punto": "inicio", "cual": "primera"},
+          "hasta": {"marca": "MARK detalle", "punto": "fin", "cual": "primera"}
+        }
+      ],
       "familias": {},
       "metricas_sql": []
     }
@@ -43,6 +50,20 @@
       "metrica": "red_solapadas",
       "esperado": "0 llamadas",
       "prioridad": "alta",
+      "esfuerzo": "bajo",
+      "riesgo": "bajo",
+      "estado": "propuesta"
+    },
+    {
+      "id": "M2",
+      "hallazgo": "H2",
+      "a_prueba": true,
+      "titulo": "Diferir la animación de entrada del detalle",
+      "hipotesis": "El frame largo al entrar al detalle es la animación de entrada: coincide con su primer frame",
+      "flujo": "home-recarga",
+      "metrica": "detalle hilo_max_ms",
+      "esperado": "≤ 16 ms",
+      "prioridad": "media",
       "esfuerzo": "bajo",
       "riesgo": "bajo",
       "estado": "propuesta"
