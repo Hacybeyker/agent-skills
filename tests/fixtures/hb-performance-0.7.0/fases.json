@@ -1,0 +1,89 @@
+{
+  "antes": {
+    "fecha": "2026-03-10T10:00:00",
+    "commit": "abc1234",
+    "sucio": false,
+    "corridas": 5,
+    "hz": 60,
+    "compilacion": "completa (speed)",
+    "hz_corridas": [
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "version": "1.0 (7)",
+    "instalada": "2026-03-10 09:00:00",
+    "flujos": {
+      "detalle": {
+        "corridas": 5,
+        "hz_corridas": [
+          60,
+          60,
+          60,
+          60,
+          60
+        ]
+      }
+    }
+  },
+  "control": {
+    "fecha": "2026-03-10T10:20:00",
+    "commit": "abc1234",
+    "sucio": false,
+    "corridas": 5,
+    "hz": 60,
+    "compilacion": "completa (speed)",
+    "hz_corridas": [
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "version": "1.0 (7)",
+    "instalada": "2026-03-10 09:00:00",
+    "flujos": {
+      "detalle": {
+        "corridas": 5,
+        "hz_corridas": [
+          60,
+          60,
+          60,
+          60,
+          60
+        ]
+      }
+    }
+  },
+  "despues": {
+    "fecha": "2026-03-11T11:00:00",
+    "commit": "def5678",
+    "sucio": false,
+    "corridas": 5,
+    "hz": 60,
+    "compilacion": "completa (speed)",
+    "hz_corridas": [
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "version": "1.0 (7)",
+    "instalada": "2026-03-11 10:30:00",
+    "flujos": {
+      "detalle": {
+        "corridas": 5,
+        "hz_corridas": [
+          60,
+          60,
+          60,
+          60,
+          60
+        ]
+      }
+    }
+  }
+}

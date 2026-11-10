@@ -13,6 +13,7 @@ Convierte el pedido en un plan de medición concreto. Termina con **una sola apr
    cd <raíz-del-proyecto> && grep -rhoE 'compose|rxjava[23]?|kotlinx-coroutines|livedata|okhttp|retrofit|ktor-client|apollo|coil|glide|picasso|epoxy|paging|navigation3|navigation-(compose|fragment)|hilt|koin|baselineprofile|benchmark-macro' --include='*.toml' --include='*.gradle' --include='*.gradle.kts' . | sort | uniq -c
    ```
 4. **Ubica el alcance:** módulos (`settings.gradle(.kts)`) y puntos de entrada. Si un módulo llega a la app como artefacto publicado y no como `project(":...")`, el código en disco puede no ser el que corre: dilo.
+5. **Cambios ajenos sin commitear, antes de medir.** Corre `git status --short` en cada repo del flujo (el de la app y los de los módulos que se incluyen desde otras carpetas) y separa lo que es de perf (el setup, las marcas del inventario de `estado.md`) de lo que no: logs de depuración que imprimen objetos con datos, código a medio hacer, archivos sueltos. Lista lo que no es de perf, con su archivo y qué es, y **pregunta si se quita antes de medir**: ensucia el log, puede sumar trabajo al camino medido (serializar un objeto para un log en el hilo principal) y deja en la evidencia datos que no hacen falta. No lo reviertas tú: es trabajo del usuario; si decide dejarlo, anótalo en "Precondiciones" para que esté igual en todas las fases.
 
 ## 2. Mapa e hipótesis
 
@@ -43,6 +44,17 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nodo
 ```
 
 Vuelca la pantalla (`uiautomator dump`), busca el nodo por `--texto`, por `--id` (`resource-id`) o por `--desc` (`content-desc`) e imprime el centro de sus bounds ya como comando `adb -s <serial> shell input tap <x> <y>`. Avisa de lo que hace fallar un toque: que la pantalla todavía muestre un cargando (espera y vuelve a volcar: el contenido y las coordenadas cambian), que el centro caiga también dentro de otro nodo clickeable (algo flotante o superpuesto: confírmalo o toca otro punto del nodo), que el nodo esté deshabilitado o que varios coincidan (`--exacto`). Sin `--volcar` lee un volcado que ya tienes. Para confirmar que el toque llegó, otro `nodos --volcar` con un texto de la pantalla destino. Cada toque va a `<carpeta>/recorrido.sh` como `adb -s "$SERIAL" shell input tap <x> <y> && sleep <s>`, con su comentario (sección 5); las esperas se calibran con la corrida de prueba. Dos límites de `nodos`, que son heurísticas: el cargando lo reconoce por la clase de las barras de progreso o por un id, un texto o una descripción con las palabras usuales (progress, loading, shimmer, "Cargando"), así que no ve uno hecho a mano y puede avisar por una barra de progreso que no es de carga; y el aviso de superposición no sabe cuál de los dos nodos está encima. **No corras tú una captura manual**: espera a alguien que toque el dispositivo, así que se la entregas al usuario como comando.
+
+**Teclado.** Un campo de texto abre el teclado, y el teclado tapa y desplaza lo que hay debajo:
+
+- **Las coordenadas se toman con el teclado en el mismo estado que tendrá el recorrido en ese paso.** `nodos --volcar` avisa si el teclado estaba abierto al volcar.
+- **ESC (`input keyevent 111`) no cierra todos los teclados:** no dependas de él.
+- **BACK (`input keyevent 4`) solo si el teclado está abierto:** con el teclado cerrado, BACK sale de la pantalla. Compruébalo antes con `dumpsys input_method` (`mInputShown=true`), y **nunca invalides la corrida porque el teclado ya estaba cerrado** (nada de `|| exit 1` en ese paso). `recorrido.sh` trae el bloque comentado:
+  ```bash
+  teclado="$(adb -s "$SERIAL" shell dumpsys input_method | grep -c 'mInputShown=true' || true)"
+  if [ "$teclado" != "0" ]; then adb -s "$SERIAL" shell input keyevent 4 && sleep 1; fi
+  ```
+  Va con `grep -c` y un `if`, no con `grep -q … &&`: con `set -o pipefail`, `grep -q` puede cortar la tubería y dar el paso por fallido, y un `&&` en la última línea del script termina con error cuando el teclado estaba cerrado.
 
 **Regla dura: nunca escribes claves ni autorizas transacciones o pagos.** No ingreses contraseñas, PIN ni códigos de un solo uso, y no toques un botón que confirme una transacción o un pago. Las credenciales las escribe `preparar` desde variables de entorno que carga el usuario ("Credenciales", abajo), no tú. Toca solo nodos que identificaste con `nodos`, nunca coordenadas estimadas: un toque mal dado puede abrir una operación real. Si aparece una pantalla de autorización, de pago o de confirmación de una operación, también por error, **detente**: no toques nada más, dile al usuario qué pantalla quedó abierta y espera a que la cierre.
 

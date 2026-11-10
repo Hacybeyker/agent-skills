@@ -52,7 +52,7 @@ Propón cómo proteger la mejora: el test de la sesión 3 y, si el flujo es crí
 - Los commits propuestos y el texto del PR, solo con métricas agregadas.
 - Pendientes y hallazgos fuera del alcance, para una próxima investigación.
 - Cómo validarlo en campo después del release (Android vitals: TTID y TTFD si la app llama a `reportFullyDrawn`).
-- "Cambios temporales por revertir" de `estado.md`: comprueba que cada fila esté revertida (en su repo o módulo) y dilo; si queda alguna, es lo primero de la entrega.
+- "Cambios temporales por revertir" de `estado.md`: comprueba que cada fila esté revertida (en su repo o módulo) y dilo; si queda alguna, es lo primero de la entrega. Cuentan también las ediciones de cableado en código de `main` que no se commitean (el gancho de red, una marca en una pantalla): si están guardadas como parche, `git apply -R <parche>` en cada repo (más `git reset -q -- <archivo>` por cada archivo nuevo que entró al parche con `git add -N`) y `git status --short` para confirmarlo.
 - Limpieza, cuando se mergee: las trazas (`antes/`, `control/`, `despues/`, `prueba/`) y los heap dumps se borran; `metricas.csv`, los `.md` y el reporte se pueden conservar. `reports/` no está en git: si `recorrido.sh` o el flow de `preparar` se van a reutilizar, se archivan fuera antes de borrar.
 - "Consumo" la completa el usuario con `perf.py consumo`; no se lo pidas. Si faltan filas, dilo en una línea con el comando.
 - `perf.py reporte` deja "Siguiente paso" como investigación cerrada.

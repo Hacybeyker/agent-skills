@@ -29,6 +29,16 @@ Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ah�
 
 Sesión 1 con el patrón de flujos largos. Si el flujo necesita credenciales, van en variables de entorno: expórtalas en la terminal **antes de abrir el agente** (solo ve las de la terminal desde la que se abrió) y, después, en la terminal donde midas.
 
+### Flujo con un paso que hace una persona (autorizar en otra app, completar un pago)
+
+**Dónde:** chat nuevo · Intermedio · medio
+
+```text
+Usa hb-performance en modo triage: medir <flujo: de qué pantalla a qué resultado>. En el medio hay un paso que hago yo (<autorizar en otra app, resolver un desafío>): déjalo como pausa del recorrido y no midas ese tiempo. Dispositivo <serial>.
+```
+
+Sesión 1 con el patrón de "Flujos que pasan por otra app": el recorrido se detiene en una pausa que atiendes en tu terminal (haces el paso y presionas Enter; con `x` + Enter esa corrida se descarta), y el plan mide a cada lado de la pausa, no a través de ella. Las capturas de este flujo las corres tú: un agente no tiene terminal donde atender la pausa. Si cada corrida es una operación real, cuenta cuántas son antes de aprobar (`estado.md` lo dice en "Cómo se recorre").
+
 ### Arranque en frío (setup listo)
 
 **Dónde:** terminal, sin chat

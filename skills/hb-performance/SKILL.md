@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Opcional: android-profiler para heap dumps; Maestro (viene con testigo) para llevar la app al punto de partida en flujos largos."
 metadata:
   author: hacybeyker
-  version: "0.7.0"
+  version: "0.8.0"
   category: flow
 ---
 
@@ -39,7 +39,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 13. **Los comandos que siguen los da `perf.py`:** cada comando imprime el paso siguiente, completo y en orden, y lo deja en `estado.md`; `perf.py siguiente` lo recalcula. Cópialos tal cual, sin inventar ni reordenar.
 14. **Español neutro** (tú, no vos) en todo lo que le escribas al usuario y en `estado.md`.
 15. **Rutas que no se leen** (pruebas a ciegas): la línea `No leer:` de la sección Performance de `AGENTS.md` (rutas separadas por comas o una viñeta por ruta debajo; los patrones parten de la raíz del proyecto: `**/ALCANCE-*` cubre cualquier carpeta), `no_leer` de `plan.json` y la fila "No leer" de `estado.md` son una sola lista, y vale en todas las sesiones. No leas, no busques (grep, find, glob) ni cites esas rutas, ni para "confirmar" algo; si el trabajo las necesita, dilo y pregunta. `perf.py` también las omite.
-16. **Nunca escribes claves ni autorizas transacciones o pagos** en el dispositivo: las credenciales las pone `preparar` desde variables de entorno del usuario. Si aparece una pantalla de autorización o de pago, te detienes y avisas ([ficha.md](references/ficha.md)).
+16. **Nunca escribes claves ni autorizas transacciones o pagos** en el dispositivo: las credenciales las pone `preparar` desde variables de entorno del usuario. Si aparece una pantalla de autorización o de pago, te detienes y avisas ([ficha.md](references/ficha.md)). Un paso que hace una persona dentro del flujo va como pausa del recorrido (`perf.py pausa`), su tiempo no se mide (`pausas` en el plan) y esas capturas las corre la persona, nunca tú.
 
 ## Sesiones
 
@@ -65,16 +65,16 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 
 ## Herramientas
 
-- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `nodos`, `capturar`, `diagnostico`, `consulta`, `resumen`, `comparar`, `har`, `reporte`, `decidir`, `siguiente` y `consumo` (cada uno con `--help`). Usa `adb` y `trace_processor`.
+- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `nodos`, `capturar`, `diagnostico`, `consulta`, `resumen`, `comparar`, `har`, `reporte`, `decidir`, `siguiente`, `consumo` y `pausa` (cada uno con `--help`). Usa `adb` y `trace_processor`.
 - Permisos para auto mode de Claude Code (el clasificador puede denegar secuencias de `adb`; con otra herramienta, su equivalente): [prompts.md](references/prompts.md) · Permisos recomendados; los agrega el usuario, la skill no toca su configuración.
 - Otras skills, por intención y sin depender de sus archivos: `android-profiler` (heap dumps y fugas), `jetpack-compose-performance`, `anr-audit-and-fix` y `r8-analyzer`.
 
 ## Checklist
 
 - [ ] Cada sesión en su chat, con `estado.md` y solo su referencia; primera línea con la sesión y el motivo; se detuvo al terminar y pegó tal cual la salida de `perf.py siguiente` (en la sesión 0, el comando de humo).
-- [ ] Setup listo y registrado en `AGENTS.md`; prueba de humo correcta.
+- [ ] Setup listo y registrado en `AGENTS.md`, con el gancho de red en cada `OkHttpClient.Builder`; prueba de humo correcta (con secciones `HTTP` si la app usa OkHttp).
 - [ ] Métricas principales fijadas antes de medir, al menos una de punta a punta (TTFD o una métrica de usuario hasta una marca de contenido visible); en flujos que no son el arranque, la ventana del flujo en el plan.
-- [ ] Corrida de prueba antes de medir; al menos 5 corridas válidas por fase (10 con recorrido automático). Si `capturar` avisa de emulador o de render por software, los frames no son principales ni valen para decidir.
+- [ ] Corrida de prueba antes de medir, con todas las marcas del plan en ✔; al menos 5 corridas válidas por fase (10 con recorrido automático). Si `capturar` avisa de emulador o de render por software, los frames no son principales ni valen para decidir.
 - [ ] Hallazgos con evidencia, también los descartados (de la traza, no de una configuración); mejoras en `plan.json` con su métrica y lo esperado (las que van a prueba, con su hipótesis); decisión del usuario registrada con `perf.py decidir`.
 - [ ] Una mejora por chat y por commit propuesto, con su test y el DoD en verde.
 - [ ] Veredictos de `perf.py`, lectura de la comparación escrita; e2e marcado como dependiente del backend.

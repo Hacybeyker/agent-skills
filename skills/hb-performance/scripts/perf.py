@@ -46,7 +46,7 @@ import time
 import xml.etree.ElementTree as ElementTree
 from urllib.parse import urlsplit
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -4080,6 +4080,11 @@ def loading_nodes(nodes):
     return found
 
 
+def keyboard_shown(adb):
+    """True solo si `dumpsys input_method` dice que el teclado está a la vista (mInputShown=true)."""
+    return bool(re.search(r"\bmInputShown=true\b", adb.shell("dumpsys input_method").stdout))
+
+
 def cmd_nodos(args):
     path = pathlib.Path(args.xml)
     if args.texto is None and args.id is None and args.desc is None:
@@ -4100,6 +4105,10 @@ def cmd_nodos(args):
             raise Precondicion("no se pudo volcar la pantalla con uiautomator (¿una animación o un cargando que no "
                                "termina?): %s. Espera a que la pantalla se quede quieta y vuelve a intentarlo"
                                % ((dumped.stderr or dumped.stdout or pulled.stderr or pulled.stdout).strip()[-200:] or "sin salida"))
+        if keyboard_shown(adb):
+            print("⚠ El teclado estaba abierto al volcar: tapa parte de la pantalla y desplaza el contenido, así que estas "
+                  "coordenadas solo valen con el teclado abierto. Tómalas con el teclado en el mismo estado que tendrá el "
+                  "recorrido en ese paso (ficha.md · Teclado).")
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as error:
@@ -4148,6 +4157,11 @@ SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
 
 # Paso 2: <qué elemento toca y qué debe abrirse>
 # adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
+
+# Teclado: ciérralo solo si está abierto (BACK con el teclado cerrado sale de la pantalla) y sin cortar el recorrido
+# si ya estaba cerrado. ESC (keyevent 111) no cierra todos los teclados.
+# teclado="$(adb -s "$SERIAL" shell dumpsys input_method | grep -c 'mInputShown=true' || true)"
+# if [ "$teclado" != "0" ]; then adb -s "$SERIAL" shell input keyevent 4 && sleep 1; fi
 
 # Paso humano (autorizar en otra app, resolver un desafío, elegir con criterio): quita el # de la función y llámala
 # donde la persona tiene que actuar. Muestra el texto en tu terminal, con un pitido, y espera Enter; con x + Enter la

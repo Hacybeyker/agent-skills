@@ -4666,3 +4666,191 @@ class SegmentNetworkTest(DeviceBase):
         self.assertIn("| pago | consulta | despues | 2 llamadas | 500 ms | 150 ms | 0 llamadas | 0 llamadas |", final)
         self.assertIn("**Red por tramo (`<tramo> red_…`):**", final)
         self.assertEqual(perf.segment_network_md(perf.read_rows(folder / "metricas.csv"), {"flujos": {"pago": {}}}), "")
+
+
+BACKGROUND_MARK = ('"tipo","ts","dur","prof","nombre"\n"proceso",0,0,0,"com.example.app"\n"limites",1000000,89000000,0,""\n'
+                   '"vsync",0,0,0,""\n"hilo",1000000,30000000,0,"Choreographer#doFrame"\n'
+                   '"seccion",2000000,10000,1,"NAV detalle"\n"seccion",45000000,5000,1,"MARK operacion_inicio"\n"jit",0,0,0,""\n')
+
+
+class MarksOnAnyThreadTest(unittest.TestCase):
+    """Las marcas propias se leen de todos los hilos del proceso, no solo del principal."""
+
+    SPEC = {"metricas_usuario": [{"nombre": "hasta_inicio_ms", "desde": {"marca": "NAV detalle"},
+                                  "hasta": {"marca": "MARK operacion_inicio"}, "familia": "app"}]}
+
+    def test_la_consulta_de_secciones_no_filtra_por_hilo(self):
+        sql = (SCRIPT.parent.parent / "assets" / "queries" / "metricas.sql").read_text(encoding="utf-8")
+        block = next(part for part in sql.split("UNION ALL") if "SELECT 'seccion'" in part)
+        self.assertIn("FROM slice\n", block)
+        self.assertNotIn("JOIN", block)  # sin thread_track ni thread: cualquier hilo
+        self.assertIn("name GLOB 'MARK *'", block)
+        main = next(part for part in sql.split("UNION ALL") if "SELECT 'hilo'" in part)
+        self.assertIn("t.tid = app.pid", main)  # el hilo principal sí se filtra, y solo ahí
+
+    def test_una_marca_emitida_en_otro_hilo_sirve_de_extremo_de_una_metrica(self):
+        # Salida de metricas.sql sobre una traza donde MARK operacion_inicio la emite un hilo de fondo, dentro de otro
+        # slice (profundidad 1): llega como 'seccion' y no como 'hilo', y la métrica la encuentra igual.
+        header, body = perf.parse_result_sets(BACKGROUND_MARK)[-1]
+        metrics, invalid, info = perf.trace_metrics(perf.trace_rows(header, body), 60, self.SPEC, set(), 30)
+        self.assertIsNone(invalid)
+        self.assertEqual({m[0]: m[1] for m in metrics}["hasta_inicio_ms"], 43.005)
+        self.assertEqual(info["faltantes"], [])
+        self.assertEqual(info["ultima_marca"][0], "MARK operacion_inicio")
+
+    def test_con_trace_processor_instalado_la_consulta_real_devuelve_la_marca_de_un_hilo_de_fondo(self):
+        try:
+            tp = perf.find_tp(None)
+        except perf.PerfError:
+            self.skipTest("trace_processor no está instalado")
+        events = [{"name": "process_name", "ph": "M", "pid": 100, "tid": 100, "args": {"name": "com.example.app"}},
+                  {"name": "thread_name", "ph": "M", "pid": 100, "tid": 207, "args": {"name": "fondo-1"}},
+                  {"name": "Choreographer#doFrame", "ph": "X", "ts": 1000, "dur": 30000, "pid": 100, "tid": 100},
+                  {"name": "NAV detalle", "ph": "X", "ts": 2000, "dur": 10, "pid": 100, "tid": 100},
+                  {"name": "trabajo", "ph": "X", "ts": 40000, "dur": 50000, "pid": 100, "tid": 207},
+                  {"name": "MARK operacion_inicio", "ph": "X", "ts": 45000, "dur": 5, "pid": 100, "tid": 207}]
+        sql = perf.fill_sql((SCRIPT.parent.parent / "assets" / "queries" / "metricas.sql").read_text(encoding="utf-8"),
+                            "com.example.app", {"INPUT_GLOB": perf.INPUT_SLICES})
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traza.json"
+            trace.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+            try:
+                sets = perf.run_tp(tp, trace, sql)
+            except (perf.PerfError, OSError, subprocess.SubprocessError) as error:
+                self.skipTest("trace_processor no pudo abrir la traza de prueba: %s" % error)
+        if not sets:
+            self.skipTest("trace_processor no devolvió filas para la traza de prueba")
+        rows = perf.trace_rows(*sets[-1])
+        self.assertIn(("seccion", 45000000, 5000, 1, "MARK operacion_inicio"), rows)
+        self.assertNotIn("trabajo", [r[4] for r in rows if r[0] == "hilo"])  # 'hilo' es solo el principal
+        metrics = perf.trace_metrics(rows, 60, self.SPEC, set(), 30)[0]
+        self.assertEqual({m[0]: m[1] for m in metrics}["hasta_inicio_ms"], 43.005)
+
+
+class KeyboardTest(DeviceBase):
+    """`nodos --volcar` avisa si el teclado estaba abierto: las coordenadas cambian con él."""
+
+    def test_avisa_solo_si_el_teclado_estaba_abierto_al_volcar(self):
+        self.env["FAKE_PULL"] = UI_XML
+        target = self.dir / "inv" / "logs" / "ui.xml"
+        out = self.ok("nodos", target, "--volcar", "--texto", "Catálogo")
+        self.assertNotIn("teclado", out)
+        self.env["FAKE_TECLADO"] = "true"
+        out = self.ok("nodos", target, "--volcar", "--texto", "Catálogo")
+        self.assertIn("⚠ El teclado estaba abierto al volcar", out)
+        self.assertIn("con el teclado en el mismo estado que tendrá el recorrido", out)
+        self.assertIn("Toque (centro): adb -s emulator-5554 shell input tap 810 2300", out)  # avisa y sigue
+        self.assertIn("dumpsys input_method", (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.assertNotIn("teclado", self.ok("nodos", target, "--texto", "Catálogo"))  # sin --volcar no consulta el dispositivo
+
+    def test_la_plantilla_del_recorrido_cierra_el_teclado_solo_si_esta_abierto_y_sin_cortar_la_corrida(self):
+        folder = self.dir / "reports" / "perf" / "pago"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "pago", "--serial", "emulator-5554")
+        text = (folder / "recorrido.sh").read_text(encoding="utf-8")
+        self.assertIn("# teclado=\"$(adb -s \"$SERIAL\" shell dumpsys input_method | grep -c 'mInputShown=true' || true)\"", text)
+        self.assertIn('# if [ "$teclado" != "0" ]; then adb -s "$SERIAL" shell input keyevent 4 && sleep 1; fi', text)
+        script = folder / "teclado.sh"  # el bloque, descomentado, con un adb falso: cerrado no falla ni manda BACK
+        lines = [line[2:] for line in text.splitlines() if line.startswith(("# teclado=", "# if [ \"$teclado\""))]
+        script.write_text("set -euo pipefail\nSERIAL=emulator-5554\n" + "\n".join(lines) + "\n", encoding="utf-8")
+        for shown, backs in (("false", 0), ("true", 1)):
+            self.env["FAKE_TECLADO"] = shown
+            (self.dir / "adb.log").unlink()
+            result = subprocess.run(["bash", str(script)], env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((self.dir / "adb.log").read_text(encoding="utf-8").count('"keyevent", "4"'), backs, shown)
+
+    def test_la_plantilla_de_estado_trae_el_inventario_con_el_cableado_y_los_comandos_del_parche(self):
+        folder = self.dir / "reports" / "perf" / "pago"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "pago")
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        section = state[state.index("## Cambios temporales por revertir"):state.index("## Mapa del alcance")]
+        self.assertIn("las ediciones de cableado en código de `main`", section)
+        self.assertIn("`cd <repo> && git diff --binary -- <archivos> > <parche> && git apply --check -R <parche>`", section)
+        self.assertIn("Quitar: `cd <repo> && git apply -R <parche>`", section)
+        self.assertIn("Volver a aplicar: `cd <repo> && git apply <parche>`", section)
+        for marker in ("<repo>", "<archivos>", "<parche>"):  # de una sola palabra: no cuentan como relleno de la plantilla
+            self.assertNotIn(marker, perf.placeholders())
+
+
+FIXTURE_070 = ROOT / "tests" / "fixtures" / "hb-performance-0.7.0"
+
+
+class Compat070Test(PerfBase):
+    """Una investigación en curso creada con 0.7.0 (plan.json con tramos, una mejora a prueba y `requiere_env`; el
+    estado.md de su plantilla; fases.json con datos por flujo) sigue funcionando igual."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "reports" / "perf" / "detalle"
+        self.folder.mkdir(parents=True)
+        for name in ("plan.json", "estado.md", "metricas.csv", "fases.json"):
+            write(self.folder / name, (FIXTURE_070 / name).read_text(encoding="utf-8"))
+        for name in ("PERF_USUARIO", "PERF_CLAVE"):  # `siguiente`, `reporte` y `comparar` no necesitan las credenciales
+            self.env.pop(name, None)
+
+    def test_el_plan_de_0_7_0_no_trae_ningun_campo_nuevo_y_carga_igual(self):
+        plan = perf.load_plan(self.folder / "plan.json")
+        text = json.dumps(plan)
+        for field in ("pausas", "solo_red", "duracion_max_s"):
+            self.assertNotIn(field, text)
+        self.assertEqual(perf.user_metric_names(plan), ["lista_a_detalle_ms", "detalle hilo_max_ms", "detalle frame_p90_ms",
+                                                         "detalle jank_app_pct"])
+        flow = plan["flujos"]["detalle"]
+        self.assertEqual(perf.required_env(flow, flow["preparar"], self.folder), (["PERF_USUARIO", "PERF_CLAVE"], []))
+        self.assertFalse(perf.has_human_pause(flow, self.folder))
+        self.assertFalse(perf.plan_expects_network({"principales": plan["principales"]}, flow))
+
+    def test_siguiente_reporte_inicial_y_comparar_corren_sin_errores(self):
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Siguiente · sesión 4 · cierre", out)  # M1 aplicada y la fase después medida
+        self.assertNotIn("no declara", out)  # las variables de `preparar` ya están en requiere_env
+        self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos)", out)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("- Variables de entorno que necesita (expórtalas antes): `PERF_USUARIO`, `PERF_CLAVE`", state)
+        self.assertNotIn("Paso humano", state)
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertIn("| H2 | Frame largo al entrar al detalle, estable en las 5 corridas |", initial)
+        self.assertIn("Una captura con muestreo de CPU o probar el cambio", initial)
+        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamadas | 0 llamadas | alta | bajo | bajo | "
+                      "aplicada |", initial)
+        self.assertIn("Decodificar la imagen de cabecera fuera del hilo principal", initial)
+        self.assertNotIn("Red por tramo", initial.split("## Cómo leer este reporte")[0])  # el CSV de 0.7.0 no la trae
+        out = self.ok("comparar", self.folder / "metricas.csv")
+        self.assertIn("| detalle | lista_a_detalle_ms | e2e | 412 ms / 420 ms | 300 ms / 305 ms | -112 ms | -27.18 % | 0.24 % | "
+                      "mejora |", out)
+        self.assertIn("| detalle | detalle hilo_max_ms | app | 48 ms / 50 ms | 48 ms / 49 ms | 0 ms | 0 % | 0 % | sin cambio |", out)
+        self.assertIn("| detalle | red_solapadas | app | 1 llamadas / 1 llamadas | 0 llamadas / 0 llamadas | -1 llamadas | "
+                      "-100 % | 0 % | mejora |", out)
+        self.assertNotIn("⚠", out)
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("3 hallazgos → 2 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
+        self.assertNotIn("## Red por tramo", final)
+        self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0], "investigación cerrada")
+
+    def test_las_fases_de_0_7_0_con_datos_por_flujo_se_leen_igual(self):
+        phases = perf.read_phases(self.folder)
+        self.assertEqual(phases["antes"]["flujos"]["detalle"]["corridas"], 5)
+        self.assertEqual(perf.frames_trust(self.folder), ("ok", ""))
+        self.assertEqual(perf.phase_warnings(self.folder), [])
+        table, notes = perf.builds_table(self.folder)
+        self.assertIn("| antes | 2026-03-10T10:00:00 | abc1234 | 1.0 (7) | 2026-03-10 09:00:00 | 60 | completa (speed) | 5 |", table)
+        self.assertEqual(notes, [])
+
+    def test_las_metricas_que_calculaba_0_7_0_no_cambian_de_nombre_ni_de_valor(self):
+        # traza.json guarda las filas de una traza y lo que 0.7.0 calculó con ellas para el flujo de este plan
+        data = json.loads((FIXTURE_070 / "traza.json").read_text(encoding="utf-8"))
+        flow = perf.load_plan(self.folder / "plan.json")["flujos"]["detalle"]
+        metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
+        self.assertIsNone(invalid)
+        now = {m[0]: list(m) for m in metrics}
+        before = {m[0]: m for m in data["metricas"]}
+        self.assertEqual(len(before), 30)
+        for name, expected in before.items():
+            self.assertEqual(now.get(name), expected, name)
+        # lo único nuevo es la red por tramo, y va después de lo que ya había
+        extra = [m[0] for m in metrics if m[0] not in before]
+        self.assertEqual(extra, ["detalle red_llamadas", "detalle red_ms", "detalle red_ttfb_ms", "detalle red_repetidas_2s",
+                                 "detalle red_solapadas"])
+        self.assertEqual([m[0] for m in metrics][:len(before)], [m[0] for m in data["metricas"]])
