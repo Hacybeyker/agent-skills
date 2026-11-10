@@ -43,7 +43,7 @@ import time
 import xml.etree.ElementTree as ElementTree
 from urllib.parse import urlsplit
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -1554,8 +1554,9 @@ def write_phase(folder, phase, data, flow=None):
 
 def forget_flow(folder, csv_path, phase, flow):
     """--rehacer: quita de fases.json solo lo del flujo que se rehace. Si la fase tiene corridas de otros flujos, su
-    registro sigue (fecha, commit, build); las corridas salen del CSV y el entorno, los avisos y las tasas, de lo
-    guardado por flujo. Un registro sin datos por flujo (de una versión anterior) conserva los de la fase."""
+    registro sigue (commit, build), sin la fecha, que la pone la tanda nueva; las corridas salen del CSV y el entorno,
+    los avisos y las tasas, de lo guardado por flujo. Un registro sin datos por flujo (de una versión anterior), o con
+    datos incompletos, conserva los de la fase."""
     phases = read_phases(folder)
     record = phases.get(phase)
     if record is None:
@@ -1777,8 +1778,11 @@ def is_denied(path, root, patterns):
     absolute = pathlib.Path(path).resolve()
     try:
         relative = absolute.relative_to(pathlib.Path(root).resolve()).as_posix()
-    except ValueError:
-        relative = None
+    except ValueError:  # fuera de la raíz (un módulo incluido desde otra carpeta): la ruta relativa, con sus '..'
+        try:
+            relative = pathlib.Path(os.path.relpath(str(absolute), str(pathlib.Path(root).resolve()))).as_posix()
+        except ValueError:
+            relative = None
     for raw in patterns:
         pattern = os.path.expanduser(raw.strip())
         if os.path.isabs(pattern):  # con y sin enlaces simbólicos (en macOS /var es /private/var)
@@ -1902,10 +1906,10 @@ def next_steps(folder, plan, flow=None):
         # diagnóstico dejó una captura pendiente en estado.md, esa captura como comando.
         steps = []
         for pending in pending_captures(state):
-            own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?(capturar\s.*)$", pending)
+            own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
             if pending.startswith("cd "):
                 pass  # ya es un comando completo
-            elif own:  # "capturar ...", con o sin "python3 -I .../perf.py" delante: se arma con la ruta de este script
+            elif own:  # un comando de perf.py, con o sin "python3 -I .../perf.py" delante: se arma con la ruta de este script
                 pending = command(own.group(1))
             else:
                 pending = "cd %s && %s" % (root, pending)
@@ -1949,7 +1953,7 @@ def pending_captures(state):
     except OSError:
         return []
     text = next((body for title, body in sections.items() if title.startswith("pendientes")), "")
-    return [found.strip() for found in PENDING_CAPTURE.findall(text) if "<" not in found]
+    return [found.strip() for found in PENDING_CAPTURE.findall(without_placeholders(text)) if "<" not in found]
 
 
 def code_span(text):
@@ -2047,8 +2051,11 @@ def cmd_siguiente(args):
     state = folder / "estado.md"
     if state.is_file():
         # La Ficha se completa en la sesión 1; el Resumen y los Hallazgos, desde que la sesión 2 entrega su reporte.
+        # Con mejoras aprobadas o aplicadas (sesión 3 y medición después), el resumen que falta es el del cierre: no
+        # se avisa todavía.
         delivered = any((folder / name).is_file() for name in ("reporte-inicial.md", "reporte-final.md", "reporte.md"))
-        warn_unfilled(folder, state_sections(state.read_text(encoding="utf-8"))[1], findings=delivered)
+        in_progress = any(m.get("estado") in ("aprobada", "aplicada") for m in plan.get("mejoras", []))
+        warn_unfilled(folder, state_sections(state.read_text(encoding="utf-8"))[1], findings=delivered and not in_progress)
     print_next(folder, plan, args.flujo)
 
 
@@ -2810,13 +2817,18 @@ def cmd_har(args):
 DEVICE_PLACEHOLDER = "<modelo · Android · Hz fijos>"
 UNFILLED = "sin completar"
 TEMPLATE_MARKER = re.compile(r"<[^<>\n!/][^<>\n]*>")
-# Textos de relleno que la plantilla de estado.md traía sin <> en versiones anteriores: también son "sin completar".
-LEGACY_PLACEHOLDERS = (
+# Marcadores <…> de la plantilla de estado.md de versiones anteriores que ya no están en la actual.
+LEGACY_MARKERS = (
     "<modelo · Android · Hz>",
     "<3 a 5 líneas: estado inicial → estado final con las métricas principales, la causa en una frase y qué depende del "
     "backend>",
-    '- <qué dice cada métrica principal, cada regresión y cada "no comparable"; la evidencia de consultas, rotulada "sin '
+    '<qué dice cada métrica principal, cada regresión y cada "no comparable"; la evidencia de consultas, rotulada "sin '
     'veredicto estadístico">',
+)
+# Textos de relleno que esa plantilla traía sin <>, y <alcance>, que deja `nuevo` sin --alcance: son "sin completar"
+# solo si son la celda o la línea entera (dentro de un texto más largo pueden ser contenido real).
+WHOLE_PLACEHOLDERS = (
+    "<alcance>",
     "las de `principales` en plan.json, y el objetivo",
     "build de profiling (R8, no debuggable, profileable) · backend real o mocks",
     "guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage",
@@ -2829,17 +2841,21 @@ _PLACEHOLDERS = []
 
 
 def placeholders():
-    """Los textos de relleno de la plantilla de estado.md: sus marcadores <…> de más de una palabra (uno de una sola,
-    como <carpeta>, puede ser texto legítimo) y los de versiones anteriores."""
+    """Los marcadores <…> de relleno de la plantilla de estado.md: los de más de una palabra (uno de una sola, como
+    <carpeta>, puede ser texto legítimo) y los de versiones anteriores."""
     if not _PLACEHOLDERS:
         template = (ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
         found = {m for m in TEMPLATE_MARKER.findall(template) if " " in m}
-        _PLACEHOLDERS.extend(sorted(found | set(LEGACY_PLACEHOLDERS) | {DEVICE_PLACEHOLDER}, key=len, reverse=True))
+        _PLACEHOLDERS.extend(sorted(found | set(LEGACY_MARKERS) | {DEVICE_PLACEHOLDER}, key=len, reverse=True))
     return _PLACEHOLDERS
 
 
 def has_placeholder(text):
-    return any(marker in text for marker in placeholders())
+    """True si el texto (una línea o una celda) sigue con el relleno de la plantilla."""
+    if any(marker in text for marker in placeholders()):
+        return True
+    pieces = {text.strip()} | {cell.strip() for cell in text.split("|")}
+    return any(whole in pieces for whole in WHOLE_PLACEHOLDERS)
 
 
 def without_placeholders(text):
@@ -2856,13 +2872,14 @@ def unfilled_parts(sections, findings=False):
     out = []
     ficha = pick("ficha")
     if ficha:
-        rows = [row[0] for row in parse_table(ficha)[1] if len(row) > 1 and has_placeholder(" | ".join(row[1:]))]
+        rows = [row[0] for row in parse_table(ficha)[1] if len(row) > 1 and row[0].strip().lower().startswith(FICHA_REPORTE)
+                and has_placeholder(" | ".join(row[1:]))]
         if rows:
             out.append("Ficha (%s)" % ", ".join(rows))
     if findings:
         summary = pick("resumen ejecutivo", "resumen")
         if summary is not None and not without_placeholders(summary):
-            out.append("Resumen ejecutivo (de 3 a 5 líneas: lo escribe la sesión 2 para el reporte inicial)")
+            out.append("Resumen ejecutivo (de 3 a 5 líneas)")
         table = pick("hallazgos")
         if table is not None:
             rows = parse_table(table)[1]
@@ -3097,7 +3114,7 @@ def findings_md(text, plan, results=None):
         return text
     tipo_index = next((i for i, h in enumerate(headers) if h.lower().startswith("tipo")), None)
     if tipo_index is None:
-        return text
+        return without_placeholders(text)
     # Las columnas que siguen a Tipo (la opcional "Qué falta para decidir") se conservan; al final va qué pasa con él.
     new_headers = headers[:tipo_index] + ["Tipo"] + headers[tipo_index + 1:] \
         + ["Resultado" if results is not None else "Qué pasa con él"]
@@ -3146,9 +3163,9 @@ def result_md(findings_text, plan):
     mejoras = plan.get("mejoras", [])
     if mejoras:
         trial = sum(1 for m in mejoras if m.get("a_prueba"))
-        lines = ["**%d %s** para %d %s%s. Tú decides cuáles se aplican." % (
+        lines = ["**%d %s**%s%s. Tú decides cuáles se aplican." % (
             len(mejoras), "mejora propuesta" if len(mejoras) == 1 else "mejoras propuestas",
-            len(rows), "hallazgo" if len(rows) == 1 else "hallazgos",
+            " para %d %s" % (len(rows), "hallazgo" if len(rows) == 1 else "hallazgos") if rows else "",
             " (%d a prueba: la causa no está probada y la medición de después la confirma o la refuta)" % trial
             if trial else ""), ""]
         for m in mejoras:
@@ -3161,10 +3178,10 @@ def result_md(findings_text, plan):
                 detail.append("esperado: %s" % m["esperado"])
             lines.append("- **%s** · %s" % (m["id"], " · ".join(detail)))
         return "\n".join(lines)
-    if not rows or tipo_i is None:
+    if not rows:
         return "**Sin mejoras aplicables.** El diagnóstico no dejó hallazgos en `estado.md`."
     kinds = [finding_kind(cell(row, tipo_i)) for row in rows]
-    counts = ", ".join("%d %s" % (kinds.count(kind), kind) for kind in sorted(set(kinds), key=kinds.index))
+    counts = ", ".join("`%s`: %d" % (kind, kinds.count(kind)) for kind in sorted(set(kinds), key=kinds.index))
     lines = ["**Sin mejoras aplicables.** %d %s (%s). Por qué, uno por uno:" % (
         len(rows), "hallazgo" if len(rows) == 1 else "hallazgos", counts), ""]
     for row, kind in zip(rows, kinds):
@@ -3266,8 +3283,9 @@ def cmd_reporte(args):
         return without_placeholders(pick(*names))
 
     warn_unfilled(folder, sections, findings=True)
-    pending_intro = ("> No son mejoras ni tareas obligatorias: es lo que esta investigación no pudo cerrar. Cada uno dice "
-                     "el síntoma y qué tan estable es, qué falta para cerrarlo, cuánto cuesta y la acción sugerida.\n\n")
+    pending_intro = ("> No son mejoras ni tareas obligatorias: es lo que esta investigación no pudo cerrar. De cada uno "
+                     "importa el síntoma y qué tan estable es, qué falta para cerrarlo, cuánto cuesta y la acción "
+                     "sugerida.\n\n")
     if args.inicial:
         plan_md = plan_table_md(plan, rows) if plan.get("mejoras") else ""
         if plan_md and update_block(folder, "mejoras", plan_md):
@@ -3590,12 +3608,10 @@ def ensure_ignored(folder):
 def read_request(path):
     """El flujo que el usuario pidió en la sesión 0 (reports/perf/setup/pedido.json): {"flujo", "llegar"}, o None."""
     try:
-        text = pathlib.Path(path).read_text(encoding="utf-8")
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except OSError:
-        return None
-    try:
-        data = json.loads(text)
-    except ValueError:
+        return None  # no hay pedido guardado
+    except ValueError:  # no es JSON, o no es UTF-8
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("flujo"), str) or not data["flujo"].strip() \
             or not isinstance(data.get("llegar", ""), str):
@@ -3626,6 +3642,9 @@ def cmd_humo(args):
     plan = {"paquete": args.paquete, "serial": serial, "compilacion": "completa", "flujos": {"humo": {
         "recorrido": {"tipo": "arranque-frio", "actividad": activity, "espera_s": args.espera},
         "familias": dict(STARTUP_FAMILIES)}}}
+    missing_setup = setup_warning(project_root(pathlib.Path.cwd()).resolve())
+    if missing_setup:
+        print("⚠ " + missing_setup)
     folder.mkdir(parents=True, exist_ok=True)
     ensure_ignored(folder)
     capture = argparse.Namespace(plan=None, prueba=True, paquete=args.paquete, carpeta=str(folder), flujo="humo", fase=None,
@@ -3642,6 +3661,8 @@ def cmd_humo(args):
                                               " [--red si la primera pantalla carga de la red]")
     request = read_request(args.pedido)
     chat_line = "Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio")
+    if missing_setup:
+        print("⚠ Antes de seguir: %s" % missing_setup)
     if request:
         print("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · %s" % chat_line)
         print("  Texto: \"%s\"" % session1_prompt(request, serial))
@@ -3700,7 +3721,7 @@ def cmd_nuevo(args):
         plan.update({"principales": [], "flujos": {args.flujo: {
             "pasos": ["<paso exacto 1 en el dispositivo>"], "inicio": "<parte del nombre de la actividad>",
             "invalidar_si": [], "recorrido": "manual", "metricas_usuario": []}}, "mejoras": []})
-        scope = args.alcance or "<alcance>"
+        scope = args.alcance or "flujo %s" % args.flujo
     (folder / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     state = (ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
     if startup:
@@ -3732,6 +3753,9 @@ def cmd_nuevo(args):
             print("✔ %s: el recorrido medido va ahí, un comentario por paso; cuando esté, el plan apunta a él con "
                   "\"recorrido\": \"bash %s\"" % (route, route))
     ensure_ignored(folder)
+    missing_setup = setup_warning(project_root(folder).resolve())
+    if missing_setup:
+        print("⚠ " + missing_setup)
     if fixed_hz:
         print("✔ Tasa de refresco ya fija en el dispositivo: %d Hz (%s). Queda en 'hz' del plan: no hace falta cambiarla."
               % (fixed_hz, ", ".join("%s=%s" % (name, fmt(value)) for name, value, _ in refresh)))
@@ -3822,6 +3846,31 @@ SNIPPETS = {
 }
 // Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): repítelas como
 // "{{VARIANTE}}Implementation"(...). Cobertura (Kover, JaCoCo, Sonar): excluye "**/perf/**".""",
+    "gradle_propiedad": """// Para un proyecto que decide cosas por el nombre del build type: en vez de crear otro, mide sobre el que ya usas
+// para probar ("<buildType>") solo cuando se pasa -Pperf. Sin -Pperf, ese build type no cambia.
+// Es un ejemplo: ajústalo a tu proyecto y a tu versión de AGP.
+val perf = providers.gradleProperty("perf").isPresent
+android {
+    buildTypes {
+        getByName("<buildType>") {
+            if (perf) {
+                isDebuggable = false
+                isProfileable = true
+            }
+        }
+    }
+    sourceSets {
+        getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
+        if (perf) {
+            getByName("<buildType>").kotlin.directories += "{{FUENTE}}"
+            // El <provider> de PerfInstaller está en el manifest que generó la skill. srcFile reemplaza el manifest de
+            // ese source set: si src/<buildType>/AndroidManifest.xml ya existe, copia antes su contenido a este.
+            getByName("<buildType>").manifest.srcFile("src/{{VARIANTE}}/AndroidManifest.xml")
+        }
+    }
+}
+// Instalar: ./gradlew :<módulo>:install<BuildType> -Pperf. El `paquete` del plan es el applicationId de ese build type.
+// Con -Pperf el build deja de ser depurable: mira los avisos de <debug-overrides> y de BuildConfig.DEBUG.""",
     "red_hilt": """// Donde se arma el OkHttpClient (Hilt): inyecta el set y aplica la primera factory.
 @Provides fun okHttp(@PerfEventListeners factories: Set<@JvmSuppressWildcards EventListener.Factory>): OkHttpClient =
     OkHttpClient.Builder()
@@ -3859,20 +3908,30 @@ PACKAGE_DECL = re.compile(r"^\s*package\s+([\w.]+)", re.M)
 OKHTTP_BUILDER = re.compile(r"\bOkHttpClient\s*\.\s*Builder\s*\(\s*\)|\bOkHttpClient\s*\(\s*\)")
 MODULE_PLUGINS = (("aplicación", re.compile(r"android[._-]?application|com\.android\.application", re.I)),
                   ("librería", re.compile(r"android[._-]?library|com\.android\.library", re.I)))
+BUILD_CONFIG_USE = re.compile(r"\bBuildConfig\s*\.\s*(BUILD_TYPE|FLAVOR\w*|DEBUG)\b")  # FLAVOR_<dimensión> también
+# Lógica de Gradle que depende del nombre de un build type, un sabor o una variante. No cuenta el nombre de un proyecto.
+GRADLE_NAME_LOGIC = re.compile(r"(?<![pP]roject\.)\b(?:name|getName\(\))\s*(?:\.\s*\w+\(\)\s*)*"
+                               r"(?:(?:==|!=)\s*[\"']\w|\.\s*(?:endsWith|startsWith|contains|equals|matches)\s*\()")
+# Líneas que miran el nombre de otra cosa (tareas, dependencias, archivos, proyectos): no deciden por build type.
+GRADLE_TASK_LINE = re.compile(r"\btasks?\b|Task\b|\brequested\b|\b(?:sub|all)projects\b|\.(?:jar|aar)\b")
+SETTINGS_HINT = re.compile(r"\bprojectDir\s*=|\bincludeBuild\b")
+SETTINGS_PATH = re.compile(r"projectDir\s*=\s*(?:new\s+)?[fF]ile\s*\(\s*(?:\w+\s*,\s*)?[\"']([^\"']+)[\"']"
+                           r"|includeBuild\s*\(?\s*[\"']([^\"']+)[\"']")
 FUN_HEAD = re.compile(r"\bfun\s+(\w+)\s*\(")
 FUN_TAIL = re.compile(r"\s*(?::\s*([^{=]*))?([{=])?")
 PRIMITIVE_TYPES = ("String", "Int", "Long", "Boolean", "Float", "Double", "Unit")
 
-def walk_files(root, patterns, suffixes):
+def walk_files(root, patterns, suffixes, project=None):
     """Archivos con esas extensiones bajo root, en orden, sin carpetas de build, ocultas ni de tests y sin las rutas
-    prohibidas; los que generó la skill tampoco."""
-    count = 0
+    prohibidas; los que generó la skill tampoco. `project` es la raíz del proyecto contra la que se comparan las rutas
+    prohibidas cuando root es otra carpeta (un módulo que settings.gradle incluye desde fuera)."""
+    count, project = 0, project or root
     for current, dirs, files in os.walk(str(root)):
         dirs[:] = sorted(d for d in dirs if d not in SCAN_SKIP and not d.startswith(".")
-                         and not is_denied(os.path.join(current, d), root, patterns))
+                         and not is_denied(os.path.join(current, d), project, patterns))
         for name in sorted(files):
             path = pathlib.Path(current) / name
-            if name.endswith(suffixes) and not is_denied(path, root, patterns) and not is_generated(path):
+            if name.endswith(suffixes) and not is_denied(path, project, patterns) and not is_generated(path):
                 count += 1
                 if count > SCAN_MAX_FILES:
                     return
@@ -3941,14 +4000,73 @@ def hook_methods(text, declaration):
     return methods
 
 
-def scan_sources(root, patterns):
-    """Un solo recorrido de los .kt y .java: interfaces y CompositionLocal con un nombre de 'contenido visible'
-    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. También dónde se arma un OkHttpClient y cuántos
-    archivos usan WebView, RecyclerView o RxJava. Devuelve {"ganchos", "archivos", "okhttp", "vistas"}."""
+def relative_to_root(path, root):
+    """La ruta desde la raíz del proyecto, con '..' si está fuera (un módulo incluido desde otra carpeta)."""
+    return pathlib.Path(os.path.relpath(os.path.realpath(str(path)), os.path.realpath(str(root)))).as_posix()
+
+
+def external_roots(root, patterns):
+    """(carpetas fuera de la raíz que settings.gradle(.kts) incluye, rutas que no se pudieron seguir). Mira los
+    `projectDir = file("...")` (o File(dir, "...")) y los `includeBuild("...")`; una ruta con variables no se resuelve."""
+    root = pathlib.Path(root).resolve()
+    found, unresolved = [], []
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        settings = root / name
+        if not settings.is_file() or is_denied(settings, root, patterns):
+            continue
+        for line in settings.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not SETTINGS_HINT.search(line) or line.lstrip().startswith(("//", "*", "/*")):
+                continue
+            match = SETTINGS_PATH.search(line)
+            if not match:  # una ruta armada con variables u otra forma que no se sabe leer: se avisa, no se ignora
+                unresolved.append(line.strip()[:100])
+                continue
+            raw = match.group(1) or match.group(2)
+            for variable in ("${rootDir}", "$rootDir", "${settingsDir}", "$settingsDir"):
+                raw = raw.replace(variable, str(root))
+            if "$" in raw:
+                unresolved.append(raw)
+                continue
+            path = pathlib.Path(os.path.normpath(str(root / raw)))
+            # dentro de la raíz ya se recorre; una carpeta que contiene a la raíz (includeBuild("..")) la repetiría entera
+            if is_under(path, root) or is_under(root, path) or is_denied(path, root, patterns):
+                continue
+            if path.is_dir() and path not in found:
+                found.append(path)
+            elif not path.is_dir() and raw not in unresolved:
+                unresolved.append(raw)
+    return found, unresolved
+
+
+def scan_gradle(root, patterns, extra=()):
+    """Líneas de los build.gradle(.kts) que deciden algo por el nombre de un build type, un sabor o una variante
+    (`name == "qa"`, `name.endsWith("Release")`): [(archivo, línea, texto)]."""
+    root = pathlib.Path(root)
+    found = []
+    for base in [root] + list(extra):
+        for path in walk_files(base, patterns, (".gradle", ".gradle.kts"), root):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError:
+                continue
+            found += [(relative_to_root(path, root), number, line.strip()[:120])
+                      for number, line in enumerate(lines, start=1)
+                      if GRADLE_NAME_LOGIC.search(line) and not GRADLE_TASK_LINE.search(line)]
+    return found
+
+
+def scan_sources(root, patterns, extra=()):
+    """Un solo recorrido de los .kt y .java (los de la raíz y los de las carpetas de `extra`, los módulos que
+    settings.gradle incluye desde fuera): interfaces y CompositionLocal con un nombre de 'contenido visible'
+    (HOOK_TOKENS) y, de cada interfaz, si algún multibinding la recibe. También dónde se arma un OkHttpClient, cuántos
+    archivos usan WebView, RecyclerView o RxJava y dónde se lee BuildConfig.BUILD_TYPE, FLAVOR o DEBUG.
+    Devuelve {"ganchos", "archivos", "okhttp", "vistas", "buildconfig"}."""
     hooks, multi, files, builders = [], set(), 0, []
     views = {"WebView": 0, "RecyclerView": 0, "RxJava": 0}
+    build_config = {"BUILD_TYPE": [], "FLAVOR": [], "DEBUG": []}
     root = pathlib.Path(root)
-    for path in walk_files(root, patterns, (".kt", ".java")):
+    paths = [path for base in [root] + list(extra) for path in walk_files(base, patterns, (".kt", ".java"), root)]
+    for path in paths:
         try:
             if path.stat().st_size > SCAN_MAX_BYTES:
                 continue
@@ -3956,14 +4074,17 @@ def scan_sources(root, patterns):
         except OSError:
             continue
         files += 1
+        relative = relative_to_root(path, root)
         for name, found in (("WebView", "WebView" in text), ("RecyclerView", "RecyclerView" in text),
                             ("RxJava", "io.reactivex" in text or "rxjava" in text.lower())):
             views[name] += 1 if found else 0
         for builder in OKHTTP_BUILDER.finditer(text):
-            builders.append((path.relative_to(root).as_posix(), text.count("\n", 0, builder.start()) + 1))
+            builders.append((relative, text.count("\n", 0, builder.start()) + 1))
+        for use in BUILD_CONFIG_USE.finditer(text):
+            build_config["FLAVOR" if use.group(1).startswith("FLAVOR") else use.group(1)].append(
+                (relative, text.count("\n", 0, use.start()) + 1))
         multi.update(SET_OF.findall(text))
         multi.update(INTO_BINDING.findall(text))
-        relative = path.relative_to(root).as_posix()
         package_match = PACKAGE_DECL.search(text)
         package = package_match.group(1) if package_match else ""
         for declaration in INTERFACE_DECL.finditer(text):
@@ -3977,7 +4098,7 @@ def scan_sources(root, patterns):
                               "linea": text.count("\n", 0, local.start()) + 1, "metodos": []})
     for hook in hooks:
         hook["multibinding"] = hook["tipo"] == "interfaz" and hook["nombre"] in multi
-    return {"ganchos": hooks, "archivos": files, "okhttp": builders, "vistas": views}
+    return {"ganchos": hooks, "archivos": files, "okhttp": builders, "vistas": views, "buildconfig": build_config}
 
 
 def is_under(path, folder):
@@ -4097,6 +4218,44 @@ adapter.submitList(items) { recyclerView.doOnPreDraw { PerfHooks.mark("<pantalla
 
 VARIANT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PRODUCTION_VARIANTS = ("debug", "release")  # build types del proyecto: jamás llevan el source set ni el provider de perf
+FLAVORED_PRODUCTION = re.compile(r"[A-Za-z0-9](?:Release|Debug)$")  # una variante con sabores: <sabor>Release, <sabor>Debug
+PROFILEABLE_ON = re.compile(r"\b(?:isProfileable|profileable)\s*(?:=\s*|\s+)true\b")
+
+
+def outer_level(body):
+    """El cuerpo de un build type sin sus bloques anidados: lo que declara siempre, no dentro de un `if (...) { }`."""
+    out, depth = [], 0
+    for char in body:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(char)
+    return "".join(out)
+
+
+def always_profileable(body):
+    """True si el build type se declara profileable sin condiciones. Uno que lo es solo con una propiedad (dentro de
+    `if (perf) { }`) no es una variante existente: sin esa propiedad no es profileable ni lleva la instrumentación."""
+    return bool(PROFILEABLE_ON.search(outer_level(body)))
+
+
+def is_production(name, declared=()):
+    """True si la variante es release o debug, sola o con sabores (demoRelease, freeDebug): nunca lleva la
+    instrumentación, porque es el build que se publica o el depurable del día a día. `declared` son los build types que
+    el módulo declara: uno propio con un nombre así (preRelease) no es un sabor de release."""
+    if name.lower() in PRODUCTION_VARIANTS:
+        return True
+    return name not in declared and bool(FLAVORED_PRODUCTION.search(name))
+
+
+def module_build_types(module, root, patterns):
+    """{nombre: cuerpo} de los build types del build.gradle(.kts) del módulo ({} si no se puede leer)."""
+    gradle = next((module / n for n in ("build.gradle.kts", "build.gradle") if (module / n).is_file()), None)
+    if not gradle or is_denied(gradle, root, patterns):
+        return {}
+    return build_types(gradle.read_text(encoding="utf-8", errors="ignore"))
 DEBUGGABLE_ON = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)true\b")
 DEBUGGABLE_OFF = re.compile(r"\b(?:isDebuggable|debuggable)\s*(?:=\s*|\s+)false\b")
 BUILD_TYPE_HEADER = re.compile(r"(?:(?:create|register|getByName|maybeCreate)\s*\(\s*[\"'](\w+)[\"']\s*\)"
@@ -4148,24 +4307,101 @@ def is_debuggable(name, body):
 
 
 def find_profileable_variants(module, root, patterns):
-    """Variantes del módulo cuyo manifest declara <profileable>: [{nombre, manifest, estado, generada}]. 'estado': 'ok'
-    (build type no depurable), 'depurable' o 'sin build type' (no se pudo verificar: sabores, otro plugin)."""
-    gradle = next((module / n for n in ("build.gradle.kts", "build.gradle") if (module / n).is_file()), None)
-    types = {}
-    if gradle and not is_denied(gradle, root, patterns):
-        types = build_types(gradle.read_text(encoding="utf-8", errors="ignore"))
+    """Variantes profileable del módulo: las que lo declaran en su manifest (<profileable>) y los build types que lo
+    declaran en Gradle (isProfileable = true, o `profileable true`): [{nombre, manifest, estado, generada, gradle}].
+    'estado': 'ok' (build type no depurable), 'depurable' o 'sin build type' (no se pudo verificar: sabores, otro
+    plugin). release y debug, solos o con sabores, nunca son candidatas."""
+    types = module_build_types(module, root, patterns)
     found = []
     for manifest in sorted((module / "src").glob("*/AndroidManifest.xml")):
         name = manifest.parent.name
-        if name == "main" or name.lower() in PRODUCTION_VARIANTS or is_denied(manifest, root, patterns):
+        if name == "main" or is_production(name, types) or is_denied(manifest, root, patterns):
             continue
         text = manifest.read_text(encoding="utf-8", errors="ignore")
         profileable = re.search(r"<profileable\b[^>]*>", text)
         if not profileable or re.search(r"android:enabled\s*=\s*[\"']false[\"']", profileable.group(0)):
             continue
         state = "sin build type" if name not in types else "depurable" if is_debuggable(name, types[name]) else "ok"
-        found.append({"nombre": name, "manifest": manifest, "estado": state, "generada": GENERATED in text[:400]})
+        found.append({"nombre": name, "manifest": manifest, "estado": state, "generada": GENERATED in text[:400],
+                      "gradle": always_profileable(types.get(name, ""))})
+    for name, body in types.items():  # los que lo declaran solo en Gradle, sin <profileable> en su manifest
+        if is_production(name, types) or any(c["nombre"] == name for c in found) or not always_profileable(body):
+            continue
+        manifest = module / "src" / name / "AndroidManifest.xml"
+        if manifest.is_file() and is_denied(manifest, root, patterns):
+            continue
+        found.append({"nombre": name, "manifest": manifest if manifest.is_file() else None, "gradle": True,
+                      "estado": "depurable" if is_debuggable(name, body) else "ok", "generada": False})
     return found
+
+
+def source_set_files(module, name, limit=10):
+    """Los archivos del source set de un build type (src/<nombre>/), para decir qué no copia initWith."""
+    base = module / "src" / name
+    if not base.is_dir():
+        return []
+    files = sorted(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file())
+    return files[:limit] + (["…"] if len(files) > limit else [])
+
+
+def debug_overrides(module, root, patterns):
+    """Los XML de res/xml del módulo que usan <debug-overrides> (network security config): ese bloque solo aplica en
+    builds depurables, así que la variante medida lo pierde."""
+    found = []
+    for path in sorted((module / "src").glob("*/res/xml*/*.xml")):
+        if is_denied(path, root, patterns):
+            continue
+        try:
+            if "<debug-overrides" in path.read_text(encoding="utf-8", errors="ignore"):
+                found.append(path)
+        except OSError:
+            continue
+    return found
+
+
+def find_instrumentation(root):
+    """(hay un source set `perf`, hay PerfHooks.kt) bajo la raíz del proyecto: lo que deja `instrumentar`."""
+    perf_set = hooks = False
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = [d for d in dirs if d not in ("build", "node_modules", "reports", "out") and not d.startswith(".")]
+        perf_set = perf_set or (os.path.basename(current) == "src" and "perf" in dirs)
+        hooks = hooks or "PerfHooks.kt" in files
+        if perf_set and hooks:
+            break
+    return perf_set, hooks
+
+
+REAPPLY_HINT = re.compile(r"git apply|parche|\.patch\b", re.I)
+
+
+def setup_warning(root):
+    """Aviso si la instrumentación del setup no está en el repo ('' si está). Si AGENTS.md dice "setup listo" y el
+    código no está (el setup se guarda como parche, o se revirtió), dice cómo reaplicarlo."""
+    perf_set, hooks = find_instrumentation(root)
+    if hooks:
+        return ""  # con PerfHooks.kt alcanza: el source set puede tener otro nombre (instrumentar --fuente)
+    try:
+        agents = (pathlib.Path(root) / "AGENTS.md").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        agents = ""
+    missing = "no encontré la instrumentación en el repo (ni PerfHooks.kt%s, bajo %s)" % (
+        "" if perf_set else " ni un source set src/perf", root)
+    if not re.search(r"setup\s+listo", agents, re.I):
+        return "%s: falta la sesión 0 (setup) antes de medir; sin ella no salen las marcas ni las secciones" % missing
+    # La línea que dice cómo reaplicarlo: la de "setup listo" si lo dice ahí; si no, una de la sección de rendimiento.
+    hint, section = "", False
+    for line in agents.splitlines():
+        if line.startswith("#"):
+            section = bool(re.search(r"rendimiento|performance", line, re.I))
+        elif REAPPLY_HINT.search(line) and (re.search(r"setup\s+listo", line, re.I) or (section and not hint)):
+            hint = line.strip(" -*\t")[:200]
+            if re.search(r"setup\s+listo", line, re.I):
+                break
+    how = ('según AGENTS.md: "%s"' % hint if hint else
+           "si el setup se guarda como parche, aplícalo (git apply <parche>); si se perdió, repite la sesión 0 "
+           "(perf.py instrumentar no pisa lo que exista)")
+    return ('AGENTS.md dice "setup listo" pero %s: las marcas no van a salir y la variante medida puede no compilar. '
+            "Reaplícala antes de seguir: %s" % (missing, how))
 
 
 def resolve_variant(found, requested):
@@ -4195,17 +4431,21 @@ def cmd_instrumentar(args):
         raise PerfError("paquete '%s' no válido: usa algo como com.ejemplo.app.perf" % args.paquete)
     if args.variante and not VARIANT_NAME.fullmatch(args.variante):
         raise PerfError("variante '%s' no válida: usa el nombre del build type (profiling, benchmark, releaseLike)" % args.variante)
-    if args.variante and args.variante.lower() in PRODUCTION_VARIANTS:
-        raise PerfError("variante '%s' no válida: release y debug son los build types del proyecto y la instrumentación "
-                        "no puede entrar en el release que se publica; usa otra variante o deja que se cree `profiling`"
-                        % args.variante)
     root = project_root(module)
     denied = read_no_leer(root, extra=args.no_leer)
+    if args.variante and is_production(args.variante, module_build_types(module, root, denied)):
+        raise PerfError("variante '%s' no válida: release y debug (también con sabores, como demoRelease) son los build "
+                        "types del proyecto y la instrumentación no puede entrar en el release que se publica; usa otra "
+                        "variante o deja que se cree `profiling`. Un nombre que termina en Release o Debug solo se acepta "
+                        "si el build.gradle del módulo lo declara como build type propio" % args.variante)
     found_variants = find_profileable_variants(module, root, denied)
     variant, existing = resolve_variant(found_variants, args.variante)
     unverified = any(c["nombre"] == variant and c["estado"] == "sin build type" for c in found_variants)
+    in_gradle = any(c["nombre"] == variant and c.get("gradle") for c in found_variants)
     modules = list_modules(root, denied)
-    scan = scan_sources(root, denied)
+    outside_roots, unresolved_roots = external_roots(root, denied)
+    scan = scan_sources(root, denied, outside_roots)
+    name_logic = scan_gradle(root, denied, outside_roots)
     network = choose(args.red, detect(module, ["okhttp", "retrofit"]))
     retrofit = network and choose(args.retrofit, detect(module, ["retrofit"]))
     fragments = choose(args.fragments, detect(module, ["fragment", "appcompat"]))
@@ -4233,8 +4473,9 @@ def cmd_instrumentar(args):
             mains.append(("PerfHooksModule.kt", "PerfHooksModule.kt"))
     plan = [(templates / src, module / args.fuente / package_path / dst) for src, dst in files]
     plan += [(templates / "main" / src, module / main_dir / package_path / dst) for src, dst in mains]
+    # Si Gradle ya declara la variante profileable, su manifest solo necesita el <provider>.
     plan += [(templates / "manifests" / ("%s.xml" % kind), module / "src" / folder / "AndroidManifest.xml")
-             for kind, folder in (("debug", "debug"), ("profiling", variant))]
+             for kind, folder in (("debug", "debug"), ("debug" if in_gradle else "profiling", variant))]
     if not args.sin_tests:
         plan += [(templates / "test" / src, module / args.tests / package_path / dst) for src, dst in tests]
     pending = []
@@ -4244,7 +4485,8 @@ def cmd_instrumentar(args):
                 target.write_text(render_template(source.read_text(encoding="utf-8"), args.paquete, tags), encoding="utf-8")
                 print("~ actualizado: %s" % target)
             elif target.suffix == ".xml":
-                lacks = target.parent.name == variant and "<profileable" not in target.read_text(encoding="utf-8", errors="ignore")
+                lacks = target.parent.name == variant and not in_gradle \
+                    and "<profileable" not in target.read_text(encoding="utf-8", errors="ignore")
                 print("= ya existe, no se toca: %s (agrega el <provider> de abajo%s)" % (
                     target, " y <profileable android:shell=\"true\" />" if lacks else ""))
                 pending.append("manifest")
@@ -4268,6 +4510,18 @@ def cmd_instrumentar(args):
         shown = ["%s (%s)" % m for m in modules[:12]]
         print("Módulos: %s%s. La instrumentación va en el módulo app (--modulo %s); las librerías emiten marcas por una interfaz." % (
             " · ".join(shown), " …" if len(modules) > 12 else "", module.as_posix()))
+    if outside_roots:
+        print("También busqué en lo que settings.gradle incluye desde fuera de la raíz: %s." % ", ".join(
+            relative_to_root(path, root) for path in outside_roots))
+    if unresolved_roots:
+        print("⚠ No pude seguir estas rutas de settings.gradle (%s): si el punto de extensión de contenido visible o el "
+              "OkHttpClient viven ahí, búscalos a mano en esas carpetas (una interfaz de pantalla o de contenido con "
+              "multibinding; `OkHttpClient.Builder()`)." % ", ".join(unresolved_roots[:5]))
+    if network and not scan["okhttp"]:
+        print("⚠ El proyecto usa OkHttp pero no encontré dónde se arma el OkHttpClient: puede venir de una librería ya "
+              "compilada. Sin acceso a su Builder no hay dónde poner el gancho: las métricas de red serán solo de punta "
+              "a punta (sin secciones HTTP, QUEUE, CONN ni TTFB). Díselo al usuario; las alternativas están en setup.md "
+              "· OkHttp dentro de una librería publicada.")
     outside = [(f, n) for f, n in scan["okhttp"] if not is_under(root / f, module)]
     if outside:
         print("⚠ OkHttpClient se arma fuera del módulo app (%s%s): PerfHooks y el multibinding de red viven en el código "
@@ -4276,12 +4530,45 @@ def cmd_instrumentar(args):
               % (", ".join("%s:%d" % o for o in outside[:3]), " …" if len(outside) > 3 else ""))
     for other in found_variants:
         if other["nombre"] != variant and other["estado"] != "ok":
-            print("  · %s también declara <profileable> pero %s: no se usa" % (
-                other["nombre"], "es depurable" if other["estado"] == "depurable" else "no pude verificar su build type"))
+            print("  · %s también declara %s pero %s: no se usa" % (
+                other["nombre"], "<profileable>" if other.get("manifest") and not other.get("gradle") else "que es profileable",
+                "es depurable" if other["estado"] == "depurable" else "no pude verificar su build type"))
+    by_name = scan["buildconfig"]["BUILD_TYPE"] + scan["buildconfig"]["FLAVOR"]
+    depends_on_name = bool(by_name or name_logic) and not existing
+    if depends_on_name:
+        where = ["BuildConfig.BUILD_TYPE o FLAVOR en %s" % ", ".join("%s:%d" % use for use in by_name[:3])] if by_name else []
+        where += ["lógica de Gradle por nombre en %s" % ", ".join("%s:%d" % (f, n) for f, n, _ in name_logic[:3])] if name_logic else []
+        print("⚠ El proyecto parece decidir cosas por el nombre del build type o del sabor (%s). Un build type nuevo (\"%s\") "
+              "tiene otro nombre: lo que dependa de él (configuración por ambiente, toggles, endpoints) puede quedar sin "
+              "valor y romper el arranque o el login. Recomendado: no crees otro build type; mide sobre el que ya usas "
+              "con una propiedad (-Pperf), el fragmento \"Alternativa\" de abajo. Si lo creas igual, revisa cada uno de "
+              "esos puntos. La búsqueda es por texto: confirma que cada línea decide por un build type, un sabor o una "
+              "variante (y no por otra cosa que también tenga nombre)." % ("; ".join(where), variant))
+    if not existing:
+        inherited = source_set_files(module, "release")
+        if inherited:
+            print("⚠ initWith(release) copia la configuración del build type, no su source set: lo que hay en "
+                  "src/release/ no llega a \"%s\" (%s). Cópialo a src/%s/ o haz que ese source set lo incluya; lo mismo "
+                  "con src/<otro>/ si heredas de otro build type." % (variant, ", ".join(inherited), variant))
+    for path in debug_overrides(module, root, denied):
+        print("⚠ %s usa <debug-overrides>: ese bloque solo aplica en builds depurables, y la variante medida no lo es. "
+              "Lo que dependa de él (la CA de usuario de un proxy de pruebas, un certificado propio) deja de valer y la "
+              "app puede no conectarse. Si las pruebas lo necesitan, propón una copia solo para la variante medida "
+              "(src/%s/res/xml/%s, con esas reglas en <base-config>), nunca en release (setup.md · Lo que cambia al no "
+              "ser depurable)." % (relative_to_root(path, root), variant, path.name))
+    debug_uses = scan["buildconfig"]["DEBUG"]
+    if debug_uses:
+        print("BuildConfig.DEBUG se lee en %d lugar%s (%s%s): en la variante medida vale false. Revisa lo que dependa de él "
+              "o del flag de depurable (logs, herramientas de depuración, endpoints o proxies de prueba)." % (
+                  len(debug_uses), "" if len(debug_uses) == 1 else "es", ", ".join("%s:%d" % use for use in debug_uses[:3]),
+                  ", …" if len(debug_uses) > 3 else ""))
     print("\nFalta pegar, con el paquete ya puesto (references/setup.md explica cada pieza):\n")
     snippets = [("1. %s (build.gradle.kts del módulo)" % ("Source set y cobertura de la variante %s" % variant if existing
                                                            else "Build type %s, source set y cobertura" % variant),
                  SNIPPETS["gradle_existente" if existing else "gradle"])]
+    if depends_on_name:
+        snippets.append(("Alternativa recomendada: medir sobre un build type que ya existe, con -Pperf (sin crear \"%s\")"
+                         % variant, SNIPPETS["gradle_propiedad"]))
     if network:
         snippets.append(("2. Red: cada OkHttpClient pasa por el gancho", SNIPPETS["red_hilt" if hilt else "red_sinhilt"]))
     snippets.append(("%d. Navegación sin cambio de actividad (Compose, Navigation 3)" % (3 if network else 2), SNIPPETS["nav"]))
@@ -4464,7 +4751,8 @@ def main(argv=None):
     p.set_defaults(func=cmd_nodos)
 
     p = sub.add_parser("instrumentar", help="copia la instrumentación y el cableado genéricos a un módulo Android")
-    p.add_argument("--modulo", required=True, help="carpeta del módulo de la app (el de com.android.application)")
+    p.add_argument("--modulo", required=True,
+                   help="carpeta del módulo que genera el APK (el de com.android.application; normalmente app)")
     p.add_argument("--paquete", required=True, help="paquete Kotlin para las clases, por ejemplo com.ejemplo.app.perf")
     p.add_argument("--fuente", default="src/perf/kotlin")
     p.add_argument("--tests", default="src/testDebug/kotlin")

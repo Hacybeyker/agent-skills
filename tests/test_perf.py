@@ -2957,7 +2957,18 @@ class NoImprovementsTest(PerfBase):
         self.assertRegex(steps[0]["texto"], r"^cd .* && python3 -I .*perf\.py capturar --plan inv/plan\.json --prueba --config cpu$")
         self.assertIn("opcional", steps[0]["que"])
         self.assertEqual(perf.pending_captures(self.folder / "no-existe.md"), [])
+        template = perf.DEVICE_PLACEHOLDER  # una línea que sigue con relleno de la plantilla no es una captura pendiente
+        state.write_text(state.read_text(encoding="utf-8") + "- %s Captura pendiente: `capturar --plan x`\n" % template,
+                         encoding="utf-8")
+        self.assertEqual(perf.pending_captures(state), ["capturar --plan inv/plan.json --prueba --config cpu"])
         expected = steps[0]["texto"]
+        for other in ("consulta inv/prueba/x_1.perfetto-trace.gz cpu_por_libreria", "perf.py diagnostico --carpeta inv"):
+            state.write_text(state.read_text(encoding="utf-8").replace(
+                "`capturar --plan inv/plan.json --prueba --config cpu`", "`%s`" % other), encoding="utf-8")
+            self.assertRegex(perf.next_steps(self.folder, self.plan)[1][0]["texto"],
+                             r"^cd .* && python3 -I .*perf\.py %s$" % re.escape(other.replace("perf.py ", "")))
+            state.write_text(state.read_text(encoding="utf-8").replace("`%s`" % other,
+                             "`capturar --plan inv/plan.json --prueba --config cpu`"), encoding="utf-8")
         for written in ("perf.py capturar --plan inv/plan.json --prueba --config cpu",
                         "python3 -I <skill>/scripts/perf.py capturar --plan inv/plan.json --prueba --config cpu".replace("<skill>", "x")):
             state.write_text(state.read_text(encoding="utf-8").replace(
@@ -3010,6 +3021,8 @@ class SmokeNextStepTest(DeviceBase):
         self.assertIn("Siguiente, según lo que se va a investigar:", out)
         write(self.dir / "reports/perf/setup/pedido.json", "esto no es JSON")
         self.assertIn("pedido.json no tiene la forma", self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "h3"))
+        (self.dir / "reports/perf/setup/pedido.json").write_bytes(b"\xff\xfe no es UTF-8")
+        self.assertIn("pedido.json no tiene la forma", self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "h4"))
         write(self.dir / "otro.json", json.dumps({"flujo": "abrir el buscador"}))
         out = self.ok("humo", "--paquete", PKG, "--pedido", self.dir / "otro.json", "--carpeta", self.dir / "h2")
         self.assertIn("medir abrir el buscador. Dispositivo", out)
@@ -3087,8 +3100,8 @@ class UnfilledTemplateTest(DeviceBase):
     def test_siguiente_avisa_de_las_filas_de_la_ficha_sin_completar_y_despues_del_reporte_tambien_del_resumen(self):
         folder = self.new()
         out = self.ok("siguiente", "--carpeta", folder)
-        self.assertIn("tiene partes sin completar: Ficha (Síntoma, Métricas principales y objetivo, Build y ambiente, Modos, "
-                      "Stack).", out)
+        self.assertIn("tiene partes sin completar: Ficha (Síntoma, Métricas principales y objetivo, Build y ambiente, "
+                      "Modos).", out)  # Stack también está sin llenar, pero no va al reporte
         self.assertNotIn("Resumen ejecutivo", out)  # todavía no toca: lo escribe la sesión 2
         state = folder / "estado.md"
         text = state.read_text(encoding="utf-8")
@@ -3098,8 +3111,11 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertNotIn("sin completar", self.ok("siguiente", "--carpeta", folder))
         write(folder / "reporte-inicial.md", "x")
         out = self.ok("siguiente", "--carpeta", folder)
-        self.assertIn("tiene partes sin completar: Resumen ejecutivo (de 3 a 5 líneas: lo escribe la sesión 2 para el reporte "
-                      "inicial); Hallazgos (la tabla está vacía).", out)
+        self.assertIn("tiene partes sin completar: Resumen ejecutivo (de 3 a 5 líneas); Hallazgos (la tabla está vacía).", out)
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "aprobada"}]
+        (folder / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        self.assertNotIn("sin completar", self.ok("siguiente", "--carpeta", folder))  # en la sesión 3 todavía no toca
 
     def test_el_reporte_no_publica_el_texto_de_la_plantilla(self):
         folder = self.new()
@@ -3112,7 +3128,7 @@ class UnfilledTemplateTest(DeviceBase):
                             "las métricas principales, la causa en una frase y qué depende del backend> |\n", 1)
         state.write_text(text, encoding="utf-8")
         out = self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
-        self.assertIn("tiene partes sin completar: Ficha (Métricas principales y objetivo, Build y ambiente, Modos, Stack); "
+        self.assertIn("tiene partes sin completar: Ficha (Métricas principales y objetivo, Build y ambiente, Modos); "
                       "Resumen ejecutivo", out)
         self.assertIn("Hallazgos (H1)", out)
         for name in ("reporte-inicial.md", "reporte-inicial.html"):
@@ -3152,7 +3168,7 @@ class UnfilledTemplateTest(DeviceBase):
         self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--receta", "arranque-frio", "--red", "--triage")
         state = (folder / "estado.md").read_text(encoding="utf-8")
         sections = perf.state_sections(state)[1]
-        self.assertEqual(perf.unfilled_parts(sections), ["Ficha (Stack)"])  # el stack lo ve la sesión 2; no va al reporte
+        self.assertEqual(perf.unfilled_parts(sections), [])  # el Stack lo ve la sesión 2 y no va al reporte
         self.assertEqual(perf.ficha_subset(sections["ficha"]).count(perf.UNFILLED), 0)
         self.assertIn("| Modos | guiado · recorrido arranque-frio · triage |", state)
         self.assertIn("| Síntoma | exploratoria (receta de arranque en frío) |", state)
@@ -3163,6 +3179,11 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertTrue(perf.has_placeholder("| Modos | guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage |"))
         self.assertTrue(perf.has_placeholder("| Dispositivo | <modelo · Android · Hz> |"))
         self.assertFalse(perf.has_placeholder("usa <carpeta>/plan.json y List<Item>"))
+        # los rellenos de 0.6.0 sin <> y <alcance> solo cuentan si son la celda entera: con datos agregados es contenido real
+        self.assertTrue(perf.has_placeholder("| Alcance | <alcance> |"))
+        self.assertFalse(perf.has_placeholder("| Alcance | el <alcance> del pedido |"))
+        self.assertFalse(perf.has_placeholder("| Métricas principales y objetivo | las de `principales` en plan.json, y el "
+                                              "objetivo: `ttid_ms` ≤ 500 ms |"))
         self.assertEqual(perf.without_placeholders("Texto real.\n- <M1 · archivos · test que la fija · DoD · commit propuesto: "
                                                    "perf(alcance): ...>\nOtra línea."), "Texto real.\nOtra línea.")
 
@@ -3189,7 +3210,7 @@ class ResultBoxTest(PerfBase):
                 "| H3 | Red solapada | n=3 | — | sin veredicto estadístico | |\n"
         md, page = self.report(table, [])
         self.assertTrue(md.index("## Resultado") < md.index("## Resumen") < md.index("## Hallazgos"))
-        self.assertIn("**Sin mejoras aplicables.** 3 hallazgos (1 descartado, 2 sin confirmar). Por qué, uno por uno:", md)
+        self.assertIn("**Sin mejoras aplicables.** 3 hallazgos (`descartado`: 1, `sin confirmar`: 2). Por qué, uno por uno:", md)
         self.assertIn("- **H1** · Jank en la lista · `descartado` · El camino lento no corrió: 0 slices", md)
         self.assertIn("- **H2** · Frame largo al cerrar el detalle · `sin confirmar` · falta: una captura con muestreo de CPU", md)
         self.assertIn("- **H3** · Red solapada · `sin confirmar` · no se pudo confirmar ni descartar con estos datos; sin acción", md)
@@ -3224,6 +3245,13 @@ class ResultBoxTest(PerfBase):
         self.assertEqual(perf.finding_kind("Sin veredicto estadístico"), "sin confirmar")
         self.assertEqual(perf.finding_kind("consecuencia de H1"), "consecuencia")
         self.assertEqual(perf.finding_kind(""), "sin tipo")
+        self.assertIn("**1 mejora propuesta**. Tú decides", perf.result_md("", {"mejoras": [{"id": "M1", "titulo": "a"}]}))
+        untyped = "| # | Síntoma |\n| --- | --- |\n| H1 | Carga lenta |\n"  # una tabla sin la columna Tipo
+        raw = perf.findings_md(untyped + "| H2 | %s |\n" % perf.DEVICE_PLACEHOLDER, {"mejoras": []})
+        self.assertIn("| H1 | Carga lenta |", raw)
+        self.assertNotIn("H2", raw)  # sin columna Tipo la tabla sale tal cual, menos las filas con relleno
+        self.assertIn("**Sin mejoras aplicables.** 1 hallazgo (`sin tipo`: 1).", perf.result_md(untyped, {"mejoras": []}))
+        self.assertIn("- **H1** · Carga lenta · `sin tipo` · sin mejora asociada", perf.result_md(untyped, {"mejoras": []}))
 
 
 FIXTURE_060 = ROOT / "tests" / "fixtures" / "hb-performance-0.6.0"
@@ -3249,7 +3277,8 @@ class Compat060Test(PerfBase):
     def test_siguiente_reporte_inicial_y_comparar_corren_sin_errores(self):
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · sesión 4 · cierre", out)  # mejora aplicada y fase después medida
-        self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos, Stack)", out)  # relleno de 0.6.0
+        self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos)", out)  # relleno de 0.6.0
+        self.assertNotIn("Resumen ejecutivo", out)  # hay una mejora aplicada: el resumen es del cierre, todavía no toca
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
         self.assertIn("| H2 | Frame largo al entrar | 48 ms en la corrida mediana · `hilo_principal_top` | — | sin veredicto "
@@ -3274,6 +3303,8 @@ class Compat060Test(PerfBase):
         self.ok("reporte", "--carpeta", self.folder, "--html")
         final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
         self.assertIn("3 hallazgos → 1 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
+        for filler in ("test que la fija", "qué dice cada métrica principal", "3 a 5 líneas", "backend real o mocks"):
+            self.assertNotIn(filler, final)  # el relleno de la plantilla de 0.6.0 tampoco llega al reporte final
         self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0], "investigación cerrada")
 
     def test_las_fases_de_0_6_0_sin_datos_por_flujo_se_leen_igual(self):
@@ -3284,3 +3315,265 @@ class Compat060Test(PerfBase):
         table, notes = perf.builds_table(self.folder)
         self.assertIn("| antes | 2026-01-15T10:00:00 | abc1234 | 1.0 (7) | 2026-01-15 09:00:00 | 60 | completa (speed) | 5 |", table)
         self.assertEqual(notes, [])
+
+
+GRADLE_PROFILEABLE = """
+plugins { id("com.android.application") }
+android {
+    buildTypes {
+        release { isMinifyEnabled = true }
+        create("demo") {
+            initWith(getByName("release"))
+            isProfileable = true
+            signingConfig = signingConfigs.getByName("debug")
+        }
+        create("interno") {
+            initWith(getByName("debug"))
+            isProfileable = true
+        }
+    }
+}
+"""
+
+
+class SetupDetectionTest(PerfBase):
+    """Lo que `instrumentar` mira antes de proponer el build de medición."""
+
+    def module(self, gradle=GRADLE_KTS, **files):
+        module = self.dir / "app"
+        write(module / "build.gradle.kts", gradle)
+        for path, text in files.items():
+            write(module / path, text)
+        return module
+
+    def instrument(self, module, *extra):
+        return self.perf("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments", *extra)
+
+    def test_una_variante_profileable_declarada_en_gradle_se_reutiliza_aunque_su_manifest_no_lo_diga(self):
+        module = self.module(GRADLE_PROFILEABLE)
+        found = {c["nombre"]: c for c in perf.find_profileable_variants(module, self.dir, [])}
+        self.assertEqual({name: c["estado"] for name, c in found.items()}, {"demo": "ok", "interno": "depurable"})
+        self.assertTrue(found["demo"]["gradle"])
+        out = self.instrument(module).stdout
+        self.assertIn("Variante: demo (existente: profileable y no depurable, no se crea otro build type)", out)
+        self.assertIn("interno también declara que es profileable pero es depurable: no se usa", out)
+        self.assertNotIn('create("profiling")', out)
+        manifest = (module / "src/demo/AndroidManifest.xml").read_text(encoding="utf-8")
+        self.assertIn('android:name="com.ejemplo.perf.PerfInstaller"', manifest)
+        self.assertNotIn("<profileable", manifest)  # Gradle ya lo declara: el manifest solo lleva el provider
+        self.assertFalse((module / "src/profiling").exists())
+
+    def test_un_build_type_que_solo_es_profileable_con_una_propiedad_no_es_una_variante_existente(self):
+        # el fragmento "-Pperf" ya pegado: sin la propiedad, qa no es profileable ni lleva la instrumentación
+        gradle = """
+val perf = providers.gradleProperty("perf").isPresent
+android {
+    buildTypes {
+        release { isMinifyEnabled = true }
+        create("qa") {
+            initWith(getByName("release"))
+            if (perf) {
+                isDebuggable = false
+                isProfileable = true
+            }
+        }
+    }
+}
+"""
+        module = self.module(gradle)
+        self.assertEqual(perf.find_profileable_variants(module, self.dir, []), [])
+        self.assertFalse(perf.always_profileable(perf.build_types(gradle)["qa"]))
+        out = self.instrument(module).stdout
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertFalse((module / "src/qa").exists())  # nada que qa cargue sin -Pperf
+        self.assertNotIn('getByName("qa").kotlin.directories', out)
+
+    def test_con_groovy_y_con_un_manifest_propio_no_pide_agregar_profileable(self):
+        gradle = "android { buildTypes {\n  release { minifyEnabled true }\n  demo { initWith release\n    profileable true }\n} }"
+        module = self.dir / "app"
+        write(module / "build.gradle", gradle)
+        write(module / "src/demo/AndroidManifest.xml", "<manifest><application/></manifest>")
+        out = self.instrument(module).stdout
+        self.assertIn("Variante: demo (existente", out)
+        hint = next(line for line in out.splitlines() if "src/demo/AndroidManifest.xml" in line)
+        self.assertIn("agrega el <provider> de abajo)", hint)
+        self.assertNotIn("<profileable", hint)
+
+    def test_release_y_debug_con_sabores_tampoco_son_candidatas_ni_se_aceptan_con_variante(self):
+        for name, expected in (("release", True), ("Release", True), ("demoRelease", True), ("freeDebug", True),
+                               ("qa2Release", True), ("PRODRelease", True), ("UATDebug", True), ("profiling", False), ("benchmark", False), ("prerelease", False),
+                               ("releaseLike", False), ("demo", False)):
+            self.assertEqual(perf.is_production(name), expected, name)
+        module = self.module(GRADLE_KTS, **{"src/demoRelease/AndroidManifest.xml": PROFILEABLE,
+                                            "src/freeDebug/AndroidManifest.xml": PROFILEABLE})
+        self.assertEqual(perf.find_profileable_variants(module, self.dir, []), [])
+        out = self.instrument(module).stdout
+        self.assertIn("Variante: profiling (nueva)", out)
+        self.assertNotIn("demoRelease", out)
+        for name in ("demoRelease", "freeDebug"):
+            result = self.instrument(module, "--variante", name)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn("variante '%s' no válida: release y debug (también con sabores" % name, result.stderr)
+        self.assertEqual((module / "src/demoRelease/AndroidManifest.xml").read_text(encoding="utf-8"), PROFILEABLE)
+        # un build type propio que el módulo declara con un nombre así no es un sabor de release: sí se puede usar
+        own = GRADLE_KTS.replace('create("benchmark")', 'create("preRelease")')
+        module = self.module(own, **{"src/preRelease/AndroidManifest.xml": PROFILEABLE})
+        self.assertTrue(perf.is_production("preRelease"))
+        self.assertFalse(perf.is_production("preRelease", perf.build_types(own)))
+        self.assertTrue(perf.is_production("release", perf.build_types(own)))
+        self.assertIn("Variante: preRelease (existente", self.instrument(module, "--variante", "preRelease").stdout)
+
+    def test_si_el_proyecto_depende_del_nombre_del_build_type_recomienda_no_crear_otro(self):
+        gradle = GRADLE_KTS + 'android.buildTypes.all { if (name.endsWith("qa")) { buildConfigField("String", "AMBIENTE", "\\"qa\\"") } }\n' \
+                              'if (project.name == "app") { println("no cuenta: es el nombre del proyecto") }\n'
+        module = self.module(gradle, **{
+            "src/main/kotlin/com/ejemplo/app/Toggles.kt": "package com.ejemplo.app\n\nval ambiente = BuildConfig.BUILD_TYPE\n",
+            "src/main/kotlin/com/ejemplo/app/Sabor.kt": "package com.ejemplo.app\nval sabor = BuildConfig.FLAVOR_ambiente\n"})
+        out = self.instrument(module).stdout
+        self.assertIn("⚠ El proyecto parece decidir cosas por el nombre del build type o del sabor (BuildConfig.BUILD_TYPE o FLAVOR en "
+                      "app/src/main/kotlin/com/ejemplo/app/Toggles.kt:3, app/src/main/kotlin/com/ejemplo/app/Sabor.kt:2; lógica de "
+                      "Gradle por nombre en app/build.gradle.kts:18)", out)
+        self.assertIn('Un build type nuevo ("profiling") tiene otro nombre', out)
+        self.assertIn("Alternativa recomendada: medir sobre un build type que ya existe, con -Pperf", out)
+        self.assertIn('val perf = providers.gradleProperty("perf").isPresent', out)
+        self.assertIn("isProfileable = true", out)
+        self.assertIn('getByName("<buildType>").manifest.srcFile("src/profiling/AndroidManifest.xml")', out)
+        self.assertNotIn("{{", out)
+        self.assertEqual(len(perf.scan_gradle(self.dir, [])), 1)  # project.name no cuenta
+        self.assertIn("confirma que cada línea decide por un build type, un sabor o una variante", out)
+        write(self.dir / "otro" / "build.gradle.kts", 'tasks.matching { it.name.contains("Test") }.configureEach { enabled = false }\n'
+              'configurations.all { resolutionStrategy.eachDependency { if (requested.name == "kotlin-stdlib") useVersion("2.0") } }\n'
+              'subprojects { if (name == "app") apply(plugin = "x") }\n'
+              'val jars = fileTree("libs").filter { it.name.endsWith(".jar") }\n')
+        self.assertEqual(len(perf.scan_gradle(self.dir, [])), 1)  # tareas, dependencias, archivos y proyectos tampoco
+        write(self.dir / "otro" / "build.gradle.kts", 'androidComponents.onVariants { v -> if (v.name.lowercase().contains("release")) {} }\n'
+              "android.applicationVariants.all { if (getName().endsWith('Qa')) {} }\n")
+        self.assertEqual([found[1] for found in perf.scan_gradle(self.dir / "otro", [])], [1, 2])  # con llamadas en medio
+        # con una variante existente no se crea ningún build type: no hay nada que advertir
+        write(module / "src/benchmark/AndroidManifest.xml", PROFILEABLE)
+        out = self.instrument(module).stdout
+        self.assertIn("Variante: benchmark (existente", out)
+        self.assertNotIn("decidir cosas por el nombre", out)
+        self.assertNotIn("-Pperf", out)
+
+    def test_un_proyecto_que_no_depende_del_nombre_no_recibe_la_alternativa(self):
+        out = self.instrument(self.module()).stdout
+        self.assertNotIn("decidir cosas por el nombre", out)
+        self.assertNotIn("-Pperf", out)
+
+    def test_al_crear_un_build_type_dice_lo_que_initwith_no_copia(self):
+        module = self.module(GRADLE_KTS, **{"src/release/AndroidManifest.xml": "<manifest/>",
+                                            "src/release/res/xml/network_security_config.xml": "<network-security-config/>",
+                                            "src/release/google-services.json": "{}"})
+        out = self.instrument(module).stdout
+        self.assertIn('⚠ initWith(release) copia la configuración del build type, no su source set: lo que hay en src/release/ '
+                      'no llega a "profiling" (AndroidManifest.xml, google-services.json, res/xml/network_security_config.xml)', out)
+        write(module / "src/benchmark/AndroidManifest.xml", PROFILEABLE)
+        self.assertNotIn("initWith(release) copia", self.instrument(module).stdout)
+
+    def test_avisa_de_debug_overrides_y_de_buildconfig_debug(self):
+        config = '<network-security-config>\n  <debug-overrides><trust-anchors><certificates src="user"/></trust-anchors>' \
+                 '</debug-overrides>\n</network-security-config>'
+        module = self.module(GRADLE_KTS, **{
+            "src/main/res/xml/network_security_config.xml": config,
+            "src/main/res/xml/otro.xml": "<paths/>",
+            "src/main/kotlin/com/ejemplo/app/Log.kt": "package com.ejemplo.app\nval verbose = BuildConfig.DEBUG\n"})
+        out = self.instrument(module).stdout
+        self.assertIn("⚠ app/src/main/res/xml/network_security_config.xml usa <debug-overrides>: ese bloque solo aplica en "
+                      "builds depurables, y la variante medida no lo es.", out)
+        self.assertIn("propón una copia solo para la variante medida (src/profiling/res/xml/network_security_config.xml, con "
+                      "esas reglas en <base-config>), nunca en release", out)
+        self.assertNotIn("otro.xml usa", out)
+        self.assertIn("BuildConfig.DEBUG se lee en 1 lugar (app/src/main/kotlin/com/ejemplo/app/Log.kt:2): en la variante "
+                      "medida vale false", out)
+
+    def test_busca_los_puntos_de_extension_en_los_modulos_que_settings_incluye_desde_fuera_de_la_raiz(self):
+        with tempfile.TemporaryDirectory() as outside:
+            sibling = Path(outside).resolve() / "analitica"
+            write(sibling / "build.gradle.kts", 'plugins { id("com.android.library") }')
+            write(sibling / "src/main/kotlin/com/ejemplo/core/ScreenTracker.kt", TRACKER)
+            write(sibling / "src/main/kotlin/com/ejemplo/core/AnalyticsModule.kt", TRACKER_MODULE)
+            write(sibling / "src/main/kotlin/com/ejemplo/core/Http.kt", "val cliente = OkHttpClient.Builder().build()\n")
+            relative = os.path.relpath(str(sibling), str(self.dir.resolve()))
+            write(self.dir / "settings.gradle.kts", 'include(":app", ":analitica", ":otra")\n'
+                  'project(":analitica").projectDir = file("%s")\n'
+                  'project(":otra").projectDir = File(rootDir, "$carpetaExterna/otra")\n'
+                  'project(":mas").projectDir = File(settingsDir.parentFile, "mas")\n'
+                  '// project(":vieja").projectDir = file("../comentada")\n'
+                  'includeBuild("../no-existe-hbperf")\n' % relative)
+            module = self.module("dependencies { implementation(libs.hilt.android); implementation(libs.okhttp) }")
+            roots, unresolved = perf.external_roots(self.dir, [])
+            self.assertEqual(([str(r) for r in roots], unresolved), (
+                [str(sibling)], ["$carpetaExterna/otra", 'project(":mas").projectDir = File(settingsDir.parentFile, "mas")',
+                                 "../no-existe-hbperf"]))
+            out = self.instrument(module).stdout
+            self.assertIn("También busqué en lo que settings.gradle incluye desde fuera de la raíz: %s." % relative, out)
+            self.assertIn("interfaz ScreenTracker (%s/src/main/kotlin/com/ejemplo/core/ScreenTracker.kt:3) · con multibinding"
+                          % relative, out)
+            self.assertIn("⚠ No pude seguir estas rutas de settings.gradle ($carpetaExterna/otra, project(\":mas\").projectDir = "
+                          "File(settingsDir.parentFile, \"mas\"), ../no-existe-hbperf)", out)
+            self.assertIn("⚠ OkHttpClient se arma fuera del módulo app (%s/src/main/kotlin/com/ejemplo/core/Http.kt:1)" % relative, out)
+            self.assertNotIn("no encontré dónde se arma el OkHttpClient", out)
+            # una ruta prohibida tampoco se lee fuera de la raíz: absoluta, o relativa a la raíz con sus '..'
+            self.assertEqual(perf.external_roots(self.dir, [str(sibling)])[0], [])
+            self.assertEqual(perf.external_roots(self.dir, [relative])[0], [])
+            inside = relative + "/src/main/kotlin/com/ejemplo/core/"
+            self.assertEqual(perf.scan_sources(self.dir, [inside], [sibling])["ganchos"], [])
+            self.assertEqual(len(perf.scan_sources(self.dir, [], [sibling])["ganchos"]), 1)
+
+    def test_las_rutas_de_settings_dentro_de_la_raiz_o_que_la_contienen_no_se_siguen_ni_se_avisan(self):
+        (self.dir / "libs" / "x").mkdir(parents=True)
+        (self.dir / "build-logic").mkdir()
+        write(self.dir / "settings.gradle.kts", 'project(":x").projectDir = file("$rootDir/libs/x")\n'
+              'includeBuild("${rootDir}/build-logic")\nincludeBuild("..")\n')
+        self.assertEqual(perf.external_roots(self.dir, []), ([], []))
+
+    def test_avisa_si_el_proyecto_usa_okhttp_pero_no_arma_el_cliente(self):
+        module = self.module("dependencies { implementation(libs.okhttp) }")
+        out = self.instrument(module).stdout
+        self.assertIn("⚠ El proyecto usa OkHttp pero no encontré dónde se arma el OkHttpClient", out)
+        self.assertIn("las métricas de red serán solo de punta a punta", out)
+        write(module / "src/main/kotlin/com/ejemplo/app/Red.kt", "val cliente = OkHttpClient.Builder().build()\n")
+        self.assertNotIn("no encontré dónde se arma", self.instrument(module, "--actualizar").stdout)
+        self.assertNotIn("no encontré dónde se arma", self.instrument(self.module("dependencies { }")).stdout)  # sin OkHttp
+
+
+class SetupPresentTest(DeviceBase):
+    """"Setup listo" en AGENTS.md no alcanza: `humo` y `nuevo` comprueban que la instrumentación esté en el repo."""
+
+    def test_el_aviso_depende_de_agents_md_y_de_lo_que_hay_en_el_repo(self):
+        self.assertIn("no encontré la instrumentación en el repo (ni PerfHooks.kt ni un source set src/perf", perf.setup_warning(self.dir))
+        self.assertIn("falta la sesión 0 (setup)", perf.setup_warning(self.dir))
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- applicationId: com.ejemplo.app\n- setup listo\n")
+        warning = perf.setup_warning(self.dir)
+        self.assertIn('AGENTS.md dice "setup listo" pero no encontré la instrumentación en el repo', warning)
+        self.assertIn("si el setup se guarda como parche, aplícalo (git apply <parche>)", warning)
+        write(self.dir / "AGENTS.md", "## Reglas\n\n- Nunca despliegues con parches manuales.\n\n## Rendimiento\n\n"
+                                      "- Setup listo, en parche: `git apply herramientas/perf-setup.patch` antes de medir\n")
+        self.assertIn('Reaplícala antes de seguir: según AGENTS.md: "Setup listo, en parche: `git apply '
+                      'herramientas/perf-setup.patch` antes de medir"', perf.setup_warning(self.dir))
+        write(self.dir / "AGENTS.md", "## Reglas\n\n- Nunca despliegues con parches manuales.\n\n## Rendimiento\n\n- setup listo\n")
+        self.assertIn("si el setup se guarda como parche, aplícalo", perf.setup_warning(self.dir))  # esa línea ajena no se cita
+        self.assertNotIn("despliegues", perf.setup_warning(self.dir))
+        (self.dir / "app/src/perf/kotlin").mkdir(parents=True)  # el source set solo, sin PerfHooks: sigue faltando
+        self.assertIn("(ni PerfHooks.kt, bajo", perf.setup_warning(self.dir))
+        write(self.dir / "app/src/main/kotlin/com/ejemplo/perf/PerfHooks.kt", "object PerfHooks")
+        self.assertEqual(perf.setup_warning(self.dir), "")
+        write(self.dir / "otra/build/generated/PerfHooks.kt", "x")  # lo que hay en build/ no cuenta
+        self.assertEqual(perf.find_instrumentation(self.dir / "otra"), (False, False))
+
+    def test_nuevo_y_humo_lo_dicen_antes_de_seguir(self):
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- setup listo (parche: git apply herramientas/perf.patch)\n")
+        out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x", "--paquete", PKG, "--flujo", "x")
+        self.assertIn('⚠ AGENTS.md dice "setup listo" pero no encontré la instrumentación en el repo', out)
+        self.assertIn("git apply herramientas/perf.patch", out)
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertEqual(out.count('AGENTS.md dice "setup listo" pero no encontré la instrumentación'), 2)  # al empezar y al final
+        self.assertLess(out.index("⚠ Antes de seguir:"), out.index("Siguiente, según lo que se va a investigar:"))
+        write(self.dir / "app/src/perf/kotlin/x/PerfInstaller.kt", "x")
+        write(self.dir / "app/src/main/kotlin/x/PerfHooks.kt", "object PerfHooks")
+        out = self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "reports/perf/humo2")
+        self.assertNotIn("no encontré la instrumentación", out)
+        out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/y", "--paquete", PKG, "--flujo", "y")
+        self.assertNotIn("no encontré la instrumentación", out)

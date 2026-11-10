@@ -32,7 +32,7 @@ Escribe en `estado.md` ("Lectura de la comparación") una línea por cada métri
 
 ## 3. Resumen ejecutivo
 
-De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las métricas principales, la causa en una frase y qué parte depende del backend.
+De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las métricas principales, la causa en una frase y qué parte depende del backend. **Reemplaza el que dejó la sesión 2** para el reporte inicial: ya no es relleno de plantilla, así que nada avisa si se queda, y el reporte final publicaría el resumen del diagnóstico.
 
 ## 4. Reporte
 

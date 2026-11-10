@@ -19,7 +19,7 @@ Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazg
 - **Tests instrumentados solo en un emulador:** `connectedAndroidTest` desinstala la app del dispositivo y se pierden los datos de prueba.
 - **DoD con la salida acotada:** los comandos de `## DoD`, con Gradle en `-q`, primero los tests del módulo afectado y el log completo en `<carpeta>/logs/`. Al chat llegan solo el conteo de tests y los fallos:
   ```bash
-  cd <raíz-del-proyecto> && ./gradlew -q :<modulo>:testDebugUnitTest > <carpeta>/logs/tests-m1.log 2>&1; echo "exit $?"; grep -E "tests completed|FAILED|BUILD" <carpeta>/logs/tests-m1.log | tail -20
+  cd <raíz-del-proyecto> && ( ./gradlew -q :<modulo>:testDebugUnitTest > <carpeta>/logs/tests-m1.log 2>&1; code=$?; grep -E "tests completed|FAILED|BUILD" <carpeta>/logs/tests-m1.log | tail -20; echo "exit $code"; exit $code )
   ```
 - **Lo temporal** (una sección agregada para confirmar una hipótesis) se quita antes de proponer el commit.
 - No dejes una edición y el comando que depende de ella en paralelo. No vuelques el diff al chat: lista los archivos y qué cambió en cada uno.
