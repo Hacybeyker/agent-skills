@@ -4,11 +4,12 @@ package {{PAQUETE}}
 import okhttp3.Request
 
 // "GET /items/{id} #1a2b": method, path with the segments that look like ids normalized and a hash of the query;
-// no query values or body.
+// no query values or body. An id is a number, a UUID, a long hex string or any segment with 6 or more digits (a
+// document or account number, also with dots, hyphens or letters); short ones such as v3.7 or page-12 stay.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(
         "/(\\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" +
-            "|[0-9a-fA-F]{16,})(?=/|$)"
+            "|[0-9a-fA-F]{16,}|(?:[^/\\d]*\\d){6,}[^/]*)(?=/|$)"
     )
 
     fun endpoint(request: Request): String =

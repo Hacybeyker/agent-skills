@@ -45,7 +45,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 
 | Paso | Quién | Lee | Hace | Termina con | Pasos máx. |
 | --- | --- | --- | --- | --- | --- |
-| 0 · Setup, una vez por proyecto | Agente | [setup.md](references/setup.md) | Variante de profiling (la que el proyecto ya tenga, o `profiling`), `perf.py instrumentar` (genera también el cableado), los fragmentos que imprime, DoD en un comando y `perf.py humo` | Aprobación del diff y el comando de humo | 40 |
+| 0 · Setup, una vez por proyecto | Agente | [setup.md](references/setup.md) | Variante de profiling (la que el proyecto ya tenga, o `profiling`), `perf.py instrumentar` (genera también el cableado), los fragmentos que imprime (el de red, aplicado en cada `OkHttpClient.Builder`), DoD en un comando y `perf.py humo` | Aprobación del diff y el comando de humo | 40 |
 | 1 · Ficha y plan | Agente; con receta, `perf.py nuevo` sin chat | [ficha.md](references/ficha.md) | Preguntas fijas, `plan.json` (marcas, ventana, métricas), `estado.md` y corrida de prueba | Aprobación de ficha y plan | 15 (25 en flujos largos) |
 | Medición antes y control | Usuario, sin chat | [medicion.md](references/medicion.md) | `perf.py capturar` y `perf.py diagnostico` | — | — |
 | 2 · Diagnóstico | Agente | [diagnostico.md](references/diagnostico.md) | Lee `diagnostico.md` y el código; hallazgos, plan de mejoras y reporte inicial | El comando de la decisión | 25 |

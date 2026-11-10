@@ -69,6 +69,22 @@ class TraceEventListenerTest {
         assertEquals("/a/{id}/b/{id}", HttpSectionName.sanitize("/a/123/b/123e4567-e89b-12d3-a456-426614174000"))
     }
 
+    @Test
+    fun sanitizeReplacesSegmentsWithSixOrMoreDigitsEvenWithHyphensOrDots() {
+        assertEquals(
+            "/clientes/{id}/cuentas/{id}",
+            HttpSectionName.sanitize("/clientes/1234-5678-90/cuentas/00-123-456789-0")
+        )
+        assertEquals("/clientes/{id}", HttpSectionName.sanitize("/clientes/AB-123.456.789"))
+        assertEquals("/pagos/{id}/detalle", HttpSectionName.sanitize("/pagos/ORD-2026-000123/detalle"))
+    }
+
+    @Test
+    fun sanitizeKeepsShortVersionsAndPages() {
+        assertEquals("/v3.7/items/pagina-12", HttpSectionName.sanitize("/v3.7/items/pagina-12"))
+        assertEquals("/api/v2/lotes/a1b2c3", HttpSectionName.sanitize("/api/v2/lotes/a1b2c3"))
+    }
+
     private class RecordingTracer : SectionTracer {
         val events = mutableListOf<String>()
 

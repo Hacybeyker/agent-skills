@@ -1674,16 +1674,19 @@ class InstrumentTest(PerfBase):
         self.assertIn("@PerfEventListeners factories", out)  # fragmento de red para Hilt
         self.assertIn("PerfHooks.mark(", out)
         self.assertNotIn("{{", out)
-        # actualizar: pisa lo generado, respeta lo del proyecto y los manifests existentes
+        # actualizar: pisa lo que generó una versión anterior de la skill (su huella coincide), respeta lo del proyecto
+        # y los manifests existentes
         own = main / "PerfHooks.kt"
         own.write_text("package com.ejemplo.perf\nobject PerfHooks\n", encoding="utf-8")
-        (perf_dir / "MarkTrace.kt").write_text((perf_dir / "MarkTrace.kt").read_text(encoding="utf-8") + "// viejo\n",
-                                               encoding="utf-8")
+        old = (perf_dir / "MarkTrace.kt").read_text(encoding="utf-8") + "// viejo\n"
+        (perf_dir / "MarkTrace.kt").write_text(perf.stamp(old), encoding="utf-8")
         out = self.ok("instrumentar", "--modulo", module, "--paquete", "com.ejemplo.perf", "--sin-fragments", "--actualizar")
-        self.assertIn("~ actualizado", out)
+        self.assertIn("~ actualizado: %s" % (perf_dir / "MarkTrace.kt"), out)
         self.assertNotIn("// viejo", (perf_dir / "MarkTrace.kt").read_text(encoding="utf-8"))
         self.assertEqual(own.read_text(encoding="utf-8"), "package com.ejemplo.perf\nobject PerfHooks\n")
         self.assertIn("no lo generó la skill", out)
+        self.assertIn("= al día: %s" % (perf_dir / "SectionTracer.kt"), out)  # lo que no cambió no se reescribe
+        self.assertNotIn("no se actualiza", out)
 
     def test_sin_hilt_la_red_pasa_por_perfhooks(self):
         module = self.dir / "app"
@@ -3577,3 +3580,313 @@ class SetupPresentTest(DeviceBase):
         self.assertNotIn("no encontré la instrumentación", out)
         out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/y", "--paquete", PKG, "--flujo", "y")
         self.assertNotIn("no encontré la instrumentación", out)
+
+
+NO_HTTP = "".join(line + "\n" for line in GOOD.splitlines() if '"HTTP ' not in line)
+CLIENT_KT = """package com.ejemplo.red
+
+import okhttp3.OkHttpClient
+
+fun cliente(): OkHttpClient = OkHttpClient.Builder()
+    .build()
+"""
+CLIENT_JAVA = """package com.ejemplo.red;
+
+import okhttp3.OkHttpClient;
+
+class ModuloRed {
+    OkHttpClient cliente() {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder();
+        return builder.build();
+    }
+
+    OkHttpClient corto(OkHttpClient base) {
+        return base.newBuilder().build();
+    }
+}
+"""
+
+
+class NetworkWiringTest(DeviceBase):
+    """El cableado de red lo aplica la sesión 0 y lo comprueban `instrumentar`, `humo` y la corrida de prueba."""
+
+    def project(self, gradle="dependencies { implementation(libs.hilt.android); implementation(libs.okhttp) }", **files):
+        write(self.dir / "app/build.gradle.kts", gradle)
+        for path, text in files.items():
+            write(self.dir / path, text)
+        return self.dir / "app"
+
+    def instrument(self, *extra):
+        return self.ok("instrumentar", "--modulo", self.dir / "app", "--paquete", "com.ejemplo.perf", "--sin-fragments", *extra)
+
+    def test_perfhooks_trae_el_helper_estatico_y_su_test_segun_el_stack(self):
+        module = self.project()
+        self.instrument()
+        hooks = (module / "src/main/kotlin/com/ejemplo/perf/PerfHooks.kt").read_text(encoding="utf-8")
+        self.assertIn("@JvmStatic\n    fun applyEventListener(", hooks)
+        self.assertIn("factories.firstOrNull()?.let { builder.eventListenerFactory(it) }", hooks)
+        self.assertIn("import okhttp3.EventListener\nimport okhttp3.OkHttpClient\n", hooks)
+        self.assertNotIn("applyOkHttp", hooks)  # con Hilt no hay PerfHooks.okHttp
+        test = (module / "src/testDebug/kotlin/com/ejemplo/perf/PerfHooksTest.kt").read_text(encoding="utf-8")
+        self.assertIn("applyEventListenerLeavesTheBuilderAsIsWithAnEmptySet", test)
+        self.assertNotIn("applyOkHttp", test)
+        self.assertNotIn("org.junit.After", test)
+        self.assertNotIn("hb-perf:", test)
+        self.assertNotIn("\n\n\n", test)
+
+    def test_sin_hilt_el_helper_tambien_sirve_desde_java_y_sin_red_no_hay_ninguno(self):
+        module = self.project(gradle="dependencies { implementation(libs.okhttp) }")
+        out = self.instrument()
+        hooks = (module / "src/main/kotlin/com/ejemplo/perf/PerfHooks.kt").read_text(encoding="utf-8")
+        self.assertIn("@JvmStatic\n    fun applyOkHttp(builder: OkHttpClient.Builder): OkHttpClient.Builder = builder.also(okHttp)", hooks)
+        self.assertIn("fun applyEventListener(", hooks)
+        self.assertNotIn("\n\n\n", hooks)
+        self.assertIn("PerfHooks.applyOkHttp(builder); // Java", out)
+        test = (module / "src/testDebug/kotlin/com/ejemplo/perf/PerfHooksTest.kt").read_text(encoding="utf-8")
+        self.assertIn("applyOkHttpRunsTheHookAndReturnsTheSameBuilder", test)
+        self.assertIn("import org.junit.After\n", test)
+        other = self.dir / "otro"
+        write(other / "app/build.gradle.kts", "dependencies { implementation(libs.androidx.fragment) }")
+        self.ok("instrumentar", "--modulo", other / "app", "--paquete", "com.ejemplo.perf")
+        plain = (other / "app/src/main/kotlin/com/ejemplo/perf/PerfHooks.kt").read_text(encoding="utf-8")
+        self.assertNotIn("JvmStatic", plain)
+        self.assertNotIn("okhttp3", plain)
+        self.assertFalse((other / "app/src/testDebug/kotlin/com/ejemplo/perf/PerfHooksTest.kt").exists())
+
+    def test_el_fragmento_de_red_cubre_un_modulo_de_di_en_java_y_el_comodin(self):
+        self.project()
+        out = self.instrument()
+        self.assertIn("PerfHooks.applyEventListener(OkHttpClient.Builder(), factories)", out)
+        self.assertIn("@Provides OkHttpClient okHttp(@PerfEventListeners Set<EventListener.Factory> factories) {", out)
+        self.assertIn("PerfHooks.applyEventListener(builder, factories);", out)
+        self.assertIn("@JvmSuppressWildcards", out)
+        self.assertIn("Set<? extends EventListener.Factory>", out)
+        module_text = (self.dir / "app/src/main/kotlin/com/ejemplo/perf/PerfHooksModule.kt").read_text(encoding="utf-8")
+        self.assertIn("PerfHooks.applyEventListener(builder, factories)", module_text)
+
+    def test_instrumentar_lista_los_builders_que_no_llaman_al_gancho_en_kotlin_y_en_java(self):
+        self.project(**{"app/src/main/kotlin/com/ejemplo/red/Cliente.kt": CLIENT_KT,
+                        "app/src/main/java/com/ejemplo/red/ModuloRed.java": CLIENT_JAVA})
+        out = self.instrument()
+        self.assertIn("// Builders que todavía no llaman al gancho (2): app/src/main/java/com/ejemplo/red/ModuloRed.java:7, "
+                      "app/src/main/kotlin/com/ejemplo/red/Cliente.kt:5", out)
+        self.assertIn("// Clientes derivados con .newBuilder() (heredan el listener de su cliente base: cablea el base): "
+                      "app/src/main/java/com/ejemplo/red/ModuloRed.java:12", out)
+        self.assertIn("la prueba de humo falla", out)
+        write(self.dir / "app/src/main/kotlin/com/ejemplo/red/Cliente.kt", CLIENT_KT.replace(
+            "OkHttpClient.Builder()\n", "PerfHooks.applyEventListener(OkHttpClient.Builder(), factories)\n"))
+        write(self.dir / "app/src/main/java/com/ejemplo/red/ModuloRed.java", CLIENT_JAVA.replace(
+            "return builder.build();", "PerfHooks.applyEventListener(builder, factories);\n        return builder.build();"))
+        out = self.instrument()
+        self.assertIn("// No quedan builders sin cablear en el código que pude leer.", out)
+        self.assertNotIn("Clientes derivados", out)  # su archivo ya llama al gancho
+
+    def test_un_builder_cuenta_como_cableado_solo_si_su_archivo_llama_al_gancho_tantas_veces_como_builders_tiene(self):
+        two = {"archivo": "a/Red.kt", "builders": [5, 9], "derivados": [20], "llamadas": 1}
+        self.assertEqual(perf.unwired_builders([two]), (["a/Red.kt:5", "a/Red.kt:9"], []))
+        self.assertEqual(perf.unwired_builders([dict(two, llamadas=2)]), ([], []))
+        self.assertEqual(perf.unwired_builders([dict(two, builders=[], llamadas=0)]), ([], ["a/Red.kt:20"]))
+        for wired in ("PerfHooks.okHttp(builder)", "PerfHooks.applyOkHttp(builder);", "PerfHooks.INSTANCE.getOkHttp().invoke(b);",
+                      "PerfHooks.applyEventListener(builder, factories)"):
+            self.assertTrue(perf.OKHTTP_WIRED.search(wired), wired)
+        for plain in ("import com.ejemplo.perf.PerfHooks", "PerfHooks.mark(\"detalle\")", "OkHttpClient.Builder()"):
+            self.assertFalse(perf.OKHTTP_WIRED.search(plain), plain)
+        # la factory puesta a mano cuenta solo si el archivo recibe el set de la skill o nombra su listener (el
+        # fragmento de versiones anteriores); otra factory del proyecto no es el gancho
+        builder = "val c = OkHttpClient.Builder()\n"
+        for name, text, calls in (
+                ("Viejo.kt", "fun c(@PerfEventListeners f: Set<F>) =\n" + builder + ".apply { f.firstOrNull()?.let(::eventListenerFactory) }\n", 1),
+                ("Directo.kt", builder + ".eventListenerFactory(TraceEventListener.FACTORY)\n", 1),
+                ("Ajeno.kt", builder + ".eventListenerFactory(MetricasPropias.FACTORY)\n", 0)):
+            write(self.dir / "wired" / name, text)
+            found = perf.scan_sources(self.dir / "wired", [])["cableado"]
+            self.assertEqual(next(item["llamadas"] for item in found if item["archivo"] == name), calls, name)
+        write(self.dir / "app/src/testDebug/kotlin/ApiTest.kt", builder)  # los tests por variante no se listan
+        write(self.dir / "app/src/androidTestDemoDebug/kotlin/UiTest.kt", builder)
+        self.assertEqual(perf.scan_sources(self.dir / "app", [])["cableado"], [])
+        derived = "import okhttp3.OkHttpClient\nval a = base.newBuilder().build()\nval r = chain.request().newBuilder().build()\n" \
+                  "val u = request.url.newBuilder().build()\n"
+        write(self.dir / "src/Derivado.kt", derived)
+        write(self.dir / "src/Interceptor.kt", "val r = original.newBuilder().build()\n")  # no nombra OkHttpClient: no cuenta
+        self.assertEqual(perf.scan_sources(self.dir / "src", [])["cableado"],
+                         [{"archivo": "Derivado.kt", "builders": [], "derivados": [2], "llamadas": 0}])
+
+    def generated(self):
+        """Un proyecto con la instrumentación de red generada y un builder sin cablear."""
+        self.project(**{"app/src/main/kotlin/com/ejemplo/red/Cliente.kt": CLIENT_KT})
+        self.instrument()
+
+    def test_la_prueba_avisa_si_hay_instrumentacion_de_red_y_ninguna_seccion_http(self):
+        self.generated()
+        self.tp_outputs(NO_HTTP)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertIn("⚠ RED SIN MEDIR: la corrida no tiene ninguna sección HTTP y el proyecto tiene la instrumentación de red "
+                      "generada. Causa probable: el listener no está conectado a ningún OkHttpClient.Builder.", out)
+        self.assertIn("Builders que no llaman al gancho de PerfHooks (1): app/src/main/kotlin/com/ejemplo/red/Cliente.kt:5.", out)
+        self.assertLess(out.index("RED SIN MEDIR"), out.index("Traza:"))
+        self.tp_outputs(GOOD)  # con secciones HTTP no hay nada que avisar
+        (self.dir / "tp.count").unlink()
+        self.assertNotIn("RED SIN MEDIR", self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba"))
+
+    def test_la_prueba_tambien_avisa_si_el_plan_declara_la_red_y_no_si_nada_la_espera(self):
+        self.tp_outputs(NO_HTTP)
+        self.assertNotIn("RED SIN MEDIR", self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba"))
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["principales"] = ["red_llamadas"]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertIn("⚠ RED SIN MEDIR: la corrida no tiene ninguna sección HTTP y el plan usa métricas o marcas de red.", out)
+        self.assertIn("No encontré builders sin conectar en el código que pude leer", out)
+
+    def test_el_plan_declara_la_red_con_metricas_marcas_o_un_tramo_solo_de_red(self):
+        mark = {"desde": {"marca": "NAV a"}, "hasta": {"marca": "MARK a"}}
+        self.assertFalse(perf.plan_expects_network({"principales": ["hilo_max_ms"]}, {"ventana": mark, "segmentos": [dict(mark, nombre="a")]}))
+        self.assertTrue(perf.plan_expects_network({"principales": ["red GET /items cliente_ms"]}, {}))
+        self.assertTrue(perf.plan_expects_network({"principales": ["pago red_llamadas"]}, {}))
+        self.assertTrue(perf.plan_expects_network({"mejoras": [{"id": "M1", "metrica": "red_solapadas"}]}, {}))
+        self.assertTrue(perf.plan_expects_network({}, {"metricas_usuario": [dict(mark, nombre="m", hasta={"marca": "HTTP GET /items"})]}))
+        self.assertTrue(perf.plan_expects_network({}, {"segmentos": [dict(mark, nombre="a", solo_red=True)]}))
+
+    def test_humo_falla_si_la_red_esta_generada_y_no_sale_ninguna_seccion_http(self):
+        self.generated()
+        self.tp_outputs(NO_HTTP)
+        result = self.perf("humo", "--paquete", PKG)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("✖ RED SIN MEDIR", result.stderr)
+        self.assertIn("el listener no está conectado a ningún OkHttpClient.Builder", result.stderr)
+        self.assertIn("app/src/main/kotlin/com/ejemplo/red/Cliente.kt:5", result.stderr)
+        self.assertIn("repite con --sin-red", result.stderr)
+        self.assertIn("Secciones propias:", result.stdout)  # las métricas y las secciones salen igual, antes del error
+        self.assertNotIn("Siguiente", result.stdout)  # el setup no está listo: no ofrece la sesión 1
+        (self.dir / "tp.count").unlink()
+        out = self.ok("humo", "--paquete", PKG, "--sin-red")
+        self.assertNotIn("RED SIN MEDIR", out)
+        self.assertIn("Siguiente", out)
+
+
+class GeneratedFilesTest(PerfBase):
+    """`instrumentar --actualizar` no pisa un archivo generado que alguien editó a mano."""
+
+    def setUp(self):
+        super().setUp()
+        self.module = self.dir / "app"
+        write(self.module / "build.gradle.kts", "dependencies { implementation(libs.okhttp) }")
+        self.out = self.instrument()
+        self.target = self.module / "src/perf/kotlin/com/ejemplo/perf/HttpSectionName.kt"
+
+    def instrument(self, *extra):
+        return self.perf("instrumentar", "--modulo", self.module, "--paquete", "com.ejemplo.perf", "--sin-fragments", *extra)
+
+    def test_cada_archivo_generado_guarda_su_huella_tambien_los_manifests(self):
+        text = self.target.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        self.assertIn("Generated by hb-performance", lines[0])
+        self.assertRegex(lines[1], r"^// hb-performance fingerprint: [0-9a-f]{16}$")
+        self.assertEqual(lines[2], "package com.ejemplo.perf")
+        self.assertEqual(perf.FINGERPRINT.search(text).group(1), perf.fingerprint(text))
+        manifest = (self.module / "src/debug/AndroidManifest.xml").read_text(encoding="utf-8")
+        self.assertRegex(manifest.splitlines()[2], r"^<!-- hb-performance fingerprint: [0-9a-f]{16} -->$")
+        self.assertTrue(perf.is_generated(self.target))
+        self.assertEqual(perf.stamp(perf.stamp(text)), text)  # volver a sellar no agrega otra línea
+
+    def test_la_huella_no_cambia_con_el_formato_y_si_con_una_edicion(self):
+        text = self.target.read_text(encoding="utf-8")
+        formatted = text.replace("request: Request)", "\n        request: Request,\n    )").replace("    ", "\t")
+        self.assertNotEqual(formatted, text)
+        self.assertEqual(perf.fingerprint(formatted), perf.fingerprint(text))
+        self.assertEqual(perf.fingerprint("// x\nimport z.Ultimo\nimport a.Primero\n"),
+                         perf.fingerprint("// x\nimport a.Primero\nimport z.Ultimo\n"))
+        self.assertNotEqual(perf.fingerprint(text.replace("{6,}", "{8,}")), perf.fingerprint(text))
+        # una edición que solo reordena código, o que solo cambia espacios o comas dentro de un literal, también cuenta
+        other = text + "// otra versión\n"
+        for before, after in (("padStart(4, '0')", "padStart('0', 4)"), ('" #"', '"#"'), ("{6,}", "{6}"),
+                              ('"/{id}"', '"/ {id}"')):
+            self.assertIn(before, text)
+            self.assertEqual(perf.generated_state(text.replace(before, after), other), "editado", (before, after))
+        listener = self.target.with_name("TraceEventListener.kt").read_text(encoding="utf-8")
+        swapped = listener.replace("http.begin()\n        queue.begin()", "queue.begin()\n        http.begin()")
+        self.assertNotEqual(swapped, listener)
+        self.assertEqual(perf.generated_state(swapped, listener + "// otra versión\n"), "editado")
+        self.assertEqual(perf.generated_state(formatted, text), "igual")
+        self.assertEqual(perf.generated_state(text.replace("{6,}", "{8,}"), text), "editado")
+        old = perf.stamp(text.replace("{6,}", "{9,}"))  # otra versión de la plantilla, sin tocar
+        self.assertEqual(perf.generated_state(old, text), "intacto")
+        self.assertEqual(perf.generated_state(perf.FINGERPRINT.sub("", old), text), "sin huella")
+
+    def test_un_archivo_editado_a_mano_no_se_pisa_sin_forzar_y_forzado_deja_la_copia(self):
+        edited = self.target.read_text(encoding="utf-8").replace('"/{id}"', '"/{numero}"')
+        self.target.write_text(edited, encoding="utf-8")
+        result = self.instrument("--actualizar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✖ no se actualiza: %s (lo editaron a mano después de generarlo)" % self.target, result.stdout)
+        self.assertIn("⚠ 1 archivo no se actualizó: difiere de lo que generó la skill", result.stdout)
+        self.assertIn("--actualizar --forzar", result.stdout)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), edited)
+        self.assertFalse(self.target.with_name("HttpSectionName.kt.orig").exists())
+        result = self.instrument("--actualizar", "--forzar")
+        copy = self.target.with_name("HttpSectionName.kt.orig")
+        self.assertIn("~ actualizado con --forzar: %s (lo que había quedó en %s)" % (self.target, copy), result.stdout)
+        self.assertEqual(copy.read_text(encoding="utf-8"), edited)
+        self.assertIn('"/{id}"', self.target.read_text(encoding="utf-8"))
+        self.assertNotIn("no se actualiza", result.stdout)
+        self.target.write_text(edited, encoding="utf-8")  # otra edición: la copia anterior no se pierde
+        self.instrument("--actualizar", "--forzar")
+        self.assertTrue(self.target.with_name("HttpSectionName.kt.orig2").is_file())
+        self.assertEqual(copy.read_text(encoding="utf-8"), edited)
+
+    def test_un_archivo_de_una_version_sin_huella_solo_se_pisa_si_no_cambio_o_con_forzar(self):
+        current = self.target.read_text(encoding="utf-8")
+        legacy = perf.FINGERPRINT.sub("", current)  # lo que dejaba una versión anterior: el encabezado, sin huella
+        self.target.write_text(legacy, encoding="utf-8")
+        result = self.instrument("--actualizar")
+        self.assertIn("= al día: %s" % self.target, result.stdout)  # igual a la plantilla: solo gana su huella
+        self.assertEqual(self.target.read_text(encoding="utf-8"), current)
+        changed = legacy.replace("{6,}", "{7,}")  # otra plantilla, o una edición: sin huella no se distinguen
+        self.target.write_text(changed, encoding="utf-8")
+        result = self.instrument("--actualizar")
+        self.assertIn("✖ no se actualiza: %s (lo generó una versión anterior, sin huella" % self.target, result.stdout)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), changed)
+        result = self.instrument("--actualizar", "--forzar")
+        self.assertEqual(self.target.read_text(encoding="utf-8"), current)
+        self.assertEqual(self.target.with_name("HttpSectionName.kt.orig").read_text(encoding="utf-8"), changed)
+
+    def test_sin_actualizar_nada_cambia_y_un_archivo_del_proyecto_nunca_se_pisa(self):
+        edited = self.target.read_text(encoding="utf-8") + "// nota\n"
+        self.target.write_text(edited, encoding="utf-8")
+        own = self.module / "src/perf/kotlin/com/ejemplo/perf/MarkTrace.kt"
+        own.write_text("package com.ejemplo.perf\n", encoding="utf-8")
+        result = self.instrument()
+        self.assertIn("= ya existe, no se toca: %s" % self.target, result.stdout)
+        result = self.instrument("--actualizar", "--forzar")
+        self.assertEqual(own.read_text(encoding="utf-8"), "package com.ejemplo.perf\n")
+        self.assertIn("no lo generó la skill", result.stdout)
+
+
+class IdSegmentsTest(unittest.TestCase):
+    """Los segmentos de la ruta que parecen un id se normalizan igual en las dos plantillas de Kotlin."""
+
+    CASES = (("/clientes/1234-5678-90/cuentas/00-123-456789-0", "/clientes/{id}/cuentas/{id}"),
+             ("/clientes/AB-123.456.789", "/clientes/{id}"), ("/pagos/ORD-2026-000123/detalle", "/pagos/{id}/detalle"),
+             ("/v3.7/items/pagina-12", "/v3.7/items/pagina-12"), ("/api/v2/lotes/a1b2c3", "/api/v2/lotes/a1b2c3"),
+             ("/a/123/b/123e4567-e89b-12d3-a456-426614174000", "/a/{id}/b/{id}"), ("/items/0123456789abcdef", "/items/{id}"))
+
+    def kotlin_regex(self, name):
+        text = (SCRIPT.parent.parent / "assets" / "instrumentacion" / name).read_text(encoding="utf-8")
+        body = re.search(r"ID_SEGMENT = Regex\(\s*((?:\"[^\n]*\"\s*\+?\s*)+)\)", text).group(1)
+        return re.compile("".join(re.findall(r'"([^"\n]*)"', body)).replace("\\\\", "\\"))
+
+    def test_las_dos_plantillas_normalizan_los_segmentos_con_seis_o_mas_digitos(self):
+        for name in ("HttpSectionName.okhttp.kt", "HttpSectionName.retrofit.kt"):
+            pattern = self.kotlin_regex(name)
+            for path, expected in self.CASES:
+                self.assertEqual(pattern.sub("/{id}", path), expected, (name, path))
+
+    def test_har_conserva_su_regla_para_no_renombrar_metricas_de_una_investigacion_en_curso(self):
+        self.assertEqual(perf.har_endpoint("get", "https://api.test/items/42/b/123e4567-e89b-12d3-a456-426614174000"),
+                         "GET api.test/items/{id}/b/{id}")
+        self.assertEqual(perf.har_endpoint("get", "https://api.test/pagos/ORD-2026-000123"), "GET api.test/pagos/ORD-2026-000123")
+
+    def test_la_plantilla_trae_sus_tests_de_normalizacion(self):
+        text = (SCRIPT.parent.parent / "assets" / "instrumentacion" / "test" / "TraceEventListenerTest.kt").read_text(encoding="utf-8")
+        self.assertIn("sanitizeReplacesSegmentsWithSixOrMoreDigitsEvenWithHyphensOrDots", text)
+        self.assertIn("sanitizeKeepsShortVersionsAndPages", text)

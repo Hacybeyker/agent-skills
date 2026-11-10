@@ -13,8 +13,9 @@ import javax.inject.Qualifier
 annotation class PerfEventListeners
 
 // Empty multibinding in release. The perf source set adds TraceEventListener.FACTORY to it (PerfNetworkModule).
-// Where the OkHttpClient is built, inject @PerfEventListeners Set<@JvmSuppressWildcards EventListener.Factory>
-// and apply factories.firstOrNull()?.let(builder::eventListenerFactory).
+// Where each OkHttpClient is built, inject @PerfEventListeners Set<@JvmSuppressWildcards EventListener.Factory>
+// (from Java, the exact type: @PerfEventListeners Set<EventListener.Factory>) and call
+// PerfHooks.applyEventListener(builder, factories) before build().
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class PerfHooksModule {
