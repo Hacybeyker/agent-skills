@@ -10,22 +10,35 @@
 | --- | --- |
 | Alcance | {{ALCANCE}} |
 | Síntoma | <lo que nota el usuario, o "exploratoria"> |
-| Métricas principales y objetivo | las de `principales` en plan.json, y el objetivo |
+| Métricas principales y objetivo | <las de `principales` en plan.json, y el objetivo de cada una> |
 | Flujos | pasos e invalidaciones en plan.json |
-| Build y ambiente | build de profiling (R8, no debuggable, profileable) · backend real o mocks |
-| Dispositivo | {{DISPOSITIVO}} · Hz fijos |
-| Modos | guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage |
-| Stack | UI · asincronía · listas · red |
-| Precondiciones | estado de la app igual en todas las fases (sesión, datos, caché) · nunca desinstalar entre fases |
+| Build y ambiente | <variante medida (R8, no depurable, profileable) · backend real o mocks> |
+| Dispositivo | {{DISPOSITIVO}} |
+| Modos | <guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage> |
+| Stack | <UI · asincronía · listas · red> |
+| Precondiciones | estado de la app igual en todas las fases (sesión, datos, caché) · nunca desinstalar ni borrar datos entre fases |
 | No leer | {{NO_LEER}} |
+
+## Cómo se recorre
+
+<!-- perf:recorrido -->
+(lo escribe perf.py: `preparar` y `recorrido` de cada flujo, y el comando para verlos correr a mano)
+<!-- /perf:recorrido -->
+
+## Cambios temporales por revertir
+
+Marcas o código puestos solo para esta investigación (por ejemplo, una marca con `android.os.Trace` en un módulo que no ve `PerfHooks`). Se revierten antes de proponer un commit y, a más tardar, en el cierre.
+
+| Archivo | Repo o módulo | Qué es | ¿Revertido? |
+| --- | --- | --- | --- |
 
 ## Mapa del alcance
 
-- `ruta/al/Archivo.kt:línea`: qué es, en una línea.
+- <`ruta/al/Archivo.kt:línea`: qué es, en una línea>
 
 ## Hipótesis
 
-1. <hipótesis> → se confirma o se descarta con <métrica o consulta>.
+1. <hipótesis → se confirma o se descarta con una métrica o una consulta>
 
 ## Métricas
 
@@ -35,8 +48,10 @@
 
 ## Hallazgos
 
-| # | Síntoma | Evidencia (métrica + consulta + archivo:línea) | Causa raíz | Tipo |
-| --- | --- | --- | --- | --- |
+Tipo: `bug`, `mejorable`, `consecuencia de H#`, `descartado` (con evidencia de la traza) o `sin confirmar` (el síntoma puede ser estable; la causa no está probada). "Qué falta para decidir" va en los `sin confirmar`.
+
+| # | Síntoma | Evidencia (métrica + consulta + archivo:línea) | Causa raíz | Tipo | Qué falta para decidir |
+| --- | --- | --- | --- | --- | --- |
 
 ## Plan de mejoras
 
@@ -52,7 +67,7 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 ## Mejoras aplicadas
 
-- **M1** · `archivos` · test que la fija · DoD · commit propuesto: `perf(<scope>): ...`
+- <M1 · archivos · test que la fija · DoD · commit propuesto: perf(alcance): ...>
 
 ## Comparación
 
@@ -62,15 +77,15 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 ## Lectura de la comparación
 
-- <qué dice cada métrica principal, cada regresión y cada "no comparable"; la evidencia de consultas, rotulada "sin veredicto estadístico">
+- <qué dice cada métrica principal, cada regresión y cada "no comparable"; la evidencia que solo sale de consultas, rotulada "sin veredicto estadístico">
 
 ## Resumen ejecutivo
 
-<3 a 5 líneas: estado inicial → estado final con las métricas principales, la causa en una frase y qué depende del backend>
+<3 a 5 líneas. Para el reporte inicial (sesión 2): qué se midió, qué se encontró y qué se propone, o por qué no hay mejoras. Para el final (sesión 4): estado inicial → estado final con las métricas principales, la causa en una frase y qué depende del backend>
 
 ## Pendientes
 
-- **H3** · causa verificada · `archivo:línea` · cambio propuesto · test · métrica que lo mide · commit sugerido
+- <no son mejoras, sino lo que la investigación no pudo cerrar; uno por línea: H3 · síntoma y qué tan estable es (en cuántas corridas, con qué métrica) · qué falta para cerrarlo · cuánto cuesta (una corrida, una captura con muestreo, una sesión) · acción sugerida>
 
 ## Consumo
 

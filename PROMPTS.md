@@ -62,13 +62,25 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 
 ## hb-performance · rendimiento en Android
 
-Tiene varias sesiones y comandos de terminal: su guía completa está en [skills/hb-performance/references/prompts.md](skills/hb-performance/references/prompts.md). Para empezar:
+Tiene varias sesiones y comandos de terminal: su guía completa está en [skills/hb-performance/references/prompts.md](skills/hb-performance/references/prompts.md). Copia solo el bloque de cada caso; la explicación va fuera. El mismo texto sirve la primera vez y las siguientes: la skill elige la sesión según el estado del proyecto (sin setup, lo hace; con setup, arma la ficha y el plan) y el agente lo dice en su primera línea.
 
-| Caso | Prompt |
-| --- | --- |
-| Primera vez en el proyecto | `Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>.` |
-| Solo el diagnóstico, sin cambiar código (triage) | `Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>.` |
-| Retomar | `Sigue hb-performance con <ruta absoluta>/estado.md` |
+**Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo):
+
+```text
+Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>.
+```
+
+**Solo el diagnóstico, sin cambiar código** (triage):
+
+```text
+Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>.
+```
+
+**Retomar** donde quedó, en un chat nuevo:
+
+```text
+Sigue hb-performance con <ruta absoluta>/estado.md
+```
 
 ## hb-coach · aprender un tema
 

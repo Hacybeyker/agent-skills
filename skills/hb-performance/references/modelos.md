@@ -17,7 +17,7 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 | Sesión | Modelo | Razonamiento | Pasos máx. |
 | --- | --- | --- | --- |
 | 0 · Setup | Intermedio | Medio | 40 |
-| 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 |
+| 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 (25 en flujos largos) |
 | Mediciones | Ninguno en modo guiado (las corre el usuario); el más económico en modo autónomo | Bajo | — |
 | 2 · Diagnóstico | Diagnóstico (por defecto el intermedio); el alto solo si el caso se complica | Alto | 25 |
 | 3 · Mejora (una por chat) | Intermedio | Medio | 30 |
@@ -45,6 +45,7 @@ Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 
 
 ## Cómo aplicarlo
 
+- **Retomar un chat cortado:** con el comando de tu herramienta que reabre una sesión eligiéndola de una lista (`claude --resume`, `copilot --resume`), no con el que continúa "la última".
 - **Sin configurar nada:** un chat nuevo por sesión, eligiendo el modelo y el razonamiento en el selector antes de escribir. El texto y el modelo para el chat nuevo están en "Siguiente paso" (los escribe `perf.py siguiente`).
 - **Con un agente por sesión:** un agente personalizado con su modelo, sus herramientas limitadas (por ejemplo, que el de mediciones no pueda editar código) y la instrucción de seguir esta skill en su sesión.
   - **Claude Code:** subagentes en `.claude/agents/*.md`, con `model` en el frontmatter.

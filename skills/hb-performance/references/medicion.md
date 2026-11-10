@@ -25,7 +25,7 @@ Qué hace, en orden:
 
    Sin esto, un build recién instalado corre con JIT y parece una regresión que no existe. Con `completa`, el TTID suele salir algo más alto que con `perfil` (un ejecutable más grande que cargar): sirve para comparar fases entre sí, no como el TTID que verá el usuario de Play. Cada corrida guarda `jit_ms` (informativa) y `comparar` avisa si la compilación o el JIT cambiaron entre fases. Después, el **calentamiento** (una corrida que no cuenta).
 3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
-4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase).
+4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase, la tasa de refresco que midió cada corrida en `hz_corridas`, los avisos y, en `flujos`, lo de cada flujo). Si el `hz` del plan difiere en más de un 6 % de la tasa que midió la traza, o si no hay `hz` y la tasa cambió entre corridas, lo avisa en la salida, en "Métricas" de `estado.md` y en `avisos` de `fases.json`; `comparar` lo repite. El presupuesto de frame se calculó con el `hz` del plan: corrígelo y repite lo medido así con `--rehacer`.
 
 Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), con intentos de reserva: 3 como mínimo y la mitad de las pedidas si son más (5 → 8 intentos, 10 → 15, 20 → 30), así que unas pocas inválidas sueltas no cortan una captura larga. Tres inválidas **seguidas** la detienen antes, sin gastar la reserva: algo falla de forma sistemática. Una corrida inválida se guarda como `_invalida_<motivo>` para auditoría y no entra al CSV.
 
@@ -39,7 +39,7 @@ Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), 
 | `--config cpu` | Una captura con muestreo de CPU, solo para el diagnóstico (con `--prueba`) |
 | `--memoria` | `dumpsys meminfo` después de cada corrida: PSS, heaps, actividades y vistas vivas |
 | `--prueba` | Una corrida que imprime las métricas y no escribe el CSV |
-| `--rehacer` | Descarta lo medido en esa fase (filas del CSV y trazas, que quedan aparte) y la mide de nuevo |
+| `--rehacer` | Descarta lo medido **de ese flujo** en esa fase (sus filas del CSV, sus trazas, que quedan aparte, y su registro en `fases.json`) y lo mide de nuevo. Lo de los otros flujos de la fase no se toca |
 | `--compilacion completa \| perfil` | Cómo se compila la app antes de medir; la misma en todas las fases |
 | `--serial`, `--hz`, `--tp`, `--forzar` | Dispositivo, tasa de refresco, ruta de `trace_processor` y seguir pese a un aviso que detiene |
 
@@ -63,7 +63,7 @@ Corre las consultas de diagnóstico sobre la corrida mediana y la peor de la pri
 
 ## Condiciones (iguales antes y después)
 
-- Mismo dispositivo, build de profiling, ambiente, usuario, datos, flags y red (la misma Wi-Fi). Tasa de refresco fija.
+- Mismo dispositivo, build de profiling, ambiente, usuario, datos, flags y red (la misma Wi-Fi). Tasa de refresco fija y la misma en todas las fases ([ficha.md](ficha.md) · Tasa de refresco).
 - Batería sobre 50 % y sin ahorro de energía; el script avisa si el dispositivo está tibio y se detiene si está caliente.
 - Mismo punto de partida y mismo modo de recorrido: no mezcles corridas manuales con automáticas entre fases.
 - **Nunca desinstales** la app entre fases: se pierden los datos y una instalación nueva puede restaurar un backup. Los tests instrumentados (`connectedAndroidTest`) desinstalan la app: córrelos en un emulador.
@@ -138,13 +138,13 @@ Las métricas del hilo principal (`hilo_*`) no cambian: el hilo principal nunca 
 ## Con Maestro y testigo
 
 - **Nunca como `recorrido`.** Medido en un A/A (misma app, mismo flujo, 10 corridas por lado), Maestro dando un solo toque sumó un 14 % al tiempo de punta a punta (284 → 325 ms, con un ruido adb-contra-adb del 0,4 %) y multiplicó por 3–10 la varianza del hilo principal; la traza creció seis veces. Su driver corre en el dispositivo y activa accesibilidad: trabajo extra para la app dentro de la ventana medida, y no depende del flow.
-- **Sí como `preparar`:** corre antes de que arranque la traza. Un flow de Maestro lleva la app al punto de partida (login, avisos, tab) y el tramo medido queda en uno o dos toques de `adb` ([ficha.md](ficha.md) · Flujos largos). `maestro --device <serial> test <flow.yaml> > /dev/null && sleep 2`; `testigo run` no, porque además instala la app si el artefacto cambió y arranca la evidencia.
+- **Sí como `preparar`:** corre antes de que arranque la traza. Un flow de Maestro lleva la app al punto de partida (login, avisos, tab) y el tramo medido queda en uno o dos toques de `adb` ([ficha.md](ficha.md) · Flujos largos). `maestro --device <serial> test <carpeta>/preparar.yaml > /dev/null 2>&1 && sleep 2` (con `-e VAR="$VAR"` por cada credencial); `testigo run` no, porque además instala la app si el artefacto cambió y arranca la evidencia.
 - **Red con Chucker (build `debuggable`), aparte de la medición:** conteos, duplicados y solapadas por endpoint, sin instrumentación:
   ```bash
   cd <raíz-del-proyecto> && testigo run --app <apk-debug> --flows <flujo.yaml> --repeat 5 --network chucker --network-format har --no-record --out <carpeta>/red-antes
   cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py har --fase antes --flujo <flujo> --csv <carpeta>/metricas.csv <carpeta>/red-antes/*/<flujo>/*/network.har
   ```
-- Los flujos para medir no limpian el estado (`clearState`), salvo que se mida el arranque en frío.
+- Los flujos para medir no limpian el estado (`clearState`): vuelven las pantallas de una sola vez y el estado deja de ser el mismo entre fases ([ficha.md](ficha.md) · Pantallas de una sola vez).
 
 ## Con Macrobenchmark
 

@@ -1,0 +1,79 @@
+{
+  "paquete": "com.example.app",
+  "serial": "emulator-5554",
+  "hz": 60,
+  "config": "base",
+  "compilacion": "completa",
+  "instalar": "./gradlew :app:installProfiling",
+  "modelos": {
+    "economico": "Haiku 5.5",
+    "intermedio": "Sonnet 5.5",
+    "diagnostico": "Sonnet 5.5",
+    "alto": "Opus 5.5"
+  },
+  "principales": [
+    "lista_a_detalle_ms",
+    "hilo_max_ms"
+  ],
+  "flujos": {
+    "detalle": {
+      "pasos": [
+        "Partir en la lista",
+        "Tocar el primer ítem",
+        "Esperar el contenido del detalle"
+      ],
+      "inicio": "MainActivity",
+      "invalidar_si": [
+        "SCREEN *Login*"
+      ],
+      "recorrido": "adb -s emulator-5554 shell input tap 540 600 && sleep 3",
+      "preparar": "adb -s emulator-5554 shell input keyevent KEYCODE_BACK && sleep 1",
+      "ventana": {
+        "desde": {
+          "marca": "NAV detalle",
+          "punto": "inicio",
+          "cual": "primera"
+        },
+        "hasta": {
+          "marca": "MARK detalle",
+          "punto": "fin",
+          "cual": "ultima"
+        },
+        "margen_ms": 300
+      },
+      "metricas_usuario": [
+        {
+          "nombre": "lista_a_detalle_ms",
+          "desde": {
+            "marca": "NAV detalle",
+            "punto": "inicio",
+            "cual": "primera"
+          },
+          "hasta": {
+            "marca": "MARK detalle",
+            "punto": "fin",
+            "cual": "ultima"
+          },
+          "familia": "e2e"
+        }
+      ],
+      "familias": {},
+      "metricas_sql": []
+    }
+  },
+  "mejoras": [
+    {
+      "id": "M1",
+      "hallazgo": "H1",
+      "titulo": "Una sola carga del detalle",
+      "flujo": "detalle",
+      "metrica": "red_solapadas",
+      "esperado": "0 llamadas",
+      "prioridad": "alta",
+      "esfuerzo": "bajo",
+      "riesgo": "bajo",
+      "estado": "aplicada",
+      "aplicada_en": "2026-01-16T10:00:00"
+    }
+  ]
+}

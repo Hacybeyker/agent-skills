@@ -29,7 +29,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 3. **Evidencia o nada:** métrica + consulta o traza + `archivo:línea`. Lo que no se pueda confirmar va como **⚠ Por confirmar**. **Descartar también exige evidencia de la traza** (un slice, una marca o una ausencia medible), nunca el valor de una configuración estática: lo que se resuelve al ejecutarse (remote config, toggles por ambiente o por build type) se comprueba en la traza ([diagnostico.md](references/diagnostico.md)).
 4. **Los números con veredicto los calcula `perf.py`.** Nunca calcules medianas, porcentajes ni veredictos. Un valor que solo sale de una consulta se cita tal cual y rotulado "sin veredicto estadístico".
 5. **Salidas acotadas.** Nunca vuelques al chat salidas completas (`dumpsys`, logcat, SQL, Gradle, tests, diffs). Encadena los comandos de un mismo paso (el DoD entero) en **una** invocación, con el log en `<carpeta>/logs/` y al chat solo el resumen o `grep -m1 -A20`. No leas `perf.py` ni los archivos que genera: usa `--help` y lo que imprime. Lee archivos por rangos.
-6. **Una sesión por chat, y al terminar te detienes.** Tu último paso es `perf.py siguiente --carpeta <carpeta>`: escribe "Siguiente paso" en `estado.md` e imprime cada paso con lo que hace, lo que le toca al usuario y, para los chats nuevos, el modelo y el esfuerzo exactos. **Pégalo tal cual**, sin resumirlo ni reescribirlo, como último bloque de tu respuesta; antes, si hay que hacer algo en el dispositivo, dilo en una línea. No sigas con la sesión siguiente aunque te diga "sigue": explícale que en este chat cuesta varias veces más, y no le pidas que vuelva a este chat.
+6. **Una sesión por chat, y al terminar te detienes.** Tu último paso es `perf.py siguiente --carpeta <carpeta>` (salvo en la sesión 0, que no tiene carpeta: termina con el comando de la prueba de humo y la indicación de abrir un chat nuevo, [setup.md](references/setup.md) · Cierre del setup): escribe "Siguiente paso" en `estado.md` e imprime cada paso con lo que hace, lo que le toca al usuario y, para los chats nuevos, el modelo y el esfuerzo exactos. **Pégalo tal cual**, sin resumirlo ni reescribirlo, como último bloque de tu respuesta; antes, si hay que hacer algo en el dispositivo, dilo en una línea. No sigas con la sesión siguiente aunque te diga "sigue": explícale que en este chat cuesta varias veces más, y no le pidas que vuelva a este chat.
 7. **Presupuesto de pasos** por sesión (tabla de abajo). Si se acaba, guarda el estado en `estado.md`, dilo y detente.
 8. **Lo que depende de una edición corre después de ella**, nunca en paralelo.
 9. **Instrumentación permanente solo en debug y profiling**, sin efecto en release. Lo temporal se quita antes del commit.
@@ -39,13 +39,14 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 13. **Los comandos que siguen los da `perf.py`:** cada comando imprime el paso siguiente, completo y en orden, y lo deja en `estado.md`; `perf.py siguiente` lo recalcula. Cópialos tal cual, sin inventar ni reordenar.
 14. **Español neutro** (tú, no vos) en todo lo que le escribas al usuario y en `estado.md`.
 15. **Rutas que no se leen** (pruebas a ciegas): la línea `No leer:` de la sección Performance de `AGENTS.md` (rutas separadas por comas o una viñeta por ruta debajo; los patrones parten de la raíz del proyecto: `**/ALCANCE-*` cubre cualquier carpeta), `no_leer` de `plan.json` y la fila "No leer" de `estado.md` son una sola lista, y vale en todas las sesiones. No leas, no busques (grep, find, glob) ni cites esas rutas, ni para "confirmar" algo; si el trabajo las necesita, dilo y pregunta. `perf.py` también las omite.
+16. **Nunca escribes claves ni autorizas transacciones o pagos** en el dispositivo: las credenciales las pone `preparar` desde variables de entorno del usuario. Si aparece una pantalla de autorización o de pago, te detienes y avisas ([ficha.md](references/ficha.md)).
 
 ## Sesiones
 
 | Paso | Quién | Lee | Hace | Termina con | Pasos máx. |
 | --- | --- | --- | --- | --- | --- |
 | 0 · Setup, una vez por proyecto | Agente | [setup.md](references/setup.md) | Variante de profiling (la que el proyecto ya tenga, o `profiling`), `perf.py instrumentar` (genera también el cableado), los fragmentos que imprime, DoD en un comando y `perf.py humo` | Aprobación del diff | 40 |
-| 1 · Ficha y plan | Agente; con receta, `perf.py nuevo` sin chat | [ficha.md](references/ficha.md) | Preguntas fijas, `plan.json` (marcas, ventana, métricas), `estado.md` y corrida de prueba | Aprobación de ficha y plan | 15 |
+| 1 · Ficha y plan | Agente; con receta, `perf.py nuevo` sin chat | [ficha.md](references/ficha.md) | Preguntas fijas, `plan.json` (marcas, ventana, métricas), `estado.md` y corrida de prueba | Aprobación de ficha y plan | 15 (25 en flujos largos) |
 | Medición antes y control | Usuario, sin chat | [medicion.md](references/medicion.md) | `perf.py capturar` y `perf.py diagnostico` | — | — |
 | 2 · Diagnóstico | Agente | [diagnostico.md](references/diagnostico.md) | Lee `diagnostico.md` y el código; hallazgos, plan de mejoras y reporte inicial | El comando de la decisión | 25 |
 | Decisión | Usuario, sin chat | — | `perf.py decidir`: aprueba, descarta o deja pendiente cada mejora | — | — |
@@ -53,8 +54,9 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 | Medición después | Usuario, sin chat | [medicion.md](references/medicion.md) | `instalar` del plan y `perf.py capturar --fase despues` | — | — |
 | 4 · Cierre | Agente | [cierre.md](references/cierre.md) | `perf.py comparar`, lectura, resumen ejecutivo y reporte final | Entrega | 10 |
 
-El costo de cada sesión lo anota el usuario desde la terminal con `perf.py consumo` (el comando sale en "Siguiente paso"); no se lo pidas en el chat.
+El costo de cada sesión lo anota el usuario desde la terminal con `perf.py consumo` (el comando sale en "Siguiente paso"; el valor es el que muestre su herramienta); no se lo pidas en el chat.
 
+- **Primera línea, siempre:** di qué sesión haces y por qué, con el formato `Sesión <n> · <nombre> (<motivo>)`: `Sesión 0 · setup (AGENTS.md no dice "setup listo")`, `Sesión 1 · ficha (setup listo en AGENTS.md)`, `Sesión 2 · diagnóstico (Siguiente paso de estado.md)`. El mismo pedido sirve para empezar la primera vez y las siguientes, porque la sesión la decide el estado del proyecto: el usuario tiene que ver cuál elegiste.
 - **Retomar:** si te pasan un `estado.md`, léelo y sigue la sesión de "Siguiente paso", y solo esa; si no está escrito, `perf.py siguiente --carpeta <carpeta>` lo calcula. Sin `estado.md`: la 0 si `AGENTS.md` no dice que el setup está listo; si no, la 1.
 - **Recetas:** el arranque en frío no necesita la sesión 1. `perf.py nuevo --receta arranque-frio` arma `plan.json` y `estado.md` listos para medir (TTID, TTFD y el hilo principal).
 - **Modos:** *guiado* por defecto: el agente corre en su terminal lo que no mide (`perf.py` salvo `capturar` y `diagnostico`, Gradle, DoD, instalar) y **el usuario corre las mediciones desde su terminal, también cuando el recorrido es automático** (así ve correr el dispositivo y no paga tokens por esperar). *Autónomo*, solo si el usuario lo pide: el agente también captura, con el modelo más económico y solo con recorrido automático (`arranque-frio` o un comando).
@@ -63,7 +65,7 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 
 ## Herramientas
 
-- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `capturar`, `diagnostico`, `consulta`, `resumen`, `comparar`, `har`, `reporte`, `decidir`, `siguiente` y `consumo` (cada uno con `--help`). Usa `adb` y `trace_processor`.
+- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `nodos`, `capturar`, `diagnostico`, `consulta`, `resumen`, `comparar`, `har`, `reporte`, `decidir`, `siguiente` y `consumo` (cada uno con `--help`). Usa `adb` y `trace_processor`.
 - Permisos para auto mode (el clasificador puede denegar secuencias de `adb`): [prompts.md](references/prompts.md) · Permisos recomendados; los agrega el usuario, la skill no toca su configuración.
 - Otras skills, por intención y sin depender de sus archivos: `android-profiler` (heap dumps y fugas), `jetpack-compose-performance`, `anr-audit-and-fix` y `r8-analyzer`.
 

@@ -63,15 +63,22 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
 
 Un hallazgo `descartado` afirma que la causa **no** ocurrió, y eso también se prueba: con un slice o una marca que muestran que corrió otro camino, o con una ausencia medible (0 llamadas, ningún slice con ese nombre, 0 ms en ese tramo). El valor de una configuración estática no alcanza.
 
-- **Lo que se resuelve al ejecutarse se comprueba en la traza.** Si un camino del código depende de remote config, de un toggle por ambiente o por build type, de un experimento o de un dato del backend, el valor que se lee en el código (una constante, un valor por defecto) puede no ser el que corrió en la variante medida. Busca en la traza cuál camino se ejecutó: una sección o un slice propios de ese camino (`perf.py consulta` con un `GLOB` del nombre), una llamada de red que solo hace uno de los dos, o la duración del tramo donde debería notarse.
+- **Lo que se resuelve al ejecutarse se comprueba en la traza.** Si un camino del código depende de remote config, de un toggle por ambiente o por build type, de una prueba A/B o de un dato del backend, el valor que se lee en el código (una constante, un valor por defecto) puede no ser el que corrió en la variante medida. Busca en la traza cuál camino se ejecutó: una sección o un slice propios de ese camino (`perf.py consulta` con un `GLOB` del nombre), una llamada de red que solo hace uno de los dos, o la duración del tramo donde debería notarse.
 - **Si la traza no los distingue,** no descartes: pide una marca temporal en cada camino ([setup.md](setup.md) · Cambios temporales) y una corrida de prueba, o deja el hallazgo `sin confirmar` y di qué falta.
 - **Cruza cada hipótesis de la ficha con los picos medidos.** Un pico estable en el tramo donde la hipótesis lo predice es evidencia a favor aunque el código parezca decir lo contrario: explica el pico antes de descartar la hipótesis.
 - **Un pico de una sola pantalla se diluye en la ventana.** Si el síntoma vive en un tramo (entrar a una pantalla, un scroll) y el plan no tiene su métrica, propón un `segmentos` para ese tramo ([ficha.md](ficha.md)): sale en todas las corridas, con ruido y veredicto.
 
 ## 7. Entregable
 
-1. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo" usa una de estas palabras, porque el reporte las explica al lector: `bug` (hay que corregirlo), `mejorable` (intencional, se decide con el negocio), `consecuencia de H#` (lo arregla otro hallazgo), `descartado` (se investigó y no es la causa: no genera mejora) o `sin veredicto estadístico` (salió de consultas y no de una métrica: no se pudo confirmar ni descartar). Solo `bug` y `mejorable` dan lugar a una mejora.
-2. **`mejoras` en `plan.json`**, una por cambio que se pueda commitear solo:
+1. **Resumen ejecutivo** en `estado.md`, de 3 a 5 líneas, **también para el reporte inicial**: qué se midió, qué se encontró y qué se propone, o por qué no hay mejoras. Reemplaza el texto de la plantilla: `perf.py reporte` avisa si sigue ahí y no lo publica.
+2. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo" usa una de estas palabras, porque el reporte las explica al lector:
+   - `bug` (hay que corregirlo) o `mejorable` (intencional, se decide con el negocio): dan lugar a una mejora.
+   - `consecuencia de H#`: lo arregla otro hallazgo.
+   - `descartado`: se investigó y la traza muestra que no es la causa (sección 6). No genera mejora.
+   - `sin confirmar` (antes `sin veredicto estadístico`, que se sigue leyendo): no se pudo confirmar ni descartar. No quiere decir que falten trazas ni que la captura fallara. Separa siempre las dos cosas en la fila: en "Síntoma" y "Evidencia", **si el síntoma es estable** (tiene su métrica, en cuántas corridas, con qué ruido) o si salió de una consulta sobre una o dos trazas; en "Causa raíz", que **la causa no está probada**; y en la columna **"Qué falta para decidir"**, lo que lo cerraría: una métrica propia del tramo (`segmentos`), otra clase de captura (`--config cpu`, composition tracing) o probar un cambio. Repetir las mismas corridas no lo cierra. Si el síntoma es estable y está fuera de presupuesto, da lugar a una mejora a prueba (abajo).
+
+   La columna "Qué falta para decidir" es opcional (una tabla sin ella se sigue leyendo) y va vacía (`—`) en los demás tipos.
+3. **`mejoras` en `plan.json`**, una por cambio que se pueda commitear solo:
    ```json
    {"id": "M1", "hallazgo": "H1", "titulo": "...", "flujo": "<flujo>", "metrica": "<métrica que debería moverse>",
     "esperado": "<valor o rango, por ejemplo ≤ 500 ms o -30 %>", "prioridad": "alta", "esfuerzo": "bajo",
@@ -85,13 +92,13 @@ Un hallazgo `descartado` afirma que la causa **no** ocurrió, y eso también se 
      ```json
      {"id": "M2", "hallazgo": "H4", "a_prueba": true, "titulo": "<cambio propuesto>",
       "hipotesis": "<causa probable, en una frase, y por qué: el pico coincide con X>", "flujo": "<flujo>",
-      "metrica": "<la métrica estable del síntoma, por ejemplo 'desglose hilo_max_ms'>", "esperado": "<efecto esperado, ≤ 16 ms>",
+      "metrica": "<la métrica estable del síntoma, por ejemplo 'detalle hilo_max_ms'>", "esperado": "<efecto esperado, ≤ 16 ms>",
       "prioridad": "media", "esfuerzo": "bajo", "riesgo": "bajo", "estado": "propuesta"}
      ```
      Con `a_prueba`, `hipotesis`, `metrica` y `esperado` son obligatorios. El usuario la aprueba con `perf.py decidir`, como cualquier otra, y el reporte final dice `✔ hipótesis confirmada` o `✖ hipótesis refutada` según el veredicto de su métrica. No la uses si el síntoma no tiene métrica propia en todas las corridas (primero un `segmentos` o una métrica de usuario) ni para un cambio grande o riesgoso: una hipótesis refutada se revierte.
-3. **Pendientes** con receta completa (causa, `archivo:línea`, cambio, test, métrica y commit sugerido), para aplicarlos sin repetir el diagnóstico.
-4. **Reporte inicial**, que también dibuja el plan en `estado.md`:
+4. **Pendientes** en `estado.md`: lo que esta investigación no pudo cerrar. **No son mejoras** (las mejoras, también las que el usuario deje para después, viven en `plan.json`), y el reporte los titula así. Uno por línea, con cuatro datos: el síntoma y qué tan estable es; qué falta para cerrarlo; cuánto cuesta (una corrida, una captura con muestreo, una sesión); y la acción sugerida. Si lo que falta es una captura que el usuario puede correr ya, deja en esa línea el texto "Captura pendiente:" seguido del comando entre acentos graves, con la ruta real del plan (por ejemplo, Captura pendiente: `capturar --plan reports/perf/detalle/plan.json --prueba --config cpu`): `siguiente` la ofrece como comando antes del cierre.
+5. **Reporte inicial**, que también dibuja el plan en `estado.md` y abre con el recuadro "Resultado" (cuántas mejoras y cuáles, o "Sin mejoras aplicables" con la razón de cada hallazgo, tomada de la tabla):
    ```bash
    cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --inicial --html
    ```
-5. **Siguiente paso:** `reporte --inicial` imprime el comando `perf.py decidir` y lo deja en `estado.md`. Muéstrale al usuario las mejoras en una tabla corta (id, título, métrica y esperado) y pega tal cual la salida de `siguiente`, que ya dice que es en la terminal y sin chat. Detente: `decidir` le da el chat de la sesión 3. No le pidas que vuelva a este chat ni el costo: lo anota con `perf.py consumo`.
+6. **Siguiente paso:** `reporte --inicial` imprime el comando `perf.py decidir` y lo deja en `estado.md`. Si avisa que `estado.md` tiene partes sin completar (el Resumen, filas de la Ficha, la tabla de Hallazgos), complétalas y vuelve a generarlo antes de entregar. Muéstrale al usuario las mejoras en una tabla corta (id, título, métrica y esperado) y pega tal cual la salida de `siguiente`, que ya dice que es en la terminal y sin chat. **Sin mejoras**, dilo en la primera línea de tu respuesta, con la razón en una frase: `siguiente` ofrece el cierre corto (y la captura pendiente, si dejaste una), no otra sesión 2. Detente: `decidir` le da el chat de la sesión 3. No le pidas que vuelva a este chat ni el costo: lo anota con `perf.py consumo`.

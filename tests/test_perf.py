@@ -1,9 +1,12 @@
 """Tests de hb-performance (skills/hb-performance/scripts/perf.py): estadística, métricas de traza, red,
 captura con un adb y un trace_processor falsos, reporte e instrumentación."""
+import contextlib
 import csv
 import importlib.util
+import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -21,6 +24,10 @@ PKG = "com.ejemplo.app"
 spec = importlib.util.spec_from_file_location("perf", str(SCRIPT))
 perf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(perf)
+
+
+def inspect_source():
+    return SCRIPT.read_text(encoding="utf-8")
 
 
 def rows(phase, flow, metric, values, unit="ms", sense="menor", family="app"):
@@ -372,7 +379,10 @@ if args == ["devices"]:
     print("List of devices attached\n" + "".join("%s\tdevice\n" % d for d in os.environ.get("FAKE_DEVICES", "emulator-5554").split(",")))
     sys.exit(0)
 if args[0] == "pull":
-    pathlib.Path(args[2]).write_bytes(b"x" * 4096)
+    if os.environ.get("FAKE_PULL_FALLA"):
+        sys.stderr.write("adb: error: failed to stat remote object '%s': No such file or directory\n" % args[1])
+        sys.exit(1)
+    pathlib.Path(args[2]).write_bytes(os.environ["FAKE_PULL"].encode("utf-8") if os.environ.get("FAKE_PULL") else b"x" * 4096)
     sys.exit(0)
 cmd = " ".join(args[1:])
 if cmd.startswith("getprop ro.build.version.sdk"):
@@ -417,6 +427,12 @@ elif cmd.startswith("kill -0"):
     sys.exit(1)
 elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
+elif cmd.startswith("uiautomator dump") and os.environ.get("FAKE_PULL_FALLA"):
+    sys.stderr.write("ERROR: could not get idle state.\n")  # uiautomator falla así, con código 0
+elif cmd.startswith("settings get system min_refresh_rate"):
+    print(os.environ.get("FAKE_MIN_HZ", "null"))
+elif cmd.startswith("settings get system peak_refresh_rate"):
+    print(os.environ.get("FAKE_PEAK_HZ", "null"))
 elif cmd.startswith('echo "q='):
     emulator = os.environ.get("FAKE_EMULATOR")
     print("q=%s\nb=\nh=%s\nm=%s\nc=\ng=%s" % ("1" if emulator else "", "ranchu" if emulator else "qcom",
@@ -839,11 +855,12 @@ class CaptureTest(DeviceBase):
         self.assertIn("corrida de prueba", out)
         self.assertIn("TTID 456 ms", out)
         self.assertIn("Secciones propias: HTTP ×2", out)
-        self.assertIn("Arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
+        self.assertIn("· Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
         self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/perf/arranque-frio/" % PKG, out)
         self.assertIn('--instalar "./gradlew app:installProfiling"', out)
-        self.assertIn("Otra pantalla o flujo · Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", out)
+        self.assertIn("· Una pantalla o un flujo · Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", out)
         self.assertIn("Dispositivo emulator-5554", out)
+        self.assertLess(out.index("Una pantalla o un flujo"), out.index("arranque en frío (receta"))  # el flujo, primero
         self.assertTrue(any((self.dir / "reports/perf/humo/prueba").glob("humo_1.perfetto-trace*")))
         self.assertFalse((self.dir / "reports/perf/humo/plan.json").exists())
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
@@ -1268,17 +1285,38 @@ class ModelLevelsTest(unittest.TestCase):
 
     def test_prompts_habla_de_niveles_y_no_de_nombres_fijos_de_modelo(self):
         prompts = self.text("references", "prompts.md")
-        intro, tables = prompts.split("## Empezar", 1)
+        intro, cases = prompts.split("## Empezar", 1)
         self.assertIn("`modelos`", intro)
         for level in ("económico", "intermedio", "diagnóstico", "alto"):
             self.assertIn(level, intro)
-        for line in tables.splitlines():
-            cells = [c.strip() for c in line.split("|")]
-            if len(cells) > 3 and cells[1] != "Caso" and not cells[1].startswith("-"):
-                self.assertNotRegex(cells[2], r"(Haiku|Sonnet|Opus) \d", line)  # la columna Chat
-        self.assertRegex(tables, r"\| Intermedio · medio \|")
-        self.assertRegex(tables, r"\| Económico · bajo \|")
-        self.assertRegex(tables, r"\| Diagnóstico · alto \|")
+        where = [line for line in cases.splitlines() if line.startswith("**Dónde:**")]
+        self.assertGreater(len(where), 15)
+        for line in where:  # dónde va cada caso: un nivel, nunca un nombre de modelo
+            self.assertNotRegex(line, r"(Haiku|Sonnet|Opus) \d", line)
+        for level in ("Intermedio · medio", "Económico · bajo", "Diagnóstico · alto"):
+            self.assertIn("**Dónde:** chat nuevo · " + level, where)
+
+    def test_cada_prompt_va_solo_en_su_bloque_y_la_descripcion_queda_afuera(self):
+        cases = self.text("references", "prompts.md").split("## Empezar", 1)[1].split("## Reglas que te ahorran dinero")[0]
+        repo = (ROOT / "PROMPTS.md").read_text(encoding="utf-8")
+        repo = repo[repo.index("## hb-performance"):repo.index("## hb-coach")]
+        for text in (cases, repo):
+            blocks = re.findall(r"```\w*\n(.*?)```", text, re.S)
+            self.assertTrue(blocks)
+            for body in blocks:
+                self.assertEqual(len(body.strip().splitlines()), 1, body)  # solo el texto para pegar
+                self.assertNotIn("→", body)
+            outside = re.sub(r"```.*?```", "", text, flags=re.S)
+            self.assertNotIn("Usa hb-performance", outside)  # ningún prompt mezclado con su explicación
+            self.assertNotIn("Sigue hb-performance con", outside)
+            self.assertNotIn("| Caso |", outside)
+        for case in cases.split("\n### ")[1:]:
+            self.assertLessEqual(case.count("```"), 2, case[:60])  # un bloque por caso, como mucho
+            self.assertIn("\n**Dónde:** ", case, case[:60])
+        self.assertIn("El mismo texto sirve para empezar", self.text("references", "prompts.md"))
+        self.assertIn("claude --resume", cases)
+        self.assertIn("copilot --resume", cases)
+        self.assertNotIn("/cost>", inspect_source())
 
     def test_modelos_y_ficha_describen_el_nivel_diagnostico(self):
         models = self.text("references", "modelos.md")
@@ -1489,7 +1527,10 @@ class NextStepTest(PerfBase):
         self.assertEqual(title, "triage cerrado")
         self.assertEqual(steps[0]["tipo"], "archivo")
         self.plan["profundidad"] = "riguroso"
-        self.assertEqual(self.step()[0], "sesión 2 · diagnóstico")  # ya no cierra: sigue con el plan de mejoras
+        self.assertEqual(self.step()[0], "sesión 4 · cierre sin mejoras")  # sin mejoras, la sesión 2 no se repite
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}]
+        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")  # con mejoras ya no cierra: sigue con el plan
+        self.plan["mejoras"] = []
         self.plan["profundidad"] = "ligero"
         self.save()
         self.assertEqual(self.perf("siguiente", "--carpeta", self.folder).returncode, 2)
@@ -2140,7 +2181,7 @@ class SegmentsTest(PerfBase):
         return {"ventana": {"desde": {"marca": "NAV lista"}, "hasta": {"marca": "MARK detalle"}},
                 "segmentos": [{"nombre": "detalle", "desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}}]}
 
-    def trace(self, peak_ms=60):
+    def trace(self, peak_ms=72):
         frames = [("frame", i * 20 * MS, 16 * MS, 0, "None") for i in range(50)]  # la lista, de 0 a 1000 ms, sin jank
         frames += [("frame", 1100 * MS, peak_ms * MS, 0, "App Deadline Missed"),  # el pico al entrar al detalle
                    ("frame", 1200 * MS, 16 * MS, 0, "None"), ("frame", 1220 * MS, 16 * MS, 0, "None")]
@@ -2159,8 +2200,8 @@ class SegmentsTest(PerfBase):
         m, info = self.metrics(self.trace(), self.flow())
         self.assertEqual(m["frame_p90_ms"][1], 16)  # 53 frames en la ventana: el pico no mueve el P90
         self.assertAlmostEqual(m["jank_app_pct"][1], 100 / 53)
-        self.assertEqual(m["detalle hilo_max_ms"][1:], (60, "ms", "app"))
-        self.assertEqual(m["detalle frame_p90_ms"][1:], (60, "ms", "app"))
+        self.assertEqual(m["detalle hilo_max_ms"][1:], (72, "ms", "app"))
+        self.assertEqual(m["detalle frame_p90_ms"][1:], (72, "ms", "app"))
         self.assertAlmostEqual(m["detalle jank_app_pct"][1], 100 / 3)
         self.assertEqual(m["detalle frames"][1:], (3, "frames", "info"))
         self.assertEqual(info["faltantes"], [])
@@ -2185,16 +2226,16 @@ class SegmentsTest(PerfBase):
 
     def test_un_tramo_sin_marcas_no_trae_metricas_y_queda_en_faltantes(self):
         flow = self.flow()
-        flow["segmentos"].append({"nombre": "desglose", "desde": {"marca": "NAV desglose"}, "hasta": {"marca": "MARK desglose"}})
+        flow["segmentos"].append({"nombre": "reparto", "desde": {"marca": "NAV reparto"}, "hasta": {"marca": "MARK reparto"}})
         m, info = self.metrics(self.trace(), flow)
-        self.assertEqual(info["faltantes"], ["tramo desglose"])
+        self.assertEqual(info["faltantes"], ["tramo reparto"])
         self.assertIn("detalle hilo_max_ms", m)
-        self.assertFalse([k for k in m if k.startswith("desglose ")])
+        self.assertFalse([k for k in m if k.startswith("reparto ")])
 
     def test_un_tramo_sin_frames_solo_trae_el_hilo(self):
         rows = [r for r in self.trace() if not (r[0] == "frame" and r[1] >= 1000 * MS)]
         m, _ = self.metrics(rows, self.flow())
-        self.assertEqual(m["detalle hilo_max_ms"][1], 60)
+        self.assertEqual(m["detalle hilo_max_ms"][1], 72)
         self.assertNotIn("detalle frame_p90_ms", m)
         self.assertNotIn("detalle jank_app_pct", m)
 
@@ -2212,6 +2253,7 @@ class SegmentsTest(PerfBase):
         good = base["flujos"]["f"]["segmentos"][0]
         for bad in ([dict(good, nombre="con espacio")], [dict(good, nombre="red")], [good, good], [{"nombre": "x"}],
                     [dict(good, nombre=None)], [dict(good, nombre=True)], [dict(good, margen_ms="mucho")],
+                    [dict(good, margen_ms=float("inf"))],
                     [dict(good, hasta={"marca": "MARK x", "punto": "medio"})], {"nombre": "detalle"}, ["detalle"]):
             base["flujos"]["f"]["segmentos"] = bad
             write(path, json.dumps(base))
@@ -2226,7 +2268,7 @@ class SegmentsTest(PerfBase):
         self.assertIn("flujos.f.ventana.margen_ms es un número", str(caught.exception))
 
     def test_comparar_da_veredicto_por_tramo_y_no_compara_si_cambian_sus_frames(self):
-        text = rows("antes", "f", "detalle hilo_max_ms", [60, 61, 59, 60, 62]) \
+        text = rows("antes", "f", "detalle hilo_max_ms", [70, 71, 69, 70, 72]) \
             + rows("despues", "f", "detalle hilo_max_ms", [20, 21, 19, 20, 22]) \
             + rows("antes", "f", "detalle frames", [10] * 5, "frames", family="info") \
             + rows("despues", "f", "detalle frames", [30] * 5, "frames", family="info") \
@@ -2290,8 +2332,8 @@ class SegmentsCaptureTest(DeviceBase):
 FINDINGS = "# Rendimiento · Detalle · 2026-11-09\n\n## Resumen ejecutivo\n\nTexto.\n\n## Hallazgos\n\n" \
            "| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n" \
            "| H1 | Carga lenta | 131 ms | Red en el hilo | bug |\n" \
-           "| H2 | Frame largo al entrar | 60 ms en las 10 corridas | sin probar | sin confirmar |\n" \
-           "| H3 | Frame largo al volver | 58 ms en las 10 corridas | sin probar | sin confirmar |\n\n" \
+           "| H2 | Frame largo al abrir el detalle | 44 ms en las 10 corridas | sin probar | sin confirmar |\n" \
+           "| H3 | Frame largo al cerrar el detalle | 37 ms en las 10 corridas | sin probar | sin confirmar |\n\n" \
            "## Plan de mejoras\n\n<!-- perf:mejoras -->\n<!-- /perf:mejoras -->\n\n## Decisiones\n\n"
 
 
@@ -2303,17 +2345,17 @@ class TrialImprovementTest(PerfBase):
         self.folder = self.dir / "inv"
         self.plan = {"paquete": PKG, "principales": ["carga_ms"], "flujos": {"f": {}}, "mejoras": [
             {"id": "M1", "titulo": "Caché", "hallazgo": "H1", "metrica": "carga_ms", "estado": "propuesta"},
-            {"id": "M2", "titulo": "Diferir la animación", "hallazgo": "H2", "a_prueba": True,
-             "hipotesis": "el pico es la animación de entrada", "metrica": "detalle hilo_max_ms", "esperado": "≤ 16 ms",
+            {"id": "M2", "titulo": "Decodificar la imagen fuera del hilo principal", "hallazgo": "H2", "a_prueba": True,
+             "hipotesis": "el pico es la decodificación de la imagen de cabecera", "metrica": "detalle hilo_max_ms", "esperado": "≤ 16 ms",
              "estado": "propuesta"},
-            {"id": "M3", "titulo": "Quitar el blur", "hallazgo": "H3", "a_prueba": True,
-             "hipotesis": "el pico es el blur del fondo", "metrica": "volver hilo_max_ms", "esperado": "≤ 16 ms",
+            {"id": "M3", "titulo": "Precalcular el layout del texto", "hallazgo": "H3", "a_prueba": True,
+             "hipotesis": "el pico es el layout del texto largo", "metrica": "cierre hilo_max_ms", "esperado": "≤ 16 ms",
              "estado": "propuesta"}]}
         write(self.folder / "estado.md", FINDINGS)
         self.save()
         self.before = rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131]) \
-            + rows("antes", "f", "detalle hilo_max_ms", [60, 61, 59, 60, 62]) \
-            + rows("antes", "f", "volver hilo_max_ms", [58, 59, 57, 58, 60])
+            + rows("antes", "f", "detalle hilo_max_ms", [44, 45, 43, 44, 46]) \
+            + rows("antes", "f", "cierre hilo_max_ms", [37, 38, 36, 37, 39])
         write(self.folder / "metricas.csv", HEADER + self.before)
 
     def save(self):
@@ -2335,21 +2377,21 @@ class TrialImprovementTest(PerfBase):
         self.ok("reporte", "--carpeta", self.folder, "--inicial")
         initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
         self.assertIn("| M1 | Caché | H1 | carga_ms | 131 ms |", initial)
-        self.assertIn("| M2 | Diferir la animación (a prueba) | H2 | detalle hilo_max_ms | 60 ms | ≤ 16 ms |", initial)
-        self.assertIn("**Mejoras a prueba**", initial)
-        self.assertIn("- **M2** · hipótesis: el pico es la animación de entrada · se confirma si `detalle hilo_max_ms` mejora "
+        self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | detalle hilo_max_ms | 44 ms | ≤ 16 ms |", initial)
+        self.assertIn("| propuesta |\n\n**Mejoras a prueba**", initial)  # con línea en blanco: no es una fila de la tabla
+        self.assertIn("- **M2** · hipótesis: el pico es la decodificación de la imagen de cabecera · se confirma si `detalle hilo_max_ms` mejora "
                       "(esperado: ≤ 16 ms)", initial)
-        self.assertIn("| H2 | Frame largo al entrar | 60 ms en las 10 corridas | sin probar | sin confirmar | M2 (propuesta) |",
+        self.assertIn("| H2 | Frame largo al abrir el detalle | 44 ms en las 10 corridas | sin probar | sin confirmar | M2 (propuesta) |",
                       initial)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
-        self.assertIn("- **M3** · hipótesis: el pico es el blur del fondo", state)
+        self.assertIn("- **M3** · hipótesis: el pico es el layout del texto largo", state)
         out = self.ok("decidir", "--carpeta", self.folder, "--aprobar", "M2,M3", "--pendiente", "M1")
         self.assertIn("sesión 3, aplica M2", out)
         self.assertIn("aplica M2 (a prueba: la medición de después confirma o refuta su hipótesis)", out)
         plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
         self.assertEqual([m["estado"] for m in plan["mejoras"]], ["pendiente", "aprobada", "aprobada"])
         self.assertTrue(plan["mejoras"][1]["a_prueba"])
-        self.assertIn("| M2 | Diferir la animación (a prueba) |", (self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) |", (self.folder / "estado.md").read_text(encoding="utf-8"))
 
     def test_el_reporte_final_dice_si_la_hipotesis_se_confirmo_o_se_refuto(self):
         for item in self.plan["mejoras"]:
@@ -2357,19 +2399,19 @@ class TrialImprovementTest(PerfBase):
         self.save()
         write(self.folder / "metricas.csv", HEADER + self.before
               + rows("despues", "f", "carga_ms", [46, 45, 47, 46, 44])
-              + rows("despues", "f", "detalle hilo_max_ms", [12, 13, 11, 12, 14])
-              + rows("despues", "f", "volver hilo_max_ms", [58, 59, 57, 58, 59]))
+              + rows("despues", "f", "detalle hilo_max_ms", [11, 12, 10, 11, 13])
+              + rows("despues", "f", "cierre hilo_max_ms", [37, 38, 36, 37, 38]))
         self.ok("reporte", "--carpeta", self.folder, "--html")
         final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
         self.assertIn("| M1 | Caché | H1 | ✔ funcionó | carga_ms: 131 ms → 46 ms", final)
-        self.assertIn("| M2 | Diferir la animación (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
-                      "animación de entrada · detalle hilo_max_ms: 60 ms → 12 ms (-80 %)", final)
-        self.assertIn("| M3 | Quitar el blur (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el blur del fondo · "
-                      "volver hilo_max_ms: 58 ms → 58 ms", final)
+        self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
+                      "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (-75 %)", final)
+        self.assertIn("| M3 | Precalcular el layout del texto (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el layout del texto largo · "
+                      "cierre hilo_max_ms: 37 ms → 37 ms", final)
         self.assertIn("| sin confirmar | ✔ M2: hipótesis confirmada (detalle hilo_max_ms mejora) |", final)
-        self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (volver hilo_max_ms sin cambio) |", final)
+        self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (cierre hilo_max_ms sin cambio) |", final)
         self.assertIn("3 hallazgos → 3 mejoras propuestas → 3 aplicadas → 2 funcionaron", final)
-        self.assertIn("| ≤ 16 ms | 12 ms | -80 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
+        self.assertIn("| ≤ 16 ms | 11 ms | -75 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
         page = (self.folder / "reporte-final.html").read_text(encoding="utf-8")
         self.assertIn('<td class="ok">✔ hipótesis confirmada</td>', page)
         self.assertIn('<td class="ko">✖ hipótesis refutada</td>', page)
@@ -2386,3 +2428,859 @@ class TrialImprovementTest(PerfBase):
         self.assertEqual(perf.improvement_result(trial, None), "— sin medir")
         self.assertEqual(perf.improvement_result(dict(trial, estado="aprobada"), {"veredicto": "mejora"}), "— no aplicada")
         self.assertEqual(perf.improvement_result({"estado": "aplicada"}, {"veredicto": "mejora"}), "✔ funcionó")
+
+
+STATE_BLOCKS = "# Rendimiento · Home · 2026-11-09\n\n## Siguiente paso\n\n- x\n\n## Métricas\n\n<!-- perf:metricas -->\n" \
+               "<!-- /perf:metricas -->\n\n## Comparación\n\n<!-- perf:comparacion -->\n<!-- /perf:comparacion -->\n"
+HZ_90 = GOOD + '"vsync",0,11111111,0,""\n'
+
+
+class RefreshRateTest(DeviceBase):
+    """El `hz` del plan contra la tasa que midió la traza, y la tasa que el dispositivo ya tiene fijada."""
+
+    def test_el_aviso_depende_de_la_tolerancia_y_de_si_hay_hz_en_el_plan(self):
+        self.assertEqual(perf.hz_warning(60, [60, 60]), "")
+        self.assertEqual(perf.hz_warning(60, [None]), "")
+        self.assertEqual(perf.hz_warning(90, [88]), "")  # 2 %: dentro de la tolerancia
+        self.assertIn("el plan dice 60 Hz y la traza midió 90 Hz", perf.hz_warning(60, [90, 90]))
+        self.assertIn("el plan dice 120 Hz y la traza midió 60/90 Hz", perf.hz_warning(120, [90, 60, None]))
+        self.assertEqual(perf.hz_warning(None, [90, 90]), "")
+        self.assertIn("cambió entre corridas (60/90 Hz)", perf.hz_warning(None, [60, 90]))
+
+    def test_la_prueba_avisa_si_el_hz_del_plan_no_es_el_de_la_traza(self):
+        self.tp_outputs(HZ_90)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertIn("Tasa de refresco: 60 Hz (plan)", out)
+        self.assertIn("⚠ TASA DE REFRESCO: el plan dice 60 Hz y la traza midió 90 Hz", out)
+        self.tp_outputs(GOOD + '"vsync",0,16666666,0,""\n')
+        self.assertNotIn("TASA DE REFRESCO", self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba"))
+
+    def test_capturar_deja_el_aviso_en_la_salida_en_estado_y_en_fases_y_guarda_la_tasa_de_cada_corrida(self):
+        write(self.plan.parent / "estado.md", STATE_BLOCKS)
+        self.tp_outputs(HZ_90)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertIn("⚠ TASA DE REFRESCO: el plan dice 60 Hz y la traza midió 90 Hz", out)
+        phase = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))["antes"]
+        self.assertEqual(phase["hz_corridas"], [90, 90])
+        self.assertEqual(phase["hz"], 60)
+        self.assertEqual(len(phase["avisos"]), 1)
+        self.assertIn("repite lo medido así con --rehacer", phase["avisos"][0])
+        state = (self.plan.parent / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("> ⚠ antes: TASA DE REFRESCO: el plan dice 60 Hz y la traza midió 90 Hz", state)
+        write(self.plan.parent / "metricas.csv", (self.plan.parent / "metricas.csv").read_text(encoding="utf-8")
+              + rows("despues", "home", "jank_app_pct", [5] * 5, "%"))
+        self.assertIn("⚠ antes: TASA DE REFRESCO", self.ok("comparar", self.plan.parent / "metricas.csv"))
+        # otra tanda de la misma fase no repite el aviso y suma las tasas
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        phase = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))["antes"]
+        self.assertEqual((phase["hz_corridas"], len(phase["avisos"])), ([90, 90, 90], 1))
+
+    def test_con_el_hz_correcto_o_sin_hz_no_hay_aviso_y_la_tasa_queda_igual(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        del plan["hz"]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(HZ_90)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertNotIn("TASA DE REFRESCO", out)
+        phase = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))["antes"]
+        self.assertEqual((phase["hz"], phase["hz_corridas"]), (90, [90, 90]))
+        self.assertNotIn("avisos", phase)
+        self.tp_outputs(HZ_90, GOOD + '"vsync",0,16666666,0,""\n')
+        (self.dir / "tp.count").unlink()  # el trace_processor falso vuelve a empezar por la primera salida
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "2",
+                      "--calentamiento", "0")
+        self.assertIn("⚠ TASA DE REFRESCO: cambió entre corridas (60/90 Hz)", out)
+
+    def test_nuevo_pone_en_el_plan_la_tasa_que_el_dispositivo_ya_tiene_fija(self):
+        self.env.update({"FAKE_MIN_HZ": "90.0", "FAKE_PEAK_HZ": "90.0"})
+        out = self.ok("nuevo", "--carpeta", self.dir / "fija", "--paquete", PKG, "--flujo", "x")
+        self.assertIn("✔ Tasa de refresco ya fija en el dispositivo: 90 Hz (min_refresh_rate=90, peak_refresh_rate=90)", out)
+        self.assertNotIn("settings put", out)
+        self.assertEqual(json.loads((self.dir / "fija" / "plan.json").read_text(encoding="utf-8"))["hz"], 90)
+        device = next(l for l in (self.dir / "fija" / "estado.md").read_text(encoding="utf-8").splitlines()
+                      if l.startswith("| Dispositivo"))
+        self.assertEqual(device, "| Dispositivo | Pixel Test · Android 14 (API 34) · 90 Hz fijos |")
+
+    def test_si_no_esta_fija_da_el_comando_que_la_fija_y_el_que_la_restaura(self):
+        self.env.update({"FAKE_MIN_HZ": "null", "FAKE_PEAK_HZ": "120.0"})
+        out = self.ok("nuevo", "--carpeta", self.dir / "adaptativa", "--paquete", PKG, "--flujo", "x", "--serial", "emulator-5554")
+        self.assertIn("⚠ La tasa de refresco no está fija en el dispositivo (min_refresh_rate=sin poner, peak_refresh_rate=120.0)", out)
+        self.assertIn("Fijarla antes de medir:  adb -s emulator-5554 shell settings put system min_refresh_rate 120 && "
+                      "adb -s emulator-5554 shell settings put system peak_refresh_rate 120", out)
+        self.assertIn("Restaurarla al cerrar:   adb -s emulator-5554 shell settings delete system min_refresh_rate && "
+                      "adb -s emulator-5554 shell settings put system peak_refresh_rate 120.0\n", out)  # lo que había, tal cual
+        self.assertNotIn("hz", json.loads((self.dir / "adaptativa" / "plan.json").read_text(encoding="utf-8")))
+        self.assertIn("tasa de refresco sin fijar", (self.dir / "adaptativa" / "estado.md").read_text(encoding="utf-8"))
+        self.env.update({"FAKE_MIN_HZ": "", "FAKE_PEAK_HZ": "Infinity"})  # ajustes que no existen o no son una tasa
+        out = self.ok("nuevo", "--carpeta", self.dir / "sin-ajustes", "--paquete", PKG, "--flujo", "x")
+        self.assertIn("adb shell settings put system min_refresh_rate <hz>", out)
+        self.assertIn("adb shell settings delete system min_refresh_rate && adb shell settings put system peak_refresh_rate "
+                      "Infinity", out)  # Infinity no es una tasa, pero es lo que había: se restaura, no se borra
+        out = self.ok("nuevo", "--carpeta", self.dir / "con-hz", "--paquete", PKG, "--flujo", "x", "--hz", "120")
+        self.assertEqual(json.loads((self.dir / "con-hz" / "plan.json").read_text(encoding="utf-8"))["hz"], 120)
+
+
+class RouteChecksTest(DeviceBase):
+    """La corrida de prueba avisa si una métrica de usuario abarca toques del recorrido o si una marca se repite."""
+
+    def flow(self):
+        return {"metricas_usuario": [
+            {"nombre": "lista_a_reparto_ms", "desde": {"marca": "NAV lista"}, "hasta": {"marca": "MARK reparto"}},
+            {"nombre": "detalle_a_reparto_ms", "desde": {"marca": "NAV reparto"}, "hasta": {"marca": "MARK reparto"}}]}
+
+    def trace(self):
+        return [("proceso", 0, 0, 0, PKG), ("frame", 0, 16 * MS, 0, "None"),
+                ("input", 90 * MS, 2 * MS, 0, "deliverInputEvent src=0x1002 eventTimeNano=1 id=0x1"),  # el toque que abre la lista
+                ("seccion", 100 * MS, 0, 0, "NAV lista"),
+                ("input", 105 * MS, 2 * MS, 0, "deliverInputEvent src=0x1002 eventTimeNano=2 id=0x2"),  # el ACTION_UP del mismo toque
+                ("input", 4000 * MS, 2 * MS, 0, "deliverInputEvent src=0x1002 eventTimeNano=3 id=0x3"),  # otro paso del recorrido
+                ("input", 4010 * MS, 2 * MS, 0, "deliverInputEvent src=0x1002 eventTimeNano=4 id=0x4"),
+                ("seccion", 4020 * MS, 0, 0, "NAV reparto"), ("seccion", 4400 * MS, 0, 0, "MARK reparto")]
+
+    def test_una_metrica_que_contiene_otros_toques_mide_el_script(self):
+        out, invalid, info = perf.trace_metrics(self.trace(), 60, self.flow(), set(), 34)
+        self.assertIsNone(invalid)
+        self.assertEqual(info["con_input"], {"lista_a_reparto_ms": 2})  # la de un solo salto no los contiene
+        self.assertEqual(info["input"], 4)
+        self.assertEqual({m[0]: m[1] for m in out}["lista_a_reparto_ms"], 4300)  # la métrica no cambia: solo se avisa
+
+    def test_el_gesto_que_dispara_la_metrica_no_cuenta_aunque_dure_mas_que_la_gracia(self):
+        # un swipe de 300 ms: sus MOVE siguen llegando cada 20 ms después de la marca de inicio del scroll
+        swipe = [("input", (1000 + i * 20) * MS, MS, 0, "deliverInputEvent src=0x1002") for i in range(16)]
+        rows = [("proceso", 0, 0, 0, PKG), ("frame", 0, 16 * MS, 0, "None"), ("seccion", 1010 * MS, 0, 0, "MARK scroll_inicio"),
+                ("seccion", 2000 * MS, 0, 0, "MARK scroll_fin")] + swipe
+        flow = {"metricas_usuario": [{"nombre": "scroll_ms", "desde": {"marca": "MARK scroll_inicio"},
+                                      "hasta": {"marca": "MARK scroll_fin"}}]}
+        self.assertEqual(perf.trace_metrics(rows, 60, flow, set(), 34)[2]["con_input"], {})
+        late = rows + [("input", 1700 * MS, MS, 0, "deliverInputEvent src=0x1002")]  # otro gesto, 400 ms después del swipe
+        self.assertEqual(perf.trace_metrics(late, 60, flow, set(), 34)[2]["con_input"], {"scroll_ms": 1})
+
+    def test_sin_slices_de_input_no_hay_nada_que_avisar(self):
+        rows = [r for r in self.trace() if r[0] != "input"]
+        info = perf.trace_metrics(rows, 60, self.flow(), set(), 34)[2]
+        self.assertEqual((info["con_input"], info["input"]), ({}, 0))
+
+    def test_la_prueba_lo_avisa_y_la_consulta_usa_el_patron_del_plan(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"].update(self.flow())
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        marks = '"seccion",100000000,0,0,"NAV lista"\n"seccion",4020000000,0,0,"NAV reparto"\n' \
+                '"seccion",4400000000,0,0,"MARK reparto"\n'
+        self.tp_outputs(GOOD + marks + '"input",4000000000,2000000,0,"deliverInputEvent src=0x1002"\n')
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertIn("⚠ lista_a_reparto_ms incluye pasos del recorrido (1 eventos de input entre sus marcas): mide el "
+                      "script, no la app", out)
+        self.assertNotIn("detalle_a_reparto_ms incluye", out)
+        self.assertNotIn("Sin slices de input", out)
+        self.assertIn("WHERE s.name GLOB 'deliverInputEvent*'", (self.dir / "tp.sql").read_text(encoding="utf-8"))
+        self.tp_outputs(GOOD + marks)
+        plan["input_slices"] = "dispatchInput*"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertIn("Sin slices de input ('dispatchInput*') en la traza", out)
+        self.assertIn("WHERE s.name GLOB 'dispatchInput*'", (self.dir / "tp.sql").read_text(encoding="utf-8"))
+        plan["input_slices"] = "x' OR 1=1 --"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'input_slices' es un patrón GLOB", result.stderr)
+
+    def test_una_marca_repetida_en_la_misma_carga_se_detecta_y_una_por_carga_no(self):
+        once = [("seccion", 0, 0, 0, "NAV home"), ("seccion", 10, 0, 0, "MARK home"), ("seccion", 20, 0, 0, "NAV detalle"),
+                ("seccion", 30, 0, 0, "MARK detalle"), ("seccion", 40, 0, 0, "NAV home"), ("seccion", 50, 0, 0, "MARK home")]
+        self.assertEqual(perf.repeated_marks(once), {})  # home se cargó dos veces: una marca por carga
+        # el gancho avisa en cada paso del ciclo de vida de la misma pantalla: tres marcas para una sola carga
+        thrice = [("seccion", 0, 5, 0, "SCREEN MainActivity onCreate"), ("seccion", 10, 0, 0, "MARK login"),
+                  ("seccion", 15, 5, 0, "SCREEN MainActivity onStart"), ("seccion", 20, 0, 0, "MARK login"),
+                  ("seccion", 25, 5, 0, "SCREEN MainActivity onResume"), ("seccion", 30, 0, 0, "MARK login")]
+        self.assertEqual(perf.repeated_marks(thrice), {"MARK login": 3})
+        # otra pantalla, otra marca o una llamada de red entre las dos apariciones: es una carga nueva, no un duplicado
+        for between in ("SCREEN DetalleActivity onCreate", "MARK busqueda_inicio", "HTTP GET items", "NAV lista"):
+            reload = [("seccion", 0, 5, 0, "SCREEN MainActivity onResume"), ("seccion", 10, 0, 0, "MARK lista"),
+                      ("seccion", 20, 5, 0, between), ("seccion", 30, 0, 0, "MARK lista")]
+            self.assertEqual(perf.repeated_marks(reload), {}, between)
+
+    def test_humo_avisa_de_la_marca_repetida(self):
+        self.tp_outputs(GOOD + '"seccion",20,0,0,"MARK login"\n"seccion",30,0,0,"MARK login"\n"seccion",40,0,0,"MARK login"\n')
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn("⚠ 'MARK login' salió 3 veces en una misma carga (sin navegación ni otra carga entre ellas)", out)
+        self.assertIn("una vez por carga", out)
+        self.tp_outputs(GOOD + '"seccion",20,0,0,"MARK login"\n')
+        self.assertNotIn("veces en una misma carga", self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "otra"))
+
+
+class RedoFlowTest(DeviceBase):
+    """--rehacer quita solo lo del flujo que se rehace: el registro, las filas y las trazas de los otros flujos siguen."""
+
+    def setUp(self):
+        super().setUp()
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["detalle"] = dict(plan["flujos"]["home"])
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.folder = self.plan.parent
+        self.common = ["capturar", "--plan", self.plan, "--fase", "antes", "--calentamiento", "0", "--sin-compilar"]
+
+    def phase(self):
+        return json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["antes"]
+
+    def runs(self, flow):
+        with (self.folder / "metricas.csv").open(newline="", encoding="utf-8") as f:
+            return sorted({r["corrida"] for r in csv.DictReader(f) if r["flujo"] == flow})
+
+    def test_rehacer_un_flujo_conserva_el_registro_y_las_trazas_del_otro(self):
+        self.tp_outputs(HZ_90)
+        self.env.update({"FAKE_EMULATOR": "1", "FAKE_GLES": GLES_SOFT})  # 'detalle' se mide con render por software
+        self.ok(*(self.common + ["--flujo", "detalle", "--corridas", "3"]))
+        self.env.pop("FAKE_EMULATOR")
+        self.env["FAKE_GLES"] = GLES_REAL
+        self.ok(*(self.common + ["--flujo", "home", "--corridas", "2"]))
+        phase = self.phase()
+        self.assertEqual((phase["corridas"], phase["flujos"]["home"]["corridas"], phase["flujos"]["detalle"]["corridas"]), (5, 2, 3))
+        out = self.ok(*(self.common + ["--flujo", "home", "--corridas", "1", "--rehacer"]))
+        self.assertIn("filas de 'antes' fuera del CSV", out)
+        phase = self.phase()
+        self.assertEqual(phase["corridas"], 4)  # 3 de detalle + la nueva de home
+        self.assertEqual(phase["flujos"]["detalle"], {"corridas": 3, "hz_corridas": [90, 90, 90], "avisos": phase["avisos"],
+                                                       "entorno": phase["entorno"]})
+        self.assertEqual(phase["flujos"]["home"]["corridas"], 1)
+        self.assertEqual(phase["entorno"]["frames"], "no")  # el entorno de 'detalle' no se pierde
+        self.assertEqual(len(phase["hz_corridas"]), 4)
+        self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2", "3"], ["1"]))
+        kept = sorted(p.name for p in (self.folder / "antes").iterdir())
+        self.assertEqual(kept, ["detalle_1.perfetto-trace.gz", "detalle_2.perfetto-trace.gz", "detalle_3.perfetto-trace.gz",
+                                "home_1.perfetto-trace.gz"])
+        discarded = next(p for p in self.folder.iterdir() if p.name.startswith("antes-descartada-"))
+        self.assertEqual(sorted(p.name for p in discarded.iterdir()), ["home_1.perfetto-trace.gz", "home_2.perfetto-trace.gz"])
+
+    def test_rehacer_despues_con_dos_flujos_renueva_la_fecha_y_siguiente_no_vuelve_a_pedirlo(self):
+        self.tp_outputs(GOOD)
+        common = ["capturar", "--plan", self.plan, "--calentamiento", "0", "--sin-compilar", "--corridas", "1"]
+        for flow in ("home", "detalle"):
+            self.ok(*(common + ["--fase", "antes", "--flujo", flow]))
+        self.env["FAKE_UPDATED"] = "2026-11-06 09:00:00"  # el build con la mejora
+        for flow in ("home", "detalle"):
+            self.ok(*(common + ["--fase", "despues", "--flujo", flow]))
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        phases["despues"]["fecha"] = "2026-11-06T10:00:00"  # se midió antes de aplicar la segunda mejora
+        write(self.folder / "fases.json", json.dumps(phases))
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "aplicada", "aplicada_en": "2026-11-07T10:00:00"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.assertEqual(perf.next_steps(self.folder, plan)[0], "medición después (sin chat)")
+        self.env["FAKE_UPDATED"] = "2026-11-08 09:00:00"
+        out = self.ok(*(common + ["--fase", "despues", "--flujo", "home", "--rehacer"]))
+        self.assertIn("sesión 4 · cierre", out)  # con la fecha nueva, la fase ya no está vieja
+        despues = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["despues"]
+        self.assertGreater(despues["fecha"], "2026-11-07T10:00:00")
+        self.assertEqual((despues["corridas"], sorted(despues["flujos"])), (2, ["detalle", "home"]))
+
+    def test_un_registro_por_flujo_incompleto_no_se_usa_para_recalcular(self):
+        # la fase empezó con una versión anterior (sin 'flujos') y 'detalle' sumó después una tanda con su registro
+        soft = {"emulador": True, "software": True, "render": "SwiftShader", "frames": "no"}
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-09T10:00:00", "corridas": 5, "entorno": soft,
+                                                                 "flujos": {"detalle": {"corridas": 1}}}}))
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "home", "jank_app_pct", [1, 2], "%")
+              + rows("antes", "detalle", "jank_app_pct", [1, 2, 3], "%"))
+        perf.forget_flow(self.folder, self.folder / "metricas.csv", "antes", "home")
+        phase = self.phase()
+        self.assertEqual(phase["corridas"], 3)
+        self.assertEqual(phase["entorno"], soft)  # 'detalle' tiene 3 corridas y su registro solo 1: no alcanza para saberlo
+
+    def test_rehacer_el_unico_flujo_medido_borra_el_registro_de_la_fase_como_antes(self):
+        self.tp_outputs(GOOD)
+        self.ok(*(self.common + ["--flujo", "home", "--corridas", "2"]))
+        self.assertEqual(self.phase()["flujos"], {"home": {"corridas": 2}})
+        perf.forget_flow(self.folder, self.folder / "metricas.csv", "control", "home")  # una fase sin medir: no hace nada
+        self.assertEqual(self.phase()["corridas"], 2)
+        perf.forget_flow(self.folder, self.folder / "metricas.csv", "antes", "home")  # no hay filas de otros flujos
+        self.assertNotIn("antes", perf.read_phases(self.folder))
+
+    def test_un_registro_sin_datos_por_flujo_conserva_los_de_la_fase(self):
+        # fases.json de una versión anterior: sin 'flujos'. No se puede saber de qué flujo era el entorno: se conserva.
+        soft = {"emulador": True, "software": True, "render": "SwiftShader", "frames": "no"}
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-09T10:00:00", "commit": "abc1234",
+                                                                 "corridas": 4, "hz": 60, "entorno": soft}}))
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "home", "jank_app_pct", [1, 2], "%")
+              + rows("antes", "detalle", "jank_app_pct", [1, 2], "%"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            perf.discard_phase(self.folder, self.folder / "metricas.csv", "antes", "home")
+        phase = self.phase()
+        self.assertEqual((phase["corridas"], phase["commit"], phase["entorno"]), (2, "abc1234", soft))
+        self.assertNotIn("flujos", phase)
+        self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2"], []))
+
+
+class PrepareSecretsTest(DeviceBase):
+    """`requiere_env`: las variables que `preparar` necesita se comprueban antes de empezar y nunca se muestran."""
+
+    def plan_with(self, prepare, env=("PERF_USUARIO", "PERF_CLAVE")):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"].update({"preparar": prepare, "requiere_env": list(env)})
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def test_si_falta_una_variable_se_detiene_antes_de_tocar_el_dispositivo_y_dice_cual(self):
+        self.plan_with("true")
+        self.env["PERF_USUARIO"] = "usuario.demo"
+        self.env.pop("PERF_CLAVE", None)
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("faltan variables de entorno que el flujo 'home' necesita (requiere_env): PERF_CLAVE.", result.stderr)
+        self.assertIn("antes de abrir el agente", result.stderr)
+        self.assertNotIn("usuario.demo", result.stdout + result.stderr)
+        self.assertFalse((self.dir / "adb.log").exists())  # ni calentamiento ni corridas: falla antes de empezar
+        self.env["PERF_CLAVE"] = ""  # vacía es lo mismo que no estar
+        self.assertEqual(self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba").returncode, 3)
+
+    def test_si_preparar_falla_muestra_su_cola_enmascarada_una_vez_y_deja_el_log(self):
+        self.plan_with('echo "escribiendo $PERF_USUARIO con $PERF_CLAVE"; echo "FAILED: no aparece Inicio" >&2; exit 7')
+        self.env.update({"PERF_USUARIO": "usuario.demo", "PERF_CLAVE": "clave-de-mentira"})
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "5")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        everything = result.stdout + result.stderr
+        self.assertNotIn("clave-de-mentira", everything)
+        self.assertNotIn("usuario.demo", everything)
+        self.assertEqual(result.stdout.count("✖ 'preparar' falló (código 7). Sus últimas líneas"), 1)
+        self.assertIn("    escribiendo *** con ***", result.stdout)
+        self.assertIn("    FAILED: no aparece Inicio", result.stdout)
+        self.assertEqual(result.stdout.count("inválida: 'preparar' terminó con código 7 (se repite)"), 3)
+        log = (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8")
+        self.assertEqual(log, "escribiendo *** con ***\nFAILED: no aparece Inicio\n")
+        self.assertIn(str(self.plan.parent / "logs" / "preparar.log"), result.stdout)
+
+    def test_un_preparar_que_falla_sin_salida_lo_dice(self):
+        self.plan_with("exit 1 > /dev/null 2>&1", env=())
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("✖ 'preparar' falló (código 1) sin dejar salida: si el comando la manda a /dev/null", result.stdout)
+        self.assertIn("'preparar' terminó con código 1", result.stderr)
+
+    def test_un_preparar_que_funciona_no_muestra_su_salida(self):
+        self.plan_with('echo "tipeando $PERF_CLAVE"')
+        self.env.update({"PERF_USUARIO": "usuario.demo", "PERF_CLAVE": "clave-de-mentira"})
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        self.assertNotIn("tipeando", out)
+        self.assertNotIn("clave-de-mentira", out)
+        self.assertFalse((self.plan.parent / "logs" / "preparar.log").exists())  # si funciona, no queda nada en disco
+
+    def test_sin_requiere_env_la_salida_estandar_se_descarta_como_siempre_y_solo_se_lee_la_de_error(self):
+        self.plan_with('echo "Input text clave-sin-declarar"; echo "no aparece Inicio" >&2; exit 1', env=())
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("    no aparece Inicio", result.stdout)
+        self.assertNotIn("clave-sin-declarar", result.stdout + result.stderr)
+        self.assertNotIn("clave-sin-declarar", (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8"))
+
+    def test_enmascara_primero_el_valor_mas_largo(self):
+        os.environ.update({"HBPERF_T1": "abc", "HBPERF_T2": "abc123"})
+        try:
+            self.assertEqual(perf.mask_secrets("x abc123 y abc z", ["HBPERF_T1", "HBPERF_T2", "HBPERF_NO"]), "x *** y *** z")
+            self.assertEqual(perf.missing_env(["HBPERF_T1", "HBPERF_NO"]), ["HBPERF_NO"])
+        finally:
+            del os.environ["HBPERF_T1"], os.environ["HBPERF_T2"]
+
+    def test_el_plan_valida_requiere_env(self):
+        for bad in ("PERF_CLAVE", ["PERF CLAVE"], [1], ["clave=secreta"]):
+            plan = json.loads(self.plan.read_text(encoding="utf-8"))
+            plan["flujos"]["home"]["requiere_env"] = bad
+            self.plan.write_text(json.dumps(plan), encoding="utf-8")
+            result = self.perf("siguiente", "--carpeta", self.plan.parent)
+            self.assertEqual(result.returncode, 2, str(bad))
+            self.assertIn("flujos.home.requiere_env es una lista de nombres de variables de entorno", result.stderr)
+
+
+UI_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.ejemplo.app" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]">
+    <node text="Catálogo" resource-id="com.ejemplo.app:id/tab_catalogo" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[540,2200][1080,2400]" />
+    <node text="" resource-id="com.ejemplo.app:id/lista" class="androidx.recyclerview.widget.RecyclerView" content-desc="" clickable="false" enabled="true" bounds="[0,200][1080,1800]">
+      <node text="" resource-id="" class="android.view.ViewGroup" content-desc="" clickable="true" enabled="true" bounds="[0,200][1080,400]">
+        <node text="Película de prueba uno" resource-id="com.ejemplo.app:id/titulo" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[40,220][700,300]" />
+      </node>
+      <node text="" resource-id="" class="android.view.ViewGroup" content-desc="" clickable="true" enabled="true" bounds="[0,400][1080,600]">
+        <node text="Película de prueba dos" resource-id="com.ejemplo.app:id/titulo" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[40,420][700,500]" />
+      </node>
+    </node>
+    <node text="" resource-id="com.ejemplo.app:id/fab" class="android.widget.ImageButton" content-desc="Agregar a favoritos" clickable="true" enabled="true" bounds="[800,1900][1040,2140]" />
+    <node text="Ver reparto" resource-id="" class="android.widget.Button" content-desc="" clickable="true" enabled="true" bounds="[700,1950][1000,2100]" />
+    <node text="Continuar" resource-id="" class="android.widget.Button" content-desc="" clickable="true" enabled="false" bounds="[100,1820][500,1880]" />
+    <node text="Estrenos" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[40,40][300,120]" />
+    <node text="Usuario.demo" resource-id="com.ejemplo.app:id/campo_usuario" class="android.widget.EditText" content-desc="" clickable="true" enabled="true" bounds="[540,40][780,120]" />
+    <node text="Fuera de pantalla" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[0,0][0,0]" />
+  </node>
+</hierarchy>
+"""
+
+
+class NodesTest(DeviceBase):
+    """`perf.py nodos`: del volcado de uiautomator al centro de los bounds, con los avisos que evitan un toque equivocado."""
+
+    def setUp(self):
+        super().setUp()
+        self.xml = self.dir / "ui.xml"
+        write(self.xml, UI_XML)
+
+    def test_busca_por_texto_id_o_descripcion_y_da_el_centro_como_comando(self):
+        out = self.ok("nodos", self.xml, "--texto", "película de prueba uno")
+        self.assertIn('1. "Película de prueba uno" · id titulo · TextView · bounds [40,220][700,300]', out)
+        self.assertIn("Toque (centro): adb shell input tap 370 260", out)
+        self.assertNotIn("⚠", out)  # su contenedor es clickeable y nada más recibe ese punto
+        out = self.ok("nodos", self.xml, "--id", "tab_catalogo", "--serial", "emulator-5554")
+        self.assertIn("Toque (centro): adb -s emulator-5554 shell input tap 810 2300", out)
+        self.assertIn("tap 810 2300", self.ok("nodos", self.xml, "--id", "com.ejemplo.app:id/tab_catalogo", "--exacto"))
+        self.assertIn("tap 920 2020", self.ok("nodos", self.xml, "--desc", "favoritos"))
+
+    def test_varios_nodos_que_coinciden_se_listan_y_exacto_o_limite_los_acotan(self):
+        out = self.ok("nodos", self.xml, "--texto", "Película de prueba")
+        self.assertIn("2 nodos coinciden", out)
+        self.assertIn("tap 370 260", out)
+        self.assertIn("tap 370 460", out)
+        out = self.ok("nodos", self.xml, "--id", "titulo", "--limite", "1")
+        self.assertIn("… 1 más (sube --limite)", out)
+        self.assertNotIn("2. ", out)
+        out = self.ok("nodos", self.xml, "--texto", "Película de prueba dos", "--exacto", "--id", "titulo")
+        self.assertNotIn("nodos coinciden", out)
+        self.assertIn("tap 370 460", out)
+
+    def test_avisa_si_el_centro_cae_en_otro_nodo_clickeable_si_esta_deshabilitado_o_no_es_clickeable(self):
+        out = self.ok("nodos", self.xml, "--texto", "Ver reparto")
+        self.assertIn("tap 850 2025", out)
+        self.assertIn('⚠ el centro también cae dentro de otro nodo clickeable (desc "Agregar a favoritos" · id fab · ImageButton, '
+                      "bounds [800,1900][1040,2140])", out)
+        self.assertIn("⚠ el nodo está deshabilitado", self.ok("nodos", self.xml, "--texto", "Continuar"))
+        self.assertIn("⚠ ni el nodo ni sus contenedores son clickeables", self.ok("nodos", self.xml, "--texto", "Estrenos"))
+        out = self.ok("nodos", self.xml, "--texto", "Fuera de pantalla")
+        self.assertIn("⚠ sin bounds visibles", out)
+        self.assertNotIn("Toque", out)
+
+    def test_avisa_si_la_pantalla_todavia_muestra_un_cargando(self):
+        self.assertNotIn("cargando", self.ok("nodos", self.xml, "--texto", "Estrenos"))
+        for loading in ('<node text="" resource-id="" class="android.widget.ProgressBar" content-desc="" bounds="[490,1100][590,1200]" />',
+                        '<node text="" resource-id="com.ejemplo.app:id/shimmer_lista" class="android.view.View" bounds="[0,200][1080,900]" />',
+                        '<node text="Cargando…" resource-id="" class="android.widget.TextView" bounds="[0,200][1080,300]" />'):
+            write(self.xml, UI_XML.replace("  </node>\n</hierarchy>", "    %s\n  </node>\n</hierarchy>" % loading))
+            out = self.ok("nodos", self.xml, "--texto", "Estrenos")
+            self.assertIn("⚠ La pantalla todavía muestra un cargando", out, loading)
+            self.assertIn("vuelve a volcar", out)
+        hidden = '<node text="" class="android.widget.ProgressBar" bounds="[0,0][0,0]" />'  # sin tamaño: no está a la vista
+        write(self.xml, UI_XML.replace("  </node>\n</hierarchy>", "    %s\n  </node>\n</hierarchy>" % hidden))
+        self.assertNotIn("cargando", self.ok("nodos", self.xml, "--texto", "Estrenos"))
+
+    def test_sin_coincidencias_dice_lo_que_hay_a_la_vista_y_exige_un_criterio(self):
+        result = self.perf("nodos", self.xml, "--texto", "Reproducir")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('ningún nodo coincide', result.stderr)
+        self.assertIn('A la vista: "Catálogo", "Película de prueba uno"', result.stderr)
+        result = self.perf("nodos", self.xml)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--texto, --id o --desc", result.stderr)
+        write(self.xml, "esto no es xml")
+        result = self.perf("nodos", self.xml, "--texto", "x")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no es un volcado de uiautomator", result.stderr)
+        self.assertEqual(self.perf("nodos", self.dir / "no-existe.xml", "--texto", "x").returncode, 2)
+
+    def test_exacto_distingue_mayusculas_para_comprobar_lo_que_se_escribio(self):
+        self.assertIn("tap 660 80", self.ok("nodos", self.xml, "--texto", "usuario.demo"))  # contiene, sin distinguir
+        result = self.perf("nodos", self.xml, "--texto", "usuario.demo", "--exacto")
+        self.assertEqual(result.returncode, 2)  # en pantalla dice "Usuario.demo": el teclado puso la mayúscula
+        self.assertIn('"Usuario.demo"', result.stderr)
+
+    def test_un_volcado_que_falla_no_deja_leer_el_de_la_pantalla_anterior(self):
+        target = self.dir / "inv" / "logs" / "ui.xml"
+        write(target, UI_XML)  # el volcado de la pantalla anterior, todavía en disco
+        self.env["FAKE_PULL_FALLA"] = "1"
+        result = self.perf("nodos", target, "--volcar", "--texto", "Catálogo")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("no se pudo volcar la pantalla con uiautomator", result.stderr)
+        self.assertIn("could not get idle state", result.stderr)
+        self.assertNotIn("Toque", result.stdout)
+        self.assertFalse(target.exists())
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertLess(log.index("rm -f /sdcard/hbperf-ui.xml"), log.index("uiautomator dump /sdcard/hbperf-ui.xml"))
+
+    def test_volcar_toma_la_pantalla_del_dispositivo_antes_de_buscar(self):
+        self.env["FAKE_PULL"] = UI_XML
+        target = self.dir / "inv" / "logs" / "ui.xml"
+        out = self.ok("nodos", target, "--volcar", "--texto", "Catálogo")
+        self.assertIn("Toque (centro): adb -s emulator-5554 shell input tap 810 2300", out)
+        self.assertTrue(target.is_file())
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("uiautomator dump /sdcard/hbperf-ui.xml", log)
+        self.assertIn('"pull", "/sdcard/hbperf-ui.xml"', log)
+
+
+class NoImprovementsTest(PerfBase):
+    """Con el reporte inicial entregado y sin mejoras, `siguiente` ofrece el cierre: nunca repite la sesión 2."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main", "espera_s": 5}}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(self.folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in ("antes", "control")}))
+        write(self.folder / "diagnostico.md", "x")
+
+    def test_antes_del_reporte_inicial_toca_la_sesion_2_y_despues_el_cierre_corto(self):
+        self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "sesión 2 · diagnóstico")
+        write(self.folder / "reporte-inicial.md", "x")
+        title, steps = perf.next_steps(self.folder, self.plan)
+        self.assertEqual(title, "sesión 4 · cierre sin mejoras")
+        self.assertEqual([s["tipo"] for s in steps], ["chat"])
+        self.assertEqual((steps[0]["modelo"], steps[0]["esfuerzo"]), ("Haiku 5.5", "bajo"))
+        self.assertTrue(steps[0]["texto"].endswith("estado.md: cierra la investigación sin fase después"))
+        self.assertIn("sesión 4 corta", steps[0]["que"])
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
+        self.assertNotIn("sesión 2", out[out.index("Siguiente ·"):])
+        self.assertIn('--costo "<lo que muestre tu herramienta>"', out)
+        write(self.folder / "reporte-final.md", "x")
+        self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "investigación cerrada")
+
+    def test_una_captura_pendiente_de_estado_md_sale_como_comando_antes_del_cierre(self):
+        write(self.folder / "reporte-inicial.md", "x")
+        state = self.folder / "estado.md"
+        text = state.read_text(encoding="utf-8")
+        pendientes = "## Pendientes\n\n- **H2** · frame largo al cerrar el detalle, estable · falta saber qué función lo ocupa · una corrida · " \
+                     "Captura pendiente: `capturar --plan inv/plan.json --prueba --config cpu`\n" \
+                     "- Captura pendiente: `<comando sin completar>`\n"
+        state.write_text(re.sub(r"## Pendientes\n.*?(?=\n## )", lambda m: pendientes, text, flags=re.S), encoding="utf-8")
+        title, steps = perf.next_steps(self.folder, self.plan)
+        self.assertEqual(title, "sesión 4 · cierre sin mejoras")
+        self.assertEqual([s["tipo"] for s in steps], ["terminal", "chat"])
+        self.assertRegex(steps[0]["texto"], r"^cd .* && python3 -I .*perf\.py capturar --plan inv/plan\.json --prueba --config cpu$")
+        self.assertIn("opcional", steps[0]["que"])
+        self.assertEqual(perf.pending_captures(self.folder / "no-existe.md"), [])
+        expected = steps[0]["texto"]
+        for written in ("perf.py capturar --plan inv/plan.json --prueba --config cpu",
+                        "python3 -I <skill>/scripts/perf.py capturar --plan inv/plan.json --prueba --config cpu".replace("<skill>", "x")):
+            state.write_text(state.read_text(encoding="utf-8").replace(
+                "`capturar --plan inv/plan.json --prueba --config cpu`", "`%s`" % written), encoding="utf-8")
+            self.assertEqual(perf.next_steps(self.folder, self.plan)[1][0]["texto"], expected, written)
+            state.write_text(state.read_text(encoding="utf-8").replace("`%s`" % written,
+                             "`capturar --plan inv/plan.json --prueba --config cpu`"), encoding="utf-8")
+
+    def test_con_mejoras_el_camino_no_cambia(self):
+        write(self.folder / "reporte-inicial.md", "x")
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}]
+        self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "decisión del usuario (sin chat)")
+        self.plan["mejoras"][0]["estado"] = "descartada"
+        self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "sesión 4 · cierre sin mejoras aplicadas")
+
+
+class SmokeNextStepTest(DeviceBase):
+    """`humo` termina con el chat de la sesión 1 del flujo que se pidió en el setup, no con la receta del arranque."""
+
+    def request(self, **data):
+        write(self.dir / "reports/perf/setup/pedido.json", json.dumps(data, ensure_ascii=False))
+
+    def test_con_el_pedido_guardado_imprime_el_prompt_exacto_de_la_sesion_1(self):
+        self.request(flujo="de la lista de películas al detalle de la primera, hasta ver el reparto.", llegar="")
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG, "--instalar", "./gradlew app:installProfiling")
+        self.assertIn("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · Chat nuevo · Modelo: Sonnet 5.5 · "
+                      "Esfuerzo: medio", out)
+        self.assertIn('Texto: "Usa hb-performance: medir de la lista de películas al detalle de la primera, hasta ver el '
+                      'reparto. Dispositivo emulator-5554."', out)
+        self.assertIn("ábrelo en un chat nuevo, no en el del setup", out)
+        recipe = out.index("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
+        self.assertLess(out.index("Siguiente · sesión 1"), recipe)
+        self.assertIn("nuevo --receta arranque-frio --paquete %s" % PKG, out[recipe:])
+        self.assertNotIn("Maestro", out)
+
+    def test_si_hay_login_o_pantallas_antes_usa_el_prompt_de_flujo_largo(self):
+        self.request(flujo="de la lista al detalle", llegar="iniciar sesión, aceptar términos e ir al tab Catálogo")
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí hay que iniciar sesión, aceptar '
+                      'términos e ir al tab Catálogo: usa un flow de Maestro en preparar y adb para el tramo medido. '
+                      'Dispositivo emulator-5554."', out)
+
+    def test_un_pedido_mal_formado_se_ignora_con_aviso_y_la_ruta_se_puede_cambiar(self):
+        write(self.dir / "reports/perf/setup/pedido.json", '{"flujo": ""}')
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn('⚠ reports/perf/setup/pedido.json no tiene la forma {"flujo": "...", "llegar": "..."}', out)
+        self.assertIn("Siguiente, según lo que se va a investigar:", out)
+        write(self.dir / "reports/perf/setup/pedido.json", "esto no es JSON")
+        self.assertIn("pedido.json no tiene la forma", self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "h3"))
+        write(self.dir / "otro.json", json.dumps({"flujo": "abrir el buscador"}))
+        out = self.ok("humo", "--paquete", PKG, "--pedido", self.dir / "otro.json", "--carpeta", self.dir / "h2")
+        self.assertIn("medir abrir el buscador. Dispositivo", out)
+        self.assertEqual(perf.read_request(self.dir / "no-existe.json"), None)
+
+
+class RouteFileTest(DeviceBase):
+    """El recorrido vive en un archivo comentado y `estado.md` dice cómo se recorre."""
+
+    def test_nuevo_deja_recorrido_sh_ejecutable_con_el_flujo_y_el_serial(self):
+        folder = self.dir / "reports" / "perf" / "detalle"
+        out = self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "detalle", "--serial", "emulator-5554")
+        route = folder / "recorrido.sh"
+        self.assertTrue(os.access(str(route), os.X_OK))
+        text = route.read_text(encoding="utf-8")
+        self.assertIn('Recorrido medido del flujo "detalle"', text)
+        self.assertIn('SERIAL="${ANDROID_SERIAL:-emulator-5554}"', text)
+        self.assertIn("# Paso 1:", text)
+        self.assertNotIn("{{", text)
+        self.assertIn('"recorrido": "bash %s"' % route, out)
+        self.assertEqual(subprocess.run(["bash", "-n", str(route)]).returncode, 0)  # el esqueleto es bash válido
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["flujos"]["detalle"]["recorrido"], "manual")  # hasta que la ficha elija el recorrido
+        startup = self.dir / "arranque"
+        self.ok("nuevo", "--carpeta", startup, "--paquete", PKG, "--receta", "arranque-frio")
+        self.assertFalse((startup / "recorrido.sh").exists())
+        reused = self.dir / "reutilizado"
+        write(reused / "recorrido.sh", "# el recorrido archivado de otra investigación\n")
+        out = self.ok("nuevo", "--carpeta", reused, "--paquete", PKG, "--flujo", "detalle")
+        self.assertIn("recorrido.sh ya existe, no se toca", out)
+        self.assertEqual((reused / "recorrido.sh").read_text(encoding="utf-8"), "# el recorrido archivado de otra investigación\n")
+
+    def test_estado_dice_como_se_recorre_cada_flujo_y_como_verlo_a_mano(self):
+        folder = self.dir / "ruta"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "detalle")
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["flujos"]["detalle"].update({"preparar": "bash inv/preparar.sh", "recorrido": "bash inv/recorrido.sh",
+                                          "requiere_env": ["PERF_CLAVE"]})
+        plan["flujos"]["lista"] = {"recorrido": "manual"}
+        plan["flujos"]["inicio"] = {"recorrido": {"tipo": "arranque-frio", "actividad": "", "espera_s": 5}}
+        (folder / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        self.ok("siguiente", "--carpeta", folder)
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        block = state[state.index("<!-- perf:recorrido -->"):state.index("<!-- /perf:recorrido -->")]
+        self.assertIn("**detalle**\n- `preparar` (antes de cada corrida, fuera de la traza): `bash inv/preparar.sh`\n"
+                      "- `recorrido` (el tramo medido): `bash inv/recorrido.sh`\n", block)
+        self.assertRegex(block, r"- Para verlo correr a mano, sin medir: `cd \S+ && bash inv/preparar\.sh && bash inv/recorrido\.sh`")
+        self.assertIn("- Variables de entorno que necesita (expórtalas antes): `PERF_CLAVE`", block)
+        self.assertIn("**lista**\n- `preparar` (antes de cada corrida, fuera de la traza): no tiene\n- `recorrido`: manual", block)
+        self.assertIn("**inicio**", block)
+        self.assertIn("arranque en frío", block)
+        self.assertIn("archívalos fuera de `reports/`", block)
+        self.assertIn("## Cambios temporales por revertir", state)
+
+    def test_un_comando_con_acento_grave_no_rompe_el_markdown(self):
+        self.assertEqual(perf.code_span("adb shell input tap 1 2"), "`adb shell input tap 1 2`")
+        self.assertEqual(perf.code_span("echo `date`"), "`` echo `date` ``")
+
+    def test_un_estado_sin_la_seccion_como_el_de_una_version_anterior_no_falla(self):
+        folder = self.dir / "inv"
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {"recorrido": "true"}}}))
+        write(folder / "estado.md", "# Rendimiento · X · 2026-11-01\n\n## Siguiente paso\n\n- x\n\n## Ficha\n\n| Campo | Valor |\n")
+        self.ok("siguiente", "--carpeta", folder)
+        self.assertNotIn("Cómo se recorre", (folder / "estado.md").read_text(encoding="utf-8"))
+
+
+class UnfilledTemplateTest(DeviceBase):
+    """`reporte` y `siguiente` avisan de lo que sigue con el texto de la plantilla y no lo publican."""
+
+    def new(self, *extra):
+        folder = self.dir / "reports" / "perf" / "x"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "x", *extra)
+        return folder
+
+    def test_siguiente_avisa_de_las_filas_de_la_ficha_sin_completar_y_despues_del_reporte_tambien_del_resumen(self):
+        folder = self.new()
+        out = self.ok("siguiente", "--carpeta", folder)
+        self.assertIn("tiene partes sin completar: Ficha (Síntoma, Métricas principales y objetivo, Build y ambiente, Modos, "
+                      "Stack).", out)
+        self.assertNotIn("Resumen ejecutivo", out)  # todavía no toca: lo escribe la sesión 2
+        state = folder / "estado.md"
+        text = state.read_text(encoding="utf-8")
+        for marker in perf.TEMPLATE_MARKER.findall(text[text.index("## Ficha"):text.index("## Cómo se recorre")]):
+            text = text.replace(marker, "listo")
+        state.write_text(text, encoding="utf-8")
+        self.assertNotIn("sin completar", self.ok("siguiente", "--carpeta", folder))
+        write(folder / "reporte-inicial.md", "x")
+        out = self.ok("siguiente", "--carpeta", folder)
+        self.assertIn("tiene partes sin completar: Resumen ejecutivo (de 3 a 5 líneas: lo escribe la sesión 2 para el reporte "
+                      "inicial); Hallazgos (la tabla está vacía).", out)
+
+    def test_el_reporte_no_publica_el_texto_de_la_plantilla(self):
+        folder = self.new()
+        state = folder / "estado.md"
+        text = state.read_text(encoding="utf-8").replace('<lo que nota el usuario, o "exploratoria">', "El detalle tarda")
+        text = text.replace("| --- | --- | --- | --- | --- | --- |\n",
+                            "| --- | --- | --- | --- | --- | --- |\n| H1 | Frame largo | 48 ms | — | sin confirmar | "
+                            "<3 a 5 líneas. Para el reporte inicial (sesión 2): qué se midió, qué se encontró y qué se "
+                            "propone, o por qué no hay mejoras. Para el final (sesión 4): estado inicial → estado final con "
+                            "las métricas principales, la causa en una frase y qué depende del backend> |\n", 1)
+        state.write_text(text, encoding="utf-8")
+        out = self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
+        self.assertIn("tiene partes sin completar: Ficha (Métricas principales y objetivo, Build y ambiente, Modos, Stack); "
+                      "Resumen ejecutivo", out)
+        self.assertIn("Hallazgos (H1)", out)
+        for name in ("reporte-inicial.md", "reporte-inicial.html"):
+            report = (folder / name).read_text(encoding="utf-8")
+            self.assertNotIn("3 a 5 líneas", report, name)
+            self.assertNotIn("guiado o autónomo", report, name)
+            self.assertNotIn("backend real o mocks", report, name)
+            self.assertNotIn("qué falta para cerrarlo", report, name)  # el renglón de ejemplo de Pendientes
+        md = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertNotIn("## Resumen\n", md)  # sin resumen escrito, la sección se omite
+        self.assertNotIn("## Pendientes", md)
+        self.assertIn("| Síntoma | El detalle tarda |", md)
+        self.assertIn("| Modos | sin completar |", md)
+        self.assertIn("| Build y ambiente | sin completar |", md)
+        self.assertIn("| H1 | Frame largo | 48 ms | — | sin confirmar | sin completar |", md)
+        self.ok("reporte", "--carpeta", folder)
+        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        for leftover in ("3 a 5 líneas", "qué dice cada métrica principal", "test que la fija", "guiado o autónomo"):
+            self.assertNotIn(leftover, final)
+        self.assertNotIn("## Resumen ejecutivo", final)
+        self.assertNotIn("## Mejoras aplicadas", final)
+        self.assertNotIn("## Lectura de la comparación", final)
+
+    def test_un_texto_entre_angulos_que_no_es_de_la_plantilla_se_publica(self):
+        folder = self.dir / "inv2"
+        write(folder / "estado.md", "# Rendimiento · <Home> · 2026-01-02\n\n## Resumen ejecutivo\n\nLa lista usa List<Item> y "
+                                    "<carpeta> propia.\n\n## Hallazgos\n\n| # | Síntoma | Tipo |\n| --- | --- | --- |\n"
+                                    "| H1 | Doble <carga> en <profileable> | bug |\n")
+        out = self.ok("reporte", "--carpeta", folder, "--inicial")
+        self.assertNotIn("sin completar", out)
+        md = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertIn("La lista usa List<Item> y <carpeta> propia.", md)
+        self.assertIn("| H1 | Doble <carga> en <profileable> | bug |", md)
+
+    def test_con_la_receta_de_arranque_la_ficha_sale_completa_porque_no_hay_sesion_1(self):
+        folder = self.dir / "arranque"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--receta", "arranque-frio", "--red", "--triage")
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        sections = perf.state_sections(state)[1]
+        self.assertEqual(perf.unfilled_parts(sections), ["Ficha (Stack)"])  # el stack lo ve la sesión 2; no va al reporte
+        self.assertEqual(perf.ficha_subset(sections["ficha"]).count(perf.UNFILLED), 0)
+        self.assertIn("| Modos | guiado · recorrido arranque-frio · triage |", state)
+        self.assertIn("| Síntoma | exploratoria (receta de arranque en frío) |", state)
+        self.assertIn("· la primera pantalla carga de la red |", state)
+
+    def test_los_marcadores_salen_de_la_plantilla_y_los_de_una_palabra_no_cuentan(self):
+        self.assertTrue(perf.has_placeholder("| Stack | <UI · asincronía · listas · red> |"))
+        self.assertTrue(perf.has_placeholder("| Modos | guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage |"))
+        self.assertTrue(perf.has_placeholder("| Dispositivo | <modelo · Android · Hz> |"))
+        self.assertFalse(perf.has_placeholder("usa <carpeta>/plan.json y List<Item>"))
+        self.assertEqual(perf.without_placeholders("Texto real.\n- <M1 · archivos · test que la fija · DoD · commit propuesto: "
+                                                   "perf(alcance): ...>\nOtra línea."), "Texto real.\nOtra línea.")
+
+
+class ResultBoxTest(PerfBase):
+    """El reporte inicial abre con el recuadro "Resultado": las mejoras, o por qué no hay ninguna."""
+
+    HEAD = "# Rendimiento · Detalle · 2026-11-09\n\n## Resumen ejecutivo\n\nTexto.\n\n## Hallazgos\n\n"
+
+    def report(self, table, mejoras):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", self.HEAD + table + "\n## Pendientes\n\n- **H2** · frame largo, estable en 10 corridas · "
+                                                        "falta saber qué función lo ocupa · una captura con muestreo · medirla\n")
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "principales": ["carga_ms"], "flujos": {"f": {}},
+                                                "mejoras": mejoras}))
+        self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
+        return (folder / "reporte-inicial.md").read_text(encoding="utf-8"), \
+            (folder / "reporte-inicial.html").read_text(encoding="utf-8")
+
+    def test_sin_mejoras_dice_por_que_con_una_linea_por_hallazgo(self):
+        table = "| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué falta para decidir |\n| --- | --- | --- | --- | --- | --- |\n" \
+                "| H1 | Jank en la lista | 2 % | El camino lento no corrió: 0 slices | descartado | — |\n" \
+                "| H2 | Frame largo al cerrar el detalle | 37 ms en 10 corridas | sin probar | sin confirmar | una captura con muestreo de CPU |\n" \
+                "| H3 | Red solapada | n=3 | — | sin veredicto estadístico | |\n"
+        md, page = self.report(table, [])
+        self.assertTrue(md.index("## Resultado") < md.index("## Resumen") < md.index("## Hallazgos"))
+        self.assertIn("**Sin mejoras aplicables.** 3 hallazgos (1 descartado, 2 sin confirmar). Por qué, uno por uno:", md)
+        self.assertIn("- **H1** · Jank en la lista · `descartado` · El camino lento no corrió: 0 slices", md)
+        self.assertIn("- **H2** · Frame largo al cerrar el detalle · `sin confirmar` · falta: una captura con muestreo de CPU", md)
+        self.assertIn("- **H3** · Red solapada · `sin confirmar` · no se pudo confirmar ni descartar con estos datos; sin acción", md)
+        self.assertIn('<section id="s0" class="resultado"><h2>Resultado</h2>', page)
+        self.assertIn("section.resultado", page)
+        # la columna opcional se conserva en la tabla de hallazgos, y el rótulo anterior se sigue leyendo
+        self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué falta para decidir | Qué pasa con él |", md)
+        self.assertIn("| sin confirmar | una captura con muestreo de CPU | no se pudo confirmar ni descartar con estos datos; "
+                      "sin acción |", md)
+        self.assertIn("| H3 | Red solapada | n=3 | — | sin veredicto estadístico | — | no se pudo confirmar ni descartar", md)
+        self.assertIn("## Pendientes (no son mejoras)", md)
+        self.assertNotIn("Queda abierto", md)
+        self.assertIn("qué falta para cerrarlo, cuánto cuesta y la acción sugerida", md)
+        self.assertIn("`sin confirmar` no quiere decir que falten trazas ni que la captura fallara", md)  # el glosario
+
+    def test_con_mejoras_dice_cuantas_y_cuales(self):
+        table = "| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n" \
+                "| H1 | Carga lenta | 131 ms | Red en el hilo | bug |\n| H2 | Frame largo | 37 ms | sin probar | sin confirmar |\n"
+        md, _ = self.report(table, [
+            {"id": "M1", "titulo": "Caché", "hallazgo": "H1", "metrica": "carga_ms", "esperado": "-30 %"},
+            {"id": "M2", "titulo": "Decodificar la imagen fuera del hilo principal", "hallazgo": "H2", "a_prueba": True, "hipotesis": "es la imagen de cabecera",
+             "metrica": "detalle hilo_max_ms", "esperado": "≤ 16 ms"}])
+        self.assertIn("## Resultado\n\n**2 mejoras propuestas** para 2 hallazgos (1 a prueba: la causa no está probada y la "
+                      "medición de después la confirma o la refuta). Tú decides cuáles se aplican.", md)
+        self.assertIn("- **M1** · Caché · ataca H1 · mide `carga_ms` · esperado: -30 %", md)
+        self.assertIn("- **M2** · Decodificar la imagen fuera del hilo principal (a prueba) · ataca H2 · mide `detalle hilo_max_ms` · esperado: ≤ 16 ms", md)
+        self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | M1 (propuesta) |", md)  # tabla de 0.6.0: igual que antes
+
+    def test_sin_tabla_de_hallazgos_lo_dice(self):
+        self.assertEqual(perf.result_md("", {"mejoras": []}),
+                         "**Sin mejoras aplicables.** El diagnóstico no dejó hallazgos en `estado.md`.")
+        self.assertEqual(perf.finding_kind("Sin veredicto estadístico"), "sin confirmar")
+        self.assertEqual(perf.finding_kind("consecuencia de H1"), "consecuencia")
+        self.assertEqual(perf.finding_kind(""), "sin tipo")
+
+
+FIXTURE_060 = ROOT / "tests" / "fixtures" / "hb-performance-0.6.0"
+
+
+class Compat060Test(PerfBase):
+    """Una investigación en curso creada con 0.6.0 (plan.json, estado.md y fases.json de esa versión) sigue funcionando."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "reports" / "perf" / "detalle"
+        self.folder.mkdir(parents=True)
+        for name in ("plan.json", "estado.md", "metricas.csv", "fases.json"):
+            write(self.folder / name, (FIXTURE_060 / name).read_text(encoding="utf-8"))
+
+    def test_el_plan_de_0_6_0_no_trae_ningun_campo_nuevo_y_carga_igual(self):
+        plan = perf.load_plan(self.folder / "plan.json")
+        text = json.dumps(plan)
+        for field in ("segmentos", "a_prueba", "hipotesis", "requiere_env", "input_slices"):
+            self.assertNotIn(field, text)
+        self.assertEqual(perf.user_metric_names(plan), ["lista_a_detalle_ms"])
+
+    def test_siguiente_reporte_inicial_y_comparar_corren_sin_errores(self):
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Siguiente · sesión 4 · cierre", out)  # mejora aplicada y fase después medida
+        self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos, Stack)", out)  # relleno de 0.6.0
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertIn("| H2 | Frame largo al entrar | 48 ms en la corrida mediana · `hilo_principal_top` | — | sin veredicto "
+                      "estadístico | no se pudo confirmar ni descartar con estos datos; sin acción |", initial)
+        self.assertIn("| H3 | Jank en la lista | `jank_app_pct` 2 % | — | descartado | descartado: se investigó y no es la causa", initial)
+        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamadas | 0 llamadas | alta | bajo | bajo | "
+                      "aplicada |", initial)
+        self.assertIn("- **H2** · causa sin verificar · falta una captura con muestreo de CPU", initial)
+        self.assertNotIn("<3 a 5 líneas", initial)
+        self.assertNotIn("backend real o mocks", initial)
+        out = self.ok("comparar", self.folder / "metricas.csv")
+        self.assertIn("| detalle | lista_a_detalle_ms | e2e | 412 ms / 420 ms | 300 ms / 305 ms | -112 ms | -27.18 % | 0.24 % | "
+                      "mejora |", out)
+        self.assertIn("| detalle | red_solapadas | app | 1 llamadas / 1 llamadas | 0 llamadas / 0 llamadas | -1 llamadas | "
+                      "-100 % | 0 % | mejora |", out)
+        self.assertIn("| detalle | hilo_max_ms | app | 48 ms / 50 ms | 48 ms / 49 ms | 0 ms | 0 % | 0 % | sin cambio |", out)
+        self.assertNotIn("⚠", out)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("| M1 | Una sola carga del detalle | red_solapadas | 1 llamadas | 0 llamadas | 0 llamadas | -100 % | mejora | "
+                      "aplicada | ✔ funcionó |", state)
+        self.assertNotIn("Cómo se recorre", state)  # el estado de 0.6.0 no tiene esa sección: no se agrega ni falla
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
+        self.assertIn("3 hallazgos → 1 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
+        self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0], "investigación cerrada")
+
+    def test_las_fases_de_0_6_0_sin_datos_por_flujo_se_leen_igual(self):
+        phases = perf.read_phases(self.folder)
+        self.assertNotIn("flujos", phases["antes"])
+        self.assertEqual(perf.frames_trust(self.folder), ("ok", ""))
+        self.assertEqual(perf.phase_warnings(self.folder), [])
+        table, notes = perf.builds_table(self.folder)
+        self.assertIn("| antes | 2026-01-15T10:00:00 | abc1234 | 1.0 (7) | 2026-01-15 09:00:00 | 60 | completa (speed) | 5 |", table)
+        self.assertEqual(notes, [])

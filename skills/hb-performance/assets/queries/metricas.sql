@@ -4,6 +4,8 @@
 -- tipo: proceso | limites | vsync (período esperado de frame) | frame (FrameTimeline) | hilo (hilo principal)
 --       | seccion (HTTP, TTFB, QUEUE, CONN, SCREEN, NAV, MARK y reportFullyDrawn) | lanzamiento (launching: del sistema = TTID)
 --       | jit (tiempo de compilación JIT de la app: delata una compilación de ART distinta entre fases)
+--       | input (entrega de un evento de input a la app, con el GLOB de 'input_slices' del plan: sirve para avisar si
+--         una métrica de usuario abarca toques del recorrido)
 WITH app AS (SELECT upid, pid, name FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1)
 SELECT 'proceso' AS tipo, 0 AS ts, 0 AS dur, 0 AS prof, name AS nombre FROM app
 UNION ALL
@@ -28,6 +30,13 @@ WHERE name GLOB 'HTTP *' OR name GLOB 'TTFB *' OR name GLOB 'QUEUE *' OR name GL
    OR name GLOB 'SCREEN *' OR name GLOB 'NAV *' OR name GLOB 'MARK *' OR name GLOB 'reportFullyDrawn*'
 UNION ALL
 SELECT 'lanzamiento', ts, dur, 0, name FROM slice WHERE name = 'launching: {{PAQUETE}}'
+UNION ALL
+SELECT 'input', s.ts, s.dur, s.depth, s.name
+FROM slice s
+JOIN thread_track tt ON s.track_id = tt.id
+JOIN thread t ON t.utid = tt.utid
+JOIN app ON t.upid = app.upid
+WHERE s.name GLOB '{{INPUT_GLOB}}'
 UNION ALL
 SELECT 'jit', 0, IFNULL(SUM(s.dur), 0), COUNT(*), ''
 FROM slice s
