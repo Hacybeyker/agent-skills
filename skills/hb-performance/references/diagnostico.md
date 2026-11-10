@@ -27,6 +27,7 @@ Cruza la evidencia con el código para encontrar las causas y propone un plan de
 | `jank_por_tipo` | Frames por tipo de jank |
 | `linea_de_tiempo` | Marcas propias en orden: qué precede a cada llamada |
 | `llamadas_solapadas`, `inflate_tras_http` | Cargas duplicadas y vistas recreadas con cada respuesta (si hay red) |
+| Red por tramo (si el plan tiene `segmentos`) | Qué llamadas empiezan en cada tramo del flujo: cuántas, a qué endpoints, su duración y su TTFB medianos, las repetidas y las solapadas, y las que quedan fuera de todos los tramos |
 
 ## 3. Una pregunta puntual
 
@@ -47,7 +48,7 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py consulta <carpeta>/prueba/<flujo>_1.perfetto-trace.gz cpu_por_libreria --param HILO='<prefijo-del-hilo>*'
 ```
 
-Las librerías nativas sin símbolos muestran la librería y no la función; el código Java o Kotlin sale ofuscado por R8: desofúscalo con el mapping de profiling.
+La corrida de prueba no fija la compilación de ART: si el build se acaba de instalar y todavía no se midió ninguna fase con él, agrega `--compilar`, o el muestreo va a mostrar al intérprete y al JIT en lugar del código de la app. Las librerías nativas sin símbolos muestran la librería y no la función; el código Java o Kotlin sale ofuscado por R8: desofúscalo con el mapping de profiling.
 
 **Compose y R8: qué nombres trae la traza.** Sin composition tracing, la traza no nombra los composables: muestra los frames y cuánto duran, no qué función los ocupa. Con R8, las clases y los métodos de las muestras de CPU, las pilas y el heap salen ofuscados; las secciones propias (`MARK`, `NAV`, `HTTP`…) son texto y no cambian. Antes de atribuir un frame largo a un composable o a un método, consigue el nombre ([setup.md](setup.md) · Atribución en Compose y con R8); si no lo consigues, el hallazgo queda `sin confirmar` y, si el síntoma es estable, puede ir como mejora a prueba (abajo).
 
@@ -58,6 +59,7 @@ Las librerías nativas sin símbolos muestran la librería y no la función; el 
 - **Duplicados:** `red_solapadas` o `red_repetidas_2s` mayores que 0 (la misma plantilla **y** la misma query), o más llamadas que las esperadas en el mapa.
 - **Dónde se va el tiempo de una llamada:** `ms` = `cola_ms` (cola del dispatcher e interceptores) + conexión nueva (`red_conexion_ms`: DNS, TCP y TLS) + `ttfb_ms` (servidor y red) + `cliente_ms` (envío, lectura del body y conversión). La lectura de cada una está en [red.md](patrones/red.md).
 - **Huecos:** antes de la llamada, con el hilo principal ocupado, la app tarda en dispararla; después, antes de que cambie la UI, el parseo o el mapeo es pesado.
+- **Por tramo:** con `segmentos`, la tabla "Red por tramo" de `diagnostico.md` dice qué llamadas hace la app en cada parte del flujo (cada llamada va al tramo donde empieza) y las métricas `<tramo> red_*` lo miden en todas las corridas. En un tramo con polling (la app consulta un estado hasta que cambia), la cantidad de llamadas depende de cuánto tardó lo que se espera, sea el backend o una persona: explica el patrón (cuántas consultas y cada cuánto) y compara medianas, sin leer una o dos llamadas de diferencia como hallazgo.
 
 ## 6. Descartar exige evidencia de la traza
 
