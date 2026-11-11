@@ -2992,7 +2992,7 @@ class NoImprovementsTest(PerfBase):
         self.assertEqual(title, "sesión 4 · cierre sin mejoras")
         self.assertEqual([s["tipo"] for s in steps], ["chat"])
         self.assertEqual((steps[0]["modelo"], steps[0]["esfuerzo"]), ("Haiku 5.5", "bajo"))
-        self.assertTrue(steps[0]["texto"].endswith("estado.md: cierra la investigación sin fase después"))
+        self.assertTrue(steps[0]["texto"].endswith("estado.md: cierra la investigación sin fase después. No hagas commit ni push."))
         self.assertIn("sesión 4 corta", steps[0]["que"])
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
@@ -3056,7 +3056,7 @@ class SmokeNextStepTest(DeviceBase):
         self.assertIn("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · Chat nuevo · Modelo: Sonnet 5.5 · "
                       "Esfuerzo: medio", out)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista de películas al detalle de la primera, hasta ver el '
-                      'reparto. Dispositivo emulator-5554."', out)
+                      'reparto. Dispositivo emulator-5554. No hagas commit ni push."', out)
         self.assertIn("ábrelo en un chat nuevo, no en el del setup", out)
         recipe = out.index("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         self.assertLess(out.index("Siguiente · sesión 1"), recipe)
@@ -3068,7 +3068,7 @@ class SmokeNextStepTest(DeviceBase):
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí hay que iniciar sesión, aceptar '
-                      'términos e ir al tab Catálogo. Dispositivo emulator-5554."', out)
+                      'términos e ir al tab Catálogo. Dispositivo emulator-5554. No hagas commit ni push."', out)
         self.assertNotIn("Maestro", out)  # el prompt no fija cómo se recorre: lo pregunta la sesión 1
 
     def test_un_pedido_mal_formado_se_ignora_con_aviso_y_la_ruta_se_puede_cambiar(self):
@@ -6120,11 +6120,18 @@ class GuidedFailureTest(DeviceBase):
         self.assertNotIn("--corridas 5", steps[0])
         self.assertIn("--rehacer", steps[1])  # la otra salida: repetir la fase entera
         self.assertEqual(self.phases()["antes"]["corridas"], 2)  # las válidas quedan con su registro
+        self.assertEqual(self.phases()["antes"]["faltan"], {"flujo": "home", "corridas": 3})
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)  # la fase no se da por medida a medias
+        self.assertIn("Siguiente · completar la fase antes, que se cortó (sin chat)", out)
+        self.assertIn("--fase antes --corridas 3", out)
+        self.assertNotIn("--fase control", out)
         self.assertIn("kill -TERM 4242", (self.dir / "adb.log").read_text(encoding="utf-8"))  # Perfetto no queda grabando
         counter.unlink()
         self.update_flow(recorrido="true")
         self.capture("--fase", "antes", "--corridas", "3", "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(self.phases()["antes"]["corridas"], 5)
+        self.assertNotIn("faltan", self.phases()["antes"])
+        self.assertNotIn("completar la fase", self.ok("siguiente", "--carpeta", self.plan.parent))
         self.assertEqual(len({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}), 5)
 
     def read_csv_at(self, path):
@@ -6138,7 +6145,12 @@ class GuidedFailureTest(DeviceBase):
                               interruptible=True)
         self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
         self.assert_guided(result, "ninguna corrida de esta tanda (0 de 5 válidas de antes)", "--corridas 5")
+        self.assertIn("ya tenía sigue igual", result.stderr)
         self.assertFalse((self.plan.parent / "fases.json").exists())
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar", "--rehacer",
+                              interruptible=True)
+        self.assertIn("ya se descartaron por --rehacer", result.stderr)  # con --rehacer lo anterior ya no está
+        self.assertNotIn("sigue igual", result.stderr)
 
     def test_tres_invalidas_seguidas_y_corridas_insuficientes_dan_el_comando_para_completar(self):
         self.tp_outputs(GOOD, LOGIN, LOGIN, LOGIN)
@@ -6224,6 +6236,9 @@ class GuidedFailureTest(DeviceBase):
         self.env["FAKE_LISTA"] = "emulator-5554\toffline\n"
         self.assertIn("sin responder (offline)", self.capture("--prueba", "--serial", "emulator-5554").stderr)
         del self.env["FAKE_LISTA"]
+        self.env["FAKE_DESCONECTA"] = "dumpsys activity activities"  # se suelta antes de empezar una prueba
+        self.assertEqual(self.capture("--prueba").returncode, 3)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home"), [])  # no es un aviso de 'preparar' que corregir
         self.env["FAKE_DESCONECTA"] = "pidof"  # el cable se suelta en medio de la primera corrida
         result = self.capture("--fase", "control", "--corridas", "3", "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
@@ -6403,3 +6418,204 @@ class SummaryWritesTest(PerfBase):
         self.assertIn("resumen.md escrito", out)
         self.assertNotIn("viejo", (self.dir / "estado.md").read_text(encoding="utf-8"))
 
+
+class DiagnosisWarningsTest(DeviceBase):
+    """ "Advertencias para el diagnóstico": perf.py escribe en estado.md lo que observó en los comandos de la terminal."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.plan.parent / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+
+    def block(self, folder=None):
+        text = ((folder or self.plan.parent) / "estado.md").read_text(encoding="utf-8")
+        return text.split("<!-- perf:advertencias -->")[1].split("<!-- /perf:advertencias -->")[0].strip()
+
+    def test_la_plantilla_trae_la_seccion_antes_de_hallazgos_y_sin_advertencias_lo_dice_sin_afirmar_ausencia(self):
+        template = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        self.assertLess(template.index("## Métricas"), template.index("## Advertencias para el diagnóstico"))
+        self.assertLess(template.index("## Advertencias para el diagnóstico"), template.index("## Hallazgos"))
+        self.assertIn("| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |", template)
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertEqual(self.block(), "- " + perf.NO_WARNINGS)
+        self.assertIn("no prueba que no haya nada que advertir", self.block())
+
+    def test_junta_los_avisos_de_la_prueba_las_invalidas_y_los_avisos_de_la_captura_una_por_linea(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["metricas_usuario"] = [{"nombre": "reparto_ms", "desde": {"marca": "HTTP GET items/{id}"},
+                                                       "hasta": {"marca": "MARK reparto"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        marks = '"seccion",400000000,0,0,"MARK reparto"\n'
+        self.tp_outputs(GOOD + marks + '"seccion",450000000,0,0,"MARK reparto"\n')
+        self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("- Corrida de prueba (home): la marca 'MARK reparto' salió 2 veces en una misma carga", self.block())
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(LOGIN, GOOD + marks, LOGIN, GOOD + marks)
+        self.env["FAKE_THERMAL"] = "1"
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "2", "--calentamiento", "0", "--sin-compilar")
+        block = self.block()
+        self.assertIn("- Corridas inválidas en antes (home): 2 · 2 × apareció 'SCREEN LoginActivity onCreate'", block)
+        self.assertIn("- Captura de antes (home): el dispositivo está tibio (Thermal Status 1)", block)
+        self.assertIn("- Fase antes: compilación de ART sin fijar (--sin-compilar)", block)
+        self.assertIn("- Ruido de `jank_app_pct` (home): sin fase control, el ruido no está medido.", block)
+        for line in block.splitlines():
+            self.assertTrue(line.startswith("- "), line)  # una línea por advertencia, sin volcar salidas
+            self.assertLessEqual(len(line), perf.NOTE_MAX + 80, line)
+        # --rehacer descarta esas corridas: lo anotado de ellas ya no vale
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(GOOD + marks)
+        del self.env["FAKE_THERMAL"]
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--rehacer")
+        block = self.block()
+        self.assertNotIn("Corridas inválidas", block)
+        self.assertNotIn("tibio", block)
+        self.assertNotIn("sin fijar", block)
+
+    def test_los_fallos_de_preparar_cuentan_como_corridas_invalidas_con_su_motivo(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["preparar"] = "exit 4"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "5", "--calentamiento", "0",
+                           "--sin-compilar")
+        self.assertEqual(result.returncode, 5)
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("- Corridas inválidas en antes (home): 3 · 3 × 'preparar' terminó con código 4", self.block())
+
+    def test_el_ruido_y_la_mejora_minima_usan_el_criterio_del_veredicto_de_comparar(self):
+        plan = {"principales": ["m", "fps", "frames", "sin_antes"]}
+        content = HEADER + rows("antes", "f", "m", [100, 104, 98, 101, 102]) + rows("control", "f", "m", [104, 106, 105, 104, 107]) \
+            + rows("antes", "f", "fps", [50, 52, 51, 50, 52], "fps", "mayor") \
+            + rows("antes", "f", "frames", [100] * 5, "frames", family="info") + rows("antes", "f", "otra", [1] * 5)
+        write(self.csv, content)
+        lines = perf.noise_lines(perf.read_rows(self.csv), plan)
+        self.assertEqual(len(lines), 3)  # las principales con antes; "otra" no es principal
+        noisy = next(line for line in lines if "`m`" in line)
+        # mediana de antes 101, de control 105: ruido 4; hay que bajar de min(98, 101 - 4) = 97
+        self.assertIn("antes y control difieren en 4 ms (3.96 %) sin ningún cambio", noisy)
+        self.assertIn("la mediana de después tiene que quedar por debajo de 97 ms (más de 4 ms, 3.96 % respecto de la mediana "
+                      "de antes, 101 ms)", noisy)
+        before, control = [100, 104, 98, 101, 102], [104, 106, 105, 104, 107]
+        self.assertEqual(perf.verdict(before, [96.9] * 5, "menor", control), "mejora")  # justo por debajo del límite
+        self.assertNotEqual(perf.verdict(before, [97] * 5, "menor", control), "mejora")  # en el límite todavía no
+        higher = next(line for line in lines if "`fps`" in line)
+        self.assertIn("sin fase control, el ruido no está medido", higher)
+        self.assertIn("por encima de 52 fps", higher)
+        self.assertEqual(perf.verdict([50, 52, 51, 50, 52], [52.1] * 5, "mayor"), "mejora")
+        self.assertNotEqual(perf.verdict([50, 52, 51, 50, 52], [52] * 5, "mayor"), "mejora")
+        self.assertIn("`frames` (f): es informativa", next(line for line in lines if "`frames`" in line))
+        soft = perf.noise_lines(perf.read_rows(self.csv), {"principales": ["jank_app_pct"]}, ("no", "emulador"))
+        self.assertEqual(soft, [])
+        write(self.csv, HEADER + rows("antes", "f", "jank_app_pct", [9] * 5, "%"))
+        self.assertIn("frames no confiables (emulador)",
+                      perf.noise_lines(perf.read_rows(self.csv), {"principales": ["jank_app_pct"]}, ("no", "emulador"))[0])
+
+    def test_copia_los_cambios_temporales_que_alteran_la_app_con_las_metricas_que_afectan(self):
+        state = self.plan.parent / "estado.md"
+        text = state.read_text(encoding="utf-8")
+        head = "| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n| --- | --- | --- | --- | --- |\n"
+        self.assertIn(head, text)
+        state.write_text(text.replace(head, head
+                                      + "| `feature/busqueda/Buscador.kt` | feature/busqueda | espera de 300 ms antes de la "
+                                        "búsqueda medida | `busqueda_ms`, `red_llamadas` | no |\n"
+                                      + "| `feature/detalle/Detalle.kt` | feature/detalle | `MARK detalle` | — | no |\n"),
+                         encoding="utf-8")
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        block = self.block()
+        self.assertIn("- Cambio temporal que altera la app: `feature/busqueda/Buscador.kt` · espera de 300 ms antes de la "
+                      "búsqueda medida → altera `busqueda_ms`, `red_llamadas` (¿revertido?: no)", block)
+        self.assertNotIn("Detalle.kt", block)  # solo emite una marca: no altera nada
+        old = "## Cambios temporales por revertir\n\n| Archivo | Repo o módulo | Qué es | ¿Revertido? |\n| --- | --- | --- | --- |\n" \
+              "| `a/B.kt` | a | una marca | no |\n"
+        self.assertEqual(perf.altering_changes(old), [])  # la tabla de una versión anterior, sin la columna, se sigue leyendo
+
+    def test_lo_que_el_diagnostico_no_midio_queda_como_advertencia_y_no_como_ausencia(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0")
+        self.env["FAKE_TP_OTRA"] = '"a"\n'
+        self.ok("diagnostico", "--carpeta", self.plan.parent)
+        block = self.block()
+        self.assertIn("- Diagnóstico de antes (home): `cpu_por_libreria`: no medido: la configuración base no captura "
+                      "ds:linux.perf (no quiere decir que no ocurra)", block)
+        notes = perf.read_notes(self.plan.parent)
+        self.assertIn("home", notes["diagnostico"]["antes"])
+        # una consulta puntual no reemplaza lo que anotó el diagnóstico entero
+        self.ok("diagnostico", "--carpeta", self.plan.parent, "--consultas", "hilo_principal_top")
+        self.assertEqual(perf.read_notes(self.plan.parent)["diagnostico"], notes["diagnostico"])
+
+    def test_una_investigacion_anterior_sin_la_seccion_la_recibe_antes_de_hallazgos_una_sola_vez(self):
+        for version in ("0.6.0", "0.7.0", "0.8.0"):
+            fixture = ROOT / "tests" / "fixtures" / ("hb-performance-%s" % version)
+            folder = self.dir / version / "reports" / "perf" / "caso"
+            for name in ("plan.json", "estado.md", "metricas.csv", "fases.json"):
+                write(folder / name, (fixture / name).read_text(encoding="utf-8"))
+            for name in ("PERF_USUARIO", "PERF_CLAVE"):
+                self.env.pop(name, None)
+            self.assertNotIn("perf:advertencias", (folder / "estado.md").read_text(encoding="utf-8"), version)
+            self.ok("siguiente", "--carpeta", folder)
+            self.ok("siguiente", "--carpeta", folder)
+            state = (folder / "estado.md").read_text(encoding="utf-8")
+            self.assertEqual(state.count("## Advertencias para el diagnóstico"), 1, version)
+            self.assertLess(state.index("## Advertencias para el diagnóstico"), state.index("## Hallazgos"), version)
+            self.assertIn("- Ruido de `", self.block(folder), version)  # antes y control ya medidos: sale el ruido
+            before = (fixture / "estado.md").read_text(encoding="utf-8")
+            self.assertEqual(before.split("## Hallazgos")[1].split("## Decisiones")[0],
+                             state.split("## Hallazgos")[1].split("## Decisiones")[0], version)  # el resto no se toca
+        bare = self.dir / "sin-secciones"
+        write(bare / "plan.json", self.plan.read_text(encoding="utf-8"))
+        write(bare / "estado.md", "# Rendimiento\n\n## Siguiente paso\n\n- nada\n\n## Ficha\n\ntexto\n")
+        self.ok("siguiente", "--carpeta", bare)
+        self.assertTrue((bare / "estado.md").read_text(encoding="utf-8").rstrip().endswith("<!-- /perf:advertencias -->"))
+
+
+class NoCommitLineTest(DeviceBase):
+    """Todo texto de chat que imprime perf.py termina con "No hagas commit ni push."."""
+
+    LINE = "No hagas commit ni push."
+
+    def test_chat_text_la_pone_al_final_tambien_con_rutas_que_no_se_leen(self):
+        self.assertEqual(perf.chat_text("Sigue hb-performance con /x/estado.md"),
+                         "Sigue hb-performance con /x/estado.md. No hagas commit ni push.")
+        self.assertEqual(perf.chat_text("Listo.", {"no_leer": ["docs/ALCANCE-*", "casos/"]}),
+                         "Listo. No leas ni busques en: docs/ALCANCE-*, casos/. No hagas commit ni push.")
+        self.assertTrue(perf.chat("x", "intermedio", "medio", "y", {})["texto"].endswith(self.LINE))
+
+    def chat_texts(self, out):
+        return re.findall(r'Texto: "(.*)"', out)
+
+    def test_siguiente_decidir_reporte_y_humo_terminan_cada_chat_con_la_linea(self):
+        folder = self.plan.parent
+        write(folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        outputs = {"siguiente (sesión 2)": self.ok("siguiente", "--carpeta", folder)}
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "metrica": "red_solapadas", "esperado": "0"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "jank_app_pct", [9] * 5, "%")
+              + rows("control", "home", "jank_app_pct", [9] * 5, "%"))
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5, "skill": perf.VERSION},
+                                                 "control": {"fecha": "2026-11-05T10:20:00", "corridas": 5}}))
+        outputs["decidir (sesión 3)"] = self.ok("decidir", "--carpeta", folder, "--aprobar", "M1")
+        outputs["decidir --aplicada (sesión 4)"] = self.ok("decidir", "--carpeta", folder, "--aplicada", "M1")
+        outputs["reporte --inicial"] = self.ok("reporte", "--carpeta", folder, "--inicial")
+        self.tp_outputs(GOOD)
+        write(self.dir / "reports/perf/setup/pedido.json", json.dumps({"flujo": "de la lista al detalle", "llegar": ""}))
+        outputs["humo con pedido"] = self.ok("humo", "--paquete", PKG)
+        (self.dir / "reports/perf/setup/pedido.json").unlink()
+        outputs["humo sin pedido"] = self.ok("humo", "--paquete", PKG)
+        for name, out in outputs.items():
+            texts = self.chat_texts(out)
+            self.assertTrue(texts, name)
+            for text in texts:
+                self.assertTrue(text.endswith(self.LINE), (name, text))
+                self.assertEqual(text.count(self.LINE), 1, (name, text))
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn(self.LINE, state.split("## Siguiente paso")[1].split("## Ficha")[0])  # también en estado.md
+
+    def test_los_prompts_documentados_tambien_la_llevan(self):
+        for path in (SCRIPT.parent.parent / "references" / "prompts.md", ROOT / "PROMPTS.md"):
+            text = path.read_text(encoding="utf-8")
+            if path.name == "PROMPTS.md":
+                text = text.split("## hb-performance")[1].split("\n## ")[0]
+            blocks = re.findall(r"```text\n(.*?)```", text, re.S)
+            self.assertTrue(blocks, path)
+            for body in blocks:
+                self.assertTrue(body.strip().endswith(self.LINE), (path.name, body))

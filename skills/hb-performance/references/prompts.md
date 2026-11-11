@@ -5,6 +5,7 @@ Para el usuario, no para el agente. Cada caso trae dónde va (un chat nuevo, con
 - **Niveles de modelo:** económico, intermedio, diagnóstico y alto son los de `modelos` en `plan.json`: por defecto Haiku 5.5, Sonnet 5.5, Sonnet 5.5 (el diagnóstico toma el intermedio si el plan no lo nombra) y Opus 5.5. `perf.py siguiente` imprime los de tu plan; con otra herramienta, pones sus equivalentes una vez en el plan.
 - **El mismo texto sirve para empezar la primera vez y las siguientes.** La skill elige la sesión según el estado del proyecto: sin setup hace el setup (sesión 0); con el setup listo, la ficha y el plan (sesión 1); con un `estado.md`, la que diga su "Siguiente paso". No hace falta decirle cuál: el agente lo dice en su primera línea, con el motivo (`Sesión 1 · ficha (setup listo en AGENTS.md)`).
 - **Lo que sigue a cada sesión no hace falta pedirlo:** cada comando de `perf.py` y cada sesión terminan imprimiendo el paso siguiente, listo para copiar, y lo dejan en "Siguiente paso" de `estado.md`.
+- **Cada texto de chat termina con "No hagas commit ni push."** La skill ya dice que el agente solo propone el commit; la línea explícita evita que una herramienta o un modelo lo haga igual. `perf.py` la agrega sola en los textos que imprime (`siguiente`, `humo`, `decidir`, `reporte`).
 - **El costo de un chat** es lo que muestre tu herramienta al cerrarlo (`/cost` en Claude Code, los créditos del chat en Copilot).
 
 ## Empezar
@@ -14,7 +15,7 @@ Para el usuario, no para el agente. Cada caso trae dónde va (un chat nuevo, con
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo: de dónde a dónde y qué debe verse al final; qué se nota: "tarda", "jank al hacer scroll">. Dispositivo <serial>.
+Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo: de dónde a dónde y qué debe verse al final; qué se nota: "tarda", "jank al hacer scroll">. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 Sin build de profiling, el agente hace el setup (sesión 0) y te deja el comando de la prueba de humo; esa prueba termina con el texto del chat siguiente, con tu flujo ya escrito. Con el setup listo, hace la sesión 1: te pregunta todo en un solo mensaje y arma el plan.
@@ -24,7 +25,7 @@ Sin build de profiling, el agente hace el setup (sesión 0) y te deja el comando
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ahí hay que <login, aceptar términos, omitir huella, ir al tab X>. Dispositivo <serial>.
+Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ahí hay que <login, aceptar términos, omitir huella, ir al tab X>. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 Sesión 1 con el patrón de flujos largos. El texto no fija cómo se recorre: el agente te lo pregunta y recomienda un flow de Maestro en `preparar` y `adb` para el tramo medido; si ya lo tienes decidido, agrégalo al pedido ("recorrido manual", "con deep link") y la pregunta sale igual, con tu elección marcada, para que puedas cambiarla. Si el flujo necesita credenciales, van en variables de entorno: expórtalas en la terminal **antes de abrir el agente** (solo ve las de la terminal desde la que se abrió) y, después, en la terminal donde midas.
@@ -34,7 +35,7 @@ Sesión 1 con el patrón de flujos largos. El texto no fija cómo se recorre: el
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Usa hb-performance en modo triage: medir <flujo: de qué pantalla a qué resultado>. En el medio hay un paso que hago yo (<autorizar en otra app, resolver un desafío>): déjalo como pausa del recorrido y no midas ese tiempo. Dispositivo <serial>.
+Usa hb-performance en modo triage: medir <flujo: de qué pantalla a qué resultado>. En el medio hay un paso que hago yo (<autorizar en otra app, resolver un desafío>): déjalo como pausa del recorrido y no midas ese tiempo. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 Sesión 1 con el patrón de "Flujos que pasan por otra app": el recorrido se detiene en una pausa que atiendes en tu terminal (haces el paso y presionas Enter; con `x` + Enter esa corrida se descarta), y el plan mide a cada lado de la pausa, no a través de ella. Las capturas de este flujo las corres tú: un agente no tiene terminal donde atender la pausa. Si cada corrida es una operación real, cuenta cuántas son antes de aprobar (`estado.md` lo dice en "Cómo se recorre").
@@ -54,7 +55,7 @@ Arma el plan sin sesión 1 e imprime los comandos para medir. Agrega `--red` si 
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>.
+Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 Termina en el reporte inicial.
@@ -74,7 +75,7 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py humo --paquete <applicationId> 
 **Dónde:** chat nuevo, con el modelo y el esfuerzo que diga "Siguiente paso"
 
 ```text
-Sigue hb-performance con <ruta absoluta>/estado.md
+Sigue hb-performance con <ruta absoluta>/estado.md. No hagas commit ni push.
 ```
 
 ### Retomar un chat que se cortó a la mitad
@@ -102,7 +103,7 @@ Recalcula el paso y lo imprime.
 **Dónde:** el mismo chat de la sesión 1
 
 ```text
-Apruebo la ficha y el plan.
+Apruebo la ficha y el plan. No hagas commit ni push.
 ```
 
 Te deja los comandos de la medición.
@@ -122,7 +123,7 @@ Imprime el chat de la sesión 3. Las mejoras a prueba se aprueban igual.
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Sigue hb-performance con <ruta>/estado.md: sesión 3, aplica <id>
+Sigue hb-performance con <ruta>/estado.md: sesión 3, aplica <id>. No hagas commit ni push.
 ```
 
 ### Cerrar la investigación (medición después lista)
@@ -130,7 +131,7 @@ Sigue hb-performance con <ruta>/estado.md: sesión 3, aplica <id>
 **Dónde:** chat nuevo · Económico · bajo
 
 ```text
-Sigue hb-performance con <ruta>/estado.md
+Sigue hb-performance con <ruta>/estado.md. No hagas commit ni push.
 ```
 
 ### Cerrar sin aplicar mejoras (no hubo, o quedaron descartadas o pendientes)
@@ -138,7 +139,7 @@ Sigue hb-performance con <ruta>/estado.md
 **Dónde:** chat nuevo · Económico · bajo
 
 ```text
-Sigue hb-performance con <ruta>/estado.md: cierra la investigación sin fase después
+Sigue hb-performance con <ruta>/estado.md: cierra la investigación sin fase después. No hagas commit ni push.
 ```
 
 ### Anotar el costo de un chat
@@ -166,7 +167,7 @@ Con varios flujos, `--flujo <nombre>`: solo se rehace ese.
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Con hb-performance, lee <ruta>/comparacion.md y <ruta>/estado.md y explícame por qué <métrica> dio <veredicto>. No cambies nada.
+Con hb-performance, lee <ruta>/comparacion.md y <ruta>/estado.md y explícame por qué <métrica> dio <veredicto>. No cambies nada. No hagas commit ni push.
 ```
 
 ### Mejorar el reporte
@@ -174,7 +175,7 @@ Con hb-performance, lee <ruta>/comparacion.md y <ruta>/estado.md y explícame po
 **Dónde:** chat nuevo · Económico · bajo
 
 ```text
-Con hb-performance, mejora el resumen ejecutivo y la lectura de la comparación en <ruta>/estado.md (<qué falta o qué sobra>) y vuelve a generar el reporte con perf.py reporte --carpeta <carpeta> --html.
+Con hb-performance, mejora el resumen ejecutivo y la lectura de la comparación en <ruta>/estado.md (<qué falta o qué sobra>) y vuelve a generar el reporte con perf.py reporte --carpeta <carpeta> --html. No hagas commit ni push.
 ```
 
 ### Regenerar el reporte sin tocar el texto
@@ -190,7 +191,7 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --carpeta <carpeta> --h
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tramo en segmentos) desde <marca> hasta <marca> (familia <app|e2e>) y dime si hace falta medir de nuevo.
+Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tramo en segmentos) desde <marca> hasta <marca> (familia <app|e2e>) y dime si hace falta medir de nuevo. No hagas commit ni push.
 ```
 
 ### Una pregunta sobre una traza
@@ -198,7 +199,7 @@ Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tr
 **Dónde:** chat nuevo · Diagnóstico · alto
 
 ```text
-Con hb-performance, en la traza <ruta>/antes/<flujo>_<n>.perfetto-trace.gz responde: <pregunta>. Usa perf.py consulta con LIMIT.
+Con hb-performance, en la traza <ruta>/antes/<flujo>_<n>.perfetto-trace.gz responde: <pregunta>. Usa perf.py consulta con LIMIT. No hagas commit ni push.
 ```
 
 ### Por qué se cerró la app
@@ -236,7 +237,7 @@ Después, el formateador y el DoD del proyecto. Si un archivo sale con `✖ no s
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Usa hb-performance: nueva investigación sobre <pendiente, con el H# del estado.md anterior en <ruta>>. Dispositivo <serial>.
+Usa hb-performance: nueva investigación sobre <pendiente, con el H# del estado.md anterior en <ruta>>. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 ## Reglas que te ahorran dinero

@@ -4,9 +4,13 @@ Cruza la evidencia con el código para encontrar las causas y propone un plan de
 
 ## 1. Punto de partida
 
-1. Lee `estado.md` (ficha, mapa, hipótesis, "Métricas") y **`diagnostico.md` entero**: tiene las consultas listas sobre la corrida mediana y la peor. No vuelvas a correr esas consultas. Si no existe, el primer paso es `perf.py diagnostico --carpeta <carpeta>`.
-2. Si no hay mapa (investigación creada con una receta), arma uno mínimo del camino medido, de 15 líneas como máximo. En el arranque: `Application`, content providers e inicializadores, la primera actividad, la primera pantalla, su ViewModel o presenter y su fuente de datos.
-3. Carga solo los patrones del stack ([patrones/](patrones/)): en el arranque, [arranque.md](patrones/arranque.md); si hay métricas `red`, siempre [red.md](patrones/red.md).
+1. **Lee primero "Advertencias para el diagnóstico" de `estado.md`.** La escribe `perf.py` con lo que observó en los comandos de la terminal: los avisos de la última corrida de prueba, las corridas inválidas de cada fase y sus motivos (también los fallos de `preparar`), los avisos de las capturas (tasa de refresco, compilación, configuración distinta entre fases, emulador), lo que el diagnóstico no midió, el ruido entre antes y control de cada métrica principal con la mejora mínima que se podría demostrar, y los cambios temporales que alteran la app. Úsala así:
+   - **Si una mejora que propones toca algo que una advertencia menciona, dilo en la mejora** (en su `titulo` o en su `hipotesis`, y en el hallazgo): un cambio temporal que altera la métrica de la mejora, una métrica cuyo ruido es mayor que lo que la mejora espera ganar, una consulta `no medido` de la que depende el hallazgo. Ejemplo: si la instrumentación agregó una espera antes de una búsqueda y propones un debounce, la mejora dice que la medición de antes ya incluía esa espera.
+   - Una mejora cuyo `esperado` es menor que la "mejora mínima demostrable" de su métrica no se va a poder demostrar con esta línea base: dilo, y propón más corridas, otra métrica o una mejora a prueba.
+   - Si la sección no existe (una investigación de una versión anterior), `perf.py siguiente --carpeta <carpeta>` la agrega.
+2. Lee `estado.md` (ficha, mapa, hipótesis, "Métricas") y **`diagnostico.md` entero**: tiene las consultas listas sobre la corrida mediana y la peor. No vuelvas a correr esas consultas. Si no existe, el primer paso es `perf.py diagnostico --carpeta <carpeta>`.
+3. Si no hay mapa (investigación creada con una receta), arma uno mínimo del camino medido, de 15 líneas como máximo. En el arranque: `Application`, content providers e inicializadores, la primera actividad, la primera pantalla, su ViewModel o presenter y su fuente de datos.
+4. Carga solo los patrones del stack ([patrones/](patrones/)): en el arranque, [arranque.md](patrones/arranque.md); si hay métricas `red`, siempre [red.md](patrones/red.md).
 
 ## 2. Qué responde cada consulta de `diagnostico.md`
 

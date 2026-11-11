@@ -65,7 +65,9 @@ Todo comando de `perf.py` que falla, se detiene o se corta con Ctrl+C termina co
 | Build repetido en `despues` | El `instalar` del plan y el mismo comando |
 | Plan inválido, traza que no se procesa, un error que `perf.py` no esperaba | El mismo comando, para repetirlo cuando esté corregido |
 
-Después del calentamiento hay una espera corta antes del primer `preparar` medido, igual que la hay entre dos corridas (mientras se cierra y se procesa la traza): sin ella, ese `preparar` podía encontrar la app todavía terminando el recorrido. Va fuera de toda traza.
+Si una tanda se corta con corridas válidas, `fases.json` guarda cuántas faltan y `siguiente` ofrece completar esa fase antes de seguir: no la da por medida a medias.
+
+Hay una espera corta después de fijar la compilación de ART (que deja la app detenida) y después del calentamiento, antes del `preparar` que sigue, igual que la hay entre dos corridas mientras se cierra y se procesa la traza. Es una precaución para un `preparar` que arranca con la app todavía asentándose; va fuera de toda traza y no cambia lo que se mide.
 
 ## Los avisos de la corrida de prueba frenan la medición
 

@@ -29,8 +29,10 @@
 
 Marcas o código puestos solo para esta investigación (por ejemplo, una marca con `android.os.Trace` en un módulo que no ve `PerfHooks`) y las ediciones de cableado en código de `main` que no se van a commitear (el gancho de red donde se arma el cliente HTTP, por ejemplo). Se revierten antes de proponer un commit y, a más tardar, en el cierre.
 
-| Archivo | Repo o módulo | Qué es | ¿Revertido? |
-| --- | --- | --- | --- |
+| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |
+| --- | --- | --- | --- | --- |
+
+"Altera": las métricas que el cambio afecta si modifica el comportamiento de la app mientras se mide (una espera, una condición, otro orden de llamadas); `—` si solo emite una marca. `perf.py` copia esas filas a "Advertencias para el diagnóstico".
 
 Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera del repo**, uno por repo (`<parche>` es una ruta en una carpeta que ese repo no versiona):
 
@@ -50,6 +52,14 @@ Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera
 <!-- perf:metricas -->
 (lo escribe perf.py capturar)
 <!-- /perf:metricas -->
+
+## Advertencias para el diagnóstico
+
+Lo que `perf.py` observó en los comandos de la terminal y que la sesión 2 lee antes que las métricas. Si una mejora toca algo que una advertencia menciona, la mejora lo dice. Lo escribe y lo mantiene `perf.py`: no lo edites.
+
+<!-- perf:advertencias -->
+(lo escribe perf.py: avisos de la corrida de prueba, corridas inválidas, avisos de las capturas, lo no medido, el ruido entre antes y control y los cambios temporales que alteran la app)
+<!-- /perf:advertencias -->
 
 ## Hallazgos
 

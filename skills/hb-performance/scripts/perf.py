@@ -214,7 +214,7 @@ def guide_lines(error=None):
     if hook:
         try:
             hook()
-        except (PerfError, OSError, ValueError):
+        except Exception:  # lo que falle al guardar no puede tapar el fallo original ni dejarlo sin guía
             pass
     if GUIA["omitir"]:
         return []
@@ -2652,10 +2652,24 @@ def terminal(command, what, you):
     return {"tipo": "terminal", "texto": command, "que": what, "tu": you}
 
 
-def chat(text, tier, effort, what, plan):
-    if plan.get("no_leer"):
+NO_COMMIT = "No hagas commit ni push."
+
+
+def chat_text(text, plan=None):
+    """El texto de un chat tal como se entrega: con las rutas que no se leen y, siempre al final, NO_COMMIT. La skill
+    ya dice que el agente solo propone el commit; la línea explícita evita que una herramienta o un modelo lo haga igual."""
+    text = text.rstrip()
+    if (plan or {}).get("no_leer"):
+        if not text.endswith((".", "!", "?")):
+            text += "."
         text += " No leas ni busques en: %s." % ", ".join(plan["no_leer"])
-    return {"tipo": "chat", "texto": text, "modelo": model_name(plan, tier), "esfuerzo": effort, "que": what}
+    if not text.endswith((".", "!", "?")):
+        text += "."
+    return "%s %s" % (text, NO_COMMIT)
+
+
+def chat(text, tier, effort, what, plan):
+    return {"tipo": "chat", "texto": chat_text(text, plan), "modelo": model_name(plan, tier), "esfuerzo": effort, "que": what}
 
 
 def next_steps(folder, plan, flow=None):
@@ -2699,6 +2713,18 @@ def next_steps(folder, plan, flow=None):
     phases = read_phases(root / folder)
     mejoras = plan.get("mejoras", [])
     estados = [m.get("estado", "propuesta") for m in mejoras]
+    for phase in FASES:
+        # Una tanda que se cortó (Ctrl+C, inválidas seguidas) dejó sus corridas válidas y cuántas faltan: la fase no se
+        # da por medida hasta completarla.
+        cut = (phases.get(phase) or {}).get("faltan") if isinstance(phases.get(phase), dict) else None
+        if isinstance(cut, dict) and cut.get("flujo") == flow and to_int(cut.get("corridas")) > 0:
+            missing = to_int(cut["corridas"])
+            return "completar la fase %s, que se cortó (sin chat)" % phase, [
+                terminal(command(*(capture + ["--fase", phase, "--corridas", missing])),
+                         "completa la fase %s con las %d corridas que faltan: la tanda anterior se cortó y las válidas ya "
+                         "están guardadas" % (phase, missing),
+                         "lo mismo que en la tanda anterior; si cambió el build o las condiciones, agrega --rehacer y pide "
+                         "las corridas completas")]
     resume = "Sigue hb-performance con %s" % state
     session2 = chat(resume, "diagnostico", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
                     "plan de mejoras; termina con el comando para que decidas", plan)
@@ -3018,6 +3044,7 @@ def print_next(folder, plan, flow=None):
     write_next(folder, title, steps)
     update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder).resolve()).resolve(),
                                                   pathlib.Path(folder)))
+    update_warnings(folder, plan)
 
 
 def cmd_siguiente(args):
@@ -3331,6 +3358,156 @@ def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, 
                  "red o midiendo el recorrido, y habría que repetirlo con --rehacer", you_run)]
 
 
+# ── advertencias para el diagnóstico (estado.md) ─────────────────────────────
+
+WARNINGS_TITLE = "Advertencias para el diagnóstico"
+WARNINGS_INTRO = ("Lo que `perf.py` observó en los comandos de la terminal y que la sesión 2 lee antes que las métricas. Si "
+                  "una mejora toca algo que una advertencia menciona, la mejora lo dice. Lo escribe y lo mantiene `perf.py`: "
+                  "no lo edites.")
+NO_WARNINGS = ("Ninguna registrada hasta ahora. `perf.py` solo ve lo que pasa en sus comandos: que no haya advertencias no "
+               "prueba que no haya nada que advertir.")
+NOT_ALTERING = ("", "—", "-", "no", "nada", "ninguna", "ninguno", "n/a")
+
+
+def altering_changes(state_text):
+    """Las filas de "Cambios temporales por revertir" de estado.md que dicen qué métricas alteran (columna "Altera"):
+    un cambio puesto para la investigación que cambia el comportamiento de la app mientras se mide."""
+    _, sections = state_sections(state_text)
+    body = next((text for title, text in sections.items() if title.startswith("cambios temporales")), "")
+    headers, rows = parse_table(body)
+    names = [header.strip().lower() for header in headers]
+
+    def column(prefix):
+        return next((index for index, name in enumerate(names) if name.lstrip("¿").startswith(prefix)), None)
+
+    altered, where, what, reverted = column("altera"), column("archivo"), column("qué es"), column("revertido")
+    if altered is None:
+        return []
+    out = []
+    for row in rows:
+        def cell(index):
+            return row[index].strip() if index is not None and index < len(row) else ""
+
+        if cell(altered).lower() in NOT_ALTERING or has_placeholder(cell(altered)):
+            continue
+        label = " · ".join(part for part in (cell(where), cell(what)) if part) or "sin detalle"
+        out.append("Cambio temporal que altera la app: %s → altera %s%s" % (
+            label, cell(altered), " (¿revertido?: %s)" % cell(reverted) if cell(reverted) else ""))
+    return out
+
+
+def noise_lines(rows, plan, trust=("ok", "")):
+    """El ruido entre antes y control de cada métrica principal y la mejora mínima que se podría demostrar, con el
+    criterio de `verdict`: la mediana de después tiene que salir del rango de antes y diferir de la de antes más que
+    el ruido."""
+    principales = plan.get("principales") or []
+    out = []
+    for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
+        before, control = entry["fases"].get("antes"), entry["fases"].get("control")
+        if metric not in principales or not before:
+            continue
+        unit, head = entry["unidad"], "Ruido de `%s` (%s)" % (metric, flow)
+        if entry["familia"] == "info":
+            out.append("%s: es informativa, `comparar` no le da veredicto" % head)
+            continue
+        if frame_metric(metric) and trust[0] == "no":
+            out.append("%s: frames no confiables (%s), `comparar` no le da veredicto" % (head, trust[1]))
+            continue
+        middle = statistics.median(before)
+        lower = entry["sentido"] == "menor"
+        noise = abs(statistics.median(control) - middle) if control else None
+        if lower:
+            limit = min(min(before), middle - noise) if control else min(before)
+        else:
+            limit = max(max(before), middle + noise) if control else max(before)
+        gap = abs(middle - limit)
+        need = "la mediana de después tiene que quedar %s %s (más de %s%s respecto de la mediana de antes, %s)" % (
+            "por debajo de" if lower else "por encima de", fmt(limit, unit), fmt(gap, unit),
+            ", %s" % fmt_pct(gap / abs(middle) * 100, signed=False) if middle else "", fmt(middle, unit))
+        if control:
+            out.append("%s: antes y control difieren en %s%s sin ningún cambio. Mejora mínima demostrable: %s" % (
+                head, fmt(noise, unit), " (%s)" % fmt_pct(noise / abs(middle) * 100, signed=False) if middle else "", need))
+        else:
+            out.append("%s: sin fase control, el ruido no está medido. Para que `comparar` diga mejora, %s" % (head, need))
+    return out
+
+
+def warnings_lines(folder, plan):
+    """Las advertencias vigentes de la investigación, una por línea y sin repetir: avisos de la última corrida de
+    prueba, corridas inválidas por fase (con los fallos de 'preparar'), avisos de las capturas, lo que el diagnóstico
+    no midió, el ruido entre antes y control de cada principal y los cambios temporales que alteran la app."""
+    folder = pathlib.Path(folder)
+    notes = read_notes(folder)
+    lines = []
+
+    def by_flow(kind, phase):
+        bucket = (notes.get(kind) or {}).get(phase) if isinstance(notes.get(kind), dict) else None
+        return sorted(bucket.items()) if isinstance(bucket, dict) else []
+
+    tests = notes.get("prueba") if isinstance(notes.get("prueba"), dict) else {}
+    for flow in sorted(tests):
+        for item in test_warnings(folder, flow):
+            lines.append("Corrida de prueba (%s): %s%s" % (flow, item["texto"], " · %s" % ", ".join(item["donde"])
+                                                           if item.get("donde") else ""))
+    for phase in FASES:
+        for flow, reasons in by_flow("invalidas", phase):
+            if isinstance(reasons, dict) and reasons:
+                lines.append("Corridas inválidas en %s (%s): %d · %s" % (
+                    phase, flow, sum(to_int(n) for n in reasons.values()),
+                    "; ".join("%d × %s" % (to_int(n), reason) for reason, n in sorted(reasons.items()))))
+    for phase in FASES:
+        for flow, texts in by_flow("capturar", phase):
+            lines += ["Captura de %s (%s): %s" % (phase, flow, text) for text in texts or [] if isinstance(text, str)]
+    phases = read_phases(folder)
+    if isinstance(phases, dict):
+        lines += ["Fases: %s" % one_line(note) for note in builds_table(folder)[1]]
+        lines += ["Fase %s: compilación de ART %s, sus tiempos no se comparan con los de otra fase" % (
+            phase, phases[phase]["compilacion"]) for phase in FASES
+            if str((phases.get(phase) or {}).get("compilacion") or "").startswith("sin fijar")]
+        lines += ["Fases: %s" % one_line(note) for note in config_notes(folder, list(plan.get("flujos") or {}))]
+    for phase in FASES:
+        for flow, texts in by_flow("diagnostico", phase):
+            lines += ["Diagnóstico de %s (%s): %s" % (phase, flow, text) for text in texts or [] if isinstance(text, str)]
+    try:
+        rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
+    except PerfError:
+        rows = []
+    lines += noise_lines(rows, plan, frames_trust(folder) if isinstance(phases, dict) else ("ok", ""))
+    try:
+        lines += altering_changes((folder / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    out = []
+    for line in lines:
+        if line not in out:
+            out.append(line)
+    return out
+
+
+def update_warnings(folder, plan):
+    """Escribe el bloque "Advertencias para el diagnóstico" de estado.md. Un estado.md de una versión anterior no trae
+    la sección: se agrega antes de "Hallazgos" (o, si no está, antes del plan de mejoras o al final)."""
+    state = pathlib.Path(folder) / "estado.md"
+    if not state.is_file():
+        return False
+    lines = warnings_lines(folder, plan)
+    content = "\n".join("- %s" % line for line in lines) if lines else "- %s" % NO_WARNINGS
+    if update_block(folder, "advertencias", content):
+        return True
+    text = state.read_text(encoding="utf-8")
+    section = "## %s\n\n%s\n\n<!-- perf:advertencias -->\n%s\n<!-- /perf:advertencias -->\n" % (
+        WARNINGS_TITLE, WARNINGS_INTRO, content)
+    for anchor in ("## Hallazgos", "## Plan de mejoras", "## Decisiones"):
+        found = re.search(r"^%s[ \t]*$" % re.escape(anchor), text, re.M)
+        if found:
+            text = text[:found.start()] + section + "\n" + text[found.start():]
+            break
+    else:
+        text = text.rstrip("\n") + "\n\n" + section
+    state.write_text(text, encoding="utf-8")
+    return True
+
+
 def cmd_capturar(args, plan=None):
     if args.plan:
         plan = load_plan(args.plan)
@@ -3382,8 +3559,11 @@ def cmd_capturar(args, plan=None):
             return
         done = progress["validas"]
         if not done:
-            GUIA.update(guardado="ninguna corrida de esta tanda (0 de %d válidas de %s); lo que %s ya tenía sigue igual"
-                        % (target, phase, csv_path), seguir=[(RETRY, same_command())])
+            kept = ("las corridas anteriores de %s ya se descartaron por --rehacer (sus trazas quedaron en "
+                    "%s-descartada-<hora>/)" % (phase, phase) if progress.get("descartada")
+                    else "lo que %s ya tenía sigue igual" % csv_path)
+            GUIA.update(guardado="ninguna corrida de esta tanda (0 de %d válidas de %s); %s" % (target, phase, kept),
+                        seguir=[(RETRY, same_command())])
             return
         GUIA.update(
             guardado="%d de %d corridas válidas de %s en %s (y su registro en fases.json)" % (done, target, phase, csv_path),
@@ -3500,9 +3680,15 @@ def cmd_capturar(args, plan=None):
     elif not args.sin_compilar:
         compilation = fix_compilation(adb, package, args.compilacion or plan.get("compilacion", "completa"), folder, build,
                                       force=getattr(args, "recompilar", False))
+        if prepare_command:
+            # Fijar la compilación deja la app detenida: un respiro antes del primer 'preparar' (el del calentamiento
+            # o, con --calentamiento 0, el de la primera corrida). Fuera de toda traza.
+            settle(WARMUP_SETTLE_S)
     if args.rehacer and not args.prueba:
         discard_phase(folder, csv_path, phase, flow_name)
         forget_notes(folder, phase, flow_name)
+        progress["descartada"] = True
+        guide()
         known = known_metrics(csv_path, flow_name)
     warmups = 0 if args.prueba else args.calentamiento
     for i in range(warmups):
@@ -3534,7 +3720,7 @@ def cmd_capturar(args, plan=None):
     if not args.prueba:
         save_capture_warnings(folder, phase, flow_name, warnings + build_warnings)
 
-    def save_record():
+    def save_record(partial=False):
         """El registro de la fase en fases.json con las corridas válidas de esta tanda. También cuando la tanda se
         corta (Ctrl+C, inválidas seguidas): lo que ya está en el CSV queda con su build, su commit y su configuración."""
         seen_hz = {h for h in run_hz if h}
@@ -3550,6 +3736,8 @@ def cmd_capturar(args, plan=None):
         if environment["emulador"] or environment["software"]:
             record["entorno"] = environment
         record.update(build)
+        if partial:  # la tanda se cortó: `siguiente` ofrece completar la fase antes de darla por medida
+            record["faltan"] = {"flujo": flow_name, "corridas": target - valid}
         write_phase(folder, phase, record, flow_name)
 
     def mark_invalid(reason):
@@ -3558,7 +3746,7 @@ def cmd_capturar(args, plan=None):
 
     def on_failure():
         if valid and not args.prueba:
-            save_record()
+            save_record(partial=True)
 
     GUIA["al_fallar"] = on_failure  # lo llama main() si la tanda se corta: las válidas no quedan sin su registro
     while valid < target:
@@ -3575,7 +3763,7 @@ def cmd_capturar(args, plan=None):
             prepare()
         except Precondicion as error:
             if not prepare_command or args.prueba:
-                if args.prueba and args.plan:
+                if args.prueba and args.plan and prepare_command and hasattr(error, "corto"):
                     save_test_warnings(folder, flow_name, [warning(
                         "preparar", "la corrida de prueba no empezó: %s" % error,
                         "'preparar' falla: corrige el comando o el flow que deja la app en el punto de partida")])
@@ -4614,6 +4802,21 @@ def cmd_diagnostico(args):
                % (BLOCKED_SHARE_MIN * 100, fmt(BLOCKED_D_MIN_MS))]
     target = folder / ("diagnostico.md" if phase == "antes" else "diagnostico-%s.md" % phase)
     target.write_text("\n".join(md) + "\n", encoding="utf-8")
+    if not wanted:  # el diagnóstico entero: lo que no midió va a "Advertencias para el diagnóstico" de estado.md
+        gaps = ["`%s`: %s (no quiere decir que no ocurra)" % (name, not_measured[name]) for name in sorted(not_measured)]
+        if unknown:
+            gaps.append("sin tabla y con configuración desconocida (trazas de una versión anterior: no se afirma que no "
+                        "ocurra): %s" % ", ".join(sorted(set(unknown))))
+        gaps += ["`%s`: no disponible, trace_processor no pudo correr la consulta" % name for name in sorted(failed)]
+        notes = read_notes(folder)
+        bucket = note_bucket(notes, "diagnostico", phase)
+        if gaps:
+            bucket[flow_name] = [one_line(text) for text in gaps]
+        else:
+            bucket.pop(flow_name, None)
+        if not bucket:
+            notes["diagnostico"].pop(phase)
+        save_notes(folder, notes)
     if blocked:
         print("· El hilo principal espera dentro de sus frames más largos (%s %% del tiempo): %s deja una captura pendiente "
               "con --config completa para saber por qué." % (fmt(round(blocked[0] * 100, 1)), target.name))
@@ -5763,8 +5966,8 @@ def session1_prompt(request, serial):
     reach = (request.get("llegar") or "").strip().rstrip(".")
     if reach:
         # No fija cómo se recorre (adb, Maestro en preparar, deep link o manual): esa pregunta es de la sesión 1.
-        return "Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial)
-    return "Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial)
+        return chat_text("Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial))
+    return chat_text("Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial))
 
 
 def cmd_humo(args):

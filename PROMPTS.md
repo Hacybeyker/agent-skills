@@ -67,19 +67,19 @@ Tiene varias sesiones y comandos de terminal: su guía completa está en [skills
 **Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo):
 
 ```text
-Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>.
+Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 **Solo el diagnóstico, sin cambiar código** (triage):
 
 ```text
-Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>.
+Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>. No hagas commit ni push.
 ```
 
 **Retomar** donde quedó, en un chat nuevo:
 
 ```text
-Sigue hb-performance con <ruta absoluta>/estado.md
+Sigue hb-performance con <ruta absoluta>/estado.md. No hagas commit ni push.
 ```
 
 ## hb-coach · aprender un tema
