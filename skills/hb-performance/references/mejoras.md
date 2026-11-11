@@ -17,6 +17,8 @@ Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazg
   - una vista que se recreaba: el adapter se configura una sola vez por vista;
   - una migración de datos: un test que parte del formato viejo y termina con los datos intactos.
 - **Tests instrumentados solo en un emulador:** `connectedAndroidTest` desinstala la app del dispositivo y se pierden los datos de prueba.
+- **Reglas del proyecto durante la investigación:** si la sección de rendimiento de `AGENTS.md` tiene una línea sobre cómo conviven las reglas del proyecto con hb-performance (por ejemplo, "durante una investigación de hb-performance, el reporte de cada cambio es el de la skill"), síguela: la aprobó el usuario en el setup para no duplicar trabajo en cada mejora. Sin esa línea, las reglas del proyecto valen tal cual.
+- **Si `AGENTS.md` no tiene `## DoD`**, no adivines qué validar: `perf.py siguiente` lo avisa e imprime una plantilla mínima (los tests unitarios del módulo que cambie y la compilación de la variante medida). Propónsela al usuario y, con ella aprobada, corre esos comandos.
 - **DoD con la salida acotada:** los comandos de `## DoD`, con Gradle en `-q`, primero los tests del módulo afectado y el log completo en `<carpeta>/logs/`. Al chat llegan solo el conteo de tests y los fallos:
   ```bash
   cd <raíz-del-proyecto> && ( ./gradlew -q :<modulo>:testDebugUnitTest > <carpeta>/logs/tests-m1.log 2>&1; code=$?; grep -E "tests completed|FAILED|BUILD" <carpeta>/logs/tests-m1.log | tail -20; echo "exit $code"; exit $code )

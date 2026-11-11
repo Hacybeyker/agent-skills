@@ -2163,6 +2163,13 @@ def write_phase(folder, phase, data, flow=None):
             # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
             flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
                 else data["skill"]
+    # `faltan` ({flujo: corridas}): lo que dejó pendiente una tanda cortada. Esta tanda reemplaza lo de su flujo (o lo
+    # quita, si terminó) y conserva lo de los demás.
+    earlier = previous.get("faltan") if isinstance(previous.get("faltan"), dict) else {}
+    pending = {name: count for name, count in earlier.items() if name != flow and to_int(count) > 0}
+    pending.update(data.pop("faltan", None) or {})
+    if pending:
+        data["faltan"] = pending
     merged = merge_run_data(previous, data)
     for key in ("hz_corridas", "avisos", "entorno", "configs"):
         data.pop(key, None)
@@ -2210,6 +2217,10 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("flujos", None)
         if tracked:
             record["flujos"] = tracked
+        if isinstance(record.get("faltan"), dict):  # lo que faltaba del flujo que se rehace ya no vale
+            record["faltan"].pop(flow, None)
+            if not record["faltan"]:
+                record.pop("faltan")
     save_phases(folder, phases)
 
 
@@ -2717,8 +2728,8 @@ def next_steps(folder, plan, flow=None):
         # Una tanda que se cortó (Ctrl+C, inválidas seguidas) dejó sus corridas válidas y cuántas faltan: la fase no se
         # da por medida hasta completarla.
         cut = (phases.get(phase) or {}).get("faltan") if isinstance(phases.get(phase), dict) else None
-        if isinstance(cut, dict) and cut.get("flujo") == flow and to_int(cut.get("corridas")) > 0:
-            missing = to_int(cut["corridas"])
+        if isinstance(cut, dict) and to_int(cut.get(flow)) > 0:
+            missing = to_int(cut[flow])
             return "completar la fase %s, que se cortó (sin chat)" % phase, [
                 terminal(command(*(capture + ["--fase", phase, "--corridas", missing])),
                          "completa la fase %s con las %d corridas que faltan: la tanda anterior se cortó y las válidas ya "
@@ -2792,11 +2803,12 @@ def next_steps(folder, plan, flow=None):
             return "completar la línea base de riguroso (sin chat)", steps
     if "aprobada" in estados:
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
+        missing_dod = dod_notice(root, plan)  # sin `## DoD` en AGENTS.md, la sesión 3 no sabría qué validar
         return "sesión 3 · %s" % first["id"], [
             chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
                  "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada" % (
                      first["id"], " (a prueba: la medición de después confirma o refuta su hipótesis)"
-                     if first.get("a_prueba") else ""), plan)]
+                     if first.get("a_prueba") else ""), plan)] + ([missing_dod] if missing_dod else [])
     if "despues" in phases and not stale:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -2986,10 +2998,12 @@ def render_steps(steps, markdown):
     """Los pasos como texto: para la terminal (markdown=False) o para estado.md."""
     code = (lambda s: "`%s`" % s) if markdown else (lambda s: s)
     lines, i = [], 0
-    for step in steps:
+    # Los avisos van primero aunque estén al final de la lista: es lo que hay que saber antes de dar los pasos.
+    for step in sorted(steps, key=lambda item: item["tipo"] != "avisos"):
         if step["tipo"] == "avisos":  # sin número: no es un paso, es lo que hay que saber antes de los pasos
             lines.append(("**%s:**" if markdown else "%s:") % step["titulo"])
-            lines += ["   - %s" % line for line in step["lineas"]]
+            # `crudo`: un texto para copiar tal cual (una plantilla), sin viñetas
+            lines += [("%s" if step.get("crudo") else "   - %s") % line for line in step["lineas"]]
             continue
         i += 1
         if step["tipo"] == "terminal":
@@ -3243,8 +3257,8 @@ def forget_notes(folder, phase, flow):
     """--rehacer: lo que se anotó de las corridas que se descartan ya no vale."""
     data = read_notes(folder)
     changed = False
-    for kind in ("invalidas", "capturar"):
-        bucket = (data.get(kind) or {}).get(phase)
+    for kind in ("invalidas", "capturar", "diagnostico"):
+        bucket = (data.get(kind) or {}).get(phase) if isinstance(data.get(kind), dict) else None
         if isinstance(bucket, dict) and flow in bucket:
             bucket.pop(flow)
             changed = True
@@ -3447,8 +3461,9 @@ def warnings_lines(folder, plan):
     tests = notes.get("prueba") if isinstance(notes.get("prueba"), dict) else {}
     for flow in sorted(tests):
         for item in test_warnings(folder, flow):
-            lines.append("Corrida de prueba (%s): %s%s" % (flow, item["texto"], " · %s" % ", ".join(item["donde"])
-                                                           if item.get("donde") else ""))
+            where = item.get("donde") if isinstance(item.get("donde"), list) else []
+            lines.append(one_line("Corrida de prueba (%s): %s%s" % (
+                flow, item["texto"], " · %s" % ", ".join(str(place) for place in where) if where else "")))
     for phase in FASES:
         for flow, reasons in by_flow("invalidas", phase):
             if isinstance(reasons, dict) and reasons:
@@ -3457,7 +3472,8 @@ def warnings_lines(folder, plan):
                     "; ".join("%d × %s" % (to_int(n), reason) for reason, n in sorted(reasons.items()))))
     for phase in FASES:
         for flow, texts in by_flow("capturar", phase):
-            lines += ["Captura de %s (%s): %s" % (phase, flow, text) for text in texts or [] if isinstance(text, str)]
+            lines += ["Captura de %s (%s): %s" % (phase, flow, one_line(text))
+                      for text in (texts if isinstance(texts, list) else []) if isinstance(text, str)]
     phases = read_phases(folder)
     if isinstance(phases, dict):
         lines += ["Fases: %s" % one_line(note) for note in builds_table(folder)[1]]
@@ -3467,7 +3483,8 @@ def warnings_lines(folder, plan):
         lines += ["Fases: %s" % one_line(note) for note in config_notes(folder, list(plan.get("flujos") or {}))]
     for phase in FASES:
         for flow, texts in by_flow("diagnostico", phase):
-            lines += ["Diagnóstico de %s (%s): %s" % (phase, flow, text) for text in texts or [] if isinstance(text, str)]
+            lines += ["Diagnóstico de %s (%s): %s" % (phase, flow, one_line(text))
+                      for text in (texts if isinstance(texts, list) else []) if isinstance(text, str)]
     try:
         rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
     except PerfError:
@@ -3506,6 +3523,152 @@ def update_warnings(folder, plan):
         text = text.rstrip("\n") + "\n\n" + section
     state.write_text(text, encoding="utf-8")
     return True
+
+
+# ── AGENTS.md del proyecto: DoD y estado del setup ───────────────────────────
+
+# Encabezados de un AGENTS.md: se aceptan numerados ("## 5. DoD") y con hasta 3 espacios de sangría, como en Markdown.
+DOD_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*(?:\d+[.)][ \t]*)?(?:DoD|Definition of Done|Definición de "
+                         r"(?:hecho|terminado))\b", re.I)
+# La sección de rendimiento es la que se llama así: el título empieza con la palabra, no basta con que la mencione.
+PERF_HEADING = re.compile(r"^(#{1,6})[ \t]+(?:\d+[.)][ \t]*)?(?:rendimiento|performance)\b", re.I)
+ANY_HEADING = re.compile(r"^(#{1,6})[ \t]+\S")
+FENCE = re.compile(r"^[ \t]{0,3}(?:```|~~~)")
+AGENTS_BLOCK = ("<!-- hb-performance:estado -->", "<!-- /hb-performance:estado -->")
+AGENTS_FIELDS = ("instrumentación en el repo", "prueba de humo", "secciones HTTP")
+AGENTS_LEAD = "Estado del setup (lo mantiene `perf.py`: no lo edites)"
+
+
+def read_agents(root):
+    """El AGENTS.md del proyecto con sus saltos de línea tal cual (un archivo con CRLF no se normaliza), o None."""
+    try:
+        with open(str(pathlib.Path(root) / "AGENTS.md"), encoding="utf-8", newline="") as handle:
+            return handle.read()
+    except (OSError, ValueError):
+        return None
+
+
+def prose_lines(text):
+    """(posición, línea) de las líneas que no están dentro de un bloque de código: un `#` de un comando no es un
+    encabezado."""
+    position, fenced = 0, False
+    for line in text.splitlines(keepends=True):
+        if FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            yield position, line
+        position += len(line)
+
+
+def has_dod(text):
+    return any(DOD_HEADING.match(line) for _, line in prose_lines(text))
+
+
+def dod_notice(root, plan):
+    """Antes de una sesión 3: None si AGENTS.md tiene `## DoD`; si no, el aviso con una plantilla mínima para
+    completarla con lo que el proyecto ya tiene (los tests unitarios del módulo que cambie y la compilación de la
+    variante medida), sin agregar herramientas."""
+    agents = read_agents(root)
+    if agents is not None and has_dod(agents):
+        return None
+    found = INSTALL_TASK.search(plan.get("instalar") or "")
+    assemble = "./gradlew -q :%sassemble%s" % (found.group(1), found.group(2)) if found else \
+        "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
+    return {"tipo": "avisos", "crudo": True,
+            "titulo": "%s: la sesión 3 corre \"los comandos de ## DoD\" y sin esa sección tendría que adivinar qué validar. "
+                      "Agrégala a AGENTS.md antes de abrir el chat, con lo que el proyecto ya tiene (sin herramientas "
+                      "nuevas). Plantilla" % ("AGENTS.md no tiene `## DoD`" if agents is not None else
+                                              "No hay AGENTS.md en %s" % root),
+            "lineas": ["## DoD", "",
+                       "1. `./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests unitarios del módulo que cambie (la "
+                       "tarea real: `./gradlew :<módulo>:tasks --all | grep UnitTest`)",
+                       "2. `%s`: compila la variante medida" % assemble]}
+
+
+def performance_section(text):
+    """(inicio, fin) de la sección de rendimiento de un AGENTS.md: desde la línea que sigue a su encabezado hasta el
+    próximo encabezado de su nivel o superior (o el final), sin contar lo que está dentro de un bloque de código. Si
+    hay más de una, la que ya tiene el bloque de estado; si no, la primera. None si no hay sección."""
+    headings = [(position, line, ANY_HEADING.match(line)) for position, line in prose_lines(text)]
+    headings = [(position, line, found) for position, line, found in headings if found]
+    sections = []
+    for index, (position, line, _) in enumerate(headings):
+        own = PERF_HEADING.match(line)
+        if not own:
+            continue
+        level = len(own.group(1))
+        end = next((later for later, _, found in headings[index + 1:] if len(found.group(1)) <= level), len(text))
+        sections.append((position + len(line), end))
+    if not sections:
+        return None
+    return next((section for section in sections if AGENTS_BLOCK[0] in text[section[0]:section[1]]), sections[0])
+
+
+def agents_state(body):
+    """{campo: valor} del bloque de estado que perf.py mantiene en la sección de rendimiento."""
+    found = re.search(re.escape(AGENTS_BLOCK[0]) + r"(.*?)" + re.escape(AGENTS_BLOCK[1]), body, re.S)
+    inner = " ".join((found.group(1) if found else "").split())
+    fields = {}
+    for key in AGENTS_FIELDS:
+        value = re.search(r"%s: (.*?)(?= · |$)" % re.escape(key), inner)
+        if value and value.group(1).strip():
+            fields[key] = value.group(1).strip()
+    return fields
+
+
+def update_agents_state(root, humo=None, http=None):
+    """Mantiene, dentro de la sección de rendimiento del AGENTS.md del proyecto, un bloque corto entre marcadores con
+    el estado del setup: si la instrumentación está en el repo, cómo salió la prueba de humo, si hay secciones HTTP y
+    con qué versión de la skill. Solo cambia los campos que recibe; no toca nada fuera del bloque ni fuera de la
+    sección, y si no hay sección no la crea. Devuelve la línea que se le dice al usuario ('' si nada cambió)."""
+    path = pathlib.Path(root) / "AGENTS.md"
+    text = read_agents(root)
+    if text is None:
+        return "· No hay AGENTS.md en %s: el estado del setup no queda anotado" % root
+    section = performance_section(text)
+    if section is None:
+        return ("· AGENTS.md no tiene una sección de rendimiento (## Rendimiento o ## Performance): no la creo, así que el "
+                "estado del setup no queda anotado ahí (la escribe la sesión 0: setup.md · Cierre del setup)")
+    start, end = section
+    body = text[start:end]
+    fields = agents_state(body)
+    fields["instrumentación en el repo"] = "sí" if find_instrumentation(root)[1] else "no (no encontré PerfHooks.kt)"
+    if humo:
+        fields["prueba de humo"] = humo
+    if http:
+        fields["secciones HTTP"] = http
+    fields.setdefault("prueba de humo", "sin correr")
+    fields.setdefault("secciones HTTP", "sin dato")
+    line = "- %s: %s · hb-performance %s" % (AGENTS_LEAD, " · ".join("%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS),
+                                             VERSION)
+    eol = "\r\n" if "\r\n" in text else "\n"  # el salto de línea que ya usa el archivo
+    block = eol.join((AGENTS_BLOCK[0], line, AGENTS_BLOCK[1]))
+    pattern = re.compile(re.escape(AGENTS_BLOCK[0]) + r".*?" + re.escape(AGENTS_BLOCK[1]), re.S)
+    if pattern.search(body):
+        new_body = pattern.sub(lambda _: block, body, count=1)
+    elif AGENTS_BLOCK[0] in body:  # un marcador de apertura suelto: el bloque va en su lugar
+        new_body = body.replace(AGENTS_BLOCK[0], block, 1)
+    else:
+        stripped = body.rstrip("\r\n")
+        new_body = (stripped + eol * 2 if stripped.strip() else eol) + block + eol + (eol if end < len(text) else "")
+    if new_body == body:
+        return ""
+    try:
+        with open(str(path), "w", encoding="utf-8", newline="") as handle:
+            handle.write(text[:start] + new_body + text[end:])
+    except OSError as error:  # no poder anotarlo no puede romper la prueba de humo ni la corrida de prueba
+        return "⚠ No pude escribir %s (%s): el estado del setup no quedó anotado ahí" % (path, error.strerror or error)
+    return "✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento (%s)" % " · ".join(
+        "%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS)
+
+
+def http_state(current, seen, source):
+    """El valor de "secciones HTTP" después de una corrida: None si no hay nada nuevo que anotar. Una corrida que las
+    ve las anota una vez (no cambia la fecha en cada prueba); una que las esperaba y no las vio lo dice."""
+    today = datetime.date.today().isoformat()
+    if seen:
+        return None if (current or "").startswith("sí") else "sí (%s, %s)" % (source, today)
+    return "sin medir: la %s del %s no trajo ninguna" % (source, today)
 
 
 def cmd_capturar(args, plan=None):
@@ -3685,9 +3848,11 @@ def cmd_capturar(args, plan=None):
             # o, con --calentamiento 0, el de la primera corrida). Fuera de toda traza.
             settle(WARMUP_SETTLE_S)
     if args.rehacer and not args.prueba:
+        had_runs = measured_runs(folder, read_phases(folder) if isinstance(read_phases(folder), dict) else {}, phase,
+                                 flow_name)
         discard_phase(folder, csv_path, phase, flow_name)
         forget_notes(folder, phase, flow_name)
-        progress["descartada"] = True
+        progress["descartada"] = bool(had_runs)
         guide()
         known = known_metrics(csv_path, flow_name)
     warmups = 0 if args.prueba else args.calentamiento
@@ -3737,7 +3902,7 @@ def cmd_capturar(args, plan=None):
             record["entorno"] = environment
         record.update(build)
         if partial:  # la tanda se cortó: `siguiente` ofrece completar la fase antes de darla por medida
-            record["faltan"] = {"flujo": flow_name, "corridas": target - valid}
+            record["faltan"] = {flow_name: target - valid}
         write_phase(folder, phase, record, flow_name)
 
     def mark_invalid(reason):
@@ -3925,7 +4090,17 @@ def cmd_capturar(args, plan=None):
                       "instrumentación entre investigaciones (perf.py instrumentar --actualizar): HttpSectionName acorta "
                       "desde la izquierda y conserva el final de la ruta (setup.md · Nombres de endpoint largos)"
                       % (len(cut), SECTION_NAME_MAX, cut[0][-40:]))
+            args.resultado = {"http": info.get("http", 0), "sin_red": bool(gap)}  # lo lee humo
             if args.plan:
+                seen = info.get("http", 0) > 0
+                if seen or gap:  # una prueba que ve la red, o que la esperaba y no la vio, deja el estado al día
+                    agents = read_agents(root)
+                    section = performance_section(agents) if agents is not None else None
+                    current = agents_state(agents[section[0]:section[1]]).get("secciones HTTP") if section else None
+                    state = http_state(current, seen, "corrida de prueba")
+                    note = update_agents_state(root, http=state) if state else ""
+                    if note:
+                        print(note)
                 pending = test_run_warnings(root, hz, info, gap, unwired)
                 save_test_warnings(folder, flow_name, pending)
                 if pending:
@@ -5991,8 +6166,30 @@ def cmd_humo(args):
                                  hz=args.hz, recorrido=None, tp=args.tp, serial=serial, forzar=args.forzar, config=None,
                                  memoria=False, sin_compilar=False, compilacion=None, rehacer=False, calentamiento=0, preparar=None,
                                  corridas=1, sin_comprimir=False, red_obligatoria=True, sin_red=args.sin_red)
-    cmd_capturar(capture, plan)
     root = project_root(folder).resolve()
+    today = datetime.date.today().isoformat()
+    try:
+        cmd_capturar(capture, plan)
+    except PerfError as error:
+        # El bloque de AGENTS.md no puede seguir diciendo que el humo pasó (o que hay red) si esta corrida no lo confirma.
+        # Una precondición que no es del setup (sin dispositivo, la app sin instalar) no es un humo fallido: no terminó.
+        no_network = "RED SIN MEDIR" in str(error)
+        outcome = "falló" if no_network or not isinstance(error, Precondicion) else "no terminó"
+        note = update_agents_state(root, humo="%s el %s" % (outcome, today),
+                                   http="sin medir: la prueba de humo del %s no trajo ninguna" % today if no_network else None)
+        if note:
+            print(note)
+        raise
+    result = getattr(capture, "resultado", None) or {}
+    # Un humo que no vio la red (--sin-red, o sin instrumentación de red) no pisa un "sí" que ya anotó otra corrida.
+    agents = read_agents(root)
+    section = performance_section(agents) if agents is not None else None
+    known = (agents_state(agents[section[0]:section[1]]).get("secciones HTTP") or "") if section else ""
+    http = ("sí (prueba de humo, %s)" % today if result.get("http") else None if known.startswith("sí") else
+            "no exigidas (humo --sin-red, %s)" % today if args.sin_red else None)
+    note = update_agents_state(root, humo="pasó el %s" % today, http=http)
+    if note:
+        print(note)
     nuevo = ["nuevo", "--receta", "arranque-frio", "--paquete", args.paquete, "--serial", serial, "--carpeta",
              "reports/perf/arranque-frio/%s" % datetime.date.today().isoformat()]
     if args.instalar:

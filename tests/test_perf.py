@@ -6120,7 +6120,7 @@ class GuidedFailureTest(DeviceBase):
         self.assertNotIn("--corridas 5", steps[0])
         self.assertIn("--rehacer", steps[1])  # la otra salida: repetir la fase entera
         self.assertEqual(self.phases()["antes"]["corridas"], 2)  # las válidas quedan con su registro
-        self.assertEqual(self.phases()["antes"]["faltan"], {"flujo": "home", "corridas": 3})
+        self.assertEqual(self.phases()["antes"]["faltan"], {"home": 3})
         out = self.ok("siguiente", "--carpeta", self.plan.parent)  # la fase no se da por medida a medias
         self.assertIn("Siguiente · completar la fase antes, que se cortó (sin chat)", out)
         self.assertIn("--fase antes --corridas 3", out)
@@ -6149,8 +6149,32 @@ class GuidedFailureTest(DeviceBase):
         self.assertFalse((self.plan.parent / "fases.json").exists())
         result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar", "--rehacer",
                               interruptible=True)
+        self.assertIn("sigue igual", result.stderr)  # --rehacer sin nada medido antes: no hubo nada que descartar
+        self.update_flow(recorrido="true")
+        self.capture("--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.update_flow(recorrido="kill -INT $PPID; sleep 0.3")
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar", "--rehacer",
+                              interruptible=True)
         self.assertIn("ya se descartaron por --rehacer", result.stderr)  # con --rehacer lo anterior ya no está
         self.assertNotIn("sigue igual", result.stderr)
+
+    def test_lo_que_falta_de_una_tanda_cortada_se_guarda_por_flujo(self):
+        folder = self.dir / "fases"
+        folder.mkdir()
+        base = {"fecha": "2026-11-09T10:00:00", "corridas": 3}
+        perf.write_phase(folder, "antes", dict(base, faltan={"a": 7}), "a")
+        perf.write_phase(folder, "antes", dict(base, corridas=10), "b")  # otro flujo completo: lo de 'a' sigue pendiente
+        self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"a": 7})
+        perf.write_phase(folder, "antes", dict(base, faltan={"b": 2}), "b")
+        self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"a": 7, "b": 2})
+        plan = {"paquete": PKG, "flujos": {"a": {"recorrido": "true"}, "b": {"recorrido": "true"}}}
+        self.assertIn("completar la fase antes", perf.next_steps(folder, plan, "a")[0])
+        self.assertIn("--corridas 2", perf.next_steps(folder, plan, "b")[1][0]["texto"])
+        perf.write_phase(folder, "antes", dict(base, corridas=7), "a")  # 'a' termina: solo queda lo de 'b'
+        self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"b": 2})
+        write(folder / "metricas.csv", HEADER + rows("antes", "a", "m", [1] * 10) + rows("antes", "b", "m", [1] * 8))
+        perf.forget_flow(folder, folder / "metricas.csv", "antes", "b")  # --rehacer de 'b': lo que le faltaba ya no vale
+        self.assertNotIn("faltan", perf.read_phases(folder)["antes"])
 
     def test_tres_invalidas_seguidas_y_corridas_insuficientes_dan_el_comando_para_completar(self):
         self.tp_outputs(GOOD, LOGIN, LOGIN, LOGIN)
@@ -6619,3 +6643,204 @@ class NoCommitLineTest(DeviceBase):
             self.assertTrue(blocks, path)
             for body in blocks:
                 self.assertTrue(body.strip().endswith(self.LINE), (path.name, body))
+
+
+class ProjectAgentsTest(DeviceBase):
+    """El AGENTS.md del proyecto: `siguiente` avisa si falta `## DoD` antes de una sesión 3, y perf.py mantiene un
+    bloque corto con el estado del setup dentro de la sección de rendimiento, sin tocar nada más."""
+
+    AGENTS = ("# Proyecto\n\n## Comandos\n\n- `./gradlew test`\n\n## Rendimiento\n\n- applicationId: `com.ejemplo.app`\n"
+              "- setup listo\n\n## Git\n\n- Conventional Commits\n")
+
+    def approved(self, **extra):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan.update(extra)
+        plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "estado": "aprobada"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5},
+                                                            "control": {"fecha": "2026-11-05T10:20:00", "corridas": 5}}))
+
+    def test_antes_de_la_sesion_3_avisa_si_falta_dod_e_imprime_una_plantilla(self):
+        self.approved(instalar="./gradlew :app:installProfiling")
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("Siguiente · sesión 3 · M1", out)
+        self.assertIn("AGENTS.md no tiene `## DoD`: la sesión 3 corre", out)
+        self.assertIn("\n  ## DoD\n", out)
+        template = "".join(line + "\n" for line in out.splitlines() if line.startswith(("  ## DoD", "  1. `", "  2. `")))
+        write(self.dir / "AGENTS.md", self.AGENTS + "\n" + template)  # pegada tal cual, con su sangría, el aviso se va
+        self.assertNotIn("no tiene `## DoD`", self.ok("siguiente", "--carpeta", self.plan.parent))
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.assertIn("./gradlew :<módulo>:tasks --all | grep UnitTest", out)
+        self.assertIn("`./gradlew -q :app:assembleProfiling`: compila la variante medida", out)  # del 'instalar' del plan
+        for tool in ("ktlint", "detekt", "sonar"):
+            self.assertNotIn(tool, out.lower())  # nunca agrega herramientas
+        self.assertLess(out.index("AGENTS.md no tiene `## DoD`"), out.index("1. Chat nuevo"))  # el aviso va antes del chat
+        self.assertIn("sesión 3, aplica M1", out)
+
+    def test_con_dod_no_avisa_y_sin_agents_lo_dice(self):
+        self.approved()
+        write(self.dir / "AGENTS.md", self.AGENTS + "\n## DoD\n\n1. `./gradlew test`\n")
+        self.assertNotIn("## DoD", self.ok("siguiente", "--carpeta", self.plan.parent))
+        (self.dir / "AGENTS.md").unlink()
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("No hay AGENTS.md en ", out)
+        self.assertIn("./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>", out)  # sin 'instalar', la plantilla genérica
+        self.assertIsNone(perf.dod_notice(self.dir, {}) if (self.dir / "AGENTS.md").exists() else None)
+        for heading in ("## DoD", "### Definition of Done", "## Definición de hecho", "## 5. DoD"):
+            write(self.dir / "AGENTS.md", "# P\n\n%s\n\n- algo\n" % heading)
+            self.assertIsNone(perf.dod_notice(self.dir, {}), heading)
+        write(self.dir / "AGENTS.md", "# P\n\n```markdown\n## DoD\n```\n")  # dentro de un bloque de código no cuenta
+        self.assertIsNotNone(perf.dod_notice(self.dir, {}))
+
+    def test_fuera_de_la_sesion_3_no_avisa(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.assertNotIn("## DoD", self.ok("siguiente", "--carpeta", self.plan.parent))
+
+    def test_humo_deja_el_estado_del_setup_en_la_seccion_de_rendimiento_y_nada_mas(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        write(self.dir / "app/src/main/kotlin/PerfHooks.kt", "object PerfHooks\n")
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        today = datetime.date.today().isoformat()
+        self.assertIn("✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento", out)
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        line = ("- Estado del setup (lo mantiene `perf.py`: no lo edites): instrumentación en el repo: sí · prueba de humo: "
+                "pasó el %s · secciones HTTP: sí (prueba de humo, %s) · hb-performance %s" % (today, today, perf.VERSION))
+        self.assertIn("<!-- hb-performance:estado -->\n%s\n<!-- /hb-performance:estado -->\n" % line, text)
+        before, after = self.AGENTS.split("## Git")
+        self.assertTrue(text.startswith(before.rstrip("\n")))  # lo de antes de la sección y la sección misma, intactos
+        self.assertTrue(text.endswith("## Git" + after))  # lo que sigue a la sección, intacto
+        self.assertLess(text.index("hb-performance:estado"), text.index("## Git"))
+        self.ok("humo", "--paquete", PKG)  # otra vez: un solo bloque, el mismo
+        again = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual(again, text)
+        self.assertEqual(again.count("<!-- hb-performance:estado -->"), 1)
+
+    def test_un_humo_que_falla_o_sin_red_no_deja_un_estado_viejo(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.tp_outputs(GOOD)
+        self.ok("humo", "--paquete", PKG)
+        self.tp_outputs(LOGIN.replace('"frame",0,16000000,0,"None"\n', ""))  # una corrida que no vale
+        (self.dir / "tp.count").unlink()
+        result = self.perf("humo", "--paquete", PKG)
+        self.assertNotEqual(result.returncode, 0)
+        today = datetime.date.today().isoformat()
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("prueba de humo: falló el %s" % today, text)
+        self.assertNotIn("pasó el", text)
+        no_http = GOOD.replace('"seccion",0,300000000,0,"HTTP GET items/{id}"\n', "").replace(
+            '"seccion",100000000,300000000,0,"HTTP GET items/{id}"\n', "")
+        self.tp_outputs(no_http)
+        (self.dir / "tp.count").unlink()
+        write(self.dir / "AGENTS.md", self.AGENTS)  # un proyecto donde ninguna corrida vio la red
+        self.ok("humo", "--paquete", PKG, "--sin-red")
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("prueba de humo: pasó el %s · secciones HTTP: no exigidas (humo --sin-red, %s)" % (today, today), text)
+
+    def test_sin_seccion_de_rendimiento_no_la_crea_y_lo_dice(self):
+        original = "# Proyecto\n\n## Comandos\n\n- `./gradlew test`\n"
+        write(self.dir / "AGENTS.md", original)
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn("AGENTS.md no tiene una sección de rendimiento (## Rendimiento o ## Performance): no la creo", out)
+        self.assertEqual((self.dir / "AGENTS.md").read_text(encoding="utf-8"), original)
+        (self.dir / "AGENTS.md").unlink()
+        self.assertIn("No hay AGENTS.md en ", self.ok("humo", "--paquete", PKG))
+        self.assertFalse((self.dir / "AGENTS.md").exists())
+
+    def test_la_corrida_de_prueba_anota_la_red_una_vez_y_conserva_lo_demas_del_bloque(self):
+        english = self.AGENTS.replace("## Rendimiento", "## Performance")
+        write(self.dir / "AGENTS.md", english + "\n")
+        self.assertEqual(perf.update_agents_state(self.dir, humo="pasó el 2026-11-01", http="sin dato"),
+                         "✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento (instrumentación en el repo: "
+                         "no (no encontré PerfHooks.kt) · prueba de humo: pasó el 2026-11-01 · secciones HTTP: sin dato)")
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("✔ AGENTS.md: estado del setup actualizado", out)
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        today = datetime.date.today().isoformat()
+        self.assertIn("prueba de humo: pasó el 2026-11-01 · secciones HTTP: sí (corrida de prueba, %s)" % today, text)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")  # ya dice que sí: no se reescribe en cada prueba
+        self.assertNotIn("AGENTS.md", out)
+        self.assertEqual((self.dir / "AGENTS.md").read_text(encoding="utf-8"), text)
+
+    def test_no_toca_nada_fuera_del_bloque_con_fences_encabezados_ajenos_ni_crlf(self):
+        fenced = ("# P\n\n## Reglas\n\n### No degradar el rendimiento\n\n- regla\n\n## Rendimiento\n\n```bash\n"
+                  "# instala el build\n./gradlew :app:installProfiling\n```\n\n## Git\n\n- c\n")
+        write(self.dir / "AGENTS.md", fenced)
+        self.assertIn("✔", perf.update_agents_state(self.dir, humo="pasó el 2026-11-01"))
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        block_at = text.index("<!-- hb-performance:estado -->")
+        self.assertLess(text.index("```\n\n<!--"), block_at)  # después del bloque de código, no dentro
+        self.assertLess(text.index("## Rendimiento"), block_at)  # en la sección que se llama así, no en la regla que la menciona
+        self.assertLess(block_at, text.index("## Git"))
+        self.assertEqual(text.replace(text[block_at:text.index("## Git")], ""), fenced)  # lo demás, byte por byte
+        self.assertIsNone(perf.performance_section("# P\n\n## Reglas\n\n### No degradar el rendimiento\n\n- regla\n"))
+        crlf = self.AGENTS.replace("\n", "\r\n")
+        with open(str(self.dir / "AGENTS.md"), "w", encoding="utf-8", newline="") as handle:
+            handle.write(crlf)
+        self.assertIn("✔", perf.update_agents_state(self.dir, humo="pasó el 2026-11-01"))
+        with open(str(self.dir / "AGENTS.md"), encoding="utf-8", newline="") as handle:
+            text = handle.read()
+        self.assertNotIn("\n", text.replace("\r\n", ""))  # el archivo sigue entero en CRLF, también el bloque
+        self.assertTrue(text.endswith("## Git\r\n\r\n- Conventional Commits\r\n"))
+        self.assertEqual(perf.update_agents_state(self.dir, humo="pasó el 2026-11-01"), "")  # idempotente
+        loose = "# P\n\n## Rendimiento\n\n- a\n<!-- hb-performance:estado -->\n"  # un marcador de apertura suelto
+        write(self.dir / "AGENTS.md", loose)
+        perf.update_agents_state(self.dir, humo="pasó el 2026-11-01")
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual((text.count("<!-- hb-performance:estado -->"), text.count("<!-- /hb-performance:estado -->")), (1, 1))
+
+    def test_un_agents_que_no_se_puede_escribir_no_rompe_humo_ni_tapa_su_resultado(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        (self.dir / "AGENTS.md").chmod(0o444)
+        if os.access(str(self.dir / "AGENTS.md"), os.W_OK):
+            self.skipTest("este usuario escribe aunque el archivo sea de solo lectura")
+        write(self.dir / "reports/perf/setup/pedido.json", json.dumps({"flujo": "de la lista al detalle", "llegar": ""}))
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn("⚠ No pude escribir ", out)
+        self.assertIn("Usa hb-performance: medir de la lista al detalle", out)  # el paso siguiente sale igual
+        self.assertEqual((self.dir / "AGENTS.md").read_text(encoding="utf-8"), self.AGENTS)
+
+    def test_un_humo_sin_red_no_pisa_la_red_que_ya_vio_otra_corrida_y_una_precondicion_no_es_un_humo_fallido(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        perf.update_agents_state(self.dir, humo="pasó el 2026-11-01", http="sí (corrida de prueba, 2026-11-02)")
+        no_http = GOOD.replace('"seccion",0,300000000,0,"HTTP GET items/{id}"\n', "").replace(
+            '"seccion",100000000,300000000,0,"HTTP GET items/{id}"\n', "")
+        self.tp_outputs(no_http)
+        self.ok("humo", "--paquete", PKG, "--sin-red")
+        self.assertIn("secciones HTTP: sí (corrida de prueba, 2026-11-02)", (self.dir / "AGENTS.md").read_text(encoding="utf-8"))
+        self.env["FAKE_THERMAL"] = "3"  # el dispositivo está caliente: el humo no llegó a correr
+        self.assertEqual(self.perf("humo", "--paquete", PKG).returncode, 3)
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("prueba de humo: no terminó el %s" % datetime.date.today().isoformat(), text)
+        self.assertNotIn("falló", text)
+
+    def test_la_seccion_termina_en_el_siguiente_encabezado_de_su_nivel_o_superior(self):
+        text = "# P\n\n## Rendimiento\n\n- a\n\n### Detalle\n\n- b\n\n## Git\n\n- c\n"
+        start, end = perf.performance_section(text)
+        self.assertEqual(text[start:end], "\n- a\n\n### Detalle\n\n- b\n\n")
+        self.assertIsNone(perf.performance_section("# P\n\n## Comandos\n"))
+        last = "# P\n\n## Performance\n\n- a\n"
+        self.assertEqual(perf.performance_section(last), (last.index("\n- a"), len(last)))
+        self.assertEqual(perf.agents_state("x <!-- hb-performance:estado -->\n- Estado: prueba de humo: pasó · secciones HTTP: sí "
+                                           "(x) · hb-performance 0.10.0\n<!-- /hb-performance:estado -->"),
+                         {"prueba de humo": "pasó", "secciones HTTP": "sí (x)"})
+        self.assertIsNone(perf.http_state("sí (prueba de humo, 2026-11-01)", True, "corrida de prueba"))
+        self.assertIn("sin medir", perf.http_state("sí (x)", False, "corrida de prueba"))
+
+
+class WarningShapesTest(PerfBase):
+    def test_formas_inesperadas_en_advertencias_json_no_rompen_ni_se_parten_en_caracteres(self):
+        write(self.dir / "advertencias.json", json.dumps({
+            "prueba": {"home": {"avisos": [{"tipo": "x", "texto": "dos\nlíneas", "donde": "app/Red.kt:10"}]}},
+            "capturar": {"antes": {"home": "un texto suelto"}}, "diagnostico": {"antes": {"home": 5}},
+            "invalidas": {"antes": {"home": {"motivo": "tres"}}}}))
+        lines = perf.warnings_lines(self.dir, {"flujos": {"home": {}}})
+        self.assertEqual(lines, ["Corrida de prueba (home): dos líneas", "Corridas inválidas en antes (home): 0 · 0 × motivo"])
+        write(self.dir / "advertencias.json", json.dumps({"diagnostico": {"antes": {"home": ["`x`: no medido"]}},
+                                                          "invalidas": {"antes": {"home": {"m": 1}}}}))
+        perf.forget_notes(self.dir, "antes", "home")  # --rehacer también olvida lo que el diagnóstico anotó de esas corridas
+        self.assertEqual(perf.warnings_lines(self.dir, {"flujos": {"home": {}}}), [])
