@@ -1,5 +1,5 @@
-# Captura completa para el diagnóstico: suma estados de los hilos, frecuencia y reposo de la CPU, binder y
-# base de datos. Pesa varias veces más que la base: úsala para entender una corrida anómala, no para medir.
+# Captura completa para el diagnóstico: suma quién despierta a cada hilo y por qué se bloquea, frecuencia y reposo
+# de la CPU, binder y base de datos. Pesa varias veces más que la base: úsala para entender una corrida anómala, no para medir.
 buffers { size_kb: 131072 fill_policy: RING_BUFFER }
 buffers { size_kb: 4096 fill_policy: RING_BUFFER }
 data_sources {
@@ -8,10 +8,18 @@ data_sources {
     ftrace_config {
       ftrace_events: "sched/sched_switch"
       ftrace_events: "sched/sched_waking"
+      # sched_blocked_reason: por qué se bloquea un hilo en estado D (la función del kernel y si es E/S). Con
+      # sched_waking, que dice quién despierta a cada hilo, responde bloqueo_hilo_principal. symbolize_ksyms pide los
+      # nombres de las funciones del kernel; si el dispositivo no los entrega, la consulta lo dice.
+      ftrace_events: "sched/sched_blocked_reason"
       ftrace_events: "sched/sched_process_exit"
       ftrace_events: "sched/sched_process_free"
       ftrace_events: "task/task_newtask"
       ftrace_events: "task/task_rename"
+      # binder_transaction y binder_transaction_received: con ellos trace_processor arma los slices "binder transaction"
+      # y "binder reply". Sin ellos, binder_hilo_principal sale vacía y se podría leer como "no hay IPC bloqueando".
+      ftrace_events: "binder/binder_transaction"
+      ftrace_events: "binder/binder_transaction_received"
       ftrace_events: "power/cpu_frequency"
       ftrace_events: "power/cpu_idle"
       atrace_categories: "gfx"
@@ -24,6 +32,7 @@ data_sources {
       atrace_categories: "binder_driver"
       atrace_categories: "database"
       atrace_apps: "{{PAQUETE}}"
+      symbolize_ksyms: true
     }
   }
 }

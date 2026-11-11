@@ -1,0 +1,149 @@
+{
+  "paquete": "com.example.app",
+  "serial": "emulator-5554",
+  "hz": 60,
+  "config": "base",
+  "compilacion": "completa",
+  "instalar": "./gradlew :app:installProfiling",
+  "modelos": {
+    "economico": "Haiku 5.5",
+    "intermedio": "Sonnet 5.5",
+    "diagnostico": "Sonnet 5.5",
+    "alto": "Opus 5.5"
+  },
+  "principales": [
+    "lista_a_detalle_ms",
+    "detalle hilo_max_ms"
+  ],
+  "flujos": {
+    "detalle": {
+      "pasos": [
+        "Partir en la lista con la sesión iniciada",
+        "Tocar el primer ítem",
+        "Esperar el contenido del detalle"
+      ],
+      "inicio": "MainActivity",
+      "invalidar_si": [
+        "SCREEN *Login*"
+      ],
+      "recorrido": "bash reports/perf/detalle/recorrido.sh",
+      "preparar": "maestro --device emulator-5554 test -e PERF_USUARIO=\"$PERF_USUARIO\" -e PERF_CLAVE=\"$PERF_CLAVE\" reports/perf/detalle/preparar.yaml > /dev/null 2>&1 && sleep 2",
+      "requiere_env": [
+        "PERF_USUARIO",
+        "PERF_CLAVE"
+      ],
+      "ventana": {
+        "desde": {
+          "marca": "NAV detalle",
+          "punto": "inicio",
+          "cual": "primera"
+        },
+        "hasta": {
+          "marca": "MARK detalle",
+          "punto": "fin",
+          "cual": "ultima"
+        },
+        "margen_ms": 300
+      },
+      "metricas_usuario": [
+        {
+          "nombre": "lista_a_detalle_ms",
+          "desde": {
+            "marca": "NAV detalle",
+            "punto": "inicio",
+            "cual": "primera"
+          },
+          "hasta": {
+            "marca": "MARK detalle",
+            "punto": "fin",
+            "cual": "ultima"
+          },
+          "familia": "e2e"
+        }
+      ],
+      "segmentos": [
+        {
+          "nombre": "detalle",
+          "desde": {
+            "marca": "NAV detalle",
+            "punto": "inicio",
+            "cual": "primera"
+          },
+          "hasta": {
+            "marca": "MARK detalle",
+            "punto": "fin",
+            "cual": "primera"
+          }
+        },
+        {
+          "nombre": "espera",
+          "desde": {
+            "marca": "MARK detalle",
+            "punto": "fin",
+            "cual": "primera"
+          },
+          "hasta": {
+            "marca": "MARK detalle",
+            "punto": "fin",
+            "cual": "ultima"
+          },
+          "solo_red": true
+        }
+      ],
+      "familias": {},
+      "metricas_sql": [],
+      "pausas": [
+        {
+          "desde": {
+            "marca": "MARK autorizar",
+            "punto": "inicio",
+            "cual": "primera"
+          },
+          "hasta": {
+            "marca": "MARK autorizado",
+            "punto": "inicio",
+            "cual": "primera"
+          }
+        }
+      ],
+      "duracion_max_s": 1200
+    }
+  },
+  "mejoras": [
+    {
+      "id": "M1",
+      "hallazgo": "H1",
+      "titulo": "Una sola carga del detalle",
+      "flujo": "detalle",
+      "metrica": "red_solapadas",
+      "esperado": "0 llamadas",
+      "prioridad": "alta",
+      "esfuerzo": "bajo",
+      "riesgo": "bajo",
+      "estado": "aplicada",
+      "aplicada_en": "2026-04-15T10:00:00"
+    },
+    {
+      "id": "M2",
+      "hallazgo": "H2",
+      "a_prueba": true,
+      "titulo": "Decodificar la imagen de cabecera fuera del hilo principal",
+      "hipotesis": "El slice largo al entrar al detalle es la decodificación de la imagen de cabecera: coincide con su primer frame",
+      "flujo": "detalle",
+      "metrica": "detalle hilo_max_ms",
+      "esperado": "≤ 16 ms",
+      "prioridad": "media",
+      "esfuerzo": "bajo",
+      "riesgo": "bajo",
+      "estado": "pendiente"
+    }
+  ],
+  "input_slices": "deliverInputEvent*",
+  "hilos_ajenos": [
+    {
+      "nombre": "servidor",
+      "patron": "^ktor-",
+      "familia": "e2e"
+    }
+  ]
+}

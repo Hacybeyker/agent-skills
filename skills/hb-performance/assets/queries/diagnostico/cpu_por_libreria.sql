@@ -1,5 +1,6 @@
 -- CPU muestreado (config cpu) por hilo, librería y función hoja; filtra hilos con --param HILO='patrón*'
 -- grupos: cpu
+-- requiere: ds:linux.perf
 WITH app AS (SELECT upid, pid, MAX(IFNULL(start_ts, 0), (SELECT start_ts FROM trace_bounds)) AS t0
              FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1),
 hilo AS (SELECT t.utid FROM thread t JOIN app ON t.upid = app.upid AND t.tid = app.pid),

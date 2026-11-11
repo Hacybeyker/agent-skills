@@ -1,5 +1,6 @@
 -- Qué hay adentro de los slices largos del hilo principal: los 15 hijos más largos y su slice de primer nivel
 -- grupos: base
+-- requiere: atrace:view atrace_apps
 WITH app AS (SELECT upid, pid, MAX(IFNULL(start_ts, 0), (SELECT start_ts FROM trace_bounds)) AS t0
              FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1),
 hilo AS (SELECT t.utid FROM thread t JOIN app ON t.upid = app.upid AND t.tid = app.pid),

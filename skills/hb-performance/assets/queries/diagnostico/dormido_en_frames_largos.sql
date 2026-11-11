@@ -1,5 +1,6 @@
 -- Dónde duerme el hilo principal dentro de los 3 doFrame más largos (esperas de más de 1 ms y el slice que las contiene)
 -- grupos: base
+-- requiere: ftrace:sched/sched_switch atrace:view
 WITH app AS (SELECT upid, pid, MAX(IFNULL(start_ts, 0), (SELECT start_ts FROM trace_bounds)) AS t0
              FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1),
 hilo AS (SELECT t.utid FROM thread t JOIN app ON t.upid = app.upid AND t.tid = app.pid),

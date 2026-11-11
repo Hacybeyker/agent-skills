@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -457,7 +458,7 @@ elif cmd.startswith('echo "q='):
 '''
 
 FAKE_TP = r'''#!{python}
-import os, re, sys
+import json, os, re, sys
 args = sys.argv[1:]
 if args[:2] == ["query", "--help"]:
     print("Usage: trace_processor query -f FILE TRACE" if os.environ.get("FAKE_TP_VIEJO") else
@@ -474,13 +475,18 @@ open(counter, "w").write(str(n + 1))
 outputs = open(os.environ["FAKE_TP_OUT"]).read().split("===\n")
 out = outputs[min(n, len(outputs) - 1)]
 names = re.findall(r"SELECT '([^']+)' AS hbperf_marker;", sql)
+if os.environ.get("FAKE_TP_FALLA") in names:
+    sys.stderr.write("no such column: blocked_function\n")
+    sys.exit(1)
 if not names:
     sys.stdout.write(out)
 else:
     chunks = []
     for name in names:
         chunks.append('"hbperf_marker"\n"%s"\n' % name)
-        chunks.append(out if name == "metricas" else os.environ.get("FAKE_TP_OTRA", '"nombre","valor"\n"x",1\n'))
+        own = json.loads(os.environ.get("FAKE_TP_POR_CONSULTA", "{{}}"))
+        chunks.append(out if name == "metricas" else own[name] if name in own
+                      else os.environ.get("FAKE_TP_OTRA", '"nombre","valor"\n"x",1\n'))
     sys.stdout.write("\n".join(c.rstrip("\n") + "\n" for c in chunks))
 '''
 
@@ -2668,7 +2674,7 @@ class RedoFlowTest(DeviceBase):
         self.assertEqual(phase["entorno"]["frames"], "no")  # el entorno de 'detalle' no se pierde
         self.assertEqual(len(phase["hz_corridas"]), 4)
         self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2", "3"], ["1"]))
-        kept = sorted(p.name for p in (self.folder / "antes").iterdir())
+        kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE)
         self.assertEqual(kept, ["detalle_1.perfetto-trace.gz", "detalle_2.perfetto-trace.gz", "detalle_3.perfetto-trace.gz",
                                 "home_1.perfetto-trace.gz"])
         discarded = next(p for p in self.folder.iterdir() if p.name.startswith("antes-descartada-"))
@@ -5095,3 +5101,479 @@ class OrphanTraceTest(DeviceBase):
         self.assertIn("otra versión de hb-performance (anterior a 0.9.0", out)
         self.assertEqual(json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))["antes"]["skill"],
                          "anterior a 0.9.0")
+
+
+EMPTY_TABLE = '"a"\n'
+FIXTURE_TRACES = ROOT / "tests" / "fixtures" / "hb-performance-trazas"
+REAL_TP = shutil.which("trace_processor") or shutil.which("trace_processor_shell")
+
+
+def skill_config(name):
+    return perf.config_record(perf.ASSETS / "perfetto" / ("%s.pbtx" % name))
+
+
+class QueryRequirementsTest(unittest.TestCase):
+    """Cada consulta declara qué fuentes necesita y las configuraciones de su grupo las capturan: una consulta no puede
+    salir vacía solo porque la configuración no graba su dato."""
+
+    def test_las_fuentes_de_una_configuracion_se_leen_del_pbtx_sin_los_comentarios(self):
+        sources = perf.config_sources('data_sources { config { name: "linux.ftrace"\n  ftrace_config {\n'
+                                      '  ftrace_events: "sched/sched_switch"  # comentario: "x/y"\n'
+                                      '  # ftrace_events: "binder/binder_transaction"\n  atrace_categories: "view"\n'
+                                      '  atrace_apps: "com.example.app"\n}}}\n'
+                                      'data_sources { config { name: "android.surfaceflinger.frametimeline" } }\n')
+        self.assertEqual(sources, ["atrace:view", "atrace_apps", "ds:android.surfaceflinger.frametimeline", "ds:linux.ftrace",
+                                   "ftrace:sched/sched_switch"])
+
+    def test_base_y_cpu_capturan_binder_y_completa_la_razon_de_bloqueo(self):
+        binder = {"ftrace:binder/binder_transaction", "ftrace:binder/binder_transaction_received"}
+        for name in ("base", "cpu", "completa"):
+            self.assertLessEqual(binder, set(skill_config(name)["fuentes"]), name)
+        self.assertIn("ftrace:sched/sched_blocked_reason", skill_config("completa")["fuentes"])
+        self.assertIn("ftrace:sched/sched_waking", skill_config("completa")["fuentes"])
+        for name in ("base", "cpu"):  # nada pesado en base: la razón de bloqueo y los wakeups son solo de completa
+            self.assertNotIn("ftrace:sched/sched_blocked_reason", skill_config(name)["fuentes"])
+            self.assertNotIn("ftrace:sched/sched_waking", skill_config(name)["fuentes"])
+
+    def test_lo_unico_que_cambia_en_base_son_los_dos_eventos_de_binder(self):
+        events = [s for s in skill_config("base")["fuentes"] if s.startswith("ftrace:")]
+        self.assertEqual(events, ["ftrace:binder/binder_transaction", "ftrace:binder/binder_transaction_received",
+                                  "ftrace:sched/sched_process_exit", "ftrace:sched/sched_process_free",
+                                  "ftrace:sched/sched_switch", "ftrace:task/task_newtask", "ftrace:task/task_rename"])
+        self.assertEqual([s for s in skill_config("base")["fuentes"] if s.startswith("ds:")],
+                         ["ds:android.surfaceflinger.frametimeline", "ds:linux.ftrace", "ds:linux.process_stats"])
+
+    def test_cada_consulta_declara_sus_fuentes_y_las_configuraciones_de_su_grupo_las_capturan(self):
+        configs = {name: set(skill_config(name)["fuentes"]) for name in perf.SKILL_CONFIGS}
+        catalog = perf.query_catalog()
+        self.assertGreaterEqual(len(catalog), 18)
+        for name, _, groups, sql in catalog:
+            requires = perf.query_requires(sql)
+            self.assertTrue(requires, "%s no declara '-- requiere:'" % name)
+            # cpu y completa son capturas de diagnóstico; el resto corre sobre las trazas de las fases, que se miden
+            # con base (y cpu y completa capturan todo lo de base)
+            needed = [g for g in groups if g in ("cpu", "completa")] or ["base", "cpu", "completa"]
+            for config in needed:
+                self.assertEqual([s for s in requires if s not in configs[config]], [],
+                                 "%s (grupos %s) pide fuentes que %s.pbtx no captura" % (name, groups, config))
+        signal = (perf.ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
+        self.assertEqual([s for s in perf.query_requires(signal) if s not in configs["base"]], [])
+
+    def test_cpu_y_completa_capturan_todo_lo_de_base(self):
+        base = set(skill_config("base")["fuentes"])
+        for name in ("cpu", "completa"):
+            self.assertLessEqual(base, set(skill_config(name)["fuentes"]), name)
+
+    def test_que_configuraciones_capturan_una_fuente(self):
+        self.assertEqual(perf.configs_with(["ds:linux.perf"]), ["cpu"])
+        self.assertEqual(perf.configs_with(["ftrace:sched/sched_blocked_reason"]), ["completa"])
+        self.assertEqual(perf.configs_with(["ftrace:no/existe"]), [])
+
+
+class TraceConfigTest(DeviceBase):
+    """La configuración con la que se grabó cada traza queda registrada, y las consultas se validan contra ella."""
+
+    def capture(self, *extra):
+        return self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar", *extra)
+
+    def test_capturar_registra_la_configuracion_junto_a_la_traza_y_en_fases_json(self):
+        self.tp_outputs(GOOD)
+        self.capture("--fase", "antes", "--corridas", "2")
+        folder = self.plan.parent
+        base = skill_config("base")
+        for run in (1, 2):
+            config = perf.trace_config(folder / "antes" / ("home_%d.perfetto-trace.gz" % run))
+            self.assertEqual((config["nombre"], config["hash"], config["fuentes"]), ("base", base["hash"], base["fuentes"]))
+            self.assertEqual(config["instalada"], "2026-11-05 10:00:00")
+        phases = perf.read_phases(folder)
+        self.assertEqual(phases["antes"]["configs"], ["base@%s" % base["hash"]])
+        self.assertEqual(phases["antes"]["flujos"]["home"]["configs"], ["base@%s" % base["hash"]])
+        self.capture("--prueba", "--config", "cpu")
+        self.assertEqual(perf.trace_config(folder / "prueba" / "home_1.perfetto-trace.gz")["nombre"], "cpu")
+        self.assertIsNone(perf.trace_config(folder / "antes" / "home_9.perfetto-trace.gz"))  # sin registro: desconocida
+        self.assertIsNone(perf.trace_config(self.dir / "suelta.perfetto-trace"))
+
+    def test_una_configuracion_propia_se_registra_con_su_nombre_y_sus_fuentes(self):
+        self.tp_outputs(GOOD)
+        write(self.plan.parent / "mia.pbtx", 'data_sources { config { name: "linux.ftrace" ftrace_config {\n'
+                                             '  ftrace_events: "sched/sched_switch"\n  atrace_apps: "{{PAQUETE}}"\n} } }\n')
+        self.capture("--prueba", "--config", "mia.pbtx")
+        config = perf.trace_config(self.plan.parent / "prueba" / "home_1.perfetto-trace.gz")
+        self.assertEqual((config["nombre"], config["fuentes"]),
+                         ("mia.pbtx", ["atrace_apps", "ds:linux.ftrace", "ftrace:sched/sched_switch"]))
+
+    def test_en_android_11_la_configuracion_va_sin_los_campos_que_no_conoce_y_frametimeline_es_no_medido(self):
+        completa = (perf.ASSETS / "perfetto" / "completa.pbtx").read_text(encoding="utf-8")
+        self.assertIn("symbolize_ksyms: true", perf.config_for_sdk(completa, 31))
+        self.assertNotIn("symbolize_ksyms:", perf.config_for_sdk(completa, 30))
+        self.assertIn("sched/sched_blocked_reason", perf.config_for_sdk(completa, 29))
+        self.tp_outputs(GOOD)
+        sent = self.dir / "enviada.pbtx"
+        self.env.update({"FAKE_SDK": "30", "FAKE_PERFETTO_CONFIG": str(sent)})
+        self.capture("--prueba", "--config", "completa")
+        self.assertNotIn("symbolize_ksyms:", sent.read_text(encoding="utf-8"))
+        self.assertIn("sched/sched_blocked_reason", sent.read_text(encoding="utf-8"))
+        trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        self.assertEqual(perf.trace_config(trace)["no_disponibles"],
+                         {"ds:android.surfaceflinger.frametimeline": "FrameTimeline es de Android 12 o superior"})
+        out = self.ok("consulta", trace, "jank_por_tipo")
+        self.assertIn("no medido: el dispositivo no entrega ds:android.surfaceflinger.frametimeline (FrameTimeline es de "
+                      "Android 12 o superior)", out)
+        self.assertNotIn("--config", out)  # ninguna configuración lo arregla
+        self.env["FAKE_SDK"] = "34"
+        self.capture("--prueba", "--config", "completa")
+        self.assertIn("symbolize_ksyms: true", sent.read_text(encoding="utf-8"))
+        self.assertEqual(perf.trace_config(trace)["no_disponibles"], {})
+
+    def test_consulta_dice_no_medido_sin_correr_la_consulta_si_la_configuracion_no_captura_la_fuente(self):
+        self.tp_outputs(GOOD)
+        self.capture("--prueba")
+        trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        (self.dir / "tp.sql").unlink()
+        out = self.ok("consulta", trace, "cpu_por_libreria")
+        self.assertIn("no medido: la configuración base no captura ds:linux.perf", out)
+        self.assertIn("No quiere decir que no ocurra", out)
+        self.assertIn("--config cpu", out)
+        self.assertFalse((self.dir / "tp.sql").exists())  # ni siquiera se corrió
+        out = self.ok("consulta", trace, "bloqueo_hilo_principal")
+        self.assertIn("no medido: la configuración base no captura ftrace:sched/sched_waking, "
+                      "ftrace:sched/sched_blocked_reason", out)
+        self.assertIn("--config completa", out)
+
+    def test_consulta_distingue_medido_sin_casos_de_configuracion_desconocida(self):
+        self.tp_outputs(GOOD)
+        self.capture("--prueba")
+        trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        self.tp_outputs(EMPTY_TABLE)
+        (self.dir / "tp.count").unlink()
+        out = self.ok("consulta", trace, "binder_hilo_principal")
+        self.assertIn("Medido y sin casos: la configuración base captura lo que pide la consulta "
+                      "(ftrace:binder/binder_transaction, ftrace:binder/binder_transaction_received)", out)
+        (self.plan.parent / "prueba" / perf.CONFIG_FILE).unlink()  # como una traza de una versión anterior
+        out = self.ok("consulta", trace, "binder_hilo_principal")
+        self.assertIn("configuración desconocida", out)
+        self.assertIn("no se puede afirmar que no ocurra", out)
+        self.assertNotIn("Medido y sin casos", out)
+        out = self.ok("consulta", trace, "--sql", "SELECT 1 AS a WHERE 0")  # una consulta propia no declara fuentes
+        self.assertNotIn("configuración", out)
+
+    def startup_folder(self, registered=True, config="base"):
+        folder = self.plan.parent
+        write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["hilo_max_ms"], "flujos": {
+            "home": {"inicio": "MainActivity", "recorrido": "true"}}}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "hilo_max_ms", [40, 50, 45]))
+        for run in (1, 2, 3):
+            name = "home_%d.perfetto-trace.gz" % run
+            write(folder / "antes" / name, "x")
+            if registered:
+                perf.save_trace_config(folder / "antes", name, skill_config(config), "2026-11-05 10:00:00")
+        return folder
+
+    def test_diagnostico_separa_medido_sin_casos_de_no_medido(self):
+        folder = self.startup_folder()
+        self.env["FAKE_TP_OTRA"] = EMPTY_TABLE
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("_Medido y sin casos (la configuración de la traza captura lo que la consulta necesita y no hubo "
+                      "filas): ", md)
+        measured = md.split("_Medido y sin casos")[1].split("\n")[0]
+        self.assertIn("binder_hilo_principal", measured)
+        self.assertIn("contencion_locks", measured)
+        self.assertNotIn("cpu_por_libreria", measured)
+        self.assertNotIn("bloqueo_hilo_principal", measured)
+        self.assertIn("_`cpu_por_libreria`: no medido: la configuración base no captura ds:linux.perf. No quiere decir que no "
+                      "ocurra._", md)
+        self.assertNotIn("bloqueo_hilo_principal", md)  # sin señal de espera, la captura completa ni se menciona
+        self.assertIn("capturar --prueba --config cpu", md)  # la pista de siempre para atribuir el CPU a funciones
+        self.assertNotIn("configuración desconocida", md)
+        sql = (self.dir / "tp.sql").read_text(encoding="utf-8")
+        self.assertNotIn("perf_sample", sql)  # lo no medido no se corre
+        self.assertNotIn("blocked_function", sql)
+        self.assertIn("binder transaction", sql)
+
+    def test_diagnostico_con_solo_consultas_no_medidas_no_llama_a_trace_processor_y_lo_dice(self):
+        folder = self.startup_folder()
+        self.tp_outputs('"x"\n1\n')
+        out = self.ok("diagnostico", "--carpeta", folder, "--consultas", "cpu_por_libreria,bloqueo_hilo_principal")
+        self.assertFalse((self.dir / "tp.sql").exists())  # un lote vacío haría fallar a trace_processor
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("_`cpu_por_libreria`: no medido: la configuración base no captura ds:linux.perf.", md)
+        self.assertIn("_`bloqueo_hilo_principal`: no medido: la configuración base no captura ftrace:sched/sched_waking, "
+                      "ftrace:sched/sched_blocked_reason.", md)  # pedida a propósito: se dice por qué no hay tabla
+        self.assertNotIn("completa)", out)
+
+    def test_diagnostico_con_trazas_sin_registro_dice_configuracion_desconocida_y_no_afirma_ausencia(self):
+        folder = self.startup_folder(registered=False)
+        self.env["FAKE_TP_OTRA"] = EMPTY_TABLE
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertNotIn("Medido y sin casos", md)
+        self.assertNotIn("no medido:", md)
+        unknown = md.split("_Sin tabla, con configuración desconocida")[1].split("\n")[0]
+        for name in ("binder_hilo_principal", "contencion_locks", "cpu_por_libreria", "bloqueo_hilo_principal"):
+            self.assertIn(name, unknown)
+        self.assertIn("no se afirma que no ocurra", unknown)
+        self.assertNotIn("blocked_function", (self.dir / "tp.sql").read_text(encoding="utf-8"))  # la de completa no se corre a ciegas
+
+    def test_diagnostico_sobre_una_captura_completa_corre_la_consulta_de_bloqueo(self):
+        folder = self.startup_folder(config="completa")
+        self.env["FAKE_TP_OTRA"] = '"estado","bloqueado_en"\n"D","filemap_fault (E/S)"\n'
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("`bloqueo_hilo_principal`", md)
+        self.assertIn("| D | filemap_fault (E/S) |", md)
+        self.assertIn("_`cpu_por_libreria`: no medido: la configuración completa no captura ds:linux.perf.", md)
+        self.assertNotIn("Captura pendiente", md)  # ya es la captura completa
+
+    def test_comparar_avisa_sin_bloquear_si_las_fases_no_usaron_la_misma_configuracion(self):
+        folder = self.dir / "cmp"
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "principales": ["hilo_max_ms"], "flujos": {"home": {}}}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "hilo_max_ms", [40, 41, 42, 43, 44])
+              + rows("despues", "home", "hilo_max_ms", [30, 31, 32, 33, 34]))
+
+        def phases(antes, despues):
+            write(folder / "fases.json", json.dumps({
+                "antes": dict({"fecha": "2026-11-05T10:00:00", "corridas": 5}, **({"configs": antes} if antes else {})),
+                "despues": dict({"fecha": "2026-11-06T10:00:00", "corridas": 5}, **({"configs": despues} if despues else {}))}))
+            return self.ok("comparar", folder / "metricas.csv")
+
+        self.assertNotIn("configuración de Perfetto", phases(["base@aaa"], ["base@aaa"]))
+        self.assertNotIn("configuración de Perfetto", phases(None, None))  # versiones anteriores: sin el dato, sin aviso
+        out = phases(["base@aaa"], ["completa@bbb"])
+        self.assertIn("⚠ home: las fases no se midieron con la misma configuración de Perfetto (antes: base@aaa; despues: "
+                      "completa@bbb)", out)
+        self.assertIn("--rehacer", out)
+        self.assertIn("| home | hilo_max_ms |", out)  # no bloquea: la comparación sale igual
+        out = phases(None, ["base@aaa"])
+        self.assertIn("antes: desconocida; despues: base@aaa", out)
+        self.assertIn("medida con una versión anterior", out)
+
+    def test_sumar_corridas_a_una_fase_de_una_version_anterior_deja_la_configuracion_desconocida_a_la_vista(self):
+        folder = self.dir / "mezcla"
+        folder.mkdir()
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 3}}))
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T10:00:00", "corridas": 2, "configs": ["base@aaa"]})
+        self.assertEqual(perf.read_phases(folder)["antes"]["configs"], ["desconocida", "base@aaa"])
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T11:00:00", "corridas": 1, "configs": ["base@aaa"]})
+        self.assertEqual(perf.read_phases(folder)["antes"]["configs"], ["desconocida", "base@aaa"])
+
+
+class BlockedMainThreadTest(DeviceBase):
+    """La captura con --config completa se pide solo cuando el hilo principal espera dentro de sus frames más largos."""
+
+    def folder_with(self, signal_row):
+        folder = self.plan.parent
+        write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["hilo_max_ms"], "flujos": {
+            "home": {"inicio": "MainActivity", "recorrido": "true"}}}))
+        write(folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "hilo_max_ms", [40]))
+        write(folder / "antes" / "home_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "antes", "home_1.perfetto-trace.gz", skill_config("base"))
+        self.env["FAKE_TP_POR_CONSULTA"] = json.dumps({
+            "senal_bloqueo": '"frames","frames_ms","espera_ms","max_d_ms"\n' + signal_row + "\n"})
+        self.env["FAKE_TP_OTRA"] = '"slice","ms"\n"Choreographer#doFrame 1",12.5\n'
+        self.tp_outputs('"x"\n1\n')
+        return folder
+
+    def test_la_senal_lee_la_fila_y_aplica_los_umbrales(self):
+        header = ["frames", "frames_ms", "espera_ms", "max_d_ms"]
+        self.assertEqual(perf.blocked_signal([(header, [["3", "100.0", "30.0", "2.5"]])]), (0.3, 2.5, 100.0))
+        self.assertIsNone(perf.blocked_signal([(header, [["0", "0.0", "0.0", "0.0"]])]))  # sin frames no hay señal
+        self.assertIsNone(perf.blocked_signal([]))
+        self.assertIsNone(perf.blocked_signal([(["otra"], [["1"]])]))
+        self.assertEqual((perf.BLOCKED_SHARE_MIN, perf.BLOCKED_D_MIN_MS), (0.25, 4.0))
+
+    def test_con_espera_importante_deja_la_captura_pendiente_y_siguiente_la_ofrece(self):
+        folder = self.folder_with("3,100.0,30.0,2.5")
+        out = self.ok("diagnostico", "--carpeta", folder)
+        self.assertIn("deja una captura pendiente con --config completa", out)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("el 30 % del tiempo de sus 3 frames más largos", md)
+        self.assertIn("Captura pendiente: `capturar --plan %s --prueba --config completa`" % (folder / "plan.json"), md)
+        self.assertIn("bloqueo_hilo_principal", md)
+        self.assertEqual(perf.diagnostic_captures(folder),
+                         ["capturar --plan %s --prueba --config completa" % (folder / "plan.json")])
+        self.assertIn("Siguiente · sesión 2 · diagnóstico", out)
+        step = out.split("Siguiente · sesión 2 · diagnóstico")[1]
+        self.assertRegex(step, r"1\. Terminal \(sin chat\) · captura opcional que pide diagnostico.md")
+        self.assertRegex(step, r"perf\.py capturar --plan \S+ --prueba --config completa\n")
+        self.assertIn("2. Chat nuevo", step)
+        # hecha la captura completa, ya no se ofrece
+        (folder / "prueba").mkdir()
+        perf.save_trace_config(folder / "prueba", "home_1.perfetto-trace.gz", skill_config("completa"))
+        self.assertEqual(len(perf.diagnostic_captures(folder)), 1)  # registrada, pero la traza no está: se sigue ofreciendo
+        write(folder / "prueba" / "home_1.perfetto-trace.gz", "x")
+        self.assertEqual(perf.diagnostic_captures(folder), [])
+        self.assertNotIn("captura opcional", self.ok("siguiente", "--carpeta", folder))
+
+    def test_el_cierre_sin_mejoras_tambien_ofrece_la_captura_y_una_prueba_con_base_no_la_da_por_hecha(self):
+        folder = self.folder_with("3,100.0,30.0,2.5")
+        self.ok("diagnostico", "--carpeta", folder)
+        write(folder / "reporte-inicial.md", "x")
+        out = self.ok("siguiente", "--carpeta", folder)
+        self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
+        self.assertIn("la captura que el diagnóstico dejó pendiente", out)
+        self.assertIn("--prueba --config completa", out)
+        (folder / "prueba").mkdir()
+        write(folder / "prueba" / "home_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "prueba", "home_1.perfetto-trace.gz", skill_config("completa"))
+        perf.save_trace_config(folder / "prueba", "home_1.perfetto-trace.gz", skill_config("base"))  # otra prueba la pisó
+        self.assertEqual(len(perf.diagnostic_captures(folder)), 1)
+
+    def test_si_trace_processor_no_puede_con_la_consulta_de_bloqueo_el_resto_del_diagnostico_sale(self):
+        folder = self.folder_with("3,100.0,30.0,2.5")
+        perf.save_trace_config(folder / "antes", "home_1.perfetto-trace.gz", skill_config("completa"))
+        self.env["FAKE_TP_FALLA"] = "bloqueo_hilo_principal"
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("_`bloqueo_hilo_principal`: no disponible: trace_processor no pudo correr la consulta (no such column: "
+                      "blocked_function). Actualiza trace_processor._", md)
+        self.assertIn("| Choreographer#doFrame 1 | 12.5 |", md)
+
+    def test_una_espera_larga_en_d_tambien_la_pide_y_sin_senal_no_aparece_nada(self):
+        folder = self.folder_with("3,100.0,6.0,4.5")  # 6 % del tiempo, pero una espera de 4,5 ms en D
+        self.ok("diagnostico", "--carpeta", folder)
+        self.assertIn("Captura pendiente:", (folder / "diagnostico.md").read_text(encoding="utf-8"))
+        folder = self.folder_with("3,100.0,10.0,1.0")  # 10 % y 1 ms: el hilo principal casi no espera
+        out = self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertNotIn("Captura pendiente", md)
+        self.assertNotIn("falta una captura", md)
+        self.assertNotIn("captura opcional", out)
+
+    def test_estado_hilo_principal_no_se_usa_para_la_senal(self):
+        signal = (perf.ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
+        self.assertIn("Choreographer#doFrame", signal)  # mira solo dentro de los frames largos
+        self.assertIn("LIMIT 3", signal)
+
+
+@unittest.skipUnless(REAL_TP, "necesita trace_processor instalado: valida las consultas contra una traza de texto inventada")
+class RealTraceProcessorTest(unittest.TestCase):
+    """Las consultas nuevas, sobre una traza de ftrace en texto (inventada) y con trace_processor de verdad: los slices de
+    binder se arman con los dos eventos que ahora captura base, y la razón de bloqueo y quién despierta al hilo salen de
+    sched_blocked_reason y sched_waking."""
+
+    def query(self, sql):
+        # la traza de texto no trae el nombre del proceso: se elige por pid
+        sql = sql.replace("WHERE name = '{{PAQUETE}}'", "WHERE pid = 1000")
+        return perf.run_tp(REAL_TP, FIXTURE_TRACES / "bloqueo.systrace", perf.fill_sql(sql, None, {}))
+
+    def diagnostic(self, name):
+        return self.query((perf.ASSETS / "queries" / "diagnostico" / (name + ".sql")).read_text(encoding="utf-8"))
+
+    def test_binder_hilo_principal_encuentra_la_transaccion(self):
+        header, body = self.diagnostic("binder_hilo_principal")[-1]
+        self.assertEqual(header, ["dentro_de", "veces", "total_ms", "max_ms"])
+        self.assertEqual(body[0][0], "cargar")
+        self.assertAlmostEqual(float(body[0][2]), 6.6)
+
+    def test_bloqueo_hilo_principal_dice_la_funcion_y_quien_lo_desperto(self):
+        header, body = self.diagnostic("bloqueo_hilo_principal")[-1]
+        self.assertEqual(header, ["frame_t_ms", "frame_ms", "estado", "ms", "bloqueado_en", "lo_desperto", "dentro_de"])
+        rows_by_state = {row[2]: row for row in body}
+        self.assertEqual(rows_by_state["D"][4], "filemap_fault+0x1c/0x40 (E/S)")
+        self.assertTrue(rows_by_state["D"][5].startswith("Binder:2000_1"))
+        self.assertEqual(rows_by_state["S"][4], "—")
+        self.assertTrue(rows_by_state["S"][5].startswith("Binder:2000_1"))
+
+    def test_sin_el_evento_dice_no_disponible_en_este_dispositivo(self):
+        text = (FIXTURE_TRACES / "bloqueo.systrace").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "sin-razon.systrace"
+            trace.write_text("".join(line + "\n" for line in text.splitlines() if "sched_blocked_reason" not in line),
+                             encoding="utf-8")
+            sql = (perf.ASSETS / "queries" / "diagnostico" / "bloqueo_hilo_principal.sql").read_text(encoding="utf-8")
+            header, body = perf.run_tp(REAL_TP, trace, perf.fill_sql(
+                sql.replace("WHERE name = '{{PAQUETE}}'", "WHERE pid = 1000"), None, {}))[-1]
+        blocked = [row for row in body if row[2] == "D"]
+        self.assertEqual(blocked[0][4], "no disponible en este dispositivo")
+
+    def test_la_senal_de_espera_mide_solo_dentro_de_los_frames_largos(self):
+        found = perf.blocked_signal(self.query((perf.ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")))
+        self.assertAlmostEqual(found[0], 10.5 / 29.0, places=3)
+        self.assertAlmostEqual(found[1], 5.5)
+        self.assertGreaterEqual(found[0], perf.BLOCKED_SHARE_MIN)
+
+
+class CompatVersionsTest(DeviceBase):
+    """Una investigación en curso de 0.6.0, 0.7.0 o 0.8.0 (su plan.json, su fases.json y su estado.md, sin ningún campo
+    de 0.9.0) carga y corre `siguiente`, `diagnostico`, `reporte --inicial` y `comparar` sin errores."""
+
+    VERSIONS = ("0.6.0", "0.7.0", "0.8.0")
+
+    def investigation(self, version):
+        fixture = ROOT / "tests" / "fixtures" / ("hb-performance-%s" % version)
+        folder = self.dir / version / "reports" / "perf" / "caso"
+        folder.mkdir(parents=True)
+        for name in ("plan.json", "estado.md", "metricas.csv", "fases.json"):
+            write(folder / name, (fixture / name).read_text(encoding="utf-8"))
+        return fixture, folder
+
+    def test_los_planes_y_las_fases_anteriores_no_traen_campos_nuevos_y_cargan(self):
+        for version in self.VERSIONS:
+            fixture, folder = self.investigation(version)
+            plan = perf.load_plan(folder / "plan.json")
+            for field in ("mapping", "desde_triage"):
+                self.assertNotIn(field, plan, version)
+            phases = perf.read_phases(folder)
+            self.assertTrue(phases, version)
+            for record in phases.values():
+                self.assertNotIn("skill", record, version)
+                self.assertNotIn("configs", record, version)
+            flow = next(iter(plan["flujos"]))
+            self.assertIsNone(perf.phase_skill(phases.get("antes"), flow), version)
+            self.assertEqual(perf.config_notes(folder, [flow]), [], version)  # sin el dato en ninguna fase, sin aviso
+            self.assertEqual(perf.diagnostic_captures(folder), [], version)
+
+    def test_siguiente_diagnostico_reporte_inicial_y_comparar_corren_sin_errores(self):
+        for name in ("PERF_USUARIO", "PERF_CLAVE"):
+            self.env.pop(name, None)
+        for version in self.VERSIONS:
+            fixture, folder = self.investigation(version)
+            plan = perf.load_plan(folder / "plan.json")
+            flow = next(iter(plan["flujos"]))
+            before = perf.next_steps(folder, plan)[0]
+            out = self.ok("siguiente", "--carpeta", folder)
+            self.assertIn("Siguiente · %s" % before, out, version)
+            self.assertNotIn("completar la línea base", out, version)  # una investigación ya decidida sigue donde estaba
+            if (fixture / "traza.json").is_file():
+                # la traza reducida del fixture: sus filas son lo que devuelve metricas.sql
+                data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
+                table = '"tipo","ts","dur","prof","nombre"\n' + "".join(
+                    '"%s",%d,%d,%d,"%s"\n' % tuple(row) for row in data["filas"])
+                self.tp_outputs(table)
+                if (self.dir / "tp.count").exists():
+                    (self.dir / "tp.count").unlink()
+                runs = sorted({r["corrida"] for r in perf.read_rows(folder / "metricas.csv")
+                               if r["fase"] == "antes" and r["flujo"] == flow})
+                for run in runs:
+                    write(folder / "antes" / ("%s_%s.perfetto-trace.gz" % (flow, run)), "x")
+                self.env["FAKE_TP_OTRA"] = '"a"\n'
+                out = self.ok("diagnostico", "--carpeta", folder)
+                md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+                # trazas de una versión anterior: no se sabe qué capturaron, así que no se afirma ausencia
+                self.assertIn("configuración desconocida", md, version)
+                self.assertNotIn("Medido y sin casos", md, version)
+                self.assertNotIn("no medido:", md, version)
+                self.assertIn("Red por tramo", md, version)
+                (folder / "diagnostico.md").unlink()  # el fixture no lo trae: el paso siguiente no debe cambiar por él
+            self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
+            self.assertTrue((folder / "reporte-inicial.md").is_file(), version)
+            out = self.ok("comparar", folder / "metricas.csv")
+            self.assertIn("Veredictos:", out, version)
+            self.assertNotIn("configuración de Perfetto", out, version)
+            self.assertNotIn("otra versión de hb-performance", out, version)
+
+    def test_las_metricas_que_calculaba_0_8_0_no_cambian_de_nombre_ni_de_valor(self):
+        fixture, folder = self.investigation("0.8.0")
+        data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
+        plan = perf.load_plan(folder / "plan.json")
+        flow = plan["flujos"]["detalle"]
+        self.assertEqual((flow["duracion_max_s"], len(flow["pausas"]), flow["segmentos"][1]["solo_red"]), (1200, 1, True))
+        metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
+        self.assertIsNone(invalid)
+        self.assertEqual([list(m) for m in metrics], data["metricas"])  # las mismas, con el mismo valor y en el mismo orden
+        self.assertEqual(len(data["metricas"]), 35)

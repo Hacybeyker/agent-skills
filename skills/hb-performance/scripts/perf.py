@@ -2007,6 +2007,9 @@ def worst_environment(environments):
     return max(environments, key=lambda e: FRAMES_LEVEL.get(e.get("frames", "ok"), 0)) if environments else None
 
 
+UNKNOWN_CONFIG = "desconocida"
+
+
 def merge_run_data(previous, data):
     """Lo que se acumula entre tandas de una fase (o de un flujo): corridas, tasa de cada corrida, avisos y el peor
     entorno."""
@@ -2018,6 +2021,12 @@ def merge_run_data(previous, data):
     warnings += [w for w in data.get("avisos") or [] if w not in warnings]
     if warnings:
         out["avisos"] = warnings
+    configs = list(previous.get("configs") or [])
+    if previous.get("corridas") and not configs and data.get("configs"):
+        configs.append(UNKNOWN_CONFIG)  # las corridas que ya había son de una versión que no lo registraba
+    configs += [c for c in data.get("configs") or [] if c not in configs]
+    if configs:
+        out["configs"] = configs
     environment = worst_environment([previous.get("entorno"), data.get("entorno")])
     if environment:
         out["entorno"] = environment
@@ -2044,7 +2053,7 @@ def write_phase(folder, phase, data, flow=None):
             flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
                 else data["skill"]
     merged = merge_run_data(previous, data)
-    for key in ("hz_corridas", "avisos", "entorno"):
+    for key in ("hz_corridas", "avisos", "entorno", "configs"):
         data.pop(key, None)
     data.update(merged)
     data["fecha"] = previous.get("fecha") or data["fecha"]
@@ -2081,7 +2090,7 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("fecha", None)
         complete = set(tracked) == set(others) and all(tracked[name].get("corridas") == len(others[name]) for name in others)
         if complete:  # lo que queda tiene su registro entero: se recalcula sin el flujo que se rehace
-            for key in ("hz_corridas", "avisos", "entorno"):
+            for key in ("hz_corridas", "avisos", "entorno", "configs"):
                 record.pop(key, None)
             rest = {}
             for data in tracked.values():
@@ -2281,6 +2290,138 @@ def resolve_config(plan, folder, override):
     return path
 
 
+CONFIG_SOURCE = re.compile(r'\b(ftrace_events|atrace_categories|atrace_apps|name)[ \t]*:[ \t]*"([^"]*)"')
+CONFIG_PREFIX = {"ftrace_events": "ftrace:", "atrace_categories": "atrace:", "name": "ds:"}
+TRACE_KEY = re.compile(r"^(.+?_\d+)(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?$")
+CONFIG_FILE = "configuracion.json"
+SKILL_CONFIGS = ("base", "cpu", "completa")
+
+
+def config_sources(text):
+    """Las fuentes que captura una configuración de Perfetto (.pbtx), con los nombres que usan las consultas en su línea
+    `-- requiere:`: `ftrace:<grupo>/<evento>`, `atrace:<categoría>`, `atrace_apps` (las secciones de la app) y
+    `ds:<fuente de datos>`."""
+    sources = set()
+    for line in text.splitlines():
+        for key, value in CONFIG_SOURCE.findall(line.split("#", 1)[0]):
+            sources.add("atrace_apps" if key == "atrace_apps" else CONFIG_PREFIX[key] + value)
+    return sorted(sources)
+
+
+def config_record(path):
+    """Nombre, huella del contenido y fuentes de una configuración. La huella sale del archivo tal cual (sin el paquete
+    ni el tope de duración), así que es la misma en todas las investigaciones que usan esa configuración."""
+    path = pathlib.Path(path)
+    text = path.read_text(encoding="utf-8")
+    name = path.stem if path.parent == ASSETS / "perfetto" else path.name
+    return {"nombre": name, "hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12], "fuentes": config_sources(text)}
+
+
+# Campos de la configuración que el `perfetto` de un Android anterior no conoce: su lector de texto rechaza la
+# configuración entera si los encuentra, así que se quitan antes de enviarla. (campo, API mínima)
+CONFIG_FIELDS_SINCE = (("symbolize_ksyms", 31),)
+# Fuentes que la configuración pide y un Android anterior no entrega: (fuente, API mínima, motivo)
+SOURCES_SINCE = (("ds:android.surfaceflinger.frametimeline", 31, "FrameTimeline es de Android 12 o superior"),)
+
+
+def config_for_sdk(text, sdk):
+    """La configuración sin los campos que ese Android no conoce."""
+    for field, since in CONFIG_FIELDS_SINCE:
+        if sdk < since:
+            text = re.sub(r"^[ \t]*%s[ \t]*:[^\n]*\n" % field, "", text, flags=re.M)
+    return text
+
+
+def device_sources(record, sdk):
+    """El registro de la configuración con lo que ese dispositivo no entrega aunque la configuración lo pida
+    (`no_disponibles`: {fuente: motivo}): para una consulta que lo necesita es "no medido", no "sin casos"."""
+    missing = {source: reason for source, since, reason in SOURCES_SINCE if sdk < since and source in record["fuentes"]}
+    return dict(record, no_disponibles=missing) if missing else record
+
+
+def config_label(record):
+    return "%s@%s" % (record["nombre"], record["hash"])
+
+
+def save_trace_config(out_dir, trace_name, record, installed=None):
+    """Anota con qué configuración se grabó una traza (y la fecha de instalación del build medido, para verificar el
+    mapping al desofuscar) en `<carpeta de la fase>/configuracion.json`. Va junto a las trazas (y no solo en
+    fases.json) porque también lo necesitan las de `--prueba`, que no son de ninguna fase, y porque `consulta` recibe
+    una traza suelta."""
+    found = TRACE_KEY.match(trace_name)
+    if not found:
+        return
+    path = pathlib.Path(out_dir) / CONFIG_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict) or not isinstance(data.get("configuraciones"), dict) \
+            or not isinstance(data.get("trazas"), dict):
+        data = {"configuraciones": {}, "trazas": {}}
+    data["configuraciones"][record["hash"]] = {"nombre": record["nombre"], "fuentes": record["fuentes"]}
+    if record.get("no_disponibles"):
+        data["configuraciones"][record["hash"]]["no_disponibles"] = record["no_disponibles"]
+    data["trazas"][found.group(1)] = record["hash"]
+    if installed:
+        if not isinstance(data.get("instaladas"), dict):
+            data["instaladas"] = {}
+        data["instaladas"][found.group(1)] = installed
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def trace_config(trace):
+    """La configuración con la que se grabó la traza ({"nombre", "hash", "fuentes", "instalada"}), o None si no se sabe:
+    una traza de una versión anterior de la skill, o una que se movió de su carpeta."""
+    trace = pathlib.Path(trace)
+    found = TRACE_KEY.match(trace.name)
+    try:
+        data = json.loads((trace.parent / CONFIG_FILE).read_text(encoding="utf-8"))
+        digest = data["trazas"][found.group(1)]
+        saved = data["configuraciones"][digest]
+        installed = (data.get("instaladas") or {}).get(found.group(1))
+        absent = saved.get("no_disponibles")
+        return {"nombre": str(saved["nombre"]), "hash": str(digest), "fuentes": [str(x) for x in saved["fuentes"]],
+                "no_disponibles": {str(k): str(v) for k, v in absent.items()} if isinstance(absent, dict) else {},
+                "instalada": installed if isinstance(installed, str) else None}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def query_requires(sql):
+    """Las fuentes que una consulta declara en su cabecera (`-- requiere: ftrace:sched/sched_switch atrace:view`)."""
+    for line in sql.splitlines():
+        if line.startswith("-- requiere:"):
+            return line.split(":", 1)[1].split()
+    return []
+
+
+def missing_sources(requires, config):
+    """Las fuentes que la consulta necesita y la traza no tiene: las que su configuración no captura y las que ese
+    dispositivo no entrega."""
+    absent = config.get("no_disponibles") or {}
+    return [source for source in requires if source not in config["fuentes"] or source in absent]
+
+
+def configs_with(requires):
+    """Las configuraciones de la skill que capturan todas esas fuentes."""
+    found = []
+    for name in SKILL_CONFIGS:
+        path = ASSETS / "perfetto" / ("%s.pbtx" % name)
+        if path.is_file() and not missing_sources(requires, config_record(path)):
+            found.append(name)
+    return found
+
+
+def unmeasured(config, missing):
+    """El texto de una consulta que no se puede responder con esa traza: no es lo mismo que "no hubo casos"."""
+    absent = config.get("no_disponibles") or {}
+    device = [source for source in missing if source in absent]
+    if device:
+        return "no medido: el dispositivo no entrega %s (%s)" % (", ".join(device), "; ".join(absent[s] for s in device))
+    return "no medido: la configuración %s no captura %s" % (config["nombre"], ", ".join(missing))
+
+
 def custom_queries(flow, folder, package):
     queries = []
     for spec in flow.get("metricas_sql", []):
@@ -2423,6 +2564,14 @@ def next_steps(folder, plan, flow=None):
     def command(*parts):
         return "cd %s && python3 -I %s %s" % (root, HERE / "perf.py", " ".join(str(part) for part in parts))
 
+    def full_command(pending):
+        """Una "Captura pendiente" como comando completo: tal cual si ya empieza con cd; con la ruta de este script si
+        es un comando de perf.py (con o sin "python3 -I .../perf.py" delante); si no, con cd a la raíz."""
+        own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
+        if pending.startswith("cd "):
+            return pending
+        return command(own.group(1)) if own else "cd %s && %s" % (root, pending)
+
     flows = plan["flujos"]
     flow = flow if flow in flows else next(iter(flows))
     spec = flows[flow]
@@ -2533,15 +2682,10 @@ def next_steps(folder, plan, flow=None):
         # La sesión 2 ya entregó su reporte y no propuso mejoras: no se repite. Queda el cierre corto y, si el
         # diagnóstico dejó una captura pendiente en estado.md, esa captura como comando.
         steps = []
-        for pending in pending_captures(state):
-            own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
-            if pending.startswith("cd "):
-                pass  # ya es un comando completo
-            elif own:  # un comando de perf.py, con o sin "python3 -I .../perf.py" delante: se arma con la ruta de este script
-                pending = command(own.group(1))
-            else:
-                pending = "cd %s && %s" % (root, pending)
-            steps.append(terminal(pending, "la captura que el diagnóstico dejó pendiente (opcional: cierra un pendiente)",
+        listed = pending_captures(state)
+        for pending in listed + [extra for extra in diagnostic_captures(state.parent) if extra not in listed]:
+            steps.append(terminal(full_command(pending),
+                                  "la captura que el diagnóstico dejó pendiente (opcional: cierra un pendiente)",
                                   "córrela solo si quieres cerrar ese pendiente antes de terminar; lo que salga se "
                                   "analiza en un chat aparte (prompts.md · Una pregunta sobre una traza)"))
         steps.append(chat("%s: cierra la investigación sin fase después" % resume, "economico", "bajo",
@@ -2549,7 +2693,14 @@ def next_steps(folder, plan, flow=None):
                           "el reporte final", plan))
         return "sesión 4 · cierre sin mejoras", steps
     if (state.parent / "diagnostico.md").is_file():
-        return "sesión 2 · diagnóstico", [session2]
+        # Si el diagnóstico pidió una captura (el hilo principal espera en sus frames largos), va antes del chat y es
+        # opcional: con ella, la sesión 2 puede decir por qué espera en vez de dejarlo sin confirmar.
+        steps = [terminal(full_command(pending),
+                          "captura opcional que pide diagnostico.md: una corrida con la configuración completa, para saber "
+                          "por qué espera el hilo principal en sus frames más largos (no cuenta como medición)",
+                          "córrela si quieres ese dato antes del diagnóstico; después, la consulta que indica diagnostico.md")
+                 for pending in diagnostic_captures(state.parent)]
+        return "sesión 2 · diagnóstico", steps + [session2]
     steps = []
     if triage:
         you_run = you_run.replace(str(runs), "3")
@@ -2608,6 +2759,30 @@ def pending_captures(state):
         return []
     text = next((body for title, body in sections.items() if title.startswith("pendientes")), "")
     return [found.strip() for found in PENDING_CAPTURE.findall(without_placeholders(text)) if "<" not in found]
+
+
+def diagnostic_captures(folder):
+    """Las capturas que `perf.py diagnostico` dejó pendientes en diagnostico.md (o diagnostico-<fase>.md) como "Captura
+    pendiente: `<comando>`". Vacío si la corrida de prueba que hay en la carpeta ya es una captura con la razón de
+    bloqueo (la captura completa ya se hizo)."""
+    folder = pathlib.Path(folder)
+    found = []
+    for path in sorted(folder.glob("diagnostico*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        found += [item.strip() for item in PENDING_CAPTURE.findall(text) if "<" not in item and item.strip() not in found]
+    if not found:
+        return []
+    try:
+        data = json.loads((folder / "prueba" / CONFIG_FILE).read_text(encoding="utf-8"))
+        saved = data["configuraciones"]
+        done = any(BLOCKED_SOURCE in saved[digest]["fuentes"] and any((folder / "prueba").glob(key + ".perfetto-trace*"))
+                   for key, digest in data["trazas"].items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        done = False
+    return [] if done else found
 
 
 def has_human_pause(flow, folder):
@@ -2878,8 +3053,10 @@ def cmd_capturar(args, plan=None):
     free_gb = shutil.disk_usage(str(folder)).free / 1e9
     if free_gb < 3:
         print("⚠ quedan %.1f GB libres: cada traza puede pesar decenas o cientos de MB" % free_gb)
-    config = with_trace_cap(resolve_config(plan, folder, args.config).read_text(encoding="utf-8")
-                            .replace("{{PAQUETE}}", package), flow.get("duracion_max_s"))
+    config_path = resolve_config(plan, folder, args.config)
+    used_config = device_sources(config_record(config_path), sdk)
+    config = with_trace_cap(config_for_sdk(config_path.read_text(encoding="utf-8"), sdk).replace("{{PAQUETE}}", package),
+                            flow.get("duracion_max_s"))
     input_glob = plan.get("input_slices") or INPUT_SLICES
     queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), package,
                                      {"INPUT_GLOB": input_glob}))]
@@ -2998,6 +3175,7 @@ def cmd_capturar(args, plan=None):
             set_aside_orphan(folder, out_dir, phase, flow_name, n, csv_path)
         label = "prueba" if args.prueba else "corrida %d de %d (%s, %s)" % (valid + 1, target, flow_name, phase)
         reason, extra = record_run(adb, config, recorrido, label, local, startup, package)
+        save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
         if not invalid and app_died(adb, package):
             invalid = "la app no estaba viva al terminar la corrida (¿se cayó?)"
@@ -3118,7 +3296,8 @@ def cmd_capturar(args, plan=None):
         n += 1
     seen_hz = {h for h in run_hz if h}
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
-              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION}
+              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
+              "configs": [config_label(used_config)]}
     if seen_hz:
         record["hz_corridas"] = run_hz
     rate_warning = hz_warning(hz, seen_hz)
@@ -3209,14 +3388,56 @@ def cmd_consulta(args):
         sql = query_path(args.archivo).read_text(encoding="utf-8")
     else:
         raise PerfError("pasa un archivo .sql (o el nombre de una consulta de la skill) o --sql")
+    requires = query_requires(sql)
+    config = trace_config(args.traza)
+    missing = missing_sources(requires, config) if config else []
+    if missing:
+        capture = configs_with(requires)
+        print("✖ %s. No quiere decir que no ocurra: esta traza no lo puede responder.%s" % (
+            unmeasured(config, missing), " Captura una corrida con --config %s y consulta esa traza." % " o ".join(capture)
+            if capture and not any(source in (config.get("no_disponibles") or {}) for source in missing) else ""))
+        return
     sql = fill_sql(sql, args.paquete or package_near(args.traza), parse_params(args.param))
-    print_sets(run_tp(tp, args.traza, sql), args.limite, args.ancho)
+    sets = run_tp(tp, args.traza, sql)
+    print_sets(sets, args.limite, args.ancho)
+    if requires and not config:
+        print("⚠ %s: no se sabe con qué configuración se grabó esta traza (es de una versión anterior o "
+              "se movió de su carpeta), así que %s. La consulta necesita: %s."
+              % ("Con configuración desconocida" if any(body for _, body in sets) else "Sin filas, con configuración "
+                 "desconocida", "lo que falte puede no haberse medido" if any(body for _, body in sets)
+                 else "no se puede afirmar que no ocurra", ", ".join(requires)))
+    elif requires and not any(body for _, body in sets):
+        print("Medido y sin casos: la configuración %s captura lo que pide la consulta (%s) y no hubo filas. Vale como "
+              "ausencia si el dispositivo emite ese dato: si nunca sale nada, comprueba que la traza lo traiga."
+              % (config["nombre"], ", ".join(requires)))
 
 
 DIAG_ORDER = ["arranque_hitos", "linea_hilo_principal", "hilo_principal_top", "estado_hilo_principal",
-              "hijos_mas_largos", "dormido_en_frames_largos", "estado_primeros_frames", "frames_por_tramo",
+              "hijos_mas_largos", "dormido_en_frames_largos", "bloqueo_hilo_principal", "estado_primeros_frames", "frames_por_tramo",
               "cpu_por_tramo", "cpu_por_hilo", "contencion_locks", "binder_hilo_principal", "jank_por_tipo",
               "linea_de_tiempo", "llamadas_solapadas", "inflate_tras_http", "cpu_por_libreria"]
+
+
+# Cuándo vale la pena una captura con --config completa para saber por qué espera el hilo principal: si pasa dormido o
+# bloqueado al menos esta parte del tiempo de sus 3 frames más largos, o si tiene ahí una espera en D de al menos estos
+# milisegundos (un cuarto del presupuesto de un frame a 60 Hz). Punto de partida, sin calibrar con datos de campo.
+BLOCKED_SHARE_MIN = 0.25
+BLOCKED_D_MIN_MS = 4.0
+BLOCKED_SOURCE = "ftrace:sched/sched_blocked_reason"
+
+
+def blocked_signal(sets):
+    """(parte del tiempo de los frames largos en S o D, espera más larga en D en ms, ms de los frames) a partir del
+    resultado de senal_bloqueo.sql; None si no hay frames o la consulta no devolvió su fila."""
+    for header, body in sets or []:
+        if body and all(name in header for name in ("frames_ms", "espera_ms", "max_d_ms")):
+            row = dict(zip(header, body[0]))
+            try:
+                frames, waiting, longest = float(row["frames_ms"]), float(row["espera_ms"]), float(row["max_d_ms"])
+            except (TypeError, ValueError):
+                return None
+            return (waiting / frames, longest, frames) if frames > 0 else None
+    return None
 
 
 def query_catalog():
@@ -3301,7 +3522,7 @@ def cmd_diagnostico(args):
     flow_metrics = {r["metrica"] for r in rows if r["flujo"] == flow_name}
     startup = bool(startup_spec(flow)) or "ttid_ms" in flow_metrics
     network = any(r["metrica"] == "red_llamadas" and r["valor"] > 0 for r in rows if r["flujo"] == flow_name)
-    groups = {"base", "cpu"} | ({"arranque"} if startup else set()) | ({"red"} if network else set())
+    groups = {"base", "cpu", "completa"} | ({"arranque"} if startup else set()) | ({"red"} if network else set())
     wanted = set(args.consultas.split(",")) if args.consultas else None
     params = {"TRAMO_MS": str(args.tramo_ms or (250 if startup else 500))}
     catalog = [q for q in query_catalog() if (q[0] in wanted if wanted else set(q[2]) & groups)]
@@ -3310,7 +3531,9 @@ def cmd_diagnostico(args):
           "_Corridas: %s. `t_ms` y `desde_ms`: ms desde que nace el proceso (arranque) o desde el inicio de la "
           "traza. Generado por hb-performance %s._" % (", ".join("%s = %s (%s %s)" % (label, run, metric, fmt(value, unit))
                                                                  for label, run, value in runs), VERSION)]
-    printed, empty = [], []
+    printed, empty, unknown, not_measured, failed = [], [], [], {}, {}
+    signal_sql = (ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
+    blocked = None  # (parte, espera más larga en D, ms de los frames, corrida) de la corrida donde más pesa la espera
     segments = flow.get("segmentos") or []
     for index, (label, run, _) in enumerate(runs):
         chosen = [q for q in catalog if index == 0 or "peor" in q[2]]
@@ -3318,11 +3541,44 @@ def cmd_diagnostico(args):
             continue
         trace = trace_of(folder, phase, flow_name, run)
         print("… procesando la traza %d de %d (corrida %s, %s)" % (index + 1, len(runs), run, label), flush=True)
-        batch = [(q[0], fill_sql(q[3], plan["paquete"], params)) for q in chosen]
+        # Cada consulta declara qué fuentes necesita (`-- requiere:`) y se valida contra la configuración con la que se
+        # grabó esta traza: sin la fuente, es "no medido", que no es lo mismo que "sin casos".
+        config = trace_config(trace)
+        runnable = []
+        for q in chosen:
+            requires = query_requires(q[3])
+            missing = missing_sources(requires, config) if config else []
+            if missing and "completa" in q[2] and not wanted:
+                pass  # una captura especial: si hace falta, la pide la señal de espera ("Captura pendiente"), más abajo
+            elif missing:
+                not_measured.setdefault(q[0], unmeasured(config, missing))
+            elif not config and set(q[2]) & {"completa"}:
+                unknown.append(q[0])  # pide una captura especial y no se sabe si esta traza lo es: no se corre
+            else:
+                runnable.append(q)
+        chosen = runnable
+        batch = [(q[0], fill_sql(q[3], plan["paquete"], params)) for q in chosen if "completa" not in q[2]]
         if segments and not wanted:  # la red por tramo sale de las mismas filas que las métricas de la corrida
             batch.append(("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"),
                                                plan["paquete"], {"INPUT_GLOB": plan.get("input_slices") or INPUT_SLICES})))
-        results = run_tp_batch(tp, trace, batch)
+        # La señal de espera solo tiene sentido si la traza no trae ya la razón de bloqueo (una captura completa).
+        watch = not wanted and not (config and (BLOCKED_SOURCE in config["fuentes"]
+                                                or missing_sources(query_requires(signal_sql), config)))
+        if watch:
+            batch.append(("senal_bloqueo", fill_sql(signal_sql, plan["paquete"], params)))
+        results = run_tp_batch(tp, trace, batch) if batch else {}  # trace_processor no acepta un archivo sin consultas
+        found = blocked_signal(results.get("senal_bloqueo")) if watch else None
+        if found and (found[0] >= BLOCKED_SHARE_MIN or found[1] >= BLOCKED_D_MIN_MS) and (blocked is None or found[0] > blocked[0]):
+            blocked = found + (run,)
+        for q in chosen:
+            if "completa" in q[2]:
+                # Aparte: usan columnas que una versión antigua de trace_processor puede no tener, y un error ahí no
+                # debe tumbar el resto del diagnóstico.
+                try:
+                    results.update(run_tp_batch(tp, trace, [(q[0], fill_sql(q[3], plan["paquete"], params))]))
+                except PerfError as error:
+                    results[q[0]] = []
+                    failed.setdefault(q[0], str(error).strip().splitlines()[-1][:160])
         if index:
             md += ["", "## Corrida %s (%s)" % (run, label)]
         network_table = segment_network_table(results.get("metricas") or [], segments)
@@ -3334,8 +3590,10 @@ def cmd_diagnostico(args):
             printed.append("red por tramo (%s)" % label)
         for name, title, _, _ in chosen:
             sets = [s for s in results[name] if s[1]]
+            if name in failed:
+                continue
             if not sets:
-                empty.append(name)
+                (empty if config else unknown).append(name)
                 continue
             md += ["", "%s %s · `%s`" % ("###" if index else "##", title.replace("{{TRAMO_MS}}", params["TRAMO_MS"]),
                                          name), ""]
@@ -3343,14 +3601,39 @@ def cmd_diagnostico(args):
                 md.append(markdown_table(header, [[fmt_cell(c)[:args.ancho] for c in row] for row in body[:args.limite]]))
             printed.append("%s (%s)" % (name, label))
     if empty:
-        md += ["", "_Sin filas: %s._" % ", ".join(sorted(set(empty)))]
-    if "cpu_por_libreria" in empty:
+        md += ["", "_Medido y sin casos (la configuración de la traza captura lo que la consulta necesita y no hubo "
+                   "filas): %s._" % ", ".join(sorted(set(empty)))]
+    for name in sorted(not_measured):
+        md += ["", "_`%s`: %s. No quiere decir que no ocurra._" % (name, not_measured[name])]
+    if unknown:
+        md += ["", "_Sin tabla, con configuración desconocida (trazas de una versión anterior: no se sabe qué fuentes "
+                   "capturaron, así que no se afirma que no ocurra): %s._" % ", ".join(sorted(set(unknown)))]
+    for name in sorted(failed):
+        md += ["", "_`%s`: no disponible: trace_processor no pudo correr la consulta (%s). Actualiza trace_processor._"
+               % (name, failed[name])]
+    if "cpu_por_libreria" in set(empty) | set(unknown) | set(not_measured):
         md += ["", "_Sin muestras de CPU: para atribuir el CPU a funciones, captura una corrida con "
                    "`capturar --prueba --config cpu` y consulta `cpu_por_libreria` sobre esa traza._"]
+    if blocked:
+        capture = "capturar --plan %s%s --prueba --config completa" % (
+            folder / "plan.json", " --flujo %s" % flow_name if len(plan["flujos"]) > 1 else "")
+        md += ["", "## Por qué espera el hilo principal: falta una captura", "",
+               "En la corrida %s, el hilo principal pasó dormido o bloqueado el %s %% del tiempo de sus 3 frames más largos "
+               "(%s ms en total; su espera más larga en D fue de %s ms). Esta traza dice dónde espera "
+               "(`dormido_en_frames_largos`), no quién lo bloquea ni quién lo despierta. Captura pendiente: `%s` y, sobre "
+               "esa traza, `consulta %s bloqueo_hilo_principal`."
+               % (blocked[3], fmt(round(blocked[0] * 100, 1)), fmt(round(blocked[2], 1)), fmt(round(blocked[1], 1)), capture,
+                  folder / "prueba" / ("%s_1.perfetto-trace.gz" % flow_name)),
+               "", "_Umbral: %d %% o más del tiempo de los frames largos en S o D, o una espera de %s ms o más en D. Es una "
+                   "captura de diagnóstico: pesa varias veces más que la base y sus tiempos no se comparan._"
+               % (BLOCKED_SHARE_MIN * 100, fmt(BLOCKED_D_MIN_MS))]
     target = folder / ("diagnostico.md" if phase == "antes" else "diagnostico-%s.md" % phase)
     target.write_text("\n".join(md) + "\n", encoding="utf-8")
+    if blocked:
+        print("· El hilo principal espera dentro de sus frames más largos (%s %% del tiempo): %s deja una captura pendiente "
+              "con --config completa para saber por qué." % (fmt(round(blocked[0] * 100, 1)), target.name))
     print("✔ %s: %d tablas de %s (%s)." % (target, len(printed), ", ".join("corrida %s" % r[1] for r in runs),
-                                          ", ".join(sorted(groups - {"cpu"}))))
+                                          ", ".join(sorted(groups - {"cpu", "completa"}))))
     print_next(folder, plan, flow_name)
 
 
@@ -3482,6 +3765,32 @@ def trial_md(plan):
 LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "Δ %", "Veredicto", "Estado", "Resultado"]
 
 
+def config_notes(folder, flows):
+    """Avisos de `comparar`: las fases de un flujo que no se midieron con la misma configuración de Perfetto. No
+    bloquea. Sin el dato en ninguna fase (investigaciones de versiones anteriores) no dice nada."""
+    phases = read_phases(folder)
+    notes = []
+    for flow in flows:
+        used = {}
+        for phase in FASES:
+            record = phases.get(phase)
+            if not record:
+                continue
+            tracked = record.get("flujos") or {}
+            if tracked and flow not in tracked:
+                continue
+            used[phase] = list((tracked.get(flow) or {}).get("configs") or record.get("configs") or [UNKNOWN_CONFIG])
+        distinct = {label for labels in used.values() for label in labels}
+        if len(used) > 1 and len(distinct) > 1:
+            notes.append("%s: las fases no se midieron con la misma configuración de Perfetto (%s): lo que cada una "
+                         "captura y su costo pueden diferir, y las métricas no ser comparables. Repite con --rehacer las "
+                         "fases que no correspondan%s" % (
+                             flow, "; ".join("%s: %s" % (phase, ", ".join(labels)) for phase, labels in used.items()),
+                             " ('desconocida': medida con una versión anterior, que no lo registraba)"
+                             if UNKNOWN_CONFIG in distinct else ""))
+    return notes
+
+
 def cmd_comparar(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
@@ -3512,6 +3821,7 @@ def cmd_comparar(args):
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
+    notes += config_notes(folder, sorted({r["flujo"] for r in rows}))
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(

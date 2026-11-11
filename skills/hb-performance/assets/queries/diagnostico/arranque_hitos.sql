@@ -1,5 +1,6 @@
 -- Hitos del arranque en ms desde que nace el proceso: lanzamiento del sistema (TTID), bindApplication, actividad, primeros frames y reportFullyDrawn
 -- grupos: arranque peor
+-- requiere: atrace:am atrace:view atrace_apps
 WITH app AS (SELECT upid, pid, MAX(IFNULL(start_ts, 0), (SELECT start_ts FROM trace_bounds)) AS t0
              FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1),
 hilo AS (SELECT t.utid FROM thread t JOIN app ON t.upid = app.upid AND t.tid = app.pid),
