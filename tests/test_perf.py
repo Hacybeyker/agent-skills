@@ -42,6 +42,11 @@ def entry(method, url, started, time):
 MS = 1_000_000
 
 
+def without_new(record):
+    """Un registro de fases.json sin los campos opcionales que agrega 0.9.0 (la versión de la skill y la configuración)."""
+    return {key: value for key, value in record.items() if key not in ("skill", "configs")}
+
+
 class PerfBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1538,10 +1543,12 @@ class NextStepTest(PerfBase):
         title, steps = self.step()
         self.assertEqual(title, "triage cerrado")
         self.assertEqual(steps[0]["tipo"], "archivo")
+        self.assertEqual(len(steps), 1)  # sin mejoras propuestas no hay nada que pasar a riguroso
         self.plan["profundidad"] = "riguroso"
         self.assertEqual(self.step()[0], "sesión 4 · cierre sin mejoras")  # sin mejoras, la sesión 2 no se repite
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}]
-        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")  # con mejoras ya no cierra: sigue con el plan
+        # con mejoras ya no cierra; y antes de decidir, riguroso pide la línea base completa y el control
+        self.assertEqual(self.step()[0], "completar la línea base de riguroso (sin chat)")
         self.plan["mejoras"] = []
         self.plan["profundidad"] = "ligero"
         self.save()
@@ -2655,7 +2662,7 @@ class RedoFlowTest(DeviceBase):
         self.assertIn("filas de 'antes' fuera del CSV", out)
         phase = self.phase()
         self.assertEqual(phase["corridas"], 4)  # 3 de detalle + la nueva de home
-        self.assertEqual(phase["flujos"]["detalle"], {"corridas": 3, "hz_corridas": [90, 90, 90], "avisos": phase["avisos"],
+        self.assertEqual(without_new(phase["flujos"]["detalle"]), {"corridas": 3, "hz_corridas": [90, 90, 90], "avisos": phase["avisos"],
                                                        "entorno": phase["entorno"]})
         self.assertEqual(phase["flujos"]["home"]["corridas"], 1)
         self.assertEqual(phase["entorno"]["frames"], "no")  # el entorno de 'detalle' no se pierde
@@ -2704,7 +2711,7 @@ class RedoFlowTest(DeviceBase):
     def test_rehacer_el_unico_flujo_medido_borra_el_registro_de_la_fase_como_antes(self):
         self.tp_outputs(GOOD)
         self.ok(*(self.common + ["--flujo", "home", "--corridas", "2"]))
-        self.assertEqual(self.phase()["flujos"], {"home": {"corridas": 2}})
+        self.assertEqual(without_new(self.phase()["flujos"]["home"]), {"corridas": 2})
         perf.forget_flow(self.folder, self.folder / "metricas.csv", "control", "home")  # una fase sin medir: no hace nada
         self.assertEqual(self.phase()["corridas"], 2)
         perf.forget_flow(self.folder, self.folder / "metricas.csv", "antes", "home")  # no hay filas de otros flujos
@@ -3025,8 +3032,8 @@ class SmokeNextStepTest(DeviceBase):
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí hay que iniciar sesión, aceptar '
-                      'términos e ir al tab Catálogo: usa un flow de Maestro en preparar y adb para el tramo medido. '
-                      'Dispositivo emulator-5554."', out)
+                      'términos e ir al tab Catálogo. Dispositivo emulator-5554."', out)
+        self.assertNotIn("Maestro", out)  # el prompt no fija cómo se recorre: lo pregunta la sesión 1
 
     def test_un_pedido_mal_formado_se_ignora_con_aviso_y_la_ruta_se_puede_cambiar(self):
         write(self.dir / "reports/perf/setup/pedido.json", '{"flujo": ""}')
@@ -4884,3 +4891,207 @@ class Compat070Test(PerfBase):
         self.assertEqual(extra, ["detalle red_llamadas", "detalle red_ms", "detalle red_ttfb_ms", "detalle red_repetidas_2s",
                                  "detalle red_solapadas"])
         self.assertEqual([m[0] for m in metrics][:len(before)], [m[0] for m in data["metricas"]])
+
+
+class TriageToRigorousTest(PerfBase):
+    """De triage a riguroso: `decidir --profundidad`, y `siguiente` pide la línea base completa y el control antes de
+    ofrecer la decisión."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": "com.example.app", "principales": ["hilo_max_ms"], "profundidad": "triage",
+                     "flujos": {"detalle": {"inicio": "MainActivity", "recorrido": "adb shell input tap 1 1"}},
+                     "mejoras": [{"id": "M1", "titulo": "a"}]}
+        self.save()
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(self.folder / "diagnostico.md", "x")
+        write(self.folder / "reporte-inicial.md", "x")
+
+    def save(self):
+        write(self.folder / "plan.json", json.dumps(self.plan))
+
+    def measured(self, antes, control=None, skill=perf.VERSION):
+        phases, text = {}, HEADER
+        for phase, count in (("antes", antes), ("control", control)):
+            if count:
+                phases[phase] = {"fecha": "2026-11-05T10:00:00", "corridas": count, "version": "1.0 (7)",
+                                 "instalada": "2026-11-05 09:00:00"}
+                if skill:
+                    phases[phase]["skill"] = skill
+                text += rows(phase, "detalle", "hilo_max_ms", [40 + i for i in range(count)])
+        write(self.folder / "fases.json", json.dumps(phases))
+        write(self.folder / "metricas.csv", text)
+
+    def step(self):
+        return perf.next_steps(self.folder, self.plan)
+
+    def test_triage_cerrado_dice_como_seguir_y_no_pide_capturas(self):
+        self.measured(3)
+        title, steps = self.step()
+        self.assertEqual(title, "triage cerrado")
+        self.assertEqual([s["tipo"] for s in steps], ["archivo", "terminal"])
+        self.assertIn("decidir --carpeta", steps[1]["texto"])
+        self.assertTrue(steps[1]["texto"].endswith("--profundidad riguroso"))
+        self.assertIn("solo si quieres aplicar una mejora", steps[1]["que"])
+
+    def test_un_triage_abierto_con_mejoras_y_sin_reporte_sigue_como_antes(self):
+        self.measured(3, skill=None)
+        (self.folder / "reporte-inicial.md").unlink()  # la sesión 2 escribió las mejoras y todavía no generó el reporte
+        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")
+
+    def test_riguroso_con_antes_incompleto_pide_las_corridas_que_faltan_antes_de_decidir(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(3, control=10)
+        title, steps = self.step()
+        self.assertEqual(title, "completar la línea base de riguroso (sin chat)")
+        self.assertEqual(len(steps), 2)
+        self.assertIn("--fase antes --corridas 7", steps[0]["texto"])
+        self.assertNotIn("--rehacer", steps[0]["texto"])
+        self.assertIn("tiene 3", steps[0]["que"])
+        self.assertIn("agrega --rehacer y pide --corridas 10", steps[0]["tu"])
+        self.assertIn("decidir --carpeta", steps[1]["texto"])
+
+    def test_riguroso_sin_control_lo_pide_y_con_recorrido_manual_la_linea_base_es_de_5(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(10)
+        title, steps = self.step()
+        self.assertEqual(title, "completar la línea base de riguroso (sin chat)")
+        self.assertEqual(len(steps), 2)
+        self.assertIn("--fase control --corridas 10", steps[0]["texto"])
+        self.assertIn("decidir --carpeta", steps[1]["texto"])
+        self.plan["flujos"]["detalle"]["recorrido"] = "manual"
+        self.measured(3)
+        steps = self.step()[1]
+        self.assertIn("--fase antes --corridas 2", steps[0]["texto"])
+        self.assertIn("--fase control --corridas 5", steps[1]["texto"])
+        self.assertIn("decidir --carpeta", steps[2]["texto"])
+
+    def test_riguroso_completo_ofrece_la_decision(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(10, control=10)
+        title, steps = self.step()
+        self.assertEqual(title, "decisión del usuario (sin chat)")
+        self.assertIn("--aprobar M1", steps[0]["texto"])
+        self.measured(12, control=5, skill=None)  # de sobra, y de una versión anterior: completa también
+        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")
+
+    def test_con_otra_version_de_la_skill_recomienda_rehacer_en_lugar_de_completar(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(3, skill=None)  # sin el dato: lo midió una versión anterior a 0.9.0
+        steps = self.step()[1]
+        self.assertIn("--fase antes --corridas 10 --rehacer", steps[0]["texto"])
+        self.assertIn("otra versión de hb-performance (anterior a 0.9.0)", steps[0]["que"])
+        self.assertIn("--fase control --corridas 10", steps[1]["texto"])
+        self.assertNotIn("--rehacer", steps[1]["texto"])
+        self.measured(5, control=5, skill=None)  # con control de esa versión: se repite junto con el antes
+        steps = self.step()[1]
+        self.assertIn("--fase antes --corridas 10 --rehacer", steps[0]["texto"])
+        self.assertIn("--fase control --corridas 10 --rehacer", steps[1]["texto"])
+
+    def test_la_version_de_la_skill_se_guarda_por_flujo(self):
+        folder = self.dir / "fases"
+        folder.mkdir()
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5,
+                                                         "flujos": {"lista": {"corridas": 5}}}}))
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T10:00:00", "corridas": 3, "skill": perf.VERSION}, "detalle")
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T11:00:00", "corridas": 1, "skill": perf.VERSION}, "lista")
+        record = perf.read_phases(folder)["antes"]
+        self.assertEqual(perf.phase_skill(record, "detalle"), perf.VERSION)  # flujo nuevo: la versión que lo midió
+        self.assertEqual(perf.phase_skill(record, "lista"), "anterior a 0.9.0")  # ya tenía corridas sin el dato
+
+    def test_una_mejora_ya_aprobada_sin_control_tambien_lo_pide_antes_de_la_sesion_3(self):
+        self.plan["profundidad"] = "riguroso"
+        self.plan["mejoras"][0]["estado"] = "aprobada"
+        self.measured(10)
+        title, steps = self.step()
+        self.assertEqual(title, "completar la línea base de riguroso (sin chat)")
+        self.assertEqual(len(steps), 1)
+        self.assertIn("--fase control", steps[0]["texto"])
+        self.measured(5, control=5)  # una investigación rigurosa ya decidida sigue igual, tenga las corridas que tenga
+        self.assertEqual(self.step()[0], "sesión 3 · M1")
+
+    def test_aprobar_en_el_triage_y_pasar_a_riguroso_tambien_completa_antes(self):
+        self.plan["mejoras"][0]["estado"] = "aprobada"
+        self.save()
+        self.measured(3)
+        out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
+        self.assertTrue(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["desde_triage"])
+        self.assertIn("--fase antes --corridas 7", out)
+        self.assertIn("--fase control --corridas 10", out)
+        self.assertNotIn("sesión 3", out)
+
+    def test_un_triage_sin_mejoras_no_ofrece_pasar_a_riguroso_y_decidir_no_falla_sin_la_clave(self):
+        del self.plan["mejoras"]
+        self.save()
+        self.measured(3)
+        title, steps = self.step()
+        self.assertEqual((title, [s["tipo"] for s in steps]), ("triage cerrado", ["archivo"]))
+        out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
+        self.assertIn("profundidad riguroso (era triage)", out)
+
+    def test_decidir_profundidad_cambia_el_plan_lo_anota_y_da_las_capturas(self):
+        self.measured(3)
+        out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
+        self.assertEqual(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["profundidad"], "riguroso")
+        self.assertIn("profundidad riguroso (era triage)", out)
+        self.assertIn("Siguiente · completar la línea base de riguroso (sin chat)", out)
+        self.assertIn("--fase antes --corridas 7", out)
+        self.assertIn("--fase control --corridas 10", out)
+        self.assertIn("profundidad riguroso (era triage) (perf.py decidir)", (self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["mejoras"][0].get("estado", "propuesta"),
+                         "propuesta")
+        result = self.perf("decidir", "--carpeta", self.folder)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--profundidad", result.stderr)
+
+
+class OrphanTraceTest(DeviceBase):
+    """Una traza que quedó sin fila en el CSV (captura cortada) no se pisa: se aparta y se avisa."""
+
+    def test_la_traza_huerfana_se_aparta_y_la_corrida_usa_su_numero(self):
+        self.tp_outputs(GOOD)
+        folder = self.plan.parent
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                "--calentamiento", "0", "--sin-compilar")
+        write(folder / "antes" / "home_2.perfetto-trace.gz", "huerfana")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertRegex(out, r"⚠ había una traza de la corrida 2 sin fila en metricas.csv .*antes-descartada-\d{6}/")
+        aside = [d for d in folder.iterdir() if d.name.startswith("antes-descartada-")]
+        self.assertEqual(len(aside), 1)
+        self.assertEqual((aside[0] / "home_2.perfetto-trace.gz").read_text(encoding="utf-8"), "huerfana")
+        self.assertNotEqual((folder / "antes" / "home_2.perfetto-trace.gz").read_bytes(), b"huerfana")
+        self.assertEqual(out.count("⚠ había una traza"), 1)
+
+    def test_sin_huerfana_no_avisa_y_una_traza_con_fila_no_se_toca(self):
+        folder = self.dir / "inv"
+        (folder / "antes").mkdir(parents=True, exist_ok=True)
+        csv_path = folder / "metricas.csv"
+        self.assertIsNone(perf.set_aside_orphan(folder, folder / "antes", "antes", "home", 1, csv_path))
+        write(csv_path, HEADER + rows("antes", "home", "hilo_max_ms", [40]))
+        write(folder / "antes" / "home_1.perfetto-trace.gz", "con fila")
+        self.assertIsNone(perf.set_aside_orphan(folder, folder / "antes", "antes", "home", 1, csv_path))
+        self.assertTrue((folder / "antes" / "home_1.perfetto-trace.gz").is_file())
+
+    def test_completar_antes_con_otro_build_o_con_otra_version_avisa_y_recomienda_rehacer(self):
+        self.tp_outputs(GOOD)
+        common = ("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                  "--calentamiento", "0", "--sin-compilar")
+        self.ok(*common)
+        self.assertNotIn("--rehacer", self.ok(*common))  # mismo build y misma versión: se suman sin aviso
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["skill"], perf.VERSION)
+        self.env["FAKE_UPDATED"] = "2026-11-06 09:00:00"
+        out = self.ok(*common)
+        self.assertIn("no es el que midió las corridas que 'antes' ya tiene", out)
+        self.assertIn("repite la fase con --rehacer", out)
+        self.assertNotIn("no es el que midió", self.ok(*(common + ("--rehacer",))))
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        del phases["antes"]["skill"]  # como la deja una versión anterior
+        del phases["antes"]["flujos"]["home"]["skill"]
+        write(self.plan.parent / "fases.json", json.dumps(phases))
+        out = self.ok(*common)
+        self.assertIn("otra versión de hb-performance (anterior a 0.9.0", out)
+        self.assertEqual(json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))["antes"]["skill"],
+                         "anterior a 0.9.0")

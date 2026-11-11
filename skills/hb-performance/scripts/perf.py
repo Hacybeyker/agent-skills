@@ -43,6 +43,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import uuid
 import xml.etree.ElementTree as ElementTree
 from urllib.parse import urlsplit
 
@@ -1958,6 +1959,28 @@ def next_run_number(csv_path, phase, flow):
     return max(runs, default=0) + 1
 
 
+def set_aside_orphan(folder, out_dir, phase, flow, n, csv_path):
+    """Una traza `<flujo>_<n>` que quedó sin fila en el CSV (una captura cortada entre bajar la traza y escribir la
+    métrica) no se pisa: se aparta en `<fase>-descartada-<hora>/`, como hace --rehacer. Devuelve la carpeta, o None."""
+    found = [out_dir / ("%s_%d.perfetto-trace%s" % (flow, n, suffix)) for suffix in ("", ".gz")]
+    found = [path for path in found if path.is_file()]
+    if not found:
+        return None
+    if csv_path.is_file() and any(r["fase"] == phase and r["flujo"] == flow and to_int(r["corrida"]) == n
+                                  for r in read_rows(csv_path)):
+        return None  # tiene su fila: no es huérfana (no debería pasar: n es el número que sigue al último del CSV)
+    target = folder / ("%s-descartada-%s" % (phase, datetime.datetime.now().strftime("%H%M%S")))
+    target.mkdir(parents=True, exist_ok=True)
+    for path in found:
+        destination = target / path.name
+        if destination.exists():
+            destination = target / ("%s-%s" % (uuid.uuid4().hex[:6], path.name))
+        path.rename(destination)
+    print("⚠ había una traza de la corrida %d sin fila en metricas.csv (una captura que se cortó): no se pisa, quedó en %s/"
+          % (n, target.name))
+    return target
+
+
 def run_line(n, size_mb, metrics):
     values = {m[0]: m for m in metrics}
     parts = ["corrida %s" % n, "%.0f MB" % size_mb]
@@ -2014,12 +2037,20 @@ def write_phase(folder, phase, data, flow=None):
     previous = phases.get(phase) or {}
     flows = dict(previous.get("flujos") or {})
     if flow:
-        flows[flow] = merge_run_data(flows.get(flow) or {}, data)
+        before_flow = flows.get(flow) or {}
+        flows[flow] = merge_run_data(before_flow, data)
+        if "skill" in data:
+            # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
+            flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
+                else data["skill"]
     merged = merge_run_data(previous, data)
     for key in ("hz_corridas", "avisos", "entorno"):
         data.pop(key, None)
     data.update(merged)
     data["fecha"] = previous.get("fecha") or data["fecha"]
+    if previous.get("corridas") and "skill" in data:
+        # La fase ya tenía corridas: vale la versión que las midió (sin dato, una anterior a 0.9.0), no la de esta tanda.
+        data["skill"] = previous.get("skill") or "anterior a 0.9.0"
     if flows:
         data["flujos"] = flows
     phases[phase] = data
@@ -2062,13 +2093,29 @@ def forget_flow(folder, csv_path, phase, flow):
     save_phases(folder, phases)
 
 
-def check_build(folder, phase, build, commit, force):
-    """Avisos (o un error) según el build y el commit que midió antes."""
+def check_build(folder, phase, build, commit, force, flow=None, redo=False):
+    """Avisos (o un error) según el build y el commit que midió antes. En `antes`, si la fase ya tiene corridas de ese
+    flujo y se van a sumar más (sin --rehacer), avisa cuando el build instalado o la versión de la skill no son los de
+    esas corridas: mezclarlas da una línea base de dos estados distintos."""
     before = read_phases(folder).get("antes")
-    if not before or phase == "antes":
+    if not before:
         return []
     same = bool(before.get("instalada")) and before.get("instalada") == build.get("instalada") \
         and before.get("version") == build.get("version")
+    if phase == "antes":
+        tracked = before.get("flujos")
+        if redo or (flow and tracked and flow not in tracked):
+            return []
+        notes = []
+        if before.get("instalada") and not same:
+            notes.append("el build instalado (%s, instalado %s) no es el que midió las corridas que 'antes' ya tiene (%s, "
+                         "instalado %s): no las completes, repite la fase con --rehacer"
+                         % (build.get("version"), build.get("instalada"), before.get("version"), before.get("instalada")))
+        if phase_skill(before, flow) != VERSION:
+            notes.append("las corridas que 'antes' ya tiene se midieron con otra versión de hb-performance (%s; esta es "
+                         "%s): la configuración de la traza puede no ser la misma; repite la fase con --rehacer"
+                         % (phase_skill(before, flow) or "anterior a 0.9.0", VERSION))
+        return notes
     notes = []
     if phase == "despues" and same and not force:
         raise Precondicion("el build instalado es el mismo que midió antes (instalado %s): instala el build con la "
@@ -2406,9 +2453,57 @@ def next_steps(folder, plan, flow=None):
         return "investigación cerrada", [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
     initial = state.parent / ("reporte-inicial.html" if (state.parent / "reporte-inicial.html").is_file() else "reporte-inicial.md")
     if triage and initial.is_file():
-        return "triage cerrado", [{"tipo": "archivo", "texto": str(initial),
-                                   "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después); "
-                                          "para aplicar mejoras, cambia profundidad a riguroso y mide control y después"}]
+        closed = [{"tipo": "archivo", "texto": str(initial),
+                   "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después)"}]
+        if not mejoras:  # sin mejoras propuestas no hay nada que pasar a riguroso
+            return "triage cerrado", closed
+        return "triage cerrado", closed + [
+            terminal(command("decidir", "--carpeta", folder, "--profundidad", "riguroso"),
+                     "solo si quieres aplicar una mejora: pasa la investigación a riguroso y te da, en orden, las capturas "
+                     "que faltan (completar antes y medir control) y la decisión",
+                     "córrelo solo si vas a aplicar una mejora; si no, el triage termina aquí")]
+    # Riguroso pide, antes de decidir, la línea base completa (10 corridas de antes con recorrido automático, 5 con
+    # recorrido manual o con pausa humana) y el control. Falta cuando la investigación viene de un triage.
+    undecided = "propuesta" in estados and "aprobada" not in estados
+    # Con una mejora ya aprobada solo se pide el control que falta de un antes medido (aprobar y pasar a riguroso en el
+    # mismo comando): una investigación rigurosa ya decidida sigue como estaba.
+    if not triage and (undecided or ("aprobada" in estados and "antes" in phases)) and "aplicada" not in estados \
+            and "despues" not in phases:
+        have = measured_runs(root / folder, phases, "antes", flow)
+        missing = 0 if not (undecided or plan.get("desde_triage")) else runs if "antes" not in phases \
+            else max(0, runs - have) if have is not None else 0
+        if missing or "control" not in phases:
+            # Con otra versión de la skill (o sin el dato: una anterior a 0.9.0) la configuración de la traza pudo
+            # cambiar: las corridas que hay no se completan, se repiten.
+            measured_with = phase_skill(phases.get("antes"), flow)
+            redo = "antes" in phases and measured_with != VERSION
+            steps = []
+            if redo:
+                steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", runs, "--rehacer"])),
+                                      "repite la fase antes completa: las corridas que hay se midieron con otra versión de "
+                                      "hb-performance (%s) y no se mezclan con las nuevas"
+                                      % (measured_with or "anterior a 0.9.0"), you_run))
+            elif missing:
+                steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", missing])),
+                                      "completa la fase antes hasta las %d corridas que pide riguroso (tiene %d: las que ya "
+                                      "hay cuentan si nada cambió)" % (runs, runs - missing),
+                                      you_run.replace(str(runs), str(missing)) + "; si reinstalaste la app o cambió el build "
+                                      "desde esas corridas, agrega --rehacer y pide --corridas %d: las anteriores ya no "
+                                      "cuentan (capturar lo avisa)" % runs))
+            if "control" not in phases or redo:
+                again = "control" in phases  # el control que había midió el ruido del antes que se repite: va de nuevo
+                steps.append(terminal(command(*(capture + ["--fase", "control", "--corridas", runs]
+                                                + (["--rehacer"] if again else []))),
+                                      "repite la medición sin cambiar nada, con el mismo build de antes: mide el ruido"
+                                      + (" (de nuevo: el control anterior era del antes que se repite)" if again else ""),
+                                      you_run))
+            if undecided:
+                ids = ",".join(m["id"] for m in mejoras if m.get("estado", "propuesta") == "propuesta")
+                steps.append(terminal(
+                    command("decidir", "--carpeta", folder, "--aprobar", ids, "--descartar", "-", "--pendiente", "-"),
+                    "registra qué mejoras se aplican y da el chat de la sesión 3",
+                    "deja en cada lista los ids que correspondan (- es ninguno); mira las mejoras en estado.md"))
+            return "completar la línea base de riguroso (sin chat)", steps
     if "aprobada" in estados:
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         return "sesión 3 · %s" % first["id"], [
@@ -2475,6 +2570,31 @@ def next_steps(folder, plan, flow=None):
     return ("medición antes (sin chat)" if triage and "antes" not in phases else
             "medición antes y control (sin chat)" if "antes" not in phases else
             "control y diagnóstico (sin chat)" if "control" not in phases and not triage else "diagnóstico (sin chat)"), steps
+
+
+def phase_skill(record, flow=None):
+    """La versión de hb-performance que midió las corridas de un flujo en una fase (la del flujo si fases.json la guarda
+    por flujo; si no, la de la fase). None si no hay dato: la midió una versión anterior a 0.9.0."""
+    record = record or {}
+    tracked = (record.get("flujos") or {}).get(flow) or {}
+    return tracked.get("skill") or record.get("skill")
+
+
+def measured_runs(folder, phases, phase, flow):
+    """Cuántas corridas válidas tiene el flujo en esa fase: las de metricas.csv o, sin CSV, las de fases.json. None si
+    no se sabe."""
+    path = pathlib.Path(folder) / "metricas.csv"
+    if path.is_file():
+        try:
+            found = {r["corrida"] for r in read_rows(path) if r["fase"] == phase and r["flujo"] == flow}
+        except PerfError:
+            found = set()
+        if found:
+            return len(found)
+    record = phases.get(phase) or {}
+    tracked = record.get("flujos") or {}
+    value = (tracked.get(flow) or {}).get("corridas") if tracked else record.get("corridas")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 PENDING_CAPTURE = re.compile(r"captura pendiente[^`\n]*`([^`\n]+)`", re.I)
@@ -2654,20 +2774,32 @@ def cmd_decidir(args):
         for item in (getattr(args, option) or "").split(","):
             if item.strip() and item.strip() != "-":
                 choices[item.strip()] = estado
-    if not choices:
-        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente o --aplicada")
+    depth = getattr(args, "profundidad", None)
+    if not choices and not depth:
+        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente o --aplicada (o cambia la "
+                        "profundidad con --profundidad)")
     known = [m["id"] for m in plan.get("mejoras", [])]
     unknown = sorted(set(choices) - set(known))
     if unknown:
         raise PerfError("plan.json no tiene las mejoras %s (tiene: %s)" % (", ".join(unknown), ", ".join(known) or "ninguna"))
-    for item in plan["mejoras"]:
+    for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
             if choices[item["id"]] == "aplicada":
                 item["aplicada_en"] = datetime.datetime.now().isoformat(timespec="seconds")
+    parts = []
+    if depth and depth != plan.get("profundidad", "riguroso"):
+        parts.append("profundidad %s (era %s)" % (depth, plan.get("profundidad", "riguroso")))
+        if depth == "riguroso":
+            plan["desde_triage"] = True  # la línea base es la de un triage: `siguiente` pide completarla aunque ya haya una mejora aprobada
+        else:
+            plan.pop("desde_triage", None)
+        plan["profundidad"] = depth
+    elif depth:
+        parts.append("profundidad %s (ya lo era)" % depth)
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    parts = ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
-             for _, estado, label in DECISIONS if estado in choices.values()]
+    parts += ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
+              for _, estado, label in DECISIONS if estado in choices.values()]
     line = "- %s: %s (perf.py decidir)" % (datetime.date.today().isoformat(), "; ".join(parts))
     state = folder / "estado.md"
     if state.is_file():
@@ -2739,7 +2871,7 @@ def cmd_capturar(args, plan=None):
     warnings += environment_warnings(environment)
     commit, dirty = git_info()
     if not args.prueba:
-        warnings += check_build(folder, phase, build, commit, args.forzar)
+        warnings += check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
     for warning in warnings:
         print("⚠ " + warning)
     folder.mkdir(parents=True, exist_ok=True)
@@ -2862,6 +2994,8 @@ def cmd_capturar(args, plan=None):
         if sdk < 31:
             adb.shell("dumpsys gfxinfo %s reset" % package)
         local = out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))
+        if not args.prueba:
+            set_aside_orphan(folder, out_dir, phase, flow_name, n, csv_path)
         label = "prueba" if args.prueba else "corrida %d de %d (%s, %s)" % (valid + 1, target, flow_name, phase)
         reason, extra = record_run(adb, config, recorrido, label, local, startup, package)
         metrics, invalid, info, crash = [], reason, {}, []
@@ -2984,7 +3118,7 @@ def cmd_capturar(args, plan=None):
         n += 1
     seen_hz = {h for h in run_hz if h}
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
-              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation}
+              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION}
     if seen_hz:
         record["hz_corridas"] = run_hz
     rate_warning = hz_warning(hz, seen_hz)
@@ -4324,12 +4458,13 @@ def read_request(path):
 
 
 def session1_prompt(request, serial):
-    """El texto del chat de la sesión 1: el de "flujo largo" si para llegar al tramo hay login u otras pantallas."""
+    """El texto del chat de la sesión 1: el de "flujo largo" si para llegar al tramo hay login u otras pantallas. Dice
+    qué hay que pasar para llegar, no cómo recorrerlo: el modo de recorrido se elige en las preguntas de la sesión 1."""
     flow = request["flujo"].strip().rstrip(".")
     reach = (request.get("llegar") or "").strip().rstrip(".")
     if reach:
-        return ("Usa hb-performance: medir %s. Para llegar ahí hay que %s: usa un flow de Maestro en preparar y adb para "
-                "el tramo medido. Dispositivo %s." % (flow, reach, serial))
+        # No fija cómo se recorre (adb, Maestro en preparar, deep link o manual): esa pregunta es de la sesión 1.
+        return "Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial)
     return "Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial)
 
 
@@ -5573,6 +5708,9 @@ def main(argv=None):
     p.add_argument("--descartar", help="ids separados por coma (- es ninguno)")
     p.add_argument("--pendiente", help="ids separados por coma (- es ninguno)")
     p.add_argument("--aplicada", help="ids que la sesión 3 ya aplicó (la usa el agente al terminar la mejora)")
+    p.add_argument("--profundidad", choices=["riguroso", "triage"],
+                   help="cambia la profundidad del plan sin editar plan.json: de triage a riguroso para aplicar una mejora "
+                        "(el paso siguiente pide completar antes y medir control)")
     p.set_defaults(func=cmd_decidir)
 
     p = sub.add_parser("capturar", help="calentamiento, compilación y N corridas con traza, consultas y CSV")

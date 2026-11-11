@@ -26,7 +26,7 @@ Qué hace, en orden:
    Compilar tarda: en una app grande, varios minutos. `capturar` lo avisa antes de empezar ("… fijando la compilación de ART… no es un cuelgue") y al terminar dice cuánto tardó; lo mismo con cada traza que procesa ("… procesando la traza 2 de 10"). Con `completa`, si la app ya tiene el filtro `speed` en todo su código (lo lee de `dumpsys package dexopt`) y es la misma instalación en la que esta investigación la compiló la última vez (versión y fecha de instalación, guardadas en `<carpeta>/compilacion.json`), no recompila y lo dice; `--recompilar` la fuerza. Un build recién instalado, otro filtro o una salida que no se puede leer compilan como siempre.
 
    Sin esto, un build recién instalado corre con JIT y parece una regresión que no existe. Con `completa`, el TTID suele salir algo más alto que con `perfil` (un ejecutable más grande que cargar): sirve para comparar fases entre sí, no como el TTID que verá el usuario de Play. Cada corrida guarda `jit_ms` (informativa) y `comparar` avisa si la compilación o el JIT cambiaron entre fases. Después, el **calentamiento** (una corrida que no cuenta).
-3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
+3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**. Si en la carpeta de la fase quedó una traza con el número de la corrida que toca y sin fila en `metricas.csv` (una captura que se cortó entre bajar la traza y escribir la métrica), no la pisa: la aparta en `<fase>-descartada-<hora>/` y lo avisa.
 4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase, la tasa de refresco que midió cada corrida en `hz_corridas`, los avisos y, en `flujos`, lo de cada flujo). Si el `hz` del plan difiere en más de un 6 % de la tasa que midió la traza, o si no hay `hz` y la tasa cambió entre corridas, lo avisa en la salida, en "Métricas" de `estado.md` y en `avisos` de `fases.json`; `comparar` lo repite. El presupuesto de frame se calculó con el `hz` del plan: corrígelo y repite lo medido así con `--rehacer`.
 
 Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), con intentos de reserva: 3 como mínimo y la mitad de las pedidas si son más (5 → 8 intentos, 10 → 15, 20 → 30), así que unas pocas inválidas sueltas no cortan una captura larga. Tres inválidas **seguidas** la detienen antes, sin gastar la reserva: algo falla de forma sistemática. Una corrida inválida se guarda como `_invalida_<motivo>` para auditoría y no entra al CSV.
@@ -58,6 +58,21 @@ Cada comando de `perf.py` termina con el paso siguiente, completo y en orden, y 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py siguiente --carpeta <carpeta>
 ```
+
+## De triage a riguroso
+
+Un triage termina en el reporte inicial ("triage cerrado"). Si después quieres aplicar una mejora, no edites `plan.json` a mano:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --profundidad riguroso
+```
+
+Cambia `profundidad`, lo anota en "Decisiones" e imprime lo que falta, en orden: completar `antes` (hasta 10 corridas con recorrido automático; 5 con recorrido manual o con pausa humana), medir `control` y, recién entonces, la decisión. `siguiente` hace la misma comprobación en cualquier investigación rigurosa con mejoras sin decidir: sin la línea base completa y sin control, no ofrece `decidir`.
+
+- **Las corridas del triage cuentan si nada cambió:** mismo build instalado (versión y fecha de instalación), mismas condiciones y la misma versión de la skill. Entonces solo se suman las que faltan (`--fase antes --corridas <faltantes>`).
+- **Si algo cambió, no se completan: se repiten.** Si reinstalaste la app o el build es otro, `capturar` lo avisa y hay que usar `--rehacer`. Si las corridas se midieron con otra versión de la skill (la configuración de la traza pudo cambiar), `siguiente` imprime directamente el comando con `--rehacer`.
+- **Aplicar una mejora invalida el `antes` de otras investigaciones abiertas que pasen por el mismo código.** Su línea base ya no describe el código actual: antes de medir su `después`, repite su `antes` (y `control`) con `--rehacer`, o ciérralas primero.
+- Si el triage no propuso mejoras, no hay nada que pasar a riguroso: el cierre es el corto, sin fase después.
 
 ## Después de medir antes (y control)
 

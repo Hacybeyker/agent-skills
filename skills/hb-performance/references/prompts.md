@@ -24,10 +24,10 @@ Sin build de profiling, el agente hace el setup (sesión 0) y te deja el comando
 **Dónde:** chat nuevo · Intermedio · medio
 
 ```text
-Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ahí hay que <login, aceptar términos, omitir huella, ir al tab X>: usa un flow de Maestro en preparar y adb para el tramo medido. Dispositivo <serial>.
+Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ahí hay que <login, aceptar términos, omitir huella, ir al tab X>. Dispositivo <serial>.
 ```
 
-Sesión 1 con el patrón de flujos largos. Si el flujo necesita credenciales, van en variables de entorno: expórtalas en la terminal **antes de abrir el agente** (solo ve las de la terminal desde la que se abrió) y, después, en la terminal donde midas.
+Sesión 1 con el patrón de flujos largos. El texto no fija cómo se recorre: el agente te lo pregunta y recomienda un flow de Maestro en `preparar` y `adb` para el tramo medido; si ya lo tienes decidido, agrégalo al pedido ("recorrido manual", "con deep link") y la pregunta sale igual, con tu elección marcada, para que puedas cambiarla. Si el flujo necesita credenciales, van en variables de entorno: expórtalas en la terminal **antes de abrir el agente** (solo ve las de la terminal desde la que se abrió) y, después, en la terminal donde midas.
 
 ### Flujo con un paso que hace una persona (autorizar en otra app, completar un pago)
 
