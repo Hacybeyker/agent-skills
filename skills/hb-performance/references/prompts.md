@@ -230,7 +230,7 @@ Imprime, en orden, lo que falta: completar `antes`, medir `control` y la decisi�
 cd <raíz> && python3 -I <skill>/scripts/perf.py instrumentar --modulo <el módulo que genera el APK, normalmente app> --paquete <paquete>.perf --actualizar
 ```
 
-Después, el formateador y el DoD del proyecto. Si un archivo sale con `✖ no se actualiza`, alguien lo editó a mano (o es de una versión sin huella): mira la diferencia y, si aceptas reemplazarlo, repite con `--actualizar --forzar`, que deja lo que había en `<archivo>.orig`.
+Hazlo **entre** investigaciones, no en medio de una: una plantilla nueva puede nombrar distinto las secciones (desde 0.10.0, los endpoints con rutas largas se acortan desde la izquierda), y antes y después tienen que nombrar igual. Después, el formateador y el DoD del proyecto. Si un archivo sale con `✖ no se actualiza`, alguien lo editó a mano (o es de una versión sin huella): mira la diferencia y, si aceptas reemplazarlo, repite con `--actualizar --forzar`, que deja lo que había en `<archivo>.orig`.
 
 ### Investigar algo que quedó en "Pendientes"
 

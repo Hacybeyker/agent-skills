@@ -50,7 +50,10 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
+# Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
+# métricas): sus corridas se pueden completar sin repetir la fase.
+SAME_CAPTURE = ("0.9.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -575,9 +578,14 @@ def update_block(folder, name, content):
 
 # ── Plan ─────────────────────────────────────────────────────────────────────
 
-def check_marker(marker):
+LAST_BEFORE = "ultima_antes"  # en `desde`: la última ocurrencia de la marca antes de la marca `hasta` elegida
+
+
+def check_marker(marker, start=False):
+    """True si la marca es válida. `ultima_antes` solo vale en `desde` (start) de una ventana, una métrica de usuario o
+    un tramo: en `hasta` y en las pausas no tiene sentido."""
     return bool(marker.get("marca")) and marker.get("punto", "inicio") in ("inicio", "fin") \
-        and marker.get("cual", "primera") in ("primera", "ultima")
+        and marker.get("cual", "primera") in (("primera", "ultima", LAST_BEFORE) if start else ("primera", "ultima"))
 
 
 def check_margin(spec):
@@ -615,15 +623,17 @@ def load_plan(path):
                     or not isinstance(spec.get("hasta"), dict):
                 raise PerfError("métrica de usuario inválida en '%s': necesita nombre, desde y hasta" % name)
             for side in ("desde", "hasta"):
-                if not check_marker(spec[side]):
-                    raise PerfError("'%s.%s' en '%s': usa marca, punto (inicio|fin) y cual (primera|ultima)"
+                if not check_marker(spec[side], start=side == "desde"):
+                    raise PerfError("'%s.%s' en '%s': usa marca, punto (inicio|fin) y cual (primera|ultima; en 'desde', "
+                                    "también ultima_antes: la última antes de la marca 'hasta')"
                                     % (spec["nombre"], side, name))
         segments = flow.get("segmentos") or []
         seen = set()
         for spec in segments if isinstance(segments, list) else [None]:
             if not isinstance(spec, dict) or not isinstance(spec.get("nombre"), str) \
                     or not SEGMENT_NAME.fullmatch(spec["nombre"]) or spec["nombre"] == "red" or spec["nombre"] in seen \
-                    or not all(isinstance(spec.get(side), dict) and check_marker(spec[side]) for side in ("desde", "hasta")) \
+                    or not all(isinstance(spec.get(side), dict) and check_marker(spec[side], start=side == "desde")
+                               for side in ("desde", "hasta")) \
                     or not check_margin(spec) or not isinstance(spec.get("solo_red", False), bool):
                 raise PerfError("'%s.segmentos' es una lista de tramos: cada uno con 'nombre' (letras, números, _ o -; sin "
                                 "repetir y distinto de 'red'), 'desde' y 'hasta' (marcas, como en metricas_usuario) y, si "
@@ -675,6 +685,9 @@ def load_plan(path):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
         if window is not None and not check_margin(window):
             raise PerfError("%s: flujos.%s.ventana.margen_ms es un número de milisegundos" % (path, name))
+        if window is not None and isinstance(window.get("hasta"), dict) and window["hasta"].get("cual") == LAST_BEFORE:
+            raise PerfError("%s: flujos.%s.ventana.hasta: 'cual': 'ultima_antes' solo vale en 'desde' (la última ocurrencia "
+                            "antes de la marca 'hasta')" % (path, name))
     if plan.get("input_slices") is not None and not (isinstance(plan["input_slices"], str)
                                                      and INPUT_GLOB.fullmatch(plan["input_slices"])):
         raise PerfError("%s: 'input_slices' es un patrón GLOB con el nombre de los slices de input (por defecto %s)"
@@ -917,23 +930,41 @@ def network_metrics(sections, known_endpoints, force):
     return out
 
 
-def resolve_marker(sections, marker, default_point, default_which, after=None):
+def resolve_marker(sections, marker, default_point, default_which, after=None, before=None):
+    """El momento (ns) de la ocurrencia elegida de una marca, o None si no está. El nombre de la marca se compara con
+    fnmatch (exacto, o un patrón con * y ?, distinguiendo mayúsculas). `after` y `before` acotan las ocurrencias."""
     point = marker.get("punto", default_point)
     which = marker.get("cual", default_which)
     times = [s[1] if point == "inicio" else s[1] + max(s[2], 0) for s in sections
              if fnmatch.fnmatchcase(s[4], marker["marca"])]
     if after is not None:
         times = [t for t in times if t >= after]
+    if before is not None:
+        times = [t for t in times if t <= before]
     if not times:
         return None
     return min(times) if which == "primera" else max(times)
 
 
-def user_metric_bounds(sections, spec):
-    """(inicio, fin) en ns de una métrica de usuario; None en el que no tenga su marca."""
+def resolve_span(sections, spec):
+    """(inicio, fin) en ns de lo que se mide entre dos marcas (una ventana, una métrica de usuario o un tramo); None en
+    el que no tenga su marca. Lo normal: se elige `desde` (por defecto la primera ocurrencia) y `hasta` se busca después
+    de él (por defecto la última). Con `"cual": "ultima_antes"` en `desde` es al revés: primero `hasta`, entre todas sus
+    ocurrencias, y `desde` es la última ocurrencia de su marca que no queda después de ese momento. Sirve cuando la
+    marca de inicio sale varias veces (cada letra de una búsqueda) y la que importa es la que precede al resultado: se
+    elige en el plan, sin tocar la app."""
+    if spec["desde"].get("cual") == LAST_BEFORE:
+        end = resolve_marker(sections, spec["hasta"], "fin", "ultima")
+        start = resolve_marker(sections, spec["desde"], "inicio", LAST_BEFORE, before=end) if end is not None else None
+        return start, end
     start = resolve_marker(sections, spec["desde"], "inicio", "primera")
     end = resolve_marker(sections, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
     return start, end
+
+
+def user_metric_bounds(sections, spec):
+    """(inicio, fin) en ns de una métrica de usuario; None en el que no tenga su marca."""
+    return resolve_span(sections, spec)
 
 
 def metrics_spanning_input(sections, specs, inputs):
@@ -1002,8 +1033,7 @@ def resolve_window(markers, spec):
     """(inicio, fin) en ns de la ventana del flujo, o None si falta alguna marca."""
     if not spec:
         return None
-    start = resolve_marker(markers, spec["desde"], "inicio", "primera")
-    end = resolve_marker(markers, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
+    start, end = resolve_span(markers, spec)
     if start is None or end is None or end <= start:
         return None
     return start, end + int(spec.get("margen_ms", 0)) * 1_000_000
@@ -1081,8 +1111,7 @@ def pause_bounds(markers, pause):
 
 def span_bounds(markers, spec):
     """(inicio, fin) en ns de una ventana, una métrica de usuario o un tramo, de marca a marca y sin su `margen_ms`."""
-    start = resolve_marker(markers, spec["desde"], "inicio", "primera")
-    end = resolve_marker(markers, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
+    start, end = resolve_span(markers, spec)
     return (start, end) if start is not None and end is not None and end > start else None
 
 
@@ -1168,8 +1197,11 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     vsync = next((r[2] for r in rows if r[0] == "vsync" and r[2] > 0), 0)
     jit = next((r for r in rows if r[0] == "jit"), None)
     inputs = sorted(r[1] for r in rows if r[0] == "input")
+    # Una marca de inicio que el plan elige con `ultima_antes` sale varias veces a propósito: no es un gancho mal puesto.
+    chosen = [spec["desde"]["marca"] for _, spec in measured_spans(flow_spec) if spec["desde"].get("cual") == LAST_BEFORE]
     info = {"frames": len(frames), "secciones": len(sections), "input": len(inputs),
-            "marcas_repetidas": repeated_marks(sections),
+            "marcas_repetidas": {name: count for name, count in repeated_marks(sections).items()
+                                 if not any(fnmatch.fnmatchcase(name, str(pattern)) for pattern in chosen)},
             "duracion_s": bounds[0][2] / 1e9 if bounds and bounds[0][2] > 0 else None,
             "nombres": {}, "hz_traza": hz_from_vsync(vsync), "arranque": bool(launches)}
     hz = hz or info["hz_traza"] or 60
@@ -2242,7 +2274,7 @@ def check_build(folder, phase, build, commit, force, flow=None, redo=False):
             notes.append("el build instalado (%s, instalado %s) no es el que midió las corridas que 'antes' ya tiene (%s, "
                          "instalado %s): no las completes, repite la fase con --rehacer"
                          % (build.get("version"), build.get("instalada"), before.get("version"), before.get("instalada")))
-        if phase_skill(before, flow) != VERSION:
+        if not same_capture(phase_skill(before, flow)):
             notes.append("las corridas que 'antes' ya tiene se midieron con otra versión de hb-performance (%s; esta es "
                          "%s): la configuración de la traza puede no ser la misma; repite la fase con --rehacer"
                          % (phase_skill(before, flow) or "anterior a 0.9.0", VERSION))
@@ -2773,7 +2805,7 @@ def next_steps(folder, plan, flow=None):
             # Con otra versión de la skill (o sin el dato: una anterior a 0.9.0) la configuración de la traza pudo
             # cambiar: las corridas que hay no se completan, se repiten.
             measured_with = phase_skill(phases.get("antes"), flow)
-            redo = "antes" in phases and measured_with != VERSION
+            redo = "antes" in phases and not same_capture(measured_with)
             steps = []
             if redo:
                 steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", runs, "--rehacer"])),
@@ -2877,6 +2909,11 @@ def next_steps(folder, plan, flow=None):
     return ("medición antes (sin chat)" if triage and "antes" not in phases else
             "medición antes y control (sin chat)" if "antes" not in phases else
             "control y diagnóstico (sin chat)" if "control" not in phases and not triage else "diagnóstico (sin chat)"), steps
+
+
+def same_capture(version):
+    """True si las corridas medidas con esa versión de la skill se pueden mezclar con las de esta."""
+    return version in SAME_CAPTURE
 
 
 def phase_skill(record, flow=None):
@@ -3528,12 +3565,12 @@ def update_warnings(folder, plan):
 # ── AGENTS.md del proyecto: DoD y estado del setup ───────────────────────────
 
 # Encabezados de un AGENTS.md: se aceptan numerados ("## 5. DoD") y con hasta 3 espacios de sangría, como en Markdown.
-DOD_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*(?:\d+[.)][ \t]*)?(?:DoD|Definition of Done|Definición de "
+DOD_HEADING = re.compile(r"^\ufeff?[ \t]{0,3}#{1,6}[ \t]*(?:\d+[.)][ \t]*)?(?:DoD|Definition of Done|Definición de "
                          r"(?:hecho|terminado))\b", re.I)
 # La sección de rendimiento es la que se llama así: el título empieza con la palabra, no basta con que la mencione.
-PERF_HEADING = re.compile(r"^(#{1,6})[ \t]+(?:\d+[.)][ \t]*)?(?:rendimiento|performance)\b", re.I)
-ANY_HEADING = re.compile(r"^(#{1,6})[ \t]+\S")
-FENCE = re.compile(r"^[ \t]{0,3}(?:```|~~~)")
+PERF_HEADING = re.compile(r"^\ufeff?[ \t]{0,3}(#{1,6})[ \t]+(?:\d+[.)][ \t]*)?(?:rendimiento|performance)\b", re.I)
+ANY_HEADING = re.compile(r"^\ufeff?[ \t]{0,3}(#{1,6})[ \t]+\S")
+FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 AGENTS_BLOCK = ("<!-- hb-performance:estado -->", "<!-- /hb-performance:estado -->")
 AGENTS_FIELDS = ("instrumentación en el repo", "prueba de humo", "secciones HTTP")
 AGENTS_LEAD = "Estado del setup (lo mantiene `perf.py`: no lo edites)"
@@ -3551,11 +3588,16 @@ def read_agents(root):
 def prose_lines(text):
     """(posición, línea) de las líneas que no están dentro de un bloque de código: un `#` de un comando no es un
     encabezado."""
-    position, fenced = 0, False
+    position, fence = 0, None
     for line in text.splitlines(keepends=True):
-        if FENCE.match(line):
-            fenced = not fenced
-        elif not fenced:
+        mark = FENCE.match(line)
+        if fence is None and mark:
+            fence = mark.group(1)  # abre un bloque: lo cierra una línea con el mismo carácter y al menos igual de larga
+        elif fence is not None:
+            if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) \
+                    and not line[mark.end():].strip():
+                fence = None
+        else:
             yield position, line
         position += len(line)
 
@@ -3572,13 +3614,14 @@ def dod_notice(root, plan):
     if agents is not None and has_dod(agents):
         return None
     found = INSTALL_TASK.search(plan.get("instalar") or "")
-    assemble = "./gradlew -q :%sassemble%s" % (found.group(1), found.group(2)) if found else \
-        "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
+    assemble = "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
+    if found:  # del 'instalar' del plan: con su módulo si lo trae; sin módulo, la tarea sin ':' (la busca en todos)
+        assemble = "./gradlew -q %sassemble%s" % (":" + found.group(1) if found.group(1) else "", found.group(2))
     return {"tipo": "avisos", "crudo": True,
             "titulo": "%s: la sesión 3 corre \"los comandos de ## DoD\" y sin esa sección tendría que adivinar qué validar. "
                       "Agrégala a AGENTS.md antes de abrir el chat, con lo que el proyecto ya tiene (sin herramientas "
                       "nuevas). Plantilla" % ("AGENTS.md no tiene `## DoD`" if agents is not None else
-                                              "No hay AGENTS.md en %s" % root),
+                                              "No hay AGENTS.md en %s (o no se pudo leer)" % root),
             "lineas": ["## DoD", "",
                        "1. `./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests unitarios del módulo que cambie (la "
                        "tarea real: `./gradlew :<módulo>:tasks --all | grep UnitTest`)",
@@ -3624,7 +3667,7 @@ def update_agents_state(root, humo=None, http=None):
     path = pathlib.Path(root) / "AGENTS.md"
     text = read_agents(root)
     if text is None:
-        return "· No hay AGENTS.md en %s: el estado del setup no queda anotado" % root
+        return "· No hay AGENTS.md en %s (o no se pudo leer): el estado del setup no queda anotado" % root
     section = performance_section(text)
     if section is None:
         return ("· AGENTS.md no tiene una sección de rendimiento (## Rendimiento o ## Performance): no la creo, así que el "
@@ -3663,12 +3706,14 @@ def update_agents_state(root, humo=None, http=None):
 
 
 def http_state(current, seen, source):
-    """El valor de "secciones HTTP" después de una corrida: None si no hay nada nuevo que anotar. Una corrida que las
-    ve las anota una vez (no cambia la fecha en cada prueba); una que las esperaba y no las vio lo dice."""
+    """El valor de "secciones HTTP" después de una corrida de prueba: None si no hay nada nuevo que anotar. Una
+    corrida que las ve las anota una vez (no cambia la fecha en cada prueba). Una que las esperaba y no las vio lo dice
+    solo si nadie las vio antes: un flujo que no hace llamadas no desmiente la red que ya se comprobó (su aviso queda
+    en advertencias.json)."""
     today = datetime.date.today().isoformat()
-    if seen:
-        return None if (current or "").startswith("sí") else "sí (%s, %s)" % (source, today)
-    return "sin medir: la %s del %s no trajo ninguna" % (source, today)
+    if (current or "").startswith("sí"):
+        return None
+    return "sí (%s, %s)" % (source, today) if seen else "sin medir: la %s del %s no trajo ninguna" % (source, today)
 
 
 def cmd_capturar(args, plan=None):

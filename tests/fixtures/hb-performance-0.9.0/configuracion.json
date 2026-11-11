@@ -1,0 +1,41 @@
+{
+  "configuraciones": {
+    "6247bfe391f0": {
+      "nombre": "base.pbtx",
+      "fuentes": [
+        "atrace:am",
+        "atrace:dalvik",
+        "atrace:gfx",
+        "atrace:input",
+        "atrace:res",
+        "atrace:view",
+        "atrace:wm",
+        "atrace_apps",
+        "ds:android.surfaceflinger.frametimeline",
+        "ds:linux.ftrace",
+        "ds:linux.process_stats",
+        "ftrace:binder/binder_transaction",
+        "ftrace:binder/binder_transaction_received",
+        "ftrace:sched/sched_process_exit",
+        "ftrace:sched/sched_process_free",
+        "ftrace:sched/sched_switch",
+        "ftrace:task/task_newtask",
+        "ftrace:task/task_rename"
+      ]
+    }
+  },
+  "trazas": {
+    "detalle_1": "6247bfe391f0",
+    "detalle_2": "6247bfe391f0",
+    "detalle_3": "6247bfe391f0",
+    "detalle_4": "6247bfe391f0",
+    "detalle_5": "6247bfe391f0"
+  },
+  "instaladas": {
+    "detalle_1": "2026-04-14 09:00:00",
+    "detalle_2": "2026-04-14 09:00:00",
+    "detalle_3": "2026-04-14 09:00:00",
+    "detalle_4": "2026-04-14 09:00:00",
+    "detalle_5": "2026-04-14 09:00:00"
+  }
+}

@@ -3854,7 +3854,7 @@ class GeneratedFilesTest(PerfBase):
         self.assertNotEqual(perf.fingerprint(text.replace("{6,}", "{8,}")), perf.fingerprint(text))
         # una edición que solo reordena código, o que solo cambia espacios o comas dentro de un literal, también cuenta
         other = text + "// otra versión\n"
-        for before, after in (("padStart(4, '0')", "padStart('0', 4)"), ('" #"', '"#"'), ("{6,}", "{6}"),
+        for before, after in (("padStart(HASH_LENGTH, '0')", "padStart('0', HASH_LENGTH)"), ('" #"', '"#"'), ("{6,}", "{6}"),
                               ('"/{id}"', '"/ {id}"')):
             self.assertIn(before, text)
             self.assertEqual(perf.generated_state(text.replace(before, after), other), "editado", (before, after))
@@ -5529,10 +5529,11 @@ class RealTraceProcessorTest(unittest.TestCase):
 
 
 class CompatVersionsTest(DeviceBase):
-    """Una investigación en curso de 0.6.0, 0.7.0 o 0.8.0 (su plan.json, su fases.json y su estado.md, sin ningún campo
-    de 0.9.0) carga y corre `siguiente`, `diagnostico`, `reporte --inicial` y `comparar` sin errores."""
+    """Una investigación en curso de 0.6.0, 0.7.0, 0.8.0 o 0.9.0 (su plan.json, su fases.json y su estado.md, sin
+    ningún campo posterior) carga y corre `siguiente`, `diagnostico`, `reporte --inicial` y `comparar` sin errores."""
 
-    VERSIONS = ("0.6.0", "0.7.0", "0.8.0")
+    VERSIONS = ("0.6.0", "0.7.0", "0.8.0", "0.9.0")
+    BEFORE_090 = ("0.6.0", "0.7.0", "0.8.0")  # sin la versión de la skill ni la configuración en fases.json
 
     def investigation(self, version):
         fixture = ROOT / "tests" / "fixtures" / ("hb-performance-%s" % version)
@@ -5551,10 +5552,16 @@ class CompatVersionsTest(DeviceBase):
             phases = perf.read_phases(folder)
             self.assertTrue(phases, version)
             for record in phases.values():
-                self.assertNotIn("skill", record, version)
-                self.assertNotIn("configs", record, version)
+                self.assertNotIn("faltan", record, version)
+                if version in self.BEFORE_090:
+                    self.assertNotIn("skill", record, version)
+                    self.assertNotIn("configs", record, version)
+                else:
+                    self.assertEqual((record["skill"], len(record["configs"])), (version, 1), version)
             flow = next(iter(plan["flujos"]))
-            self.assertIsNone(perf.phase_skill(phases.get("antes"), flow), version)
+            self.assertEqual(perf.phase_skill(phases.get("antes"), flow), None if version in self.BEFORE_090 else version)
+            self.assertFalse((folder / perf.NOTES_FILE).exists(), version)
+            self.assertNotIn("perf:advertencias", (folder / "estado.md").read_text(encoding="utf-8"), version)
             self.assertEqual(perf.config_notes(folder, [flow]), [], version)  # sin el dato en ninguna fase, sin aviso
             self.assertEqual(perf.diagnostic_captures(folder), [], version)
 
@@ -5581,13 +5588,19 @@ class CompatVersionsTest(DeviceBase):
                                if r["fase"] == "antes" and r["flujo"] == flow})
                 for run in runs:
                     write(folder / "antes" / ("%s_%s.perfetto-trace.gz" % (flow, run)), "x")
+                if (fixture / "configuracion.json").is_file():  # 0.9.0 ya anota con qué configuración grabó cada traza
+                    write(folder / "antes" / "configuracion.json", (fixture / "configuracion.json").read_text(encoding="utf-8"))
                 self.env["FAKE_TP_OTRA"] = '"a"\n'
                 out = self.ok("diagnostico", "--carpeta", folder)
                 md = (folder / "diagnostico.md").read_text(encoding="utf-8")
-                # trazas de una versión anterior: no se sabe qué capturaron, así que no se afirma ausencia
-                self.assertIn("configuración desconocida", md, version)
-                self.assertNotIn("Medido y sin casos", md, version)
-                self.assertNotIn("no medido:", md, version)
+                if version in self.BEFORE_090:
+                    # trazas de una versión anterior: no se sabe qué capturaron, así que no se afirma ausencia
+                    self.assertIn("configuración desconocida", md, version)
+                    self.assertNotIn("Medido y sin casos", md, version)
+                    self.assertNotIn("no medido:", md, version)
+                else:
+                    self.assertNotIn("configuración desconocida", md, version)
+                    self.assertIn("Medido y sin casos", md, version)  # se sabe qué capturó: la ausencia se puede afirmar
                 self.assertIn("Red por tramo", md, version)
                 (folder / "diagnostico.md").unlink()  # el fixture no lo trae: el paso siguiente no debe cambiar por él
             self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
@@ -5597,16 +5610,29 @@ class CompatVersionsTest(DeviceBase):
             self.assertNotIn("configuración de Perfetto", out, version)
             self.assertNotIn("otra versión de hb-performance", out, version)
 
-    def test_las_metricas_que_calculaba_0_8_0_no_cambian_de_nombre_ni_de_valor(self):
-        fixture, folder = self.investigation("0.8.0")
-        data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
-        plan = perf.load_plan(folder / "plan.json")
-        flow = plan["flujos"]["detalle"]
-        self.assertEqual((flow["duracion_max_s"], len(flow["pausas"]), flow["segmentos"][1]["solo_red"]), (1200, 1, True))
-        metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
-        self.assertIsNone(invalid)
-        self.assertEqual([list(m) for m in metrics], data["metricas"])  # las mismas, con el mismo valor y en el mismo orden
-        self.assertEqual(len(data["metricas"]), 35)
+    def test_las_metricas_que_calculaban_0_8_0_y_0_9_0_no_cambian_de_nombre_ni_de_valor(self):
+        for version in ("0.8.0", "0.9.0"):
+            fixture, folder = self.investigation(version)
+            data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
+            plan = perf.load_plan(folder / "plan.json")
+            flow = plan["flujos"]["detalle"]
+            self.assertEqual((flow["duracion_max_s"], len(flow["pausas"]), flow["segmentos"][1]["solo_red"]), (1200, 1, True))
+            metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
+            self.assertIsNone(invalid, version)
+            self.assertEqual([list(m) for m in metrics], data["metricas"], version)  # las mismas, con el mismo valor y orden
+            self.assertEqual(len(data["metricas"]), 35, version)
+
+    def test_las_corridas_de_0_9_0_se_completan_sin_repetir_la_fase_y_las_anteriores_no(self):
+        self.assertTrue(perf.same_capture("0.9.0") and perf.same_capture(perf.VERSION))
+        self.assertFalse(perf.same_capture("0.8.0") or perf.same_capture(None))
+        fixture, folder = self.investigation("0.9.0")
+        build = {"version": "1.0 (7)", "instalada": "2026-04-14 09:00:00"}
+        self.assertEqual(perf.check_build(folder, "antes", build, "abc1234", False, "detalle"), [])
+        phases = perf.read_phases(folder)
+        phases["antes"]["skill"] = phases["antes"]["flujos"]["detalle"]["skill"] = "0.8.0"
+        perf.save_phases(folder, phases)
+        self.assertIn("otra versión de hb-performance (0.8.0; esta es %s)" % perf.VERSION,
+                      perf.check_build(folder, "antes", build, "abc1234", False, "detalle")[0])
 
 
 MAPPING = (FIXTURE_TRACES / "mapping.txt")
@@ -6690,6 +6716,8 @@ class ProjectAgentsTest(DeviceBase):
         for heading in ("## DoD", "### Definition of Done", "## Definición de hecho", "## 5. DoD"):
             write(self.dir / "AGENTS.md", "# P\n\n%s\n\n- algo\n" % heading)
             self.assertIsNone(perf.dod_notice(self.dir, {}), heading)
+        write(self.dir / "AGENTS.md", "\ufeff## DoD\n\n- algo\n")  # con BOM, como los demás encabezados
+        self.assertIsNone(perf.dod_notice(self.dir, {}))
         write(self.dir / "AGENTS.md", "# P\n\n```markdown\n## DoD\n```\n")  # dentro de un bloque de código no cuenta
         self.assertIsNotNone(perf.dod_notice(self.dir, {}))
 
@@ -6829,7 +6857,168 @@ class ProjectAgentsTest(DeviceBase):
                                            "(x) · hb-performance 0.10.0\n<!-- /hb-performance:estado -->"),
                          {"prueba de humo": "pasó", "secciones HTTP": "sí (x)"})
         self.assertIsNone(perf.http_state("sí (prueba de humo, 2026-11-01)", True, "corrida de prueba"))
-        self.assertIn("sin medir", perf.http_state("sí (x)", False, "corrida de prueba"))
+        self.assertIsNone(perf.http_state("sí (x)", False, "corrida de prueba"))  # un flujo sin llamadas no lo desmiente
+        self.assertIn("sin medir", perf.http_state("sin dato", False, "corrida de prueba"))
+        nested = "## Rendimiento\n\n````\n```\n# no es un encabezado\n```\n````\n\n~~~\n```\n# tampoco\n~~~\n\n## Git\n"
+        start, end = perf.performance_section(nested)
+        self.assertEqual(nested[end:], "## Git\n")  # los fences anidados o mezclados no cortan la sección
+        self.assertIsNotNone(perf.performance_section("  ## Rendimiento\n\n- a\n"))  # con sangría, como DoD
+        self.assertIn("`./gradlew -q assembleProfiling`", " ".join(perf.dod_notice(self.dir / "no-hay", {
+            "instalar": "./gradlew installProfiling"})["lineas"]))  # sin módulo en 'instalar', la tarea va sin ':' 
+
+
+class LastBeforeTest(unittest.TestCase):
+    """`"cual": "ultima_antes"` en `desde`: la última ocurrencia de la marca antes de la marca `hasta` elegida. Sirve
+    cuando la marca de inicio sale varias veces (cada letra de una búsqueda) y se elige en el plan, sin tocar la app."""
+
+    START = {"marca": "MARK busqueda_inicio", "cual": "ultima_antes"}
+
+    def trace(self):
+        # una búsqueda que carga con cada letra: tres inicios, dos resultados intermedios y el resultado final
+        return [("proceso", 0, 0, 0, PKG), ("limites", 0, 5000 * MS, 0, "")] \
+            + [("frame", i * 20 * MS, 16 * MS, 0, "None") for i in range(150)] \
+            + [("hilo", 2050 * MS, 30 * MS, 0, "Choreographer#doFrame"), ("hilo", 1010 * MS, 80 * MS, 0, "Choreographer#doFrame"),
+               ("seccion", 1000 * MS, 0, 0, "MARK busqueda_inicio"), ("seccion", 1300 * MS, 0, 0, "MARK busqueda_inicio"),
+               ("seccion", 1500 * MS, 0, 0, "MARK resultados"), ("seccion", 2000 * MS, 0, 0, "MARK busqueda_inicio"),
+               ("seccion", 2100 * MS, 0, 0, "MARK resultados"), ("seccion", 2400 * MS, 0, 0, "MARK resultados"),
+               ("seccion", 3000 * MS, 0, 0, "MARK busqueda_inicio"),  # otra búsqueda, después del último resultado
+               ("seccion", 2010 * MS, 200 * MS, 0, "HTTP GET api/v1/clientes"), ("seccion", 1010 * MS, 100 * MS, 0, "HTTP GET api/v1/clientes")]
+
+    def metrics(self, flow):
+        out, invalid, info = perf.trace_metrics(self.trace(), 60, flow, set(), 34)
+        self.assertIsNone(invalid)
+        return {m[0]: m[1] for m in out}, info
+
+    def test_en_una_metrica_de_usuario_elige_el_inicio_que_precede_al_resultado(self):
+        def flow(start, end):
+            return {"metricas_usuario": [{"nombre": "busqueda_ms", "desde": start, "hasta": end}]}
+
+        last = self.metrics(flow(self.START, {"marca": "MARK resultados"}))[0]
+        self.assertEqual(last["busqueda_ms"], 400)  # del inicio de los 2000 ms al último resultado (2400)
+        first = self.metrics(flow(self.START, {"marca": "MARK resultados", "cual": "primera"}))[0]
+        self.assertEqual(first["busqueda_ms"], 200)  # del inicio de los 1300 ms al primer resultado (1500)
+        # lo de siempre no cambia: 'primera' toma el primer inicio y 'ultima', el último de toda la traza
+        self.assertEqual(self.metrics(flow({"marca": "MARK busqueda_inicio"}, {"marca": "MARK resultados"}))[0]["busqueda_ms"],
+                         1400)
+        _, info = self.metrics(flow({"marca": "MARK busqueda_inicio", "cual": "ultima"}, {"marca": "MARK resultados"}))
+        self.assertEqual(info["faltantes"], ["busqueda_ms"])  # el último inicio queda después de todo resultado
+
+    def test_funciona_igual_en_la_ventana_y_en_los_tramos(self):
+        span = {"desde": self.START, "hasta": {"marca": "MARK resultados"}}
+        flow = {"ventana": dict(span), "segmentos": [dict(span, nombre="busqueda")]}
+        out, info = self.metrics(flow)
+        self.assertEqual(info["ventana_ns"], (2000 * MS, 2400 * MS))
+        self.assertEqual(out["ventana_ms"], 400)
+        self.assertEqual(out["hilo_max_ms"], 30)  # el slice de 80 ms es de una búsqueda anterior: queda fuera
+        self.assertEqual(out["busqueda hilo_max_ms"], 30)
+        self.assertEqual(out["busqueda red_llamadas"], 1)  # solo la llamada que empieza en el tramo
+        self.assertEqual(perf.span_bounds(sorted(self.trace(), key=lambda r: r[1]), span), (2000 * MS, 2400 * MS))
+
+    def test_el_nombre_de_la_marca_se_compara_exacto_o_como_patron_y_un_prefijo_no_se_confunde(self):
+        rows = [("seccion", 100 * MS, 0, 0, "MARK busqueda_inicio lista"), ("seccion", 200 * MS, 0, 0, "MARK busqueda_inicio"),
+                ("seccion", 300 * MS, 0, 0, "MARK busqueda_inicio lista"), ("seccion", 500 * MS, 0, 0, "MARK resultados")]
+        exact = {"desde": self.START, "hasta": {"marca": "MARK resultados"}}
+        self.assertEqual(perf.resolve_span(rows, exact), (200 * MS, 500 * MS))  # exacto: el nombre más largo no cuenta
+        pattern = {"desde": {"marca": "MARK busqueda_inicio*", "cual": "ultima_antes"}, "hasta": {"marca": "MARK resultados"}}
+        self.assertEqual(perf.resolve_span(rows, pattern), (300 * MS, 500 * MS))  # con * entran las dos
+        self.assertEqual(perf.resolve_span(rows, {"desde": self.START, "hasta": {"marca": "MARK no_esta"}}), (None, None))
+        early = [("seccion", 100 * MS, 0, 0, "MARK resultados"), ("seccion", 200 * MS, 0, 0, "MARK busqueda_inicio")]
+        self.assertEqual(perf.resolve_span(early, exact), (None, 100 * MS))  # ningún inicio antes del resultado: falta, no se inventa
+
+    def test_una_marca_elegida_con_ultima_antes_no_cuenta_como_marca_repetida(self):
+        rows = [("proceso", 0, 0, 0, PKG), ("frame", 0, 16 * MS, 0, "None")] \
+            + [("seccion", t * MS, 0, 0, "MARK busqueda_inicio") for t in (100, 200, 300)] \
+            + [("seccion", 500 * MS, 0, 0, "MARK resultados"), ("seccion", 600 * MS, 0, 0, "MARK resultados")]
+        flow = {"metricas_usuario": [{"nombre": "busqueda_ms", "desde": self.START, "hasta": {"marca": "MARK resultados"}}]}
+        info = perf.trace_metrics(rows, 60, flow, set(), 34)[2]
+        self.assertEqual(info["marcas_repetidas"], {"MARK resultados": 2})  # la de inicio se repite a propósito
+        plain = {"metricas_usuario": [{"nombre": "busqueda_ms", "desde": {"marca": "MARK busqueda_inicio"},
+                                       "hasta": {"marca": "MARK resultados"}}]}
+        self.assertEqual(perf.trace_metrics(rows, 60, plain, set(), 34)[2]["marcas_repetidas"],
+                         {"MARK busqueda_inicio": 3, "MARK resultados": 2})  # sin ultima_antes, el aviso de siempre
+
+    def test_el_plan_la_acepta_en_desde_y_la_rechaza_en_hasta_y_en_las_pausas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plan.json"
+
+            def load(flow):
+                path.write_text(json.dumps({"paquete": PKG, "flujos": {"f": flow}}), encoding="utf-8")
+                return perf.load_plan(path)
+
+            end = {"marca": "MARK resultados"}
+            load({"metricas_usuario": [{"nombre": "m", "desde": self.START, "hasta": end}],
+                  "segmentos": [{"nombre": "t", "desde": self.START, "hasta": end}],
+                  "ventana": {"desde": self.START, "hasta": end}})
+            for bad in ({"metricas_usuario": [{"nombre": "m", "desde": {"marca": "NAV x"}, "hasta": dict(end, cual="ultima_antes")}]},
+                        {"segmentos": [{"nombre": "t", "desde": {"marca": "NAV x"}, "hasta": dict(end, cual="ultima_antes")}]},
+                        {"ventana": {"desde": {"marca": "NAV x"}, "hasta": dict(end, cual="ultima_antes")}},
+                        {"pausas": [{"desde": self.START, "hasta": end}]}):
+                with self.assertRaises(perf.PerfError, msg=str(bad)):
+                    load(bad)
+            with self.assertRaises(perf.PerfError) as raised:
+                load({"metricas_usuario": [{"nombre": "m", "desde": {"marca": "NAV x", "cual": "penultima"}, "hasta": end}]})
+            self.assertIn("ultima_antes", str(raised.exception))
+
+
+class SectionNameLimitTest(DeviceBase):
+    """Nombres de endpoint largos: la plantilla acorta desde la izquierda y la corrida de prueba avisa de los cortados."""
+
+    @staticmethod
+    def shorten(method, path, tag, limit=120):
+        """La misma regla que HttpSectionName.shorten de la plantilla Kotlin (hashCode de Java), para comprobar sus
+        propiedades sin compilar Kotlin."""
+        def short_hash(text):
+            code = 0
+            for char in text:
+                code = (31 * code + ord(char)) & 0xFFFFFFFF
+            return "%04x" % (code & 0xFFFF)
+
+        room = limit - len(method) - 1 - len(tag)
+        if len(path) <= room:
+            return "%s %s%s" % (method, path, tag)
+        kept = path[len(path) - max(room - 5, 0):] if room - 5 > 0 else ""
+        tail = kept[max(kept.find("/"), 0):]
+        return "%s ~%s%s%s" % (method, short_hash(path[:len(path) - len(tail)]), tail, tag)
+
+    def test_las_dos_plantillas_acortan_desde_la_izquierda_dentro_del_limite(self):
+        base = SCRIPT.parent.parent / "assets" / "instrumentacion"
+        for name in ("HttpSectionName.okhttp.kt", "HttpSectionName.retrofit.kt"):
+            text = (base / name).read_text(encoding="utf-8")
+            self.assertIn("const val MAX_ENDPOINT_NAME = MAX_SECTION_NAME - LONGEST_PREFIX_LENGTH - 1", text, name)
+            self.assertIn("fun shorten(method: String, path: String, tag: String): String", text, name)
+            self.assertIn('return "$method ~${shortHash(path.dropLast(tail.length))}$tail$tag"', text, name)
+            self.assertRegex(text, r"fun endpoint\(request: Request\): String =\s+shorten\(request\.method, ", name)
+            self.assertLessEqual(max(len(line) for line in text.splitlines()), 120, name)  # el estilo que ya cumplen
+        tracer = (base / "SectionTracer.kt").read_text(encoding="utf-8")
+        self.assertIn("const val MAX_SECTION_NAME = %d" % perf.SECTION_NAME_MAX, tracer)  # el mismo límite en los dos lados
+        tests = (base / "test" / "TraceEventListenerTest.kt").read_text(encoding="utf-8")
+        self.assertIn("fun aLongPathIsShortenedFromTheLeftAndFitsInASectionName()", tests)
+        self.assertIn("fun aPathThatFitsKeepsItsNameAndAHugeSegmentIsStillCapped()", tests)
+
+    def test_la_regla_conserva_el_final_de_la_ruta_y_distingue_prefijos(self):
+        gateway = "/gateway/" + "segmento-largo/" * 12
+        movements = self.shorten("GET", gateway + "clientes/{id}/movimientos", " #1a2b")
+        self.assertLess(len("QUEUE " + movements), perf.SECTION_NAME_MAX)  # nunca llega al límite: no dispara el aviso
+        self.assertRegex(movements, r"^GET ~[0-9a-f]{4}/.*clientes/\{id\}/movimientos #1a2b$")
+        self.assertNotEqual(movements, self.shorten("GET", gateway + "clientes/{id}/saldos", " #1a2b"))
+        self.assertNotEqual(movements, self.shorten("GET", "/otro" + gateway + "clientes/{id}/movimientos", " #1a2b"))
+        self.assertEqual(self.shorten("GET", "/items/{id}", ""), "GET /items/{id}")  # un nombre que cabe no cambia
+        self.assertEqual(perf.endpoint_of("HTTP " + movements), movements[:-len(" #1a2b")])  # perf.py lo lee como cualquier otro
+        self.assertEqual(perf.at_limit({"HTTP " + movements: 1, "HTTP GET " + "a" * 118: 2, "MARK x": 1}),
+                         ["HTTP GET " + "a" * 118])
+
+    def test_la_corrida_de_prueba_avisa_si_un_nombre_de_seccion_llega_al_limite(self):
+        long_name = ("HTTP GET /gateway/" + "segmento-largo/" * 10)[:perf.SECTION_NAME_MAX]
+        self.assertEqual(len(long_name), 127)
+        self.tp_outputs(GOOD + '"seccion",200000000,100000000,0,"%s"\n' % long_name)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("⚠ 1 nombres de sección llegan al límite de 127 caracteres de android.os.Trace y están cortados", out)
+        self.assertIn("perf.py instrumentar --actualizar", out)
+        self.assertEqual([item["tipo"] for item in perf.test_warnings(self.plan.parent, "home")], ["nombre"])
+        self.assertIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(GOOD)
+        self.assertNotIn("llegan al límite", self.ok("capturar", "--plan", self.plan, "--prueba"))
 
 
 class WarningShapesTest(PerfBase):
