@@ -23,6 +23,8 @@ Qué hace, en orden:
    - `completa` (por defecto): todo compilado antes de correr, como `CompilationMode.Full` de Macrobenchmark. No depende de perfiles ni de librerías: es la que sirve para comparar un cambio de código.
    - `perfil`: borra los perfiles, instala el Baseline Profile del APK con `profileinstaller` y compila con `speed-profile` (`CompilationMode.Partial`). Más parecida a una instalación de Play; para medir un Baseline Profile. Si el perfil no se instala, se detiene.
 
+   Compilar tarda: en una app grande, varios minutos. `capturar` lo avisa antes de empezar ("… fijando la compilación de ART… no es un cuelgue") y al terminar dice cuánto tardó; lo mismo con cada traza que procesa ("… procesando la traza 2 de 10"). Con `completa`, si la app ya tiene el filtro `speed` en todo su código (lo lee de `dumpsys package dexopt`) y es la misma instalación en la que esta investigación la compiló la última vez (versión y fecha de instalación, guardadas en `<carpeta>/compilacion.json`), no recompila y lo dice; `--recompilar` la fuerza. Un build recién instalado, otro filtro o una salida que no se puede leer compilan como siempre.
+
    Sin esto, un build recién instalado corre con JIT y parece una regresión que no existe. Con `completa`, el TTID suele salir algo más alto que con `perfil` (un ejecutable más grande que cargar): sirve para comparar fases entre sí, no como el TTID que verá el usuario de Play. Cada corrida guarda `jit_ms` (informativa) y `comparar` avisa si la compilación o el JIT cambiaron entre fases. Después, el **calentamiento** (una corrida que no cuenta).
 3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
 4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase, la tasa de refresco que midió cada corrida en `hz_corridas`, los avisos y, en `flujos`, lo de cada flujo). Si el `hz` del plan difiere en más de un 6 % de la tasa que midió la traza, o si no hay `hz` y la tasa cambió entre corridas, lo avisa en la salida, en "Métricas" de `estado.md` y en `avisos` de `fases.json`; `comparar` lo repite. El presupuesto de frame se calculó con el `hz` del plan: corrígelo y repite lo medido así con `--rehacer`.
@@ -38,10 +40,14 @@ Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), 
 | (`ventana` del plan) | Frames, jank e hilo principal solo entre dos marcas del flujo (`ventana_ms` queda como informativa); sin ventana cubren toda la traza, lo que en un recorrido manual depende de cuánto tarda el usuario en presionar Enter |
 | `--config cpu` | Una captura con muestreo de CPU, solo para el diagnóstico (con `--prueba`) |
 | `--memoria` | `dumpsys meminfo` después de cada corrida: PSS, heaps, actividades y vistas vivas |
-| `--prueba` | Una corrida que imprime las métricas y no escribe el CSV |
+| `--prueba` | Una corrida que imprime las métricas y no escribe el CSV. **No fija la compilación de ART** (sus números no se guardan ni se comparan), así que tarda lo que el recorrido; `--compilar` la fija igual que en una fase. Al terminar dice qué marcas del plan salieron (✔) y cuáles no (✖), la última marca vista con su momento, cuánto dura la traza y cuántas secciones `HTTP` trae, también si la corrida se cortó a la mitad |
+| `--sin-compilar` | No fija la compilación de ART (en una fase, solo para depurar el recorrido: esos números no se comparan con los de otra fase) |
+| `--recompilar` | Compila aunque la app ya tenga la compilación completa de esta misma instalación |
 | `--rehacer` | Descarta lo medido **de ese flujo** en esa fase (sus filas del CSV, sus trazas, que quedan aparte, y su registro en `fases.json`) y lo mide de nuevo. Lo de los otros flujos de la fase no se toca |
 | `--compilacion completa \| perfil` | Cómo se compila la app antes de medir; la misma en todas las fases |
 | `--serial`, `--hz`, `--tp`, `--forzar` | Dispositivo, tasa de refresco, ruta de `trace_processor` y seguir pese a un aviso que detiene |
+
+**Cuánto dura la traza.** La corrida termina cuando termina el recorrido (`perf.py` detiene Perfetto); la configuración solo trae un tope, de 10 minutos (`duration_ms`). Un recorrido más largo (con pasos que hace una persona, por ejemplo) necesita un tope mayor: `"duracion_max_s": 1200` en el flujo del plan. Si la traza llega a su tope antes de que termine el recorrido, le falta el final: la corrida sale inválida con ese motivo ("la traza terminó antes que el recorrido") y hay que subir el tope. El archivo de la traza también tiene un máximo (1 GB en las configuraciones `base` y `cpu`; 2 GB en `completa`).
 
 Códigos de salida: 2 uso o datos, 3 precondición (dispositivo, app, herramientas, pantalla de inicio, build repetido), 4 captura fallida, 5 sin las corridas válidas pedidas.
 
@@ -76,7 +82,7 @@ Corre las consultas de diagnóstico sobre la corrida mediana y la peor de la pri
 | --- | --- | --- |
 | `debuggable` | Conteos y orden de las llamadas, duplicados, fugas | Frames, CPU y tiempos: corre con chequeos extra |
 | `profileable` (profiling) | Todo | — |
-| Emulador | Conteos y fugas | Tiempos y frames (con `-gpu host` son orientativos; con render por software, no valen) |
+| Emulador | El comportamiento de la red (qué llamadas hace, cuántas y en qué orden), conteos y fugas | Tiempos de frames, de hilo principal y de carga: no representan un teléfono (con `-gpu host` son orientativos; con render por software, no valen) |
 
 Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script usa `gfxinfo` (métricas `gfx_*`).
 
@@ -87,10 +93,10 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 | Entorno | `frames` | Qué pasa |
 | --- | --- | --- |
 | Dispositivo físico con GPU | `ok` | Nada |
-| Emulador con GPU del host (`-gpu host`) | `baja` | Aviso: valen los conteos (red, inflates) y las fugas; los tiempos y los frames son orientativos, y los reportes lo anotan en los avisos de `jank_*`, `frame_*` y `gfx_*` |
+| Emulador con GPU del host (`-gpu host`) | `baja` | Aviso: sus tiempos de frames, de hilo principal y de carga no representan un teléfono (son orientativos, y los reportes lo anotan en los avisos de `jank_*`, `frame_*` y `gfx_*`); sí sirve para el comportamiento de la red (qué llamadas, cuántas y en qué orden), los conteos (inflates) y las fugas |
 | Render por software (SwiftShader, llvmpipe), en emulador o no | `no` | Aviso, y `comparar` y el reporte dan `no confiable` a los frames en lugar de un veredicto; los conteos y los tiempos que no son de frame siguen con el suyo |
 
-Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`; si una fase se mide en varias tandas, conserva el peor nivel: relanzar el emulador con `-gpu host` no la vuelve confiable, hay que repetirla con `--rehacer`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
+Un emulador es una buena herramienta para lo que no depende del hardware: comprobar que las marcas y la red del plan salen (la corrida de prueba), contar llamadas, ver duplicados y el orden en que se disparan. Para decidir con tiempos, mide en un dispositivo físico. Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`; si una fase se mide en varias tandas, conserva el peor nivel: relanzar el emulador con `-gpu host` no la vuelve confiable, hay que repetirla con `--rehacer`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
 
 ## Familias de métricas
 
@@ -114,6 +120,9 @@ Las métricas de frames y del hilo principal cubren la ventana entera del flujo.
 | `<tramo> frame_p90_ms` | P90 de la duración de los frames del tramo | `app` |
 | `<tramo> jank_app_pct` | Porcentaje de frames del tramo con App Deadline Missed | `app` |
 | `<tramo> frames` | Cuántos frames tuvo el tramo: el denominador de las dos anteriores | `info` |
+| `<tramo> red_llamadas` | Cuántas llamadas `HTTP` empiezan dentro del tramo | `app` |
+| `<tramo> red_ms`, `<tramo> red_ttfb_ms` | Mediana de la duración y del TTFB de esas llamadas (no salen si el tramo no tuvo ninguna) | `e2e` |
+| `<tramo> red_repetidas_2s`, `<tramo> red_solapadas` | Cuántas de esas llamadas son repetidas o solapadas, con el mismo criterio que `red_repetidas_2s` y `red_solapadas` | `app` |
 
 - El tramo va de la marca `desde` a la marca `hasta` (más `margen_ms`, si lo tiene) y cuenta los slices y los frames que **se solapan** con él: el frame o el slice que ya estaba en curso cuando sale la marca de inicio también entra. Se calcula sobre toda la traza, así que un tramo puede quedar fuera de la ventana.
 - Las métricas de la ventana (`hilo_max_ms`, `frame_p90_ms`, `jank_app_pct`) no cambian por declarar tramos.
@@ -121,6 +130,9 @@ Las métricas de frames y del hilo principal cubren la ventana entera del flujo.
 - Un tramo sin frames (muy corto, o en Android 11 o anterior, que no tiene FrameTimeline) solo trae `<tramo> hilo_max_ms`: ahí, esa es la que puede ser principal. Con `<tramo> frame_p90_ms` o `<tramo> jank_app_pct` como principal, la corrida sale inválida (`sin frames en el tramo`).
 - Con pocos frames valen las mismas reservas que en la ventana: si `<tramo> frames` cambia más de un 50 % entre antes y después, el P90 y el porcentaje salen `no comparable`; con render por software, `no confiable`.
 - Agregar un tramo después de medir `antes` deja esa métrica sin línea base: decláralos en la sesión 1, o repite `antes` (y `control`) con `--rehacer`.
+- **Red por tramo.** Cada llamada `HTTP` se asigna al tramo donde **empieza** (si dos tramos se solapan, al primero del plan), aunque termine después; las que empiezan fuera de todos los tramos solo cuentan en las métricas de la corrida entera, que no cambian. Las `<tramo> red_*` salen cuando la corrida tiene red (alguna sección `HTTP`, o la investigación ya la medía); sin tramos, todo queda como siempre. No entran en el resumen compacto salvo que sean principales: se leen en la tabla "Red por tramo" de `diagnostico.md` (la corrida mediana y la peor, con los endpoints de cada tramo y las llamadas que quedan fuera) y del reporte (la mediana entre corridas, por fase).
+- **`"solo_red": true`** en un tramo: no calcula frames, hilo ni jank; solo agrupa sus llamadas, y trae `<tramo> red_llamadas` aunque sea 0. Para los tramos donde la app espera o hace polling ([ficha.md](ficha.md) · Flujos que pasan por otra app).
+- Una investigación que midió `antes` con una versión anterior de la skill no tiene las `<tramo> red_*` en esa fase: en `comparar` salen como métricas sin las dos fases, sin veredicto, hasta que se repita la fase.
 
 ## Hilos ajenos a la app
 
