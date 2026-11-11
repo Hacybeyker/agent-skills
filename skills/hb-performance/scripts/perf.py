@@ -3863,12 +3863,14 @@ def cmd_capturar(args, plan=None):
                               "flujo no declara requiere_env, y entonces solo se lee su salida de error), córrelo a "
                               "mano en tu terminal para ver el error:" % code)
                         print("    %s" % by_hand)
-                    GUIA["previos"] = [("corre 'preparar' a mano para ver por qué falla (si manda su salida a /dev/null, "
-                                        "quítale esa parte para verla)", by_hand)]
+                # En cada fallo, no solo en el primero: un 'preparar' intermitente puede volver a fallar después de funcionar.
+                GUIA["previos"] = [("corre 'preparar' a mano para ver por qué falla (si manda su salida a /dev/null, "
+                                    "quítale esa parte para verla)", by_hand)]
                 failure = Precondicion("'preparar' terminó con código %d: no dejó la app en el punto de partida (un "
                                        "login que no entró, una pantalla que no cargó a tiempo o el backend caído)" % code)
                 failure.corto = "'preparar' terminó con código %d" % code
                 raise failure
+            GUIA["previos"] = []  # este 'preparar' funcionó: un corte posterior ya no pide correrlo a mano
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
             component = launcher_activity(adb, package)
             if component:
@@ -6216,12 +6218,15 @@ def cmd_humo(args):
     try:
         cmd_capturar(capture, plan)
     except PerfError as error:
-        # El bloque de AGENTS.md no puede seguir diciendo que el humo pasó (o que hay red) si esta corrida no lo confirma.
-        # Una precondición que no es del setup (sin dispositivo, la app sin instalar) no es un humo fallido: no terminó.
+        # El bloque de AGENTS.md no puede seguir diciendo que el humo pasó (o que hay red) si esta corrida lo desmiente.
+        # Una precondición que no es del setup (sin dispositivo, el dispositivo caliente) no es un humo fallido: no
+        # llegó a correr, y lo anotado antes sigue valiendo.
         no_network = "RED SIN MEDIR" in str(error)
-        outcome = "falló" if no_network or not isinstance(error, Precondicion) else "no terminó"
-        note = update_agents_state(root, humo="%s el %s" % (outcome, today),
-                                   http="sin medir: la prueba de humo del %s no trajo ninguna" % today if no_network else None)
+        note = ""
+        if no_network or not isinstance(error, Precondicion):
+            note = update_agents_state(root, humo="falló el %s" % today,
+                                       http="sin medir: la prueba de humo del %s no trajo ninguna" % today if no_network
+                                       else None)
         if note:
             print(note)
         raise

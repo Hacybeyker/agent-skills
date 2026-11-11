@@ -6263,6 +6263,14 @@ class GuidedFailureTest(DeviceBase):
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         self.assertNotIn("clave-de-mentira", result.stdout + result.stderr)
         self.assert_guided(result, "ninguna corrida de esta tanda", "( echo *** > /dev/null; exit 3 )", "--corridas 5")
+        # un 'preparar' que falla una vez y después funciona: el corte posterior ya no pide correrlo a mano
+        counter = self.dir / "preparos.txt"
+        self.update_flow(preparar='n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; [ "$n" -gt 0 ]' % (counter, counter))
+        self.tp_outputs(GOOD, LOGIN, LOGIN, LOGIN)
+        (self.dir / "tp.count").unlink() if (self.dir / "tp.count").exists() else None
+        result = self.capture("--fase", "control", "--corridas", "5", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertNotIn("a mano", result.stderr.split("Cómo seguir:")[1])
         self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"],
                          {"'preparar' terminó con código 3": 3})
 
@@ -6843,7 +6851,7 @@ class ProjectAgentsTest(DeviceBase):
         self.env["FAKE_THERMAL"] = "3"  # el dispositivo está caliente: el humo no llegó a correr
         self.assertEqual(self.perf("humo", "--paquete", PKG).returncode, 3)
         text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn("prueba de humo: no terminó el %s" % datetime.date.today().isoformat(), text)
+        self.assertIn("prueba de humo: pasó el %s" % datetime.date.today().isoformat(), text)  # lo anotado sigue valiendo
         self.assertNotIn("falló", text)
 
     def test_la_seccion_termina_en_el_siguiente_encabezado_de_su_nivel_o_superior(self):
@@ -6997,14 +7005,14 @@ class SectionNameLimitTest(DeviceBase):
 
     def test_la_regla_conserva_el_final_de_la_ruta_y_distingue_prefijos(self):
         gateway = "/gateway/" + "segmento-largo/" * 12
-        movements = self.shorten("GET", gateway + "clientes/{id}/movimientos", " #1a2b")
-        self.assertLess(len("QUEUE " + movements), perf.SECTION_NAME_MAX)  # nunca llega al límite: no dispara el aviso
-        self.assertRegex(movements, r"^GET ~[0-9a-f]{4}/.*clientes/\{id\}/movimientos #1a2b$")
-        self.assertNotEqual(movements, self.shorten("GET", gateway + "clientes/{id}/saldos", " #1a2b"))
-        self.assertNotEqual(movements, self.shorten("GET", "/otro" + gateway + "clientes/{id}/movimientos", " #1a2b"))
+        orders = self.shorten("GET", gateway + "clientes/{id}/pedidos", " #1a2b")
+        self.assertLess(len("QUEUE " + orders), perf.SECTION_NAME_MAX)  # nunca llega al límite: no dispara el aviso
+        self.assertRegex(orders, r"^GET ~[0-9a-f]{4}/.*clientes/\{id\}/pedidos #1a2b$")
+        self.assertNotEqual(orders, self.shorten("GET", gateway + "clientes/{id}/facturas", " #1a2b"))
+        self.assertNotEqual(orders, self.shorten("GET", "/otro" + gateway + "clientes/{id}/pedidos", " #1a2b"))
         self.assertEqual(self.shorten("GET", "/items/{id}", ""), "GET /items/{id}")  # un nombre que cabe no cambia
-        self.assertEqual(perf.endpoint_of("HTTP " + movements), movements[:-len(" #1a2b")])  # perf.py lo lee como cualquier otro
-        self.assertEqual(perf.at_limit({"HTTP " + movements: 1, "HTTP GET " + "a" * 118: 2, "MARK x": 1}),
+        self.assertEqual(perf.endpoint_of("HTTP " + orders), orders[:-len(" #1a2b")])  # perf.py lo lee como cualquier otro
+        self.assertEqual(perf.at_limit({"HTTP " + orders: 1, "HTTP GET " + "a" * 118: 2, "MARK x": 1}),
                          ["HTTP GET " + "a" * 118])
 
     def test_la_corrida_de_prueba_avisa_si_un_nombre_de_seccion_llega_al_limite(self):

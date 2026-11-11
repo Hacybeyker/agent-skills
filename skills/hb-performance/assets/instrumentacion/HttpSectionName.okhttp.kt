@@ -7,7 +7,7 @@ import okhttp3.Request
 // no query values or body. An id is a number, a UUID, a long hex string or any segment with 6 or more digits (a
 // document or account number, also with dots, hyphens or letters); short ones such as v3.7 or page-12 stay.
 // android.os.Trace cuts a section name at MAX_SECTION_NAME: a long path (a gateway with several prefixes) is shortened
-// from the left, "GET ~1a2b/accounts/{id}/movements". The method, the query hash and the last segments stay, and "~"
+// from the left, "GET ~1a2b/customers/{id}/orders". The method, the query hash and the last segments stay, and "~"
 // plus a short hash of the removed prefix keeps apart two paths that only differ there.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(

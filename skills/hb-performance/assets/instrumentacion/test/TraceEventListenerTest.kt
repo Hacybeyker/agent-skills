@@ -89,15 +89,15 @@ class TraceEventListenerTest {
     fun aLongPathIsShortenedFromTheLeftAndFitsInASectionName() {
         val gateway = "/gateway/" + "segmento-largo/".repeat(12)
         fun name(path: String) = HttpSectionName.endpoint(Request.Builder().url("https://api.test$path").build())
-        val movements = name(gateway + "clientes/42/movimientos?page=1")
-        assertTrue(movements, "QUEUE $movements".length < MAX_SECTION_NAME)
-        assertTrue(movements, movements.matches(Regex("GET ~[0-9a-f]{4}/.*clientes/\\{id}/movimientos #[0-9a-f]{4}")))
+        val orders = name(gateway + "clientes/42/pedidos?page=1")
+        assertTrue(orders, "QUEUE $orders".length < MAX_SECTION_NAME)
+        assertTrue(orders, orders.matches(Regex("GET ~[0-9a-f]{4}/.*clientes/\\{id}/pedidos #[0-9a-f]{4}")))
         // the same beginning and another end: still two endpoints
-        assertNotEquals(movements, name(gateway + "clientes/42/saldos?page=1"))
+        assertNotEquals(orders, name(gateway + "clientes/42/facturas?page=1"))
         // the same end behind another prefix: the hash of what was removed keeps them apart
-        assertNotEquals(movements, name("/otro" + gateway + "clientes/42/movimientos?page=1"))
+        assertNotEquals(orders, name("/otro" + gateway + "clientes/42/pedidos?page=1"))
         // the same endpoint with another id keeps its name
-        assertEquals(movements, name(gateway + "clientes/43/movimientos?page=1"))
+        assertEquals(orders, name(gateway + "clientes/43/pedidos?page=1"))
     }
 
     @Test
