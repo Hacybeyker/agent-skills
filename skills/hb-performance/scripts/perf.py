@@ -1543,7 +1543,9 @@ SHELL_VARIABLES = frozenset((
     "HOME", "PATH", "PWD", "OLDPWD", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG", "HOSTNAME", "RANDOM", "SECONDS",
     "LINENO", "IFS", "PPID", "UID", "EUID", "OSTYPE", "REPLY", "OPTARG", "OPTIND", "FUNCNAME", "PIPESTATUS", "BASH",
     "EPOCHSECONDS", "EPOCHREALTIME", "BASHPID", "SRANDOM", "COLUMNS", "LINES", "HOSTTYPE", "MACHTYPE", "SHLVL", "DISPLAY",
-    "NF", "NR", "FS", "OFS"))  # las últimas son de awk: llegan aquí si su programa no va entre comillas simples
+    "NF", "NR", "FS", "OFS",  # de awk: llegan aquí si su programa no va entre comillas simples
+    # de las herramientas y del entorno de trabajo, no del flujo: si faltan, falla la herramienta y lo dice ella
+    "ANDROID_SERIAL", "ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME", "ADB", "CI", "DEBUG", "VERBOSE", "TRACE"))
 # Solo cuentan los nombres con forma de variable de entorno (en mayúsculas): los demás son variables del propio script.
 # Un `\$VAR` escapado no lo expande este shell.
 ENV_REFERENCE = re.compile(r"(?<!\\)\$(?:\{([A-Z][A-Z0-9_]*)\}|\{([A-Z][A-Z0-9_]*):?\?[^}]*\}|([A-Z][A-Z0-9_]*)\b)")
@@ -1554,10 +1556,64 @@ ENV_PASSED = re.compile(r"((?:^|\s)(?:-e|--env)(?:[ \t]+|=)[\"']?)([A-Za-z_][A-Z
 ENV_ASSIGNED = re.compile(r"(?:^|[\s;&|(){}!])([A-Z][A-Z0-9_]*)[ \t]*\+?=(?!=)|\bfor[ \t]+([A-Z][A-Z0-9_]*)[ \t]+in\b"
                           r"|\b(?:getopts[ \t]+\S+|printf[ \t]+-v)[ \t]+([A-Z][A-Z0-9_]*)\b", re.M)
 ENV_READ = re.compile(r"\bread\b([^\n;|&<)]*)")
-SHELL_QUOTED = re.compile(r"'[^']*'")
+# `[ -n "$VAR" ]`, `[[ -z $VAR ]]`: el script pregunta si la variable está: ya contempla que falte.
+ENV_TESTED = re.compile(r"-[nz][ \t]+\"?\$(?:\{([A-Z][A-Z0-9_]*)\}|([A-Z][A-Z0-9_]*)\b)")
 SHELL_HEREDOC = re.compile(r"<<-?[ \t]*(['\"])(\w+)\1.*?^[ \t]*\2[ \t]*$", re.S | re.M)
 SHELL_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.M)
-SHELL_SOURCED = re.compile(r"(?:^|[;&|(){}]|\b(?:then|do|else)\b)[ \t]*(?:source|\.)[ \t]+\S", re.M)
+# El script recibe variables por otro camino (incluye otro archivo, carga un .env, las evalúa o las inyecta un
+# envoltorio): lo que lee puede venir de ahí y no del entorno.
+SHELL_SOURCED = re.compile(r"(?:^|[;&|(){}]|\b(?:then|do|else)\b)[ \t]*(?:source|\.)[ \t]+\S|\beval\b|\bexport[ \t]+\$\("
+                           r"|\bset[ \t]+-a\b|\bdotenv\b|\.env\b", re.M)
+
+
+def shell_expanded(text):
+    """El texto de un script sin lo que el shell no expande ni ejecuta: lo que va entre comillas simples y los
+    comentarios. Sigue las comillas dobles (un apóstrofo o un # dentro de ellas es texto), las barras de escape y las
+    sustituciones de comando: dentro de `$(…)` o de dos acentos graves las comillas vuelven a empezar, aunque la
+    sustitución esté entre comillas dobles."""
+    out, index, size = [], 0, len(text)
+    # por nivel de sustitución: las comillas abiertas y los paréntesis que faltan cerrar (None si es de acentos graves)
+    stack = [["", 0]]
+    while index < size:
+        char, state = text[index], stack[-1]
+        if state[0] == "'":
+            state[0] = "" if char == "'" else "'"
+        elif char == "\\" and index + 1 < size:
+            out.append(text[index:index + 2])
+            index += 1
+        elif char == "$" and text[index + 1:index + 2] == "(":
+            stack.append(["", 1])
+            out.append("$(")
+            index += 1
+        elif char == "`":
+            if state[1] is None:
+                stack.pop()
+            else:
+                stack.append(["", None])
+            out.append(char)
+        elif state[0] == '"':
+            state[0] = "" if char == '"' else '"'
+            out.append(char)
+        elif char == "'":
+            state[0] = "'"
+            out.append("''")
+        elif char == "#" and (index == 0 or text[index - 1].isspace()):
+            while index + 1 < size and text[index + 1] != "\n":
+                index += 1
+        else:
+            if char == '"':
+                state[0] = '"'
+            elif char == "(" and state[1]:
+                state[1] += 1
+            elif char == ")" and state[1]:
+                state[1] -= 1
+                if state[1] == 0:
+                    stack.pop()
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 YAML_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 SCRIPT_SUFFIXES = (".sh", ".bash", ".yaml", ".yml")
 SCRIPT_MAX_BYTES = 200_000
@@ -1567,22 +1623,23 @@ def shell_env_names(text):
     """Las variables de entorno que un comando o un script de shell lee sin darles un valor: `$VAR` y `${VAR}`, con
     nombre en mayúsculas. No cuentan las que el propio texto asigna (`VAR=…`, `for VAR in`, `read VAR`), las que en
     algún lugar traen un valor por defecto (`${VAR:-x}`, `${VAR:=x}`: el script ya contempla que falten), las del shell
-    (HOME, PATH…), lo que está en un comentario, entre comillas simples o en un heredoc con el delimitador entre
-    comillas (ahí el shell no expande: es texto para `awk` o para el shell del dispositivo) ni los parámetros (`$1`).
-    Un script que incluye otro (`source`, `.`) no aporta ninguna: sus variables pueden venir de ahí. Ante la duda, no
-    cuenta: una variable de más detendría una captura que funciona."""
-    text = SHELL_HEREDOC.sub("", text)
-    text = SHELL_QUOTED.sub("''", SHELL_COMMENT.sub("", text))
+    (HOME, PATH…) o de las herramientas (ANDROID_SERIAL…), las que el script pregunta si están (`[ -n "$VAR" ]`), lo que
+    está en un comentario, entre comillas simples o en un heredoc con el delimitador entre comillas (ahí el shell no
+    expande: es texto para `awk` o para el shell del dispositivo) ni los parámetros (`$1`). Un script que recibe
+    variables por otro camino (`source`, `.`, `eval`, un `.env`) no aporta ninguna. Ante la duda, no cuenta: una
+    variable de más detendría una captura que funciona."""
+    text = shell_expanded(SHELL_HEREDOC.sub("", text))
     if SHELL_SOURCED.search(text):
         return set()
     text = ENV_PASSED.sub(r"\1", text)  # en `-e NOMBRE="$VAR"` NOMBRE no es una asignación del shell
-    skipped = {name for groups in ENV_ASSIGNED.findall(text) for name in groups if name} | set(ENV_OPTIONAL.findall(text))
+    skipped = {name for groups in ENV_ASSIGNED.findall(text) for name in groups if name} \
+        | set(ENV_OPTIONAL.findall(text)) | {name for groups in ENV_TESTED.findall(text) for name in groups if name}
     for words in ENV_READ.findall(text):
         skipped.update(re.findall(r"\b[A-Z][A-Z0-9_]*\b", words))
     names = set()
     for groups in ENV_REFERENCE.findall(text):
         name = next(group for group in groups if group)
-        if name not in skipped and name not in SHELL_VARIABLES and not name.startswith(("BASH_", "LC_")):
+        if name not in skipped and name not in SHELL_VARIABLES and not name.startswith(("BASH_", "LC_", "MAESTRO_")):
             names.add(name)
     return names
 
@@ -1615,8 +1672,8 @@ def prepare_env_names(command, folder):
     las que el flow define en su `env:`, las que el comando le pasa con `-e` o `--env` (esas ya se leen del comando),
     las `MAESTRO_*` y lo que esté en un comentario. Solo nombres en mayúsculas.
     Solo nombres, en orden: nunca valores."""
-    if not command:
-        return []
+    if not command or SHELL_SOURCED.search(shell_expanded(command)):
+        return []  # sin comando, o con uno que carga las variables por su cuenta (un envoltorio, un .env)
     names = shell_env_names(command)
     passed = {name for _, name in ENV_PASSED.findall(command)}
     for path in named_scripts(command, folder):
@@ -1844,15 +1901,17 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None)
         reason, extra = drive(recorrido, label), []
     # Si Perfetto ya no corre, la traza llegó a su tope (duration_ms o el tamaño máximo) antes de que terminara el
     # recorrido: le falta el final. Solo cuenta una respuesta explícita: un adb que no contesta no invalida la corrida.
-    if "terminada" in adb.shell("kill -0 %s 2>/dev/null && echo viva || echo terminada" % pid).stdout:
+    # Se mira /proc/<pid>, como hace el script oficial de Perfetto para saber si su proceso sigue: no depende de que el
+    # shell de adb tenga permiso para mandarle señales.
+    if "terminada" in adb.shell("[ -d /proc/%s ] && echo viva || echo terminada" % pid).stdout:
         cap = trace_cap_s(config)
         reason = reason or ("la traza terminó antes que el recorrido: llegó a su tope de duración (%s) o al tamaño máximo "
                             "del archivo, y le falta el final. Sube 'duracion_max_s' en el flujo del plan (segundos; "
                             "contempla las pausas humanas) y repite"
                             % ("%s s" % fmt(cap) if cap else "duration_ms de la configuración de Perfetto"))
     adb.shell("kill -TERM %s" % pid)
-    for _ in range(60):
-        if adb.shell("kill -0 %s" % pid).returncode != 0:
+    for _ in range(60):  # espera a que Perfetto cierre el archivo: hasta que su proceso ya no esté
+        if adb.shell("[ -d /proc/%s ]" % pid).returncode != 0:
             break
         time.sleep(0.5)
     pulled = adb.run("pull", remote, str(local), timeout=600)

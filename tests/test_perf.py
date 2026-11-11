@@ -430,10 +430,13 @@ elif cmd.startswith("perfetto"):
     if os.environ.get("FAKE_PERFETTO_CONFIG"):
         pathlib.Path(os.environ["FAKE_PERFETTO_CONFIG"]).write_text(config)
     print("4242")
-elif cmd.startswith("kill -0"):
-    if "echo terminada" in cmd and os.environ.get("FAKE_TRAZA_CORTADA"):
+elif cmd.startswith("[ -d /proc/"):
+    # con "echo": ¿sigue Perfetto antes de detenerlo? (sin respuesta por defecto, como un adb que no contesta);
+    # sin "echo": la espera después de detenerlo, y aquí el proceso ya terminó
+    if "echo" not in cmd:
+        sys.exit(1)
+    if os.environ.get("FAKE_TRAZA_CORTADA"):
         print("terminada")
-    sys.exit(1)
 elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
 elif cmd.startswith("uiautomator dump") and os.environ.get("FAKE_PULL_FALLA"):
@@ -4133,6 +4136,11 @@ class CaptureFeedbackTest(DeviceBase):
         self.assertEqual(result.stdout.count("inválida: la traza terminó antes que el recorrido"), 3)
         del self.env["FAKE_TRAZA_CORTADA"]
         self.assertEqual(self.capture("--prueba").returncode, 0)
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("[ -d /proc/4242 ] && echo viva || echo terminada", log)  # sin señales: mira si el proceso existe
+        self.assertLess(log.rindex("[ -d /proc/4242 ] && echo"), log.rindex("kill -TERM 4242"))  # antes de detener Perfetto
+        self.assertLess(log.rindex("kill -TERM 4242"), log.rindex('"[ -d /proc/4242 ]"'))  # y después espera a que termine
+        self.assertNotIn("kill -0", log)
 
     def test_en_un_emulador_dice_que_los_tiempos_no_representan_un_telefono_y_que_la_red_si_sirve(self):
         self.tp_outputs(GOOD)
@@ -4219,8 +4227,30 @@ echo "$PERF_DE_VERDAD"
                 ("variables del shell", 'echo "$EPOCHSECONDS $BASHPID $COLUMNS"\n'),
                 ("escapada para el dispositivo", 'adb shell "echo \\$EPOCHREALTIME \\$ANDROID_DATA"\n'),
                 ("comillas simples de varias líneas", "adb devices | awk '\n  { print $NF, $CAMPO }\n'\nadb shell '\n  ls $DIRECTORIO\n'\n"),
-                ("heredoc sin expansión", "cat <<'EOF'\nusa $PERF_CLAVE\nEOF\n")):
+                ("heredoc sin expansión", "cat <<'EOF'\nusa $PERF_CLAVE\nEOF\n"),
+                ("carga un .env", "export $(grep -v '^#' .env | xargs)\nadb shell input text \"$PERF_USUARIO\"\n"),
+                ("evalúa lo que carga", 'eval "$(cat credenciales)"\nadb shell input text "$PERF_USUARIO"\n'),
+                ("bandera opcional", '[ -n "$DETALLE" ] && set -x\nif [[ -z $MODO_LENTO ]]; then sleep 1; fi\necho "$DETALLE"\n'),
+                ("apóstrofo entre comillas dobles", "echo \"can't open\"\nadb shell 'ls $EXTERNAL_STORAGE'\n"),
+                ("# entre comillas simples", "adb shell 'echo # $ANDROID_DATA'\nadb shell 'ls $EXTERNAL_STORAGE'\n"),
+                ("variables de las herramientas", 'adb -s $ANDROID_SERIAL devices; ls $ANDROID_HOME; [ "$CI" = true ]\n'),
+                ("comillas simples dentro de una sustitución", 'SD="$(adb shell \'echo $EXTERNAL_STORAGE\')"\n'
+                                                              'N="$(adb shell \'ls $EXTERNAL_STORAGE/Download | wc -l\')"\n'),
+                ("comilla doble entre simples en una sustitución", 'L="$(echo "$linea" | sed \'s/"//g\')"\n'
+                                                                  "adb shell 'ls $EXTERNAL_STORAGE'\n"),
+                ("aritmética y sustituciones anidadas", 'T="$(( $(date +%s) - 5 ))"; U="$(basename "$(dirname \'$NO\')")"\n'
+                                                        "adb shell 'ls $EXTERNAL_STORAGE'\n"),
+                ("comillas simples entre acentos graves", 'SD="`adb shell \'echo $EXTERNAL_STORAGE\'`"\n'
+                                                         'echo "sdk: `adb shell \'getprop ro.build.version.sdk; echo $ANDROID_ROOT\'`"\n'
+                                                         "adb shell 'ls $EXTERNAL_STORAGE'\n"),
+                ("variables de Maestro", 'echo "$MAESTRO_DRIVER_STARTUP_TIMEOUT"\n')):
             self.assertEqual(perf.shell_env_names(body), set(), name)
+        self.assertEqual(perf.shell_env_names("echo \"no es un comentario # $PERF_CLAVE\"  # sí lo es: $PERF_OTRA\n"), {"PERF_CLAVE"})
+        self.assertEqual(perf.prepare_env_names("dotenv run -- bash preparar.sh $PERF_USUARIO", self.plan.parent), [])
+        self.assertEqual(perf.shell_env_names('CLAVE="$(printf %s "$PERF_CLAVE")"; adb shell input text "$(echo "$PERF_USUARIO")"'),
+                         {"PERF_CLAVE", "PERF_USUARIO"})  # dentro de una sustitución entre comillas dobles se sigue viendo
+        self.assertEqual(perf.shell_env_names('adb shell input text "`echo "$PERF_USUARIO"`"; echo "$PERF_CLAVE"'),
+                         {"PERF_CLAVE", "PERF_USUARIO"})
         self.assertEqual(perf.shell_env_names('test -n "${PERF_CLAVE:?falta}" && echo "${PERF_USUARIO}"'), {"PERF_CLAVE", "PERF_USUARIO"})
         flow = self.plan.parent / "comentado.yaml"
         write(flow, "appId: com.example.app\nenv: {USUARIO: demo, IDIOMA: es}\n---\n# - inputText: ${PERF_OTP}\n"
@@ -4236,7 +4266,7 @@ echo "$PERF_DE_VERDAD"
                                                 self.dir), ["PERF_CLAVE", "PERF_USUARIO"])
 
     def test_capturar_trata_como_requeridas_las_que_el_plan_no_declara_y_se_detiene_si_faltan(self):
-        self.set_prepare('test -n "$PERF_USUARIO" && test -n "$PERF_CLAVE"', requiere_env=["PERF_USUARIO"])
+        self.set_prepare('echo "$PERF_USUARIO $PERF_CLAVE" > /dev/null', requiere_env=["PERF_USUARIO"])
         self.env["PERF_USUARIO"] = "usuario.demo"
         self.env.pop("PERF_CLAVE", None)
         self.tp_outputs(GOOD)
@@ -4520,8 +4550,8 @@ def network_trace():
     frames = [("frame", i * 20 * MS, 16 * MS, 0, "None") for i in range(200)]
     marks = [("seccion", 100 * MS, 0, 0, "NAV consulta"), ("seccion", 1000 * MS, 0, 0, "MARK consulta"),
              ("seccion", 2000 * MS, 0, 0, "MARK operacion_inicio"), ("seccion", 3000 * MS, 0, 0, "MARK operacion_fin")]
-    calls = [("seccion", 200 * MS, 300 * MS, 0, "HTTP GET /saldo #1a2b"), ("seccion", 260 * MS, 100 * MS, 0, "TTFB GET /saldo #1a2b"),
-             ("seccion", 250 * MS, 500 * MS, 0, "HTTP GET /saldo #1a2b"), ("seccion", 300 * MS, 200 * MS, 0, "TTFB GET /saldo #1a2b"),
+    calls = [("seccion", 200 * MS, 300 * MS, 0, "HTTP GET /catalogo #1a2b"), ("seccion", 260 * MS, 100 * MS, 0, "TTFB GET /catalogo #1a2b"),
+             ("seccion", 250 * MS, 500 * MS, 0, "HTTP GET /catalogo #1a2b"), ("seccion", 300 * MS, 200 * MS, 0, "TTFB GET /catalogo #1a2b"),
              ("seccion", 990 * MS, 2000 * MS, 0, "HTTP POST /pagos"),  # empieza en `consulta` y termina después: es de `consulta`
              ("seccion", 2100 * MS, 400 * MS, 0, "HTTP POST /autorizaciones"), ("seccion", 2150 * MS, 80 * MS, 0, "TTFB POST /autorizaciones"),
              ("seccion", 2600 * MS, 200 * MS, 0, "HTTP GET /estado"),
@@ -4559,7 +4589,7 @@ class SegmentNetworkTest(DeviceBase):
         self.assertEqual(m["red_llamadas"][1], 6)  # las de la corrida entera no cambian: 3 + 2 + 1 fuera de los tramos
         self.assertEqual((m["red_solapadas"][1], m["red_repetidas_2s"][1]), (1, 1))
         self.assertEqual(info["red_fuera"], {"GET /novedades": 1})
-        self.assertEqual(info["red_por_tramo"][0]["endpoints"], {"GET /saldo": 2, "POST /pagos": 1})
+        self.assertEqual(info["red_por_tramo"][0]["endpoints"], {"GET /catalogo": 2, "POST /pagos": 1})
 
     def test_un_tramo_solo_red_no_trae_frames_ni_hilo_y_los_demas_no_cambian(self):
         m, _ = self.metrics(network_trace(), network_flow())
@@ -4629,7 +4659,7 @@ class SegmentNetworkTest(DeviceBase):
         self.ok("diagnostico", "--carpeta", self.plan.parent, "--flujo", "home")
         text = (self.plan.parent / "diagnostico.md").read_text(encoding="utf-8")
         self.assertIn("## Red por tramo: las llamadas que empiezan en cada tramo del plan · `segmentos`", text)
-        self.assertIn("| consulta | 3 | GET /saldo ×2, POST /pagos | 500 | 150 | 1 | 1 |", text)
+        self.assertIn("| consulta | 3 | GET /catalogo ×2, POST /pagos | 500 | 150 | 1 | 1 |", text)
         self.assertIn("| pago | 2 | GET /estado, POST /autorizaciones | 300 | 80 | 0 | 0 |", text)
         self.assertIn("| (fuera de los tramos) | 1 | GET /novedades | — | — | — | — |", text)
         self.assertIn("sin veredicto estadístico", text)
