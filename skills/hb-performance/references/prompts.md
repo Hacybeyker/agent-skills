@@ -201,6 +201,26 @@ Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tr
 Con hb-performance, en la traza <ruta>/antes/<flujo>_<n>.perfetto-trace.gz responde: <pregunta>. Usa perf.py consulta con LIMIT.
 ```
 
+### Por qué se cerró la app
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py salidas --carpeta <carpeta>
+```
+
+Las últimas salidas del proceso según el sistema (Android 11 o superior), con el motivo en claro: crash, crash nativo, ANR, poca memoria, uso excesivo de recursos. Sin investigación, `--paquete <applicationId>` en vez de `--carpeta`. Para un crash trae el inicio de la pila, desofuscada si encuentra el mapping de la variante medida.
+
+### Pasar un triage a riguroso para aplicar una mejora
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py decidir --carpeta <carpeta> --profundidad riguroso
+```
+
+Imprime, en orden, lo que falta: completar `antes`, medir `control` y la decisión.
+
 ### Actualizar la instrumentación tras actualizar la skill
 
 **Dónde:** terminal, sin chat

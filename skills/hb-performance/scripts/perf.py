@@ -19,6 +19,7 @@ Comandos (cada uno con --help):
   instrumentar  copia la instrumentación genérica (secciones HTTP, QUEUE, CONN, TTFB, SCREEN y NAV) a un módulo
   nodos         busca un nodo en un volcado de uiautomator y da el centro de sus bounds para tocarlo con adb
   pausa         desde un recorrido: muestra un texto en la terminal y espera a la persona (un paso humano)
+  salidas       por qué se cerró la app: sus últimas salidas según el sistema (Android 11+), con el motivo en claro
 
 Códigos de salida: 0 bien · 2 uso o datos inválidos · 3 precondición (dispositivo, app o herramientas) ·
 4 captura fallida · 5 no se juntaron las corridas válidas pedidas.
@@ -45,9 +46,10 @@ import textwrap
 import time
 import uuid
 import xml.etree.ElementTree as ElementTree
+import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -583,6 +585,9 @@ def load_plan(path):
                             "confirma o refuta la hipótesis con esa métrica" % (path, item["id"]))
     if plan.get("instalar") is not None and not isinstance(plan["instalar"], str):
         raise PerfError("%s: 'instalar' es el comando que compila e instala el build de profiling (texto)" % path)
+    if plan.get("mapping") is not None and not (isinstance(plan["mapping"], str) and plan["mapping"].strip()):
+        raise PerfError("%s: 'mapping' es la ruta del mapping.txt de R8 de la variante medida (texto), por ejemplo "
+                        "app/build/outputs/mapping/profiling/mapping.txt" % path)
     if plan.get("profundidad", "riguroso") not in ("riguroso", "triage"):
         raise PerfError("%s: 'profundidad' es riguroso o triage" % path)
     for name, flow in plan["flujos"].items():
@@ -1930,13 +1935,7 @@ def app_died(adb, package):
 
 def crash_excerpt(adb, package):
     """Primeras líneas del último crash de la app en logcat -b crash."""
-    lines = adb.shell("logcat -b crash -d -t 400").stdout.splitlines()
-    starts = [i for i, line in enumerate(lines) if "FATAL EXCEPTION" in line]
-    for start in reversed(starts):
-        block = lines[start:start + 14]
-        if any(package in line for line in block):
-            return block
-    return []
+    return crash_block(adb.shell("logcat -b crash -d -t 400").stdout.splitlines(), package=package)
 
 
 def mapping_hint():
@@ -3065,6 +3064,11 @@ def cmd_capturar(args, plan=None):
     out_dir = folder / ("prueba" if args.prueba else phase)
     out_dir.mkdir(parents=True, exist_ok=True)
     known = known_metrics(csv_path, flow_name)
+    deobfuscator = Deobfuscator(plan, project_root(folder).resolve(), getattr(args, "mapping", None), build.get("instalada"),
+                                adb)
+    if sdk < EXIT_MIN_SDK:
+        print("· Android %s: sin registro de salidas de la app por corrida (exit-info es de Android 11 o superior). Solo "
+              "queda el aviso de crash; un cierre por memoria o un ANR no se detectan aquí." % ("10" if sdk == 29 else sdk))
     start_screen = None if startup else flow.get("inicio")
 
     def check_start():
@@ -3174,12 +3178,33 @@ def cmd_capturar(args, plan=None):
         if not args.prueba:
             set_aside_orphan(folder, out_dir, phase, flow_name, n, csv_path)
         label = "prueba" if args.prueba else "corrida %d de %d (%s, %s)" % (valid + 1, target, flow_name, phase)
+        # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida nueva
+        # del proceso medido dentro de la corrida la invalida.
+        exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
         reason, extra = record_run(adb, config, recorrido, label, local, startup, package)
         save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
-        if not invalid and app_died(adb, package):
+        died = not invalid and app_died(adb, package)
+        if died:
             invalid = "la app no estaba viva al terminar la corrida (¿se cayó?)"
             crash = crash_excerpt(adb, package)
+        exits = []
+        if exits_before is not None:
+            # En un arranque en frío el proceso nace en la corrida (no se sabe su pid antes) y el que había lo detiene
+            # la propia skill: ese pid se ignora. En los demás flujos, cuenta solo el proceso que estaba al empezar.
+            old_pid = exits_before[1]
+            exits = run_exits(exits_before, exit_snapshot(adb, package), None if startup else old_pid,
+                              (old_pid,) if startup and old_pid else (), package)
+        unexpected = [entry for entry in exits if entry["motivo"] not in EXIT_DELIBERATE]
+        if unexpected:
+            if not invalid or died:
+                invalid = "la app salió: %s" % exit_text(unexpected[0])
+            if not crash and unexpected[0]["motivo"] == 4:
+                crash = crash_block(adb.shell("logcat -b crash -d -t 400").stdout.splitlines(), pid=unexpected[0]["pid"])
+        if args.prueba:
+            for entry in exits:
+                print("%s Salida de la app durante la corrida (%s, pid %s): %s" % (
+                    "✖" if entry in unexpected else "·", entry["hora"][11:19], entry["pid"], exit_text(entry)))
         if not invalid:
             print("… procesando la traza %s (%.0f MB)" % (
                 "de prueba" if args.prueba else "%d de %d" % (valid + 1, target), local.stat().st_size / 1e6), flush=True)
@@ -3226,8 +3251,9 @@ def cmd_capturar(args, plan=None):
         size_mb = local.stat().st_size / 1e6
         if crash:
             print("✖ La app se cayó durante la corrida. Inicio del crash (logcat -b crash):")
-            print("\n".join("  " + line for line in crash))
-            print("  " + mapping_hint())
+            print("\n".join("  " + line for line in deobfuscator.stack(crash)))
+            if deobfuscator.mapping is None:
+                print("  " + mapping_hint())
         if invalid and args.prueba:
             if not info:  # el recorrido se cortó (o la app se cayó): la traza igual dice hasta dónde llegó
                 try:
@@ -3339,6 +3365,498 @@ def write_summary(csv_path, rows, plan):
         print("✔ estado.md actualizado (Métricas)")
 
 
+# ── desofuscación (R8) ───────────────────────────────────────────────────────
+
+RETRACE_INSTALL = ("instala las Command-line Tools del SDK de Android (Android Studio · SDK Manager · SDK Tools · \"Android SDK "
+                   "Command-line Tools\", o `sdkmanager \"cmdline-tools;latest\"`): traen `retrace` en "
+                   "<sdk>/cmdline-tools/latest/bin. Necesita Java. Si está en otra ruta, pásala con RETRACE=<ruta>")
+MAPPING_ID = re.compile(r"^#[ \t]*pg_map_id:[ \t]*(\S+)", re.M)
+MAPPING_CLASS = re.compile(r"^[^\s#][^\n]* -> [^\s:]+:[ \t]*$", re.M)
+APK_MAP_ID = re.compile(br'"pg-map-id":"([^"]+)"')  # el marcador que R8 deja en cada classes.dex: ~~R8{...,"pg-map-id":"<id>",...}
+INSTALL_TASK = re.compile(r"(?:^|[\s:])((?:[\w.-]+:)*)install([A-Z]\w*)")
+JAVA_NAME = re.compile(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$<][\w$<>]*)+")
+# Un nombre `paquete.Clase.método` parece ofuscado si su clase tiene 1 o 2 caracteres o empieza con minúscula (a.b.c,
+# com.example.app.data.a.b, o.aB.d): R8 puede conservar los paquetes y renombrar solo la clase y el método.
+OBFUSCATED_NAME = re.compile(r"(?:[\w$]+\.)*(?:[a-z_$][\w$]*|[A-Za-z_$][\w$]?)\.[A-Za-z_$<][\w$<>]*")
+STACK_FRAME = re.compile(r"\bat[ \t]+([\w$.<>]+)\(")
+RETRACED = re.compile(r"^\s*(<OR>\s+)?at\s+(.+?)\(")
+CLOCK_MARGIN_S = 120  # el reloj del dispositivo y el de la máquina no van al segundo
+ENCRYPTED_HINT = ("la app puede usar cifrado de clases u otro ofuscador (ofuscadores comerciales con cifrado de clases), que "
+                  "este mapping no deshace: mide con una variante sin cifrado de clases")
+
+
+def find_retrace():
+    """La ruta de `retrace` (cmdline-tools del SDK), o None."""
+    candidates = [os.environ.get("RETRACE"), shutil.which("retrace")]
+    homes = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT")]
+    adb = shutil.which("adb")
+    if adb:
+        homes.append(str(pathlib.Path(adb).resolve().parent.parent))
+    for home in homes:
+        if home:
+            candidates += [str(path) for path in sorted(pathlib.Path(home).glob("cmdline-tools/*/bin/retrace"), reverse=True)]
+    for candidate in candidates:
+        if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
+            return candidate
+    return None
+
+
+def read_mapping(path):
+    """{"ruta", "id" (pg_map_id de la cabecera, o None), "valido" (tiene líneas de clase de ProGuard/R8), "mtime"}."""
+    path = pathlib.Path(path)
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        head = f.read(2_000_000)
+    found = MAPPING_ID.search(head[:20_000])
+    return {"ruta": path, "id": found.group(1) if found else None, "valido": bool(MAPPING_CLASS.search(head)),
+            "mtime": path.stat().st_mtime}
+
+
+def install_variant(install):
+    """(módulo como ruta, variante) de un comando con `:app:installDemoProfiling`: ("app", "demoProfiling"). (None, None)
+    si el comando no instala con una tarea install<Variante> de Gradle."""
+    found = INSTALL_TASK.search(install or "")
+    if not found:
+        return None, None
+    variant = found.group(2)
+    return found.group(1).strip(":").replace(":", "/") or None, variant[0].lower() + variant[1:]
+
+
+def mapping_candidates(root, variant="*"):
+    found = []
+    for pattern in ("build/outputs/mapping/%s/mapping.txt", "*/build/outputs/mapping/%s/mapping.txt",
+                    "*/*/build/outputs/mapping/%s/mapping.txt"):
+        found += sorted(pathlib.Path(root).glob(pattern % variant))
+    return found
+
+
+def locate_mapping(plan, root, override=None):
+    """(ruta o None, explícito, aviso) del mapping.txt de la variante medida. Con R8 hay uno por variante, en el módulo
+    de la app. Orden: --mapping; `mapping` de plan.json; la variante del comando `instalar` del plan; y, si en el
+    proyecto hay un solo mapping que no sea de debug ni de release, ese."""
+    root = pathlib.Path(root)
+    if override:
+        path = pathlib.Path(override)
+        if not path.is_file():
+            raise PerfError("no existe el mapping %s" % path)
+        return path, True, ""
+    if plan.get("mapping"):
+        path = pathlib.Path(plan["mapping"])
+        path = path if path.is_absolute() else root / path
+        if path.is_file():
+            return path, False, ""
+        return None, False, "el 'mapping' de plan.json (%s) no existe: ¿falta compilar esa variante?" % plan["mapping"]
+    module, variant = install_variant(plan.get("instalar"))
+    if variant:
+        found = [root / module / "build" / "outputs" / "mapping" / variant / "mapping.txt"] if module else \
+            mapping_candidates(root, variant)
+        found = [path for path in found if path.is_file()]
+        if len(found) == 1:
+            return found[0], False, ""
+        if not found:
+            return None, False, ("no encontré el mapping de la variante %s (la del comando 'instalar' del plan): ¿la variante "
+                                 "usa R8 (minifyEnabled)? Si está en otra ruta, ponla en \"mapping\" de plan.json o pásala "
+                                 "con --mapping" % variant)
+    else:
+        found = [path for path in mapping_candidates(root) if path.parent.name not in ("release", "debug")]
+        if len(found) == 1:
+            return found[0], False, ""
+        if not found:
+            return None, False, ("no encontré ningún mapping.txt (<módulo>/build/outputs/mapping/<variante>/): indica el de "
+                                 "la variante medida en \"mapping\" de plan.json o con --mapping")
+    return None, False, ("hay %d mappings (%s) y no sé cuál es el de la variante medida: indícalo en \"mapping\" de "
+                         "plan.json o con --mapping" % (len(found), ", ".join(str(path.parent.name) for path in found[:4])))
+
+
+def apk_map_ids(apk):
+    """Los pg_map_id que R8 dejó en los classes*.dex de un APK. Vacío si el APK no los trae (sin R8, u otro ofuscador)."""
+    ids = set()
+    with zipfile.ZipFile(str(apk)) as archive:
+        for name in archive.namelist():
+            if re.fullmatch(r"classes\d*\.dex", name):
+                ids |= {found.decode("ascii", "replace") for found in APK_MAP_ID.findall(archive.read(name))}
+    return ids
+
+
+def installed_map_ids(adb, package):
+    """Los pg_map_id del APK instalado (baja base.apk a una carpeta temporal y la borra). None si no se pudo leer."""
+    paths = re.findall(r"^package:(\S+)", adb.shell("pm path %s" % package).stdout, re.M)
+    base = next((path for path in paths if path.endswith("base.apk")), paths[0] if paths else None)
+    if not base:
+        return None
+    work = tempfile.mkdtemp(prefix="hbperf-apk-")
+    try:
+        local = pathlib.Path(work) / "base.apk"
+        pulled = adb.run("pull", base, str(local), timeout=600)
+        if pulled.returncode != 0 or not local.is_file():
+            return None
+        return apk_map_ids(local)
+    except (OSError, zipfile.BadZipFile, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def parse_installed(text):
+    try:
+        return datetime.datetime.strptime(text or "", "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return None
+
+
+def output_apk_mtime(mapping_path):
+    """La fecha del APK de salida de la variante del mapping (<módulo>/build/outputs/apk/**/<variante>/*.apk), o None."""
+    mapping_path = pathlib.Path(mapping_path)
+    variant, outputs = mapping_path.parent.name, mapping_path.parent.parent.parent
+    apks = [path for path in (outputs / "apk").glob("**/*.apk")
+            if "".join(path.relative_to(outputs / "apk").parts[:-1]).lower() == variant.lower()] \
+        if (outputs / "apk").is_dir() else []
+    return max((path.stat().st_mtime for path in apks), default=None)
+
+
+def verify_mapping(mapping, installed, explicit, apk_ids=None):
+    """(se usa, nota). Un mapping de otro build da nombres equivocados sin ningún error, así que solo se usa si
+    corresponde al APK medido:
+
+    - con el pg_map_id del mapping y los del APK instalado, se comparan: si no coinciden, no se usa nunca;
+    - sin esos identificadores, por fechas y de forma conservadora: el mapping (y el APK de salida de su variante) no
+      pueden ser posteriores a la instalación de la app, ni el mapping posterior a ese APK;
+    - si no se puede verificar, no se usa, salvo que se haya pasado con --mapping.
+    """
+    if mapping["id"] and apk_ids:
+        if mapping["id"] in apk_ids:
+            return True, "verificado: su pg_map_id (%s) es el del APK instalado" % mapping["id"]
+        return False, ("el mapping no es el del APK instalado (pg_map_id %s; el APK tiene %s): daría nombres equivocados. "
+                       "Compila e instala de nuevo esa variante, o indica el mapping correcto"
+                       % (mapping["id"], ", ".join(sorted(apk_ids))))
+    if explicit:
+        return True, "sin verificar contra el APK instalado: se usa porque lo pasaste con --mapping"
+    moment = parse_installed(installed)
+    if moment is None:
+        return False, ("no se pudo verificar que el mapping corresponda al APK medido (sin pg_map_id comparable ni fecha de "
+                       "instalación): no se desofusca. Si estás seguro de que es el de ese build, pásalo con --mapping")
+    if mapping["mtime"] > moment + CLOCK_MARGIN_S:
+        return False, ("el mapping se generó después de instalar la app (instalada %s): es de otro build y daría nombres "
+                       "equivocados. Instala de nuevo esa variante, o pasa con --mapping el del build medido" % installed)
+    apk = output_apk_mtime(mapping["ruta"])
+    if apk is not None and (apk > moment + CLOCK_MARGIN_S or mapping["mtime"] > apk + CLOCK_MARGIN_S):
+        return False, ("el APK de salida de esa variante no corresponde con la instalación (instalada %s) o con el mapping: "
+                       "puede ser de otro build. Instala de nuevo esa variante, o pasa con --mapping el del build medido"
+                       % installed)
+    return True, ("verificado solo por fecha (el mapping%s no es posterior a la instalación, %s): sin pg_map_id comparable"
+                  % (" y el APK de salida" if apk is not None else "", installed))
+
+
+class Deobfuscator:
+    """Desofusca con `retrace` y el mapping de la variante medida, solo cuando hace falta: lo que tarda (ubicar el
+    mapping, verificarlo contra el APK) se hace la primera vez que aparece un nombre ofuscado. Nunca falla por no tener
+    mapping ni `retrace`: lo dice una vez y deja los nombres como están."""
+
+    def __init__(self, plan, root, override=None, installed=None, adb=None):
+        self.plan, self.root, self.override, self.installed, self.adb = plan or {}, root, override, installed, adb
+        if override and not pathlib.Path(override).is_file():
+            raise PerfError("no existe el mapping %s" % override)  # al empezar el comando, no a mitad de una captura
+        self.ready, self.retrace, self.mapping, self.notes = False, None, None, []
+
+    def note(self, text):
+        if text not in self.notes:
+            self.notes.append(text)
+            print(text)
+
+    def prepare(self):
+        if self.ready:
+            return self.mapping is not None
+        self.ready = True
+        path, explicit, warning = locate_mapping(self.plan, self.root, self.override)
+        if path is None:
+            self.note("· Sin desofuscar: %s." % warning)
+            return False
+        mapping = read_mapping(path)
+        if not mapping["valido"]:
+            self.note("⚠ Sin desofuscar: %s no tiene el formato de un mapping de ProGuard/R8 (¿lo generó otro ofuscador?); %s."
+                      % (path, ENCRYPTED_HINT))
+            return False
+        adb = self.adb() if callable(self.adb) else self.adb
+        ids = installed_map_ids(adb, self.plan.get("paquete")) if adb and mapping["id"] and self.plan.get("paquete") else None
+        use, detail = verify_mapping(mapping, self.installed, explicit, ids)
+        if not use:
+            self.note("⚠ Sin desofuscar: %s." % detail)
+            return False
+        self.retrace = find_retrace()
+        if not self.retrace:
+            self.note("· Sin desofuscar: falta `retrace`; %s." % RETRACE_INSTALL)
+            return False
+        self.mapping = mapping
+        try:  # relativa a la raíz: esta nota también queda en diagnostico.md
+            shown = pathlib.Path(path).resolve().relative_to(pathlib.Path(self.root).resolve())
+        except ValueError:
+            shown = path
+        self.note("✔ Desofuscado con %s (%s)." % (shown, detail))
+        return True
+
+    def run(self, lines):
+        """Las líneas pasadas por retrace, o None si falló."""
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+            source = f.name
+        try:
+            result = subprocess.run([self.retrace, str(self.mapping["ruta"]), source], capture_output=True, text=True,
+                                    timeout=300)
+        except (OSError, subprocess.SubprocessError) as error:
+            self.note("⚠ Sin desofuscar: retrace no corrió (%s)." % str(error)[:120])
+            return None
+        finally:
+            os.unlink(source)
+        if result.returncode != 0:
+            self.note("⚠ Sin desofuscar: retrace falló (%s)." % ((result.stderr or result.stdout).strip().splitlines() or ["sin salida"])[-1][:160])
+            return None
+        return result.stdout.splitlines()
+
+    def stack(self, lines):
+        """Una pila (logcat, una traza de salida) con los nombres reales. Sin frames ofuscados, o sin mapping, igual."""
+        if not any(OBFUSCATED_NAME.fullmatch(name) for line in lines for name in STACK_FRAME.findall(line)):
+            return lines
+        if not self.prepare():
+            return lines
+        out = self.run(lines)
+        if out is None:
+            return lines
+        self.leftover([name for line in out for name in STACK_FRAME.findall(line)])
+        return out
+
+    def names(self, names):
+        """{nombre ofuscado: nombre real} para nombres `clase.método` sueltos (sin número de línea, retrace puede
+        devolver varios candidatos: van separados por ' o ')."""
+        if not any(OBFUSCATED_NAME.fullmatch(name or "") for name in names) or not self.prepare():
+            return {}
+        # Con un nombre que parece ofuscado ya vale la pena: van todos los que tienen forma de `clase.método`, porque
+        # una clase ofuscada también puede llamarse Ab0 o ABc.
+        wanted = sorted({name for name in names if JAVA_NAME.fullmatch(name or "")})
+        out = self.run(["\tat %s(Unknown Source)" % name for name in wanted])
+        if out is None:
+            return {}
+        groups = []
+        for line in out:
+            found = RETRACED.match(line)
+            if not found:
+                continue
+            if found.group(1) and groups:
+                groups[-1].append(found.group(2))
+            else:
+                groups.append([found.group(2)])
+        if len(groups) != len(wanted):  # la salida no tiene la forma esperada: mejor sin tocar que con nombres corridos
+            self.note("⚠ Sin desofuscar: la salida de retrace no se pudo emparejar con los nombres.")
+            return {}
+        mapped = {}
+        for name, options in zip(wanted, groups):
+            unique = [option for i, option in enumerate(options) if option not in options[:i]]
+            mapped[name] = " o ".join(unique[:3]) + (" o …" if len(unique) > 3 else "")
+        self.leftover([value for name, value in mapped.items() if value == name])
+        return {name: value for name, value in mapped.items() if value != name}
+
+    def leftover(self, names):
+        still = sorted({name for name in names if OBFUSCATED_NAME.fullmatch(name)})
+        if still:
+            self.note("⚠ %d nombre%s ofuscado%s después de aplicar el mapping (%s): el mapping no los trae; %s."
+                      % (len(still), " sigue" if len(still) == 1 else "s siguen", "" if len(still) == 1 else "s",
+                         ", ".join(still[:3]) + ("…" if len(still) > 3 else ""), ENCRYPTED_HINT))
+
+
+def query_deobfuscate(sql):
+    """Las columnas con nombres de métodos que una consulta declara en su cabecera (`-- desofuscar: funcion`)."""
+    for line in sql.splitlines():
+        if line.startswith("-- desofuscar:"):
+            return line.split(":", 1)[1].split()
+    return []
+
+
+def deobfuscate_sets(sets, columns, deobfuscator):
+    """Los resultados de una consulta con las columnas de nombres de métodos desofuscadas. Avisa también del código
+    nativo sin símbolos, que se muestra como librería."""
+    if not columns or deobfuscator is None:
+        return sets
+    out, native = [], False
+    for header, body in sets:
+        indexes = [i for i, name in enumerate(header) if name in columns]
+        library = header.index("libreria") if "libreria" in header else None
+
+        def managed(row):  # el código nativo y el del kernel no pasan por el mapping de R8
+            origin = str(row[library]) if library is not None and library < len(row) else ""
+            return ".so" not in origin and not origin.startswith("[kernel")
+
+        names = deobfuscator.names([row[i] for row in body if managed(row) for i in indexes if i < len(row)]) \
+            if indexes else {}
+        native = native or any(i < len(row) and row[i] in ("?", "") and library is not None and library < len(row)
+                               and ".so" in str(row[library]) for row in body for i in indexes)
+        out.append((header, [[names.get(cell, cell) if i in indexes and managed(row) else cell
+                              for i, cell in enumerate(row)] for row in body] if names else body))
+    if native:
+        deobfuscator.note("· Código nativo sin símbolos: se muestra la librería, no la función (hacen falta los símbolos de "
+                          "esa librería; el mapping de R8 no los trae).")
+    return out
+
+
+# ── salidas de la app (ApplicationExitInfo) ──────────────────────────────────
+
+EXIT_REASONS = {0: "desconocido", 1: "la app terminó sola (exit)", 2: "señal del sistema operativo",
+                3: "poca memoria (la cerró el sistema)", 4: "crash", 5: "crash nativo", 6: "ANR",
+                7: "falló al iniciar", 8: "cambio de permisos", 9: "uso excesivo de recursos",
+                10: "detenida a pedido del usuario (o force-stop)", 11: "usuario del dispositivo detenido",
+                12: "murió un proceso del que dependía", 13: "detenida por el sistema", 14: "detenida por el freezer",
+                15: "cambio de estado del paquete", 16: "paquete actualizado"}
+# Cierres que pide alguien (un force-stop del recorrido o de la propia skill, una reinstalación): no son fallas de la app.
+EXIT_DELIBERATE = (8, 10, 11, 15, 16)
+EXIT_KEYS = ("timestamp", "pid", "realUid", "packageUid", "definingUid", "user", "process", "reason", "subreason",
+             "status", "importance", "pss", "rss", "description", "state", "trace")
+EXIT_ENTRY = re.compile(r"ApplicationExitInfo #\d+:")
+EXIT_END = re.compile(r"^\s*(?:package:|Historical Process Exit|ACTIVITY MANAGER|Last Timestamp)", re.M)
+EXIT_MIN_SDK = 30
+
+
+def parse_exit_info(text):
+    """Las salidas de `dumpsys activity exit-info <paquete>` (Android 11+), de la más reciente a la más vieja. Cada una:
+    hora ('AAAA-MM-DD HH:MM:SS.mmm', hora del dispositivo), proceso, pid, motivo (código), motivo_texto, submotivo, estado,
+    importancia, pss, rss, descripcion y traza. Tolerante a las diferencias entre versiones: un campo que no está queda
+    vacío (None en pid y motivo), y los que no conoce se ignoran."""
+    entries = []
+    for block in EXIT_ENTRY.split(text or "")[1:]:
+        end = EXIT_END.search(block)
+        body = " ".join((block[:end.start()] if end else block).split())
+        marks = []
+        for key in EXIT_KEYS:
+            # 'state' y 'trace' van después de la descripción, que es texto libre: se toma la última vez que salen
+            found = list(re.finditer(r"(?:^|\s)%s=" % key, body))
+            if found:
+                marks.append((found[-1] if key in ("state", "trace") else found[0], key))
+        marks.sort(key=lambda item: item[0].start())
+        values = {}
+        for index, (found, key) in enumerate(marks):
+            stop = marks[index + 1][0].start() if index + 1 < len(marks) else len(body)
+            values.setdefault(key, body[found.end():stop].strip())
+        code = re.match(r"\d+", values.get("reason", ""))
+        code = int(code.group(0)) if code else None
+        sub = re.match(r"\d+\s*\((.*)\)\s*$", values.get("subreason", ""))
+        pid = re.match(r"\d+", values.get("pid", ""))
+        described = values.get("description", "")
+        stamp = re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?", values.get("timestamp", ""))
+        entries.append({
+            "hora": stamp.group(0) if stamp else "", "proceso": values.get("process", ""), "pid": int(pid.group(0)) if pid else None, "motivo": code,
+            "motivo_texto": EXIT_REASONS.get(code, "motivo %s" % values.get("reason", "sin dato") if values.get("reason")
+                                             else "sin dato"),
+            "submotivo": "" if not sub or sub.group(1).upper() == "UNKNOWN" else sub.group(1),
+            "estado": values.get("status", ""), "importancia": values.get("importance", ""),
+            "pss": values.get("pss", ""), "rss": values.get("rss", ""),
+            "descripcion": "" if described == "null" else described,
+            "traza": "" if values.get("trace", "null") == "null" else values.get("trace", "")})
+    return entries
+
+
+def exit_text(entry):
+    """El motivo de una salida, en una línea."""
+    text = entry["motivo_texto"]
+    if entry["submotivo"]:
+        text += " · %s" % entry["submotivo"].lower()
+    if entry["descripcion"]:
+        text += " (%s)" % entry["descripcion"][:80]
+    return text
+
+
+def exit_snapshot(adb, package):
+    """(hora del dispositivo 'AAAA-MM-DD HH:MM:SS', pid de la app o None, salidas registradas), en una sola llamada a adb.
+    La hora sale del mismo reloj y con la misma zona que las de exit-info: se comparan como texto."""
+    out = adb.shell("date '+hora=%%Y-%%m-%%d %%H:%%M:%%S'; echo \"pid=$(pidof %s)\"; dumpsys activity exit-info %s"
+                    % (package, package)).stdout
+    moment = re.search(r"^hora=(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$", out, re.M)
+    pid = re.search(r"^pid=(\d+)", out, re.M)
+    return moment.group(1) if moment else "", int(pid.group(1)) if pid else None, parse_exit_info(out)
+
+
+def run_exits(before, after, measured_pid=None, killed=(), package=None):
+    """Las salidas de la app que pasaron dentro de una corrida: las que aparecen en `after` (foto al terminar) y no
+    estaban en `before` (foto al empezar), con hora dentro de la ventana y, si se conoce, del pid medido. Deja fuera
+    las que provoca la propia skill: los pids de `killed` (el proceso que detiene antes de un arranque en frío) y todo
+    lo que está fuera de la ventana (el force-stop de `preparar` y el de la compilación de ART). Con `package`, tampoco
+    cuentan los procesos secundarios de la app (`<paquete>:servicio`): el que se mide es el principal."""
+    start, _, known = before
+    end, _, entries = after
+    if not start or not end:
+        return []
+    seen = {(entry["hora"], entry["pid"]) for entry in known}
+    found = []
+    for entry in entries:
+        moment = entry["hora"][:19]
+        if (entry["hora"], entry["pid"]) in seen or not start <= moment <= end or entry["pid"] in killed:
+            continue
+        if measured_pid is not None and entry["pid"] != measured_pid:
+            continue
+        if package and entry.get("proceso") and entry["proceso"] != package:
+            continue
+        found.append(entry)
+    return found
+
+
+def crash_block(lines, package=None, pid=None, size=14):
+    """El último bloque FATAL EXCEPTION de logcat -b crash que es de ese pid (o, sin pid, de ese paquete)."""
+    starts = [i for i, line in enumerate(lines) if "FATAL EXCEPTION" in line]
+    for start in reversed(starts):
+        block = lines[start:start + size]
+        if pid is not None and any(re.search(r"\bPID: %d\b" % pid, line) for line in block):
+            return block
+        if pid is None and package and any(package in line for line in block):
+            return block
+    return []
+
+
+def cmd_salidas(args):
+    plan, folder = {}, None
+    if args.carpeta:
+        folder = pathlib.Path(args.carpeta)
+        plan = load_plan(folder / "plan.json")
+    package = args.paquete or plan.get("paquete")
+    if not package:
+        raise PerfError("indica la app con --paquete (o --carpeta, para tomarla del plan)")
+    serial = select_device(args.serial or plan.get("serial"))
+    adb = Adb(serial)
+    sdk = to_int(adb.shell("getprop ro.build.version.sdk").stdout.strip())
+    if sdk < EXIT_MIN_SDK:
+        print("Salidas de la app: no disponible (Android 11 o superior; el dispositivo tiene API %d). No quiere decir que "
+              "la app no se haya cerrado: en este dispositivo solo queda el aviso de crash de `capturar`." % sdk)
+        return
+    dump = adb.shell("dumpsys activity exit-info %s" % package).stdout
+    entries = parse_exit_info(dump)
+    if args.desde:
+        entries = [entry for entry in entries if entry["hora"] >= args.desde]
+    since = " desde %s" % args.desde if args.desde else ""
+    if not entries:
+        print("Sin salidas registradas de %s%s. El sistema guarda un historial acotado por paquete y lo borra al "
+              "desinstalar: una lista vacía no cubre lo que pasó antes." % (package, since))
+        return
+    shown = entries[:args.limite]
+    print(markdown_table(["Hora", "pid", "Motivo", "Descripción", "PSS", "RSS"],
+                         [[entry["hora"], entry["pid"] if entry["pid"] is not None else "—",
+                           entry["motivo_texto"] + (" · %s" % entry["submotivo"].lower() if entry["submotivo"] else ""),
+                           entry["descripcion"][:60] or "—", entry["pss"] or "—", entry["rss"] or "—"] for entry in shown]))
+    if len(entries) > len(shown):
+        print("… %d salidas más (sube --limite o acota con --desde)" % (len(entries) - len(shown)))
+    print("Hora del dispositivo. Los cierres a pedido (force-stop, reinstalar) también quedan registrados: no son fallas.")
+    crashes = [entry for entry in shown if entry["motivo"] == 4 and entry["pid"] is not None]
+    if crashes:
+        root = project_root(folder if folder is not None else pathlib.Path.cwd()).resolve()
+        build = package_build(adb.shell("dumpsys package %s" % package).stdout)
+        deobfuscator = Deobfuscator(dict(plan, paquete=package), root, args.mapping, build.get("instalada"), adb)
+        lines = adb.shell("logcat -b crash -d -t 2000").stdout.splitlines()
+        for entry in crashes[:3]:
+            block = crash_block(lines, pid=entry["pid"])
+            if block:
+                print("Crash de las %s (pid %d), inicio de la pila (logcat -b crash):" % (entry["hora"][11:19], entry["pid"]))
+                print("\n".join("  " + line for line in deobfuscator.stack(block)))
+            else:
+                print("Crash de las %s (pid %d): su pila ya no está en logcat -b crash." % (entry["hora"][11:19], entry["pid"]))
+    traced = [entry for entry in shown if entry["traza"]]
+    if traced:
+        print("Con traza del sistema (ANR o crash nativo): %s. Para leerlas, `anr-audit-and-fix` o `android-profiler`."
+              % ", ".join("%s %s" % (entry["hora"][11:19], entry["motivo_texto"]) for entry in traced[:3]))
+
+
 # ── consulta y diagnostico ───────────────────────────────────────────────────
 
 def parse_params(items):
@@ -3359,6 +3877,32 @@ def package_near(trace):
             except ValueError:
                 return None
     return None
+
+
+def trace_plan(trace):
+    """(raíz del proyecto, plan.json de la investigación de esa traza, o {} si no hay)."""
+    for folder in list(pathlib.Path(trace).resolve().parents)[:3]:
+        if (folder / "plan.json").is_file():
+            try:
+                plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+            except ValueError:
+                plan = {}
+            return project_root(folder).resolve(), plan if isinstance(plan, dict) else {}
+    return project_root(pathlib.Path.cwd()).resolve(), {}
+
+
+def measured_device(plan, installed):
+    """El dispositivo, solo si está conectado y todavía tiene instalado el build que se midió (misma fecha de
+    instalación): con él se compara el pg_map_id del mapping con el del APK. None si no: se verifica por fechas."""
+    package = plan.get("paquete")
+    if not package or not installed:
+        return None
+    try:
+        adb = Adb(select_device(plan.get("serial")))
+        current = package_build(adb.shell("dumpsys package %s" % package).stdout)
+    except (PerfError, OSError, subprocess.SubprocessError):
+        return None
+    return adb if current.get("instalada") == installed else None
 
 
 def query_path(name):
@@ -3399,6 +3943,12 @@ def cmd_consulta(args):
         return
     sql = fill_sql(sql, args.paquete or package_near(args.traza), parse_params(args.param))
     sets = run_tp(tp, args.traza, sql)
+    columns = query_deobfuscate(sql)
+    if columns:
+        root, near = trace_plan(args.traza)
+        sets = deobfuscate_sets(sets, columns, Deobfuscator(
+            near, root, args.mapping, (config or {}).get("instalada"),
+            lambda: measured_device(near, (config or {}).get("instalada"))))
     print_sets(sets, args.limite, args.ancho)
     if requires and not config:
         print("⚠ %s: no se sabe con qué configuración se grabó esta traza (es de una versión anterior o "
@@ -3532,6 +4082,9 @@ def cmd_diagnostico(args):
           "traza. Generado por hb-performance %s._" % (", ".join("%s = %s (%s %s)" % (label, run, metric, fmt(value, unit))
                                                                  for label, run, value in runs), VERSION)]
     printed, empty, unknown, not_measured, failed = [], [], [], {}, {}
+    installed = (read_phases(folder).get(phase) or {}).get("instalada")
+    deobfuscator = Deobfuscator(plan, project_root(folder).resolve(), args.mapping, installed,
+                                lambda: measured_device(plan, installed))
     signal_sql = (ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
     blocked = None  # (parte, espera más larga en D, ms de los frames, corrida) de la corrida donde más pesa la espera
     segments = flow.get("segmentos") or []
@@ -3588,8 +4141,8 @@ def cmd_diagnostico(args):
                    "", "_De esta corrida, sin veredicto estadístico: los valores con veredicto son las métricas "
                        "`<tramo> red_*` de todas las corridas._"]
             printed.append("red por tramo (%s)" % label)
-        for name, title, _, _ in chosen:
-            sets = [s for s in results[name] if s[1]]
+        for name, title, _, sql in chosen:
+            sets = deobfuscate_sets([s for s in results[name] if s[1]], query_deobfuscate(sql), deobfuscator)
             if name in failed:
                 continue
             if not sets:
@@ -3614,6 +4167,8 @@ def cmd_diagnostico(args):
     if "cpu_por_libreria" in set(empty) | set(unknown) | set(not_measured):
         md += ["", "_Sin muestras de CPU: para atribuir el CPU a funciones, captura una corrida con "
                    "`capturar --prueba --config cpu` y consulta `cpu_por_libreria` sobre esa traza._"]
+    for note in deobfuscator.notes:
+        md += ["", "_%s_" % note.lstrip("·⚠✔ ")]
     if blocked:
         capture = "capturar --plan %s%s --prueba --config completa" % (
             folder / "plan.json", " --flujo %s" % flow_name if len(plan["flujos"]) > 1 else "")
@@ -5958,6 +6513,10 @@ def cmd_instrumentar(args):
 
 # ── Entrada ──────────────────────────────────────────────────────────────────
 
+MAPPING_HELP = ("mapping.txt de R8 de la variante medida, para desofuscar; si no, el 'mapping' del plan o el de la variante "
+                "del comando 'instalar'. Pasado así se usa aunque no se pueda verificar contra el APK instalado")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Captura, métricas, diagnóstico, comparación y reporte de hb-performance.")
     parser.add_argument("--version", action="version", version="hb-performance %s" % VERSION)
@@ -6052,6 +6611,7 @@ def main(argv=None):
                         "Profile + speed-profile); si no, la del plan")
     p.add_argument("--paquete", help="con --prueba y sin plan")
     p.add_argument("--carpeta", help="con --prueba y sin plan")
+    p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_capturar)
 
     p = sub.add_parser("diagnostico", help="consultas de diagnóstico sobre la corrida mediana y la peor")
@@ -6064,6 +6624,7 @@ def main(argv=None):
     p.add_argument("--limite", type=int, default=25)
     p.add_argument("--ancho", type=int, default=80)
     p.add_argument("--tp")
+    p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_diagnostico)
 
     p = sub.add_parser("consulta", help="consulta SQL acotada sobre una traza")
@@ -6075,7 +6636,17 @@ def main(argv=None):
     p.add_argument("--limite", type=int, default=20)
     p.add_argument("--ancho", type=int, default=80)
     p.add_argument("--tp")
+    p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_consulta)
+
+    p = sub.add_parser("salidas", help="por qué se cerró la app: sus últimas salidas según el sistema (Android 11 o superior)")
+    p.add_argument("--paquete", help="applicationId; si no, el del plan de --carpeta")
+    p.add_argument("--carpeta", help="carpeta de la investigación: toma de su plan el paquete, el serial y el mapping")
+    p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
+    p.add_argument("--desde", help="solo las salidas desde esa hora del dispositivo: 'AAAA-MM-DD' o 'AAAA-MM-DD HH:MM'")
+    p.add_argument("--limite", type=int, default=10, help="cuántas salidas, de la más reciente hacia atrás (10)")
+    p.add_argument("--mapping", help=MAPPING_HELP)
+    p.set_defaults(func=cmd_salidas)
 
     p = sub.add_parser("resumen", help="estadísticas por fase y avisos")
     p.add_argument("csv")

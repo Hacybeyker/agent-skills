@@ -2,6 +2,7 @@
 captura con un adb y un trace_processor falsos, reporte e instrumentación."""
 import contextlib
 import csv
+import datetime
 import importlib.util
 import io
 import json
@@ -13,7 +14,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
+import zipfile
 from pathlib import Path
 
 from helpers import ROOT, write
@@ -411,6 +414,19 @@ elif cmd.startswith("dumpsys thermalservice"):
     print("Thermal Status: " + os.environ.get("FAKE_THERMAL", "0"))
 elif cmd.startswith("dumpsys battery"):
     print("  level: 90")
+elif cmd.startswith("date '+hora="):
+    # la foto de salidas de capturar: hora del dispositivo, pid y exit-info. El reloj avanza un segundo por llamada y
+    # el volcado solo sale en la foto de después de cada corrida (llamadas impares)
+    counter = os.environ["FAKE_LOG"] + ".salidas"
+    n = int(open(counter).read()) if os.path.exists(counter) else 0
+    open(counter, "w").write(str(n + 1))
+    print("hora=2026-11-05 10:00:%02d" % min(n, 59))
+    print("pid=" + ("" if os.environ.get("FAKE_DEAD") else "1234"))
+    if os.environ.get("FAKE_EXIT_INFO") and n % 2 == 1:
+        print(open(os.environ["FAKE_EXIT_INFO"]).read())
+elif cmd.startswith("dumpsys activity exit-info"):
+    if os.environ.get("FAKE_EXIT_INFO"):
+        print(open(os.environ["FAKE_EXIT_INFO"]).read())
 elif cmd.startswith("dumpsys activity activities"):
     print("  topResumedActivity=ActivityRecord{{1 u0 %s t5}}" % os.environ.get("FAKE_RESUMED", "com.ejemplo.app/.MainActivity"))
 elif cmd.startswith("cmd package compile"):
@@ -431,6 +447,8 @@ elif cmd.startswith("logcat -b crash"):
     print("11-05 10:00:01.000  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
           "11-05 10:00:01.000  1234  1234 E AndroidRuntime: Process: com.ejemplo.app, PID: 1234\n"
           "11-05 10:00:01.000  1234  1234 E AndroidRuntime: java.lang.IllegalStateException: boom")
+    for frame in filter(None, os.environ.get("FAKE_CRASH_FRAMES", "").split("|")):
+        print("11-05 10:00:01.000  1234  1234 E AndroidRuntime: " + frame)
 elif cmd.startswith("perfetto"):
     config = sys.stdin.read()
     if os.environ.get("FAKE_PERFETTO_CONFIG"):
@@ -5577,3 +5595,467 @@ class CompatVersionsTest(DeviceBase):
         self.assertIsNone(invalid)
         self.assertEqual([list(m) for m in metrics], data["metricas"])  # las mismas, con el mismo valor y en el mismo orden
         self.assertEqual(len(data["metricas"]), 35)
+
+
+MAPPING = (FIXTURE_TRACES / "mapping.txt")
+REAL_RETRACE = perf.find_retrace()
+FAKE_RETRACE = r'''#!{python}
+import re, sys
+mapping, stack = sys.argv[1], sys.argv[2]
+assert "pg_map_id" in open(mapping).read() or "->" in open(mapping).read()
+names = {{"a.b.a": ["com.example.app.data.Repo.load", "com.example.app.data.Repo.save"],
+         "a.b.b": ["com.example.app.data.Repo.refresh"]}}
+for line in open(stack).read().splitlines():
+    found = re.search(r"at ([\w.$]+)\(([^)]*)\)", line)
+    if not found or found.group(1) not in names:
+        print(line)
+        continue
+    options = names[found.group(1)]
+    if found.group(2) != "Unknown Source":
+        options = options[:1]
+    for i, option in enumerate(options):
+        text = line.replace(found.group(0), "at %s(Repo.kt)" % option)
+        print(text if i == 0 else "\t<OR> " + text.strip())
+'''
+CPU_TABLE = ('"hilo","libreria","funcion","muestras"\n"main","base.odex","a.b.a",40\n"main","base.odex","a.b.b",12\n'
+             '"main","boot-framework.oat","android.os.Handler.dispatchMessage",9\n"main","libexample.so","?",7\n'
+             '"main","base.odex","x.y.z",3\n"main","libexample.so","render.cold",2\n')
+
+
+class MappingTest(PerfBase):
+    """Ubicar el mapping de la variante medida y verificar que corresponde al APK medido."""
+
+    def mapping_at(self, relative, text=None):
+        path = self.dir / relative
+        write(path, text if text is not None else MAPPING.read_text(encoding="utf-8"))
+        return path
+
+    def test_la_variante_sale_del_comando_instalar(self):
+        self.assertEqual(perf.install_variant("./gradlew :app:installDemoProfiling"), ("app", "demoProfiling"))
+        self.assertEqual(perf.install_variant("ANDROID_SERIAL=emulator-5554 ./gradlew installProfiling -Pperf"),
+                         (None, "profiling"))
+        self.assertEqual(perf.install_variant("./gradlew :feature:app:installProfiling"), ("feature/app", "profiling"))
+        self.assertEqual(perf.install_variant("adb install -r app.apk"), (None, None))
+        self.assertEqual(perf.install_variant(None), (None, None))
+
+    def test_ubica_el_mapping_del_plan_de_la_variante_instalada_o_el_unico(self):
+        profiling = self.mapping_at("app/build/outputs/mapping/profiling/mapping.txt")
+        self.mapping_at("app/build/outputs/mapping/release/mapping.txt")
+        self.assertEqual(perf.locate_mapping({}, self.dir), (profiling, False, ""))  # el único que no es debug ni release
+        demo = self.mapping_at("app/build/outputs/mapping/demoProfiling/mapping.txt")
+        path, explicit, warning = perf.locate_mapping({}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("hay 2 mappings", warning)
+        self.assertIn('"mapping" de plan.json o con --mapping', warning)
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew :app:installDemoProfiling"}, self.dir)[0], demo)
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew installProfiling"}, self.dir)[0], profiling)
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew :app:installDemoProfiling",
+                                              "mapping": "app/build/outputs/mapping/release/mapping.txt"}, self.dir)[0],
+                         self.dir / "app/build/outputs/mapping/release/mapping.txt")  # el del plan manda
+        other = self.mapping_at("otro/mapping.txt")
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew :app:installDemoProfiling"}, self.dir, str(other)),
+                         (other, True, ""))  # --mapping manda sobre todo, y es explícito
+
+    def test_sin_mapping_lo_dice_y_no_falla_salvo_un_mapping_explicito_que_no_existe(self):
+        path, _, warning = perf.locate_mapping({}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("no encontré ningún mapping.txt", warning)
+        path, _, warning = perf.locate_mapping({"instalar": "./gradlew :app:installProfiling"}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("no encontré el mapping de la variante profiling", warning)
+        path, _, warning = perf.locate_mapping({"mapping": "app/no-existe.txt"}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("no existe", warning)
+        with self.assertRaises(perf.PerfError):
+            perf.locate_mapping({}, self.dir, str(self.dir / "no-existe.txt"))
+
+    def test_lee_el_identificador_del_mapping_y_reconoce_uno_que_no_es_de_proguard(self):
+        mapping = perf.read_mapping(MAPPING)
+        self.assertEqual((mapping["id"], mapping["valido"]), ("1a2b3c4", True))
+        plain = perf.read_mapping(self.mapping_at("m/mapping.txt", "com.example.app.data.Repo -> a.b:\n    int count -> a\n"))
+        self.assertEqual((plain["id"], plain["valido"]), (None, True))
+        other = perf.read_mapping(self.mapping_at("o/mapping.txt", "<?xml version='1.0'?>\n<mapa cifrado='si'/>\n"))
+        self.assertEqual((other["id"], other["valido"]), (None, False))
+
+    def test_lee_el_identificador_que_r8_deja_en_el_apk(self):
+        apk = self.dir / "app.apk"
+        with zipfile.ZipFile(str(apk), "w") as archive:
+            archive.writestr("classes.dex", b'dex\n035\x00~~R8{"backend":"dex","compilation-mode":"release","min-api":24,'
+                                            b'"pg-map-id":"1a2b3c4","r8-mode":"full","version":"8.5.35"}\x00')
+            archive.writestr("classes2.dex", b"dex\n035\x00sin marcador")
+            archive.writestr("lib/arm64-v8a/libexample.so", b'"pg-map-id":"no-es-un-dex"')
+        self.assertEqual(perf.apk_map_ids(apk), {"1a2b3c4"})
+        with zipfile.ZipFile(str(apk), "w") as archive:
+            archive.writestr("classes.dex", b"dex\n035\x00sin R8")
+        self.assertEqual(perf.apk_map_ids(apk), set())
+
+    def test_verifica_por_identificador_y_si_no_coincide_no_se_usa_ni_con_mapping_explicito(self):
+        mapping = perf.read_mapping(MAPPING)
+        self.assertEqual(perf.verify_mapping(mapping, None, False, {"1a2b3c4"})[0], True)
+        self.assertIn("pg_map_id (1a2b3c4) es el del APK instalado", perf.verify_mapping(mapping, None, False, {"1a2b3c4"})[1])
+        for explicit in (False, True):
+            use, note = perf.verify_mapping(mapping, None, explicit, {"9z9z9z9"})
+            self.assertFalse(use)
+            self.assertIn("no es el del APK instalado", note)
+
+    def test_sin_identificador_verifica_por_fechas_de_forma_conservadora(self):
+        path = self.mapping_at("app/build/outputs/mapping/profiling/mapping.txt")
+        mapping = dict(perf.read_mapping(path), id=None)
+        stamp = lambda delta: datetime.datetime.fromtimestamp(mapping["mtime"] + delta).strftime("%Y-%m-%d %H:%M:%S")
+        use, note = perf.verify_mapping(mapping, stamp(600), False)  # la app se instaló después de generar el mapping
+        self.assertTrue(use)
+        self.assertIn("verificado solo por fecha", note)
+        use, note = perf.verify_mapping(mapping, stamp(-3600), False)  # el mapping es posterior a la instalación
+        self.assertFalse(use)
+        self.assertIn("se generó después de instalar la app", note)
+        use, note = perf.verify_mapping(mapping, None, False)  # sin fecha de instalación no se puede verificar
+        self.assertFalse(use)
+        self.assertIn("no se pudo verificar", note)
+        self.assertIn("--mapping", note)
+        use, note = perf.verify_mapping(mapping, None, True)  # pero un --mapping explícito se usa, y lo dice
+        self.assertTrue(use)
+        self.assertIn("sin verificar contra el APK instalado", note)
+        # el APK de salida de esa variante, más nuevo que la instalación: es otro build
+        apk = self.dir / "app/build/outputs/apk/profiling/app-profiling.apk"
+        write(apk, "x")
+        os.utime(str(apk), (mapping["mtime"] + 7200, mapping["mtime"] + 7200))
+        use, note = perf.verify_mapping(mapping, stamp(600), False)
+        self.assertFalse(use)
+        self.assertIn("APK de salida", note)
+        os.utime(str(apk), (mapping["mtime"] + 60, mapping["mtime"] + 60))
+        self.assertTrue(perf.verify_mapping(mapping, stamp(600), False)[0])
+
+    def test_el_plan_valida_el_campo_mapping_y_sin_el_carga_igual(self):
+        write(self.dir / "plan.json", json.dumps({"paquete": "com.example.app", "flujos": {"home": {}}, "mapping": 7}))
+        with self.assertRaises(perf.PerfError):
+            perf.load_plan(self.dir / "plan.json")
+        write(self.dir / "plan.json", json.dumps({"paquete": "com.example.app", "flujos": {"home": {}},
+                                                  "mapping": "app/build/outputs/mapping/profiling/mapping.txt"}))
+        self.assertIn("mapping", perf.load_plan(self.dir / "plan.json"))
+
+
+class DeobfuscateTest(DeviceBase):
+    """La desofuscación con `retrace` (simulado) donde hay nombres de métodos: cpu_por_libreria y la pila de un crash."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.pop("ANDROID_HOME", None)
+        self.env.pop("ANDROID_SDK_ROOT", None)
+        self.env.pop("RETRACE", None)
+        self.mapping = self.dir / "app" / "build" / "outputs" / "mapping" / "profiling" / "mapping.txt"
+        write(self.mapping, MAPPING.read_text(encoding="utf-8"))
+        old = time.time() - 30 * 24 * 3600  # generado mucho antes de la instalación simulada (2026-11-05 10:00:00)
+        os.utime(str(self.mapping), (old, old))
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["instalar"] = "./gradlew :app:installProfiling"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        write(self.trace, "x")
+        perf.save_trace_config(self.trace.parent, self.trace.name, skill_config("cpu"), "2099-01-01 10:00:00")
+        self.tp_outputs(CPU_TABLE)
+
+    def install_retrace(self):
+        path = self.dir / "bin" / "retrace"
+        path.write_text(textwrap.dedent(FAKE_RETRACE).replace("{python}", sys.executable).replace("{{", "{")
+                        .replace("}}", "}"), encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+    def consulta(self, *extra):
+        if (self.dir / "tp.count").exists():
+            (self.dir / "tp.count").unlink()
+        return self.ok("consulta", self.trace, "cpu_por_libreria", "--ancho", "120", *extra)
+
+    def test_cpu_por_libreria_sale_con_los_nombres_reales_y_avisa_lo_que_no_pudo(self):
+        self.install_retrace()
+        out = self.consulta()
+        self.assertIn("✔ Desofuscado con app/build/outputs/mapping/profiling/mapping.txt (verificado solo por fecha", out)
+        self.assertIn("| main | base.odex | com.example.app.data.Repo.load o com.example.app.data.Repo.save | 40 |", out)
+        self.assertIn("| main | base.odex | com.example.app.data.Repo.refresh | 12 |", out)
+        self.assertIn("| main | boot-framework.oat | android.os.Handler.dispatchMessage | 9 |", out)  # lo que no es de la app, igual
+        self.assertIn("⚠ 1 nombre sigue ofuscado después de aplicar el mapping (x.y.z)", out)  # render.cold es nativo: no cuenta
+        self.assertIn("| main | libexample.so | render.cold | 2 |", out)
+        self.assertIn("mide con una variante sin cifrado de clases", out)
+        self.assertIn("· Código nativo sin símbolos: se muestra la librería, no la función", out)
+        self.assertNotIn("| a.b.a |", out)
+
+    def test_un_mapping_posterior_a_la_instalacion_no_se_usa_salvo_que_se_pase_con_mapping(self):
+        self.install_retrace()
+        perf.save_trace_config(self.trace.parent, self.trace.name, skill_config("cpu"), "2020-01-01 10:00:00")
+        out = self.consulta()
+        self.assertIn("⚠ Sin desofuscar: el mapping se generó después de instalar la app", out)
+        self.assertIn("| main | base.odex | a.b.a | 40 |", out)  # los nombres quedan como estaban
+        out = self.consulta("--mapping", self.mapping)
+        self.assertIn("sin verificar contra el APK instalado: se usa porque lo pasaste con --mapping", out)
+        self.assertIn("com.example.app.data.Repo.refresh", out)
+
+    def test_sin_retrace_dice_como_instalarlo_y_sigue_sin_desofuscar(self):
+        out = self.consulta()
+        self.assertIn("· Sin desofuscar: falta `retrace`", out)
+        self.assertIn("cmdline-tools;latest", out)
+        self.assertIn("| main | base.odex | a.b.a | 40 |", out)
+
+    def test_sin_mapping_o_con_uno_de_otro_ofuscador_avisa_y_nunca_falla(self):
+        self.install_retrace()
+        self.mapping.unlink()
+        out = self.consulta()
+        self.assertIn("· Sin desofuscar: no encontré el mapping de la variante profiling", out)
+        self.assertIn("| main | base.odex | a.b.a | 40 |", out)
+        write(self.mapping, "<?xml version='1.0'?>\n<mapa cifrado='si'/>\n")
+        out = self.consulta()
+        self.assertIn("no tiene el formato de un mapping de ProGuard/R8", out)
+        self.assertIn("mide con una variante sin cifrado de clases", out)
+
+    def test_sin_nombres_ofuscados_no_busca_el_mapping_ni_imprime_nada(self):
+        self.tp_outputs('"hilo","libreria","funcion","muestras"\n"main","base.odex","com.example.app.data.Repo.load",40\n')
+        out = self.consulta()
+        self.assertNotIn("esofusc", out)
+        self.assertIn("com.example.app.data.Repo.load", out)
+
+    def test_la_pila_de_un_crash_en_capturar_sale_desofuscada(self):
+        self.install_retrace()
+        self.tp_outputs(GOOD)
+        self.env["FAKE_DEAD"] = "1"
+        self.env["FAKE_CRASH_FRAMES"] = "\tat a.b.b(SourceFile:7)|\tat com.example.app.MainActivity.onCreate(SourceFile:20)"
+        self.env["FAKE_UPDATED"] = "2099-01-01 10:00:00"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("IllegalStateException: boom", result.stdout)
+        self.assertIn("at com.example.app.data.Repo.refresh(Repo.kt)", result.stdout)
+        self.assertNotIn("at a.b.b(", result.stdout)
+        self.assertIn("✔ Desofuscado con", result.stdout)
+
+    def test_salidas_desofusca_la_pila_del_crash(self):
+        self.install_retrace()
+        write(self.dir / "exit-info.txt", EXIT_ANDROID_11)
+        self.env.update({"FAKE_EXIT_INFO": str(self.dir / "exit-info.txt"), "FAKE_UPDATED": "2099-01-01 10:00:00",
+                         "FAKE_CRASH_FRAMES": "\tat a.b.b(SourceFile:7)"})
+        out = self.ok("salidas", "--carpeta", self.plan.parent)
+        self.assertIn("Crash de las 10:00:01 (pid 1234), inicio de la pila (logcat -b crash):", out)
+        self.assertIn("at com.example.app.data.Repo.refresh(Repo.kt)", out)
+        self.assertNotIn("at a.b.b(", out)
+        result = self.perf("salidas", "--carpeta", self.plan.parent, "--mapping", self.dir / "no-existe.txt")
+        self.assertEqual(result.returncode, 2)  # un --mapping que no existe se dice al empezar
+        self.assertIn("no existe el mapping", result.stderr)
+
+    def test_diagnostico_desofusca_la_tabla_y_deja_la_nota_en_el_archivo(self):
+        self.install_retrace()
+        folder = self.plan.parent
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "jank_app_pct", [10]))
+        write(folder / "antes" / "home_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "antes", "home_1.perfetto-trace.gz", skill_config("cpu"))
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 1,
+                                                         "instalada": "2099-01-01 10:00:00"}}))
+        self.env["FAKE_TP_POR_CONSULTA"] = json.dumps({"cpu_por_libreria": CPU_TABLE})
+        self.env["FAKE_TP_OTRA"] = '"a"\n'
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("| main | base.odex | com.example.app.data.Repo.refresh | 12 |", md)
+        self.assertIn("_Desofuscado con", md)
+        self.assertIn("nombre sigue ofuscado después de aplicar el mapping (x.y.z)", md)
+
+
+@unittest.skipUnless(REAL_RETRACE, "necesita retrace (cmdline-tools del SDK): valida la desofuscación con un mapping inventado")
+class RealRetraceTest(PerfBase):
+    def deobfuscator(self):
+        return perf.Deobfuscator({"paquete": "com.example.app"}, self.dir, str(MAPPING))
+
+    def test_nombres_sueltos_y_una_pila_con_lineas(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            tool = self.deobfuscator()
+            names = tool.names(["a.b.a", "a.b.b", "android.os.Handler.dispatchMessage", "?"])
+            stack = tool.stack(["E AndroidRuntime: java.lang.IllegalStateException: boom",
+                                "E AndroidRuntime: \tat a.b.b(SourceFile:7)", "E AndroidRuntime: \tat a.b.a(SourceFile:3)"])
+        # sin depender de la versión de retrace: ni el orden de los candidatos ni el formato exacto de la línea
+        self.assertEqual(set(names), {"a.b.a", "a.b.b"})
+        self.assertEqual(set(names["a.b.a"].split(" o ")), {"com.example.app.data.Repo.load", "com.example.app.data.Repo.save"})
+        self.assertIn("com.example.app.data.Repo.refresh", names["a.b.b"])
+        text = "\n".join(stack)
+        self.assertIn("com.example.app.data.Repo.refresh(", text)
+        self.assertIn("com.example.app.data.Repo.load(", text)
+        self.assertNotIn("at a.b.", text)
+
+
+EXIT_HEAD = ("ACTIVITY MANAGER PROCESS EXIT INFO (dumpsys activity exit-info)\n"
+             "Last Timestamp of Persistence Into Persistent Storage: 2026-11-05 10:00:05.000\n"
+             "  package: com.example.app\n    Historical Process Exit for uid=10234\n")
+
+
+def exit_entry(index, stamp, pid, reason, extra="", description="crash", trace="null", memory="pss=118MB rss=201MB"):
+    return ("        ApplicationExitInfo #%d:\n          timestamp=%s pid=%d realUid=10234 packageUid=10234 definingUid=10234 "
+            "user=0 process=com.example.app reason=%s %sstatus=0 importance=100 %s description=%s state=empty trace=%s\n"
+            % (index, stamp, pid, reason, extra, memory, description, trace))
+
+
+# Muestras inventadas con la forma que imprime la plataforma en cada versión.
+EXIT_ANDROID_11 = EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.120", 1234, "4 (APP CRASH(EXCEPTION))") + \
+    exit_entry(1, "2026-11-05 09:50:00.000", 4000, "10 (USER REQUESTED)", memory="pss=0.00 rss=0.00",
+               description="stop com.example.app due to from pid 999")
+EXIT_ANDROID_13 = EXIT_HEAD + \
+    exit_entry(0, "2026-11-05 10:00:01.500", 1234, "3 (LOW_MEMORY)", "subreason=3 (MEMORY PRESSURE) ", description="null") + \
+    exit_entry(1, "2026-11-05 09:40:00.000", 3900, "6 (ANR)", "subreason=0 (UNKNOWN) ",
+               description="user request after error: Input dispatching timed out", trace="/data/system/procexitstore/anr_1.gz") + \
+    exit_entry(2, "2026-11-05 09:30:00.000", 3800, "5 (APP CRASH(NATIVE))", "subreason=0 (UNKNOWN) ", description="null")
+EXIT_ANDROID_16 = EXIT_HEAD + \
+    exit_entry(0, "2026-11-05 10:00:01.900", 1234, "9 (EXCESSIVE RESOURCE USAGE)", "subreason=7 (EXCESSIVE CPU USAGE) ",
+               description="excessive cpu 12000 during 300000 dur=600000 limit=2") + \
+    exit_entry(1, "2026-11-05 09:20:00.000", 3700, "16 (PACKAGE UPDATED)", "subreason=0 (UNKNOWN) ", description="null") + \
+    exit_entry(2, "2026-11-05 09:10:00.000", 3600, "14 (FREEZER)", "subreason=0 (UNKNOWN) ", description="null") + \
+    exit_entry(3, "2026-11-05 09:00:00.000", 3500, "2 (SIGNALED)", "subreason=0 (UNKNOWN) ", description="null")
+
+
+class ExitInfoTest(DeviceBase):
+    """Por qué se cerró la app: el parser de exit-info, `perf.py salidas` y la detección por corrida en `capturar`."""
+
+    def exit_info(self, text):
+        # el proceso principal se llama como el paquete del plan de estos tests
+        write(self.dir / "exit-info.txt", text.replace("process=com.example.app ", "process=%s " % PKG))
+        self.env["FAKE_EXIT_INFO"] = str(self.dir / "exit-info.txt")
+
+    def test_lee_las_salidas_de_android_11_sin_submotivo(self):
+        first, second = perf.parse_exit_info(EXIT_ANDROID_11)
+        self.assertEqual(first, {"hora": "2026-11-05 10:00:01.120", "proceso": "com.example.app", "pid": 1234, "motivo": 4, "motivo_texto": "crash",
+                                 "submotivo": "", "estado": "0", "importancia": "100", "pss": "118MB", "rss": "201MB",
+                                 "descripcion": "crash", "traza": ""})
+        self.assertEqual((second["motivo"], second["descripcion"], second["pid"]),
+                         (10, "stop com.example.app due to from pid 999", 4000))
+        self.assertIn("detenida a pedido del usuario", second["motivo_texto"])
+
+    def test_lee_submotivo_traza_y_los_motivos_de_versiones_mas_nuevas(self):
+        memory, anr, native = perf.parse_exit_info(EXIT_ANDROID_13)
+        self.assertEqual((memory["motivo_texto"], memory["submotivo"], memory["descripcion"]),
+                         ("poca memoria (la cerró el sistema)", "MEMORY PRESSURE", ""))
+        self.assertEqual((anr["motivo_texto"], anr["submotivo"], anr["traza"]),
+                         ("ANR", "", "/data/system/procexitstore/anr_1.gz"))
+        self.assertIn("Input dispatching timed out", anr["descripcion"])
+        self.assertEqual(native["motivo_texto"], "crash nativo")
+        texts = [entry["motivo_texto"] for entry in perf.parse_exit_info(EXIT_ANDROID_16)]
+        self.assertEqual(texts, ["uso excesivo de recursos", "paquete actualizado", "detenida por el freezer",
+                                 "señal del sistema operativo"])
+        self.assertEqual(perf.exit_text(perf.parse_exit_info(EXIT_ANDROID_16)[0]),
+                         "uso excesivo de recursos · excessive cpu usage (excessive cpu 12000 during 300000 dur=600000 limit=2)")
+
+    def test_un_campo_que_falta_queda_vacio_y_uno_que_no_conoce_no_rompe(self):
+        self.assertEqual(perf.parse_exit_info(""), [])
+        self.assertEqual(perf.parse_exit_info(EXIT_HEAD), [])
+        entry, = perf.parse_exit_info("ApplicationExitInfo #0:\n  timestamp=2026-11-05 10:00:01.120 campoNuevo=7 "
+                                      "reason=99 (ALGO NUEVO) otroNuevo=x\n")
+        self.assertEqual((entry["hora"], entry["pid"], entry["motivo"], entry["pss"], entry["descripcion"]),
+                         ("2026-11-05 10:00:01.120", None, 99, "", ""))
+        self.assertIn("motivo 99", entry["motivo_texto"])
+        entry, = perf.parse_exit_info("ApplicationExitInfo #0:\n  pid=12\n")
+        self.assertEqual((entry["hora"], entry["motivo"], entry["motivo_texto"]), ("", None, "sin dato"))
+
+    def test_las_salidas_de_una_corrida_filtran_por_ventana_por_pid_y_por_lo_que_ya_estaba(self):
+        entries = perf.parse_exit_info(EXIT_ANDROID_11)
+        before = ("2026-11-05 10:00:00", 1234, entries[1:])
+        after = ("2026-11-05 10:00:02", None, entries)
+        self.assertEqual([e["pid"] for e in perf.run_exits(before, after, 1234)], [1234])
+        self.assertEqual(perf.run_exits(before, after, 5555), [])  # no es el proceso medido
+        self.assertEqual(perf.run_exits(before, after, None, killed=(1234,)), [])  # el que detiene la propia skill
+        self.assertEqual(perf.run_exits(("2026-11-05 10:00:02", 1234, entries[1:]), ("2026-11-05 10:00:03", None, entries), 1234),
+                         [])  # pasó antes de que empezara la corrida
+        self.assertEqual(perf.run_exits(("2026-11-05 10:00:00", 1234, entries), after, 1234), [])  # ya estaba registrada
+        self.assertEqual(perf.run_exits(("", None, []), after, 1234), [])  # sin hora del dispositivo no se afirma nada
+        # un proceso secundario de la app (un servicio en otro proceso) no es el que se mide
+        other = perf.parse_exit_info(EXIT_ANDROID_11.replace("process=com.example.app reason=4", "process=com.example.app:push reason=4"))
+        self.assertEqual(perf.run_exits(before, ("2026-11-05 10:00:02", None, other), None, package="com.example.app"), [])
+        self.assertEqual(len(perf.run_exits(before, after, None, package="com.example.app")), 1)
+
+    def test_salidas_imprime_la_tabla_en_espanol_y_acota_con_desde_y_limite(self):
+        self.exit_info(EXIT_ANDROID_13)
+        out = self.ok("salidas", "--paquete", "com.example.app")
+        self.assertIn("| Hora | pid | Motivo | Descripción | PSS | RSS |", out)
+        self.assertIn("| 2026-11-05 10:00:01.500 | 1234 | poca memoria (la cerró el sistema) · memory pressure | — | 118MB | 201MB |",
+                      out)
+        self.assertIn("| ANR |", out)
+        self.assertIn("| crash nativo |", out)
+        self.assertIn("Con traza del sistema (ANR o crash nativo): 09:40:00 ANR", out)
+        out = self.ok("salidas", "--paquete", "com.example.app", "--limite", "1")
+        self.assertNotIn("| ANR |", out)
+        self.assertIn("… 2 salidas más", out)
+        out = self.ok("salidas", "--paquete", "com.example.app", "--desde", "2026-11-05 09:35")
+        self.assertIn("| ANR |", out)
+        self.assertNotIn("| crash nativo |", out)
+        out = self.ok("salidas", "--paquete", "com.example.app", "--desde", "2026-11-06")
+        self.assertIn("Sin salidas registradas de com.example.app desde 2026-11-06", out)
+        self.assertIn("no cubre lo que pasó antes", out)
+
+    def test_salidas_muestra_la_pila_del_crash_y_toma_el_paquete_del_plan(self):
+        self.exit_info(EXIT_ANDROID_11)
+        out = self.ok("salidas", "--carpeta", self.plan.parent)  # el paquete del plan es com.ejemplo.app
+        self.assertIn("| 2026-11-05 10:00:01.120 | 1234 | crash | crash | 118MB | 201MB |", out)
+        self.assertIn("Crash de las 10:00:01 (pid 1234), inicio de la pila (logcat -b crash):", out)
+        self.assertIn("IllegalStateException: boom", out)
+        result = self.perf("salidas")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--paquete", result.stderr)
+
+    def test_en_android_10_dice_que_no_esta_disponible(self):
+        self.env["FAKE_SDK"] = "29"
+        out = self.ok("salidas", "--paquete", "com.example.app")
+        self.assertIn("no disponible (Android 11 o superior; el dispositivo tiene API 29)", out)
+        self.assertIn("No quiere decir que la app no se haya cerrado", out)
+
+    def capture(self, *extra):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar", *extra)
+
+    def test_una_salida_del_proceso_medido_dentro_de_la_corrida_la_invalida_con_el_motivo(self):
+        self.tp_outputs(GOOD)
+        self.exit_info(EXIT_ANDROID_13)  # poca memoria a las 10:00:01, pid 1234: dentro de la primera corrida
+        result = self.capture("--fase", "antes", "--corridas", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✖ corrida 1 inválida: la app salió: poca memoria (la cerró el sistema) · memory pressure", result.stdout)
+        self.assertIn("corrida 2/2", result.stdout)  # se repite con las reglas de siempre
+        folder = self.plan.parent
+        self.assertTrue(any("_invalida_la-app-sali" in f.name for f in (folder / "antes").iterdir()))
+        runs = {r["corrida"] for r in perf.read_rows(folder / "metricas.csv")}
+        self.assertEqual(len(runs), 2)
+
+    def test_el_force_stop_y_las_salidas_de_otro_proceso_o_de_antes_no_invalidan(self):
+        self.tp_outputs(GOOD)
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 1234, "10 (USER REQUESTED)",
+                                              description="stop com.example.app due to from pid 999"))
+        result = self.capture("--fase", "antes", "--corridas", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("inválida", result.stdout)
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 777, "4 (APP CRASH(EXCEPTION))")
+                       + exit_entry(1, "2026-11-05 09:00:00.000", 1234, "4 (APP CRASH(EXCEPTION))"))
+        result = self.capture("--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("inválida", result.stdout)
+
+    def test_en_un_arranque_en_frio_ignora_el_proceso_que_detiene_la_skill_y_ve_el_del_proceso_nuevo(self):
+        write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["ttid_ms"], "flujos": {"arranque": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 0}}}}))
+        self.tp_outputs(GOOD)
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 1234, "10 (USER REQUESTED)",
+                                              description="stop com.example.app due to from pid 999"))
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Salida de la app", result.stdout)  # era el proceso anterior, que detuvo perf.py
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 4321, "4 (APP CRASH(EXCEPTION))"))
+        (self.dir / "adb.log.salidas").unlink()
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("✖ Salida de la app durante la corrida (10:00:01, pid 4321): crash (crash)", result.stdout)
+        self.assertIn("la corrida de prueba fue inválida: la app salió: crash", result.stderr)
+
+    def test_si_la_app_se_cayo_el_motivo_es_el_de_exit_info_y_se_mantiene_el_aviso_de_crash(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_DEAD"] = "1"
+        self.exit_info(EXIT_ANDROID_11)
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("✖ La app se cayó durante la corrida. Inicio del crash (logcat -b crash):", result.stdout)
+        self.assertIn("IllegalStateException: boom", result.stdout)
+        self.assertIn("la app salió: crash", result.stderr)
+
+    def test_en_android_10_avisa_una_vez_que_no_hay_registro_de_salidas(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_SDK"] = "29"
+        self.exit_info(EXIT_ANDROID_11)
+        result = self.capture("--fase", "antes", "--corridas", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("sin registro de salidas de la app por corrida"), 1)
+        self.assertNotIn("inválida", result.stdout)
