@@ -5742,6 +5742,8 @@ class DeobfuscateTest(DeviceBase):
         self.env.pop("ANDROID_HOME", None)
         self.env.pop("ANDROID_SDK_ROOT", None)
         self.env.pop("RETRACE", None)
+        # solo las herramientas simuladas y las del sistema: un retrace real en el PATH de la máquina no cuenta
+        self.env["PATH"] = os.pathsep.join([str(self.dir / "bin"), "/usr/bin", "/bin"])
         self.mapping = self.dir / "app" / "build" / "outputs" / "mapping" / "profiling" / "mapping.txt"
         write(self.mapping, MAPPING.read_text(encoding="utf-8"))
         old = time.time() - 30 * 24 * 3600  # generado mucho antes de la instalación simulada (2026-11-05 10:00:00)
@@ -5855,7 +5857,8 @@ class DeobfuscateTest(DeviceBase):
         self.assertIn("nombre sigue ofuscado después de aplicar el mapping (x.y.z)", md)
 
 
-@unittest.skipUnless(REAL_RETRACE, "necesita retrace (cmdline-tools del SDK): valida la desofuscación con un mapping inventado")
+@unittest.skipUnless(REAL_RETRACE and not os.environ.get("CI"),
+                     "validación local con retrace (cmdline-tools del SDK) y un mapping inventado; en el CI no corre")
 class RealRetraceTest(PerfBase):
     def deobfuscator(self):
         return perf.Deobfuscator({"paquete": "com.example.app"}, self.dir, str(MAPPING))
