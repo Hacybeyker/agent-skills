@@ -1,0 +1,29 @@
+# tracer: nop
+#
+# entries-in-buffer/entries-written: 30/30   #P:2
+#
+#                                      _-----=> irqs-off
+#                                     / _----=> need-resched
+#                                    | / _---=> hardirq/softirq
+#                                    || / _--=> preempt-depth
+#                                    ||| /     delay
+#           TASK-PID    TGID   CPU#  ||||    TIMESTAMP  FUNCTION
+#              | |        |      |   ||||       |         |
+          <idle>-0     (-----) [000] d..3  100.000000: sched_switch: prev_comm=swapper/0 prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=m.example.app next_pid=1000 next_prio=120
+   m.example.app-1000  ( 1000) [000] ...1  100.001000: tracing_mark_write: B|1000|Choreographer#doFrame 1
+   m.example.app-1000  ( 1000) [000] ...1  100.002000: tracing_mark_write: B|1000|cargar
+   m.example.app-1000  ( 1000) [000] ...1  100.002500: binder_transaction: transaction=77 dest_node=5 dest_proc=2000 dest_thread=0 reply=0 flags=0x10 code=0x1
+   m.example.app-1000  ( 1000) [000] d..3  100.003000: sched_switch: prev_comm=m.example.app prev_pid=1000 prev_prio=120 prev_state=D ==> next_comm=swapper/0 next_pid=0 next_prio=120
+          <idle>-0     (-----) [001] d..3  100.003100: sched_switch: prev_comm=swapper/1 prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=Binder:2000_1 next_pid=2001 next_prio=120
+   Binder:2000_1-2001  ( 2000) [001] ...1  100.003200: binder_transaction_received: transaction=77
+   Binder:2000_1-2001  ( 2000) [001] d..4  100.008000: sched_blocked_reason: pid=1000 iowait=1 caller=filemap_fault+0x1c/0x40
+   Binder:2000_1-2001  ( 2000) [001] ...1  100.008400: binder_transaction: transaction=78 dest_node=0 dest_proc=1000 dest_thread=1000 reply=1 flags=0x0 code=0x0
+   Binder:2000_1-2001  ( 2000) [001] d..4  100.008500: sched_waking: comm=m.example.app pid=1000 prio=120 target_cpu=000
+          <idle>-0     (-----) [000] d..3  100.009000: sched_switch: prev_comm=swapper/0 prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=m.example.app next_pid=1000 next_prio=120
+   m.example.app-1000  ( 1000) [000] ...1  100.009100: binder_transaction_received: transaction=78
+   m.example.app-1000  ( 1000) [000] ...1  100.010000: tracing_mark_write: E|1000
+   m.example.app-1000  ( 1000) [000] d..3  100.011000: sched_switch: prev_comm=m.example.app prev_pid=1000 prev_prio=120 prev_state=S ==> next_comm=swapper/0 next_pid=0 next_prio=120
+   Binder:2000_1-2001  ( 2000) [001] d..4  100.016000: sched_waking: comm=m.example.app pid=1000 prio=120 target_cpu=000
+          <idle>-0     (-----) [000] d..3  100.016500: sched_switch: prev_comm=swapper/0 prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=m.example.app next_pid=1000 next_prio=120
+   m.example.app-1000  ( 1000) [000] ...1  100.030000: tracing_mark_write: E|1000
+   m.example.app-1000  ( 1000) [000] d..3  100.031000: sched_switch: prev_comm=m.example.app prev_pid=1000 prev_prio=120 prev_state=S ==> next_comm=swapper/0 next_pid=0 next_prio=120

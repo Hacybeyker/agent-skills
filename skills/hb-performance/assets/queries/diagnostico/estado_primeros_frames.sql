@@ -1,5 +1,6 @@
 -- Los dos primeros doFrame: estado del hilo principal y qué otros hilos de la app corrían a la vez (más de 3 ms)
 -- grupos: arranque
+-- requiere: ftrace:sched/sched_switch atrace:view
 WITH app AS (SELECT upid, pid, MAX(IFNULL(start_ts, 0), (SELECT start_ts FROM trace_bounds)) AS t0
              FROM process WHERE name = '{{PAQUETE}}' ORDER BY IFNULL(start_ts, 0) DESC LIMIT 1),
 hilo AS (SELECT t.utid FROM thread t JOIN app ON t.upid = app.upid AND t.tid = app.pid),

@@ -14,6 +14,10 @@ data_sources {
       ftrace_events: "sched/sched_process_free"
       ftrace_events: "task/task_newtask"
       ftrace_events: "task/task_rename"
+      # binder_transaction y binder_transaction_received: con ellos trace_processor arma los slices "binder transaction"
+      # y "binder reply". Sin ellos, binder_hilo_principal sale vacía y se podría leer como "no hay IPC bloqueando".
+      ftrace_events: "binder/binder_transaction"
+      ftrace_events: "binder/binder_transaction_received"
       atrace_categories: "gfx"
       atrace_categories: "view"
       atrace_categories: "am"

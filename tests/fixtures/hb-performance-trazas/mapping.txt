@@ -1,0 +1,16 @@
+# compiler: R8
+# compiler_version: 8.5.35
+# min_api: 24
+# pg_map_id: 1a2b3c4
+# pg_map_hash: SHA-256 0000000000000000000000000000000000000000000000000000000000000000
+com.example.app.data.Repo -> a.b:
+# {"id":"sourceFile","fileName":"Repo.kt"}
+    int count -> a
+    1:5:java.util.List load(java.lang.String):20:24 -> a
+    6:6:void save(int):30:30 -> a
+    7:7:void com.example.app.util.Json.parse(java.lang.String):12:12 -> b
+    7:7:void refresh():41 -> b
+com.example.app.ui.MainActivity -> com.example.app.ui.MainActivity:
+    1:3:void onCreate(android.os.Bundle):15:17 -> onCreate
+com.example.app.util.Json -> a.c:
+    void <init>() -> <init>

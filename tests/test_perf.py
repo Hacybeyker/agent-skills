@@ -2,17 +2,21 @@
 captura con un adb y un trace_processor falsos, reporte e instrumentación."""
 import contextlib
 import csv
+import datetime
 import importlib.util
 import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
+import zipfile
 from pathlib import Path
 
 from helpers import ROOT, write
@@ -40,6 +44,11 @@ def entry(method, url, started, time):
 
 
 MS = 1_000_000
+
+
+def without_new(record):
+    """Un registro de fases.json sin los campos opcionales que agrega 0.9.0 (la versión de la skill y la configuración)."""
+    return {key: value for key, value in record.items() if key not in ("skill", "configs")}
 
 
 class PerfBase(unittest.TestCase):
@@ -405,6 +414,19 @@ elif cmd.startswith("dumpsys thermalservice"):
     print("Thermal Status: " + os.environ.get("FAKE_THERMAL", "0"))
 elif cmd.startswith("dumpsys battery"):
     print("  level: 90")
+elif cmd.startswith("date '+hora="):
+    # la foto de salidas de capturar: hora del dispositivo, pid y exit-info. El reloj avanza un segundo por llamada y
+    # el volcado solo sale en la foto de después de cada corrida (llamadas impares)
+    counter = os.environ["FAKE_LOG"] + ".salidas"
+    n = int(open(counter).read()) if os.path.exists(counter) else 0
+    open(counter, "w").write(str(n + 1))
+    print("hora=2026-11-05 10:00:%02d" % min(n, 59))
+    print("pid=" + ("" if os.environ.get("FAKE_DEAD") else "1234"))
+    if os.environ.get("FAKE_EXIT_INFO") and n % 2 == 1:
+        print(open(os.environ["FAKE_EXIT_INFO"]).read())
+elif cmd.startswith("dumpsys activity exit-info"):
+    if os.environ.get("FAKE_EXIT_INFO"):
+        print(open(os.environ["FAKE_EXIT_INFO"]).read())
 elif cmd.startswith("dumpsys activity activities"):
     print("  topResumedActivity=ActivityRecord{{1 u0 %s t5}}" % os.environ.get("FAKE_RESUMED", "com.ejemplo.app/.MainActivity"))
 elif cmd.startswith("cmd package compile"):
@@ -425,6 +447,8 @@ elif cmd.startswith("logcat -b crash"):
     print("11-05 10:00:01.000  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
           "11-05 10:00:01.000  1234  1234 E AndroidRuntime: Process: com.ejemplo.app, PID: 1234\n"
           "11-05 10:00:01.000  1234  1234 E AndroidRuntime: java.lang.IllegalStateException: boom")
+    for frame in filter(None, os.environ.get("FAKE_CRASH_FRAMES", "").split("|")):
+        print("11-05 10:00:01.000  1234  1234 E AndroidRuntime: " + frame)
 elif cmd.startswith("perfetto"):
     config = sys.stdin.read()
     if os.environ.get("FAKE_PERFETTO_CONFIG"):
@@ -452,7 +476,7 @@ elif cmd.startswith('echo "q='):
 '''
 
 FAKE_TP = r'''#!{python}
-import os, re, sys
+import json, os, re, sys
 args = sys.argv[1:]
 if args[:2] == ["query", "--help"]:
     print("Usage: trace_processor query -f FILE TRACE" if os.environ.get("FAKE_TP_VIEJO") else
@@ -469,13 +493,18 @@ open(counter, "w").write(str(n + 1))
 outputs = open(os.environ["FAKE_TP_OUT"]).read().split("===\n")
 out = outputs[min(n, len(outputs) - 1)]
 names = re.findall(r"SELECT '([^']+)' AS hbperf_marker;", sql)
+if os.environ.get("FAKE_TP_FALLA") in names:
+    sys.stderr.write("no such column: blocked_function\n")
+    sys.exit(1)
 if not names:
     sys.stdout.write(out)
 else:
     chunks = []
     for name in names:
         chunks.append('"hbperf_marker"\n"%s"\n' % name)
-        chunks.append(out if name == "metricas" else os.environ.get("FAKE_TP_OTRA", '"nombre","valor"\n"x",1\n'))
+        own = json.loads(os.environ.get("FAKE_TP_POR_CONSULTA", "{{}}"))
+        chunks.append(out if name == "metricas" else own[name] if name in own
+                      else os.environ.get("FAKE_TP_OTRA", '"nombre","valor"\n"x",1\n'))
     sys.stdout.write("\n".join(c.rstrip("\n") + "\n" for c in chunks))
 '''
 
@@ -1538,10 +1567,12 @@ class NextStepTest(PerfBase):
         title, steps = self.step()
         self.assertEqual(title, "triage cerrado")
         self.assertEqual(steps[0]["tipo"], "archivo")
+        self.assertEqual(len(steps), 1)  # sin mejoras propuestas no hay nada que pasar a riguroso
         self.plan["profundidad"] = "riguroso"
         self.assertEqual(self.step()[0], "sesión 4 · cierre sin mejoras")  # sin mejoras, la sesión 2 no se repite
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}]
-        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")  # con mejoras ya no cierra: sigue con el plan
+        # con mejoras ya no cierra; y antes de decidir, riguroso pide la línea base completa y el control
+        self.assertEqual(self.step()[0], "completar la línea base de riguroso (sin chat)")
         self.plan["mejoras"] = []
         self.plan["profundidad"] = "ligero"
         self.save()
@@ -2655,13 +2686,13 @@ class RedoFlowTest(DeviceBase):
         self.assertIn("filas de 'antes' fuera del CSV", out)
         phase = self.phase()
         self.assertEqual(phase["corridas"], 4)  # 3 de detalle + la nueva de home
-        self.assertEqual(phase["flujos"]["detalle"], {"corridas": 3, "hz_corridas": [90, 90, 90], "avisos": phase["avisos"],
+        self.assertEqual(without_new(phase["flujos"]["detalle"]), {"corridas": 3, "hz_corridas": [90, 90, 90], "avisos": phase["avisos"],
                                                        "entorno": phase["entorno"]})
         self.assertEqual(phase["flujos"]["home"]["corridas"], 1)
         self.assertEqual(phase["entorno"]["frames"], "no")  # el entorno de 'detalle' no se pierde
         self.assertEqual(len(phase["hz_corridas"]), 4)
         self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2", "3"], ["1"]))
-        kept = sorted(p.name for p in (self.folder / "antes").iterdir())
+        kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE)
         self.assertEqual(kept, ["detalle_1.perfetto-trace.gz", "detalle_2.perfetto-trace.gz", "detalle_3.perfetto-trace.gz",
                                 "home_1.perfetto-trace.gz"])
         discarded = next(p for p in self.folder.iterdir() if p.name.startswith("antes-descartada-"))
@@ -2704,7 +2735,7 @@ class RedoFlowTest(DeviceBase):
     def test_rehacer_el_unico_flujo_medido_borra_el_registro_de_la_fase_como_antes(self):
         self.tp_outputs(GOOD)
         self.ok(*(self.common + ["--flujo", "home", "--corridas", "2"]))
-        self.assertEqual(self.phase()["flujos"], {"home": {"corridas": 2}})
+        self.assertEqual(without_new(self.phase()["flujos"]["home"]), {"corridas": 2})
         perf.forget_flow(self.folder, self.folder / "metricas.csv", "control", "home")  # una fase sin medir: no hace nada
         self.assertEqual(self.phase()["corridas"], 2)
         perf.forget_flow(self.folder, self.folder / "metricas.csv", "antes", "home")  # no hay filas de otros flujos
@@ -3025,8 +3056,8 @@ class SmokeNextStepTest(DeviceBase):
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí hay que iniciar sesión, aceptar '
-                      'términos e ir al tab Catálogo: usa un flow de Maestro en preparar y adb para el tramo medido. '
-                      'Dispositivo emulator-5554."', out)
+                      'términos e ir al tab Catálogo. Dispositivo emulator-5554."', out)
+        self.assertNotIn("Maestro", out)  # el prompt no fija cómo se recorre: lo pregunta la sesión 1
 
     def test_un_pedido_mal_formado_se_ignora_con_aviso_y_la_ruta_se_puede_cambiar(self):
         write(self.dir / "reports/perf/setup/pedido.json", '{"flujo": ""}')
@@ -4884,3 +4915,1150 @@ class Compat070Test(PerfBase):
         self.assertEqual(extra, ["detalle red_llamadas", "detalle red_ms", "detalle red_ttfb_ms", "detalle red_repetidas_2s",
                                  "detalle red_solapadas"])
         self.assertEqual([m[0] for m in metrics][:len(before)], [m[0] for m in data["metricas"]])
+
+
+class TriageToRigorousTest(PerfBase):
+    """De triage a riguroso: `decidir --profundidad`, y `siguiente` pide la línea base completa y el control antes de
+    ofrecer la decisión."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": "com.example.app", "principales": ["hilo_max_ms"], "profundidad": "triage",
+                     "flujos": {"detalle": {"inicio": "MainActivity", "recorrido": "adb shell input tap 1 1"}},
+                     "mejoras": [{"id": "M1", "titulo": "a"}]}
+        self.save()
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(self.folder / "diagnostico.md", "x")
+        write(self.folder / "reporte-inicial.md", "x")
+
+    def save(self):
+        write(self.folder / "plan.json", json.dumps(self.plan))
+
+    def measured(self, antes, control=None, skill=perf.VERSION):
+        phases, text = {}, HEADER
+        for phase, count in (("antes", antes), ("control", control)):
+            if count:
+                phases[phase] = {"fecha": "2026-11-05T10:00:00", "corridas": count, "version": "1.0 (7)",
+                                 "instalada": "2026-11-05 09:00:00"}
+                if skill:
+                    phases[phase]["skill"] = skill
+                text += rows(phase, "detalle", "hilo_max_ms", [40 + i for i in range(count)])
+        write(self.folder / "fases.json", json.dumps(phases))
+        write(self.folder / "metricas.csv", text)
+
+    def step(self):
+        return perf.next_steps(self.folder, self.plan)
+
+    def test_triage_cerrado_dice_como_seguir_y_no_pide_capturas(self):
+        self.measured(3)
+        title, steps = self.step()
+        self.assertEqual(title, "triage cerrado")
+        self.assertEqual([s["tipo"] for s in steps], ["archivo", "terminal"])
+        self.assertIn("decidir --carpeta", steps[1]["texto"])
+        self.assertTrue(steps[1]["texto"].endswith("--profundidad riguroso"))
+        self.assertIn("solo si quieres aplicar una mejora", steps[1]["que"])
+
+    def test_un_triage_abierto_con_mejoras_y_sin_reporte_sigue_como_antes(self):
+        self.measured(3, skill=None)
+        (self.folder / "reporte-inicial.md").unlink()  # la sesión 2 escribió las mejoras y todavía no generó el reporte
+        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")
+
+    def test_riguroso_con_antes_incompleto_pide_las_corridas_que_faltan_antes_de_decidir(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(3, control=10)
+        title, steps = self.step()
+        self.assertEqual(title, "completar la línea base de riguroso (sin chat)")
+        self.assertEqual(len(steps), 2)
+        self.assertIn("--fase antes --corridas 7", steps[0]["texto"])
+        self.assertNotIn("--rehacer", steps[0]["texto"])
+        self.assertIn("tiene 3", steps[0]["que"])
+        self.assertIn("agrega --rehacer y pide --corridas 10", steps[0]["tu"])
+        self.assertIn("decidir --carpeta", steps[1]["texto"])
+
+    def test_riguroso_sin_control_lo_pide_y_con_recorrido_manual_la_linea_base_es_de_5(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(10)
+        title, steps = self.step()
+        self.assertEqual(title, "completar la línea base de riguroso (sin chat)")
+        self.assertEqual(len(steps), 2)
+        self.assertIn("--fase control --corridas 10", steps[0]["texto"])
+        self.assertIn("decidir --carpeta", steps[1]["texto"])
+        self.plan["flujos"]["detalle"]["recorrido"] = "manual"
+        self.measured(3)
+        steps = self.step()[1]
+        self.assertIn("--fase antes --corridas 2", steps[0]["texto"])
+        self.assertIn("--fase control --corridas 5", steps[1]["texto"])
+        self.assertIn("decidir --carpeta", steps[2]["texto"])
+
+    def test_riguroso_completo_ofrece_la_decision(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(10, control=10)
+        title, steps = self.step()
+        self.assertEqual(title, "decisión del usuario (sin chat)")
+        self.assertIn("--aprobar M1", steps[0]["texto"])
+        self.measured(12, control=5, skill=None)  # de sobra, y de una versión anterior: completa también
+        self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")
+
+    def test_con_otra_version_de_la_skill_recomienda_rehacer_en_lugar_de_completar(self):
+        self.plan["profundidad"] = "riguroso"
+        self.measured(3, skill=None)  # sin el dato: lo midió una versión anterior a 0.9.0
+        steps = self.step()[1]
+        self.assertIn("--fase antes --corridas 10 --rehacer", steps[0]["texto"])
+        self.assertIn("otra versión de hb-performance (anterior a 0.9.0)", steps[0]["que"])
+        self.assertIn("--fase control --corridas 10", steps[1]["texto"])
+        self.assertNotIn("--rehacer", steps[1]["texto"])
+        self.measured(5, control=5, skill=None)  # con control de esa versión: se repite junto con el antes
+        steps = self.step()[1]
+        self.assertIn("--fase antes --corridas 10 --rehacer", steps[0]["texto"])
+        self.assertIn("--fase control --corridas 10 --rehacer", steps[1]["texto"])
+
+    def test_la_version_de_la_skill_se_guarda_por_flujo(self):
+        folder = self.dir / "fases"
+        folder.mkdir()
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5,
+                                                         "flujos": {"lista": {"corridas": 5}}}}))
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T10:00:00", "corridas": 3, "skill": perf.VERSION}, "detalle")
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T11:00:00", "corridas": 1, "skill": perf.VERSION}, "lista")
+        record = perf.read_phases(folder)["antes"]
+        self.assertEqual(perf.phase_skill(record, "detalle"), perf.VERSION)  # flujo nuevo: la versión que lo midió
+        self.assertEqual(perf.phase_skill(record, "lista"), "anterior a 0.9.0")  # ya tenía corridas sin el dato
+
+    def test_una_mejora_ya_aprobada_sin_control_tambien_lo_pide_antes_de_la_sesion_3(self):
+        self.plan["profundidad"] = "riguroso"
+        self.plan["mejoras"][0]["estado"] = "aprobada"
+        self.measured(10)
+        title, steps = self.step()
+        self.assertEqual(title, "completar la línea base de riguroso (sin chat)")
+        self.assertEqual(len(steps), 1)
+        self.assertIn("--fase control", steps[0]["texto"])
+        self.measured(5, control=5)  # una investigación rigurosa ya decidida sigue igual, tenga las corridas que tenga
+        self.assertEqual(self.step()[0], "sesión 3 · M1")
+
+    def test_aprobar_en_el_triage_y_pasar_a_riguroso_tambien_completa_antes(self):
+        self.plan["mejoras"][0]["estado"] = "aprobada"
+        self.save()
+        self.measured(3)
+        out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
+        self.assertTrue(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["desde_triage"])
+        self.assertIn("--fase antes --corridas 7", out)
+        self.assertIn("--fase control --corridas 10", out)
+        self.assertNotIn("sesión 3", out)
+
+    def test_un_triage_sin_mejoras_no_ofrece_pasar_a_riguroso_y_decidir_no_falla_sin_la_clave(self):
+        del self.plan["mejoras"]
+        self.save()
+        self.measured(3)
+        title, steps = self.step()
+        self.assertEqual((title, [s["tipo"] for s in steps]), ("triage cerrado", ["archivo"]))
+        out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
+        self.assertIn("profundidad riguroso (era triage)", out)
+
+    def test_decidir_profundidad_cambia_el_plan_lo_anota_y_da_las_capturas(self):
+        self.measured(3)
+        out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
+        self.assertEqual(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["profundidad"], "riguroso")
+        self.assertIn("profundidad riguroso (era triage)", out)
+        self.assertIn("Siguiente · completar la línea base de riguroso (sin chat)", out)
+        self.assertIn("--fase antes --corridas 7", out)
+        self.assertIn("--fase control --corridas 10", out)
+        self.assertIn("profundidad riguroso (era triage) (perf.py decidir)", (self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["mejoras"][0].get("estado", "propuesta"),
+                         "propuesta")
+        result = self.perf("decidir", "--carpeta", self.folder)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--profundidad", result.stderr)
+
+
+class OrphanTraceTest(DeviceBase):
+    """Una traza que quedó sin fila en el CSV (captura cortada) no se pisa: se aparta y se avisa."""
+
+    def test_la_traza_huerfana_se_aparta_y_la_corrida_usa_su_numero(self):
+        self.tp_outputs(GOOD)
+        folder = self.plan.parent
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                "--calentamiento", "0", "--sin-compilar")
+        write(folder / "antes" / "home_2.perfetto-trace.gz", "huerfana")
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertRegex(out, r"⚠ había una traza de la corrida 2 sin fila en metricas.csv .*antes-descartada-\d{6}/")
+        aside = [d for d in folder.iterdir() if d.name.startswith("antes-descartada-")]
+        self.assertEqual(len(aside), 1)
+        self.assertEqual((aside[0] / "home_2.perfetto-trace.gz").read_text(encoding="utf-8"), "huerfana")
+        self.assertNotEqual((folder / "antes" / "home_2.perfetto-trace.gz").read_bytes(), b"huerfana")
+        self.assertEqual(out.count("⚠ había una traza"), 1)
+
+    def test_sin_huerfana_no_avisa_y_una_traza_con_fila_no_se_toca(self):
+        folder = self.dir / "inv"
+        (folder / "antes").mkdir(parents=True, exist_ok=True)
+        csv_path = folder / "metricas.csv"
+        self.assertIsNone(perf.set_aside_orphan(folder, folder / "antes", "antes", "home", 1, csv_path))
+        write(csv_path, HEADER + rows("antes", "home", "hilo_max_ms", [40]))
+        write(folder / "antes" / "home_1.perfetto-trace.gz", "con fila")
+        self.assertIsNone(perf.set_aside_orphan(folder, folder / "antes", "antes", "home", 1, csv_path))
+        self.assertTrue((folder / "antes" / "home_1.perfetto-trace.gz").is_file())
+
+    def test_completar_antes_con_otro_build_o_con_otra_version_avisa_y_recomienda_rehacer(self):
+        self.tp_outputs(GOOD)
+        common = ("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                  "--calentamiento", "0", "--sin-compilar")
+        self.ok(*common)
+        self.assertNotIn("--rehacer", self.ok(*common))  # mismo build y misma versión: se suman sin aviso
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["skill"], perf.VERSION)
+        self.env["FAKE_UPDATED"] = "2026-11-06 09:00:00"
+        out = self.ok(*common)
+        self.assertIn("no es el que midió las corridas que 'antes' ya tiene", out)
+        self.assertIn("repite la fase con --rehacer", out)
+        self.assertNotIn("no es el que midió", self.ok(*(common + ("--rehacer",))))
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        del phases["antes"]["skill"]  # como la deja una versión anterior
+        del phases["antes"]["flujos"]["home"]["skill"]
+        write(self.plan.parent / "fases.json", json.dumps(phases))
+        out = self.ok(*common)
+        self.assertIn("otra versión de hb-performance (anterior a 0.9.0", out)
+        self.assertEqual(json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))["antes"]["skill"],
+                         "anterior a 0.9.0")
+
+
+EMPTY_TABLE = '"a"\n'
+FIXTURE_TRACES = ROOT / "tests" / "fixtures" / "hb-performance-trazas"
+REAL_TP = shutil.which("trace_processor") or shutil.which("trace_processor_shell")
+
+
+def skill_config(name):
+    return perf.config_record(perf.ASSETS / "perfetto" / ("%s.pbtx" % name))
+
+
+class QueryRequirementsTest(unittest.TestCase):
+    """Cada consulta declara qué fuentes necesita y las configuraciones de su grupo las capturan: una consulta no puede
+    salir vacía solo porque la configuración no graba su dato."""
+
+    def test_las_fuentes_de_una_configuracion_se_leen_del_pbtx_sin_los_comentarios(self):
+        sources = perf.config_sources('data_sources { config { name: "linux.ftrace"\n  ftrace_config {\n'
+                                      '  ftrace_events: "sched/sched_switch"  # comentario: "x/y"\n'
+                                      '  # ftrace_events: "binder/binder_transaction"\n  atrace_categories: "view"\n'
+                                      '  atrace_apps: "com.example.app"\n}}}\n'
+                                      'data_sources { config { name: "android.surfaceflinger.frametimeline" } }\n')
+        self.assertEqual(sources, ["atrace:view", "atrace_apps", "ds:android.surfaceflinger.frametimeline", "ds:linux.ftrace",
+                                   "ftrace:sched/sched_switch"])
+
+    def test_base_y_cpu_capturan_binder_y_completa_la_razon_de_bloqueo(self):
+        binder = {"ftrace:binder/binder_transaction", "ftrace:binder/binder_transaction_received"}
+        for name in ("base", "cpu", "completa"):
+            self.assertLessEqual(binder, set(skill_config(name)["fuentes"]), name)
+        self.assertIn("ftrace:sched/sched_blocked_reason", skill_config("completa")["fuentes"])
+        self.assertIn("ftrace:sched/sched_waking", skill_config("completa")["fuentes"])
+        for name in ("base", "cpu"):  # nada pesado en base: la razón de bloqueo y los wakeups son solo de completa
+            self.assertNotIn("ftrace:sched/sched_blocked_reason", skill_config(name)["fuentes"])
+            self.assertNotIn("ftrace:sched/sched_waking", skill_config(name)["fuentes"])
+
+    def test_lo_unico_que_cambia_en_base_son_los_dos_eventos_de_binder(self):
+        events = [s for s in skill_config("base")["fuentes"] if s.startswith("ftrace:")]
+        self.assertEqual(events, ["ftrace:binder/binder_transaction", "ftrace:binder/binder_transaction_received",
+                                  "ftrace:sched/sched_process_exit", "ftrace:sched/sched_process_free",
+                                  "ftrace:sched/sched_switch", "ftrace:task/task_newtask", "ftrace:task/task_rename"])
+        self.assertEqual([s for s in skill_config("base")["fuentes"] if s.startswith("ds:")],
+                         ["ds:android.surfaceflinger.frametimeline", "ds:linux.ftrace", "ds:linux.process_stats"])
+
+    def test_cada_consulta_declara_sus_fuentes_y_las_configuraciones_de_su_grupo_las_capturan(self):
+        configs = {name: set(skill_config(name)["fuentes"]) for name in perf.SKILL_CONFIGS}
+        catalog = perf.query_catalog()
+        self.assertGreaterEqual(len(catalog), 18)
+        for name, _, groups, sql in catalog:
+            requires = perf.query_requires(sql)
+            self.assertTrue(requires, "%s no declara '-- requiere:'" % name)
+            # cpu y completa son capturas de diagnóstico; el resto corre sobre las trazas de las fases, que se miden
+            # con base (y cpu y completa capturan todo lo de base)
+            needed = [g for g in groups if g in ("cpu", "completa")] or ["base", "cpu", "completa"]
+            for config in needed:
+                self.assertEqual([s for s in requires if s not in configs[config]], [],
+                                 "%s (grupos %s) pide fuentes que %s.pbtx no captura" % (name, groups, config))
+        signal = (perf.ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
+        self.assertEqual([s for s in perf.query_requires(signal) if s not in configs["base"]], [])
+
+    def test_cpu_y_completa_capturan_todo_lo_de_base(self):
+        base = set(skill_config("base")["fuentes"])
+        for name in ("cpu", "completa"):
+            self.assertLessEqual(base, set(skill_config(name)["fuentes"]), name)
+
+    def test_que_configuraciones_capturan_una_fuente(self):
+        self.assertEqual(perf.configs_with(["ds:linux.perf"]), ["cpu"])
+        self.assertEqual(perf.configs_with(["ftrace:sched/sched_blocked_reason"]), ["completa"])
+        self.assertEqual(perf.configs_with(["ftrace:no/existe"]), [])
+
+
+class TraceConfigTest(DeviceBase):
+    """La configuración con la que se grabó cada traza queda registrada, y las consultas se validan contra ella."""
+
+    def capture(self, *extra):
+        return self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar", *extra)
+
+    def test_capturar_registra_la_configuracion_junto_a_la_traza_y_en_fases_json(self):
+        self.tp_outputs(GOOD)
+        self.capture("--fase", "antes", "--corridas", "2")
+        folder = self.plan.parent
+        base = skill_config("base")
+        for run in (1, 2):
+            config = perf.trace_config(folder / "antes" / ("home_%d.perfetto-trace.gz" % run))
+            self.assertEqual((config["nombre"], config["hash"], config["fuentes"]), ("base", base["hash"], base["fuentes"]))
+            self.assertEqual(config["instalada"], "2026-11-05 10:00:00")
+        phases = perf.read_phases(folder)
+        self.assertEqual(phases["antes"]["configs"], ["base@%s" % base["hash"]])
+        self.assertEqual(phases["antes"]["flujos"]["home"]["configs"], ["base@%s" % base["hash"]])
+        self.capture("--prueba", "--config", "cpu")
+        self.assertEqual(perf.trace_config(folder / "prueba" / "home_1.perfetto-trace.gz")["nombre"], "cpu")
+        self.assertIsNone(perf.trace_config(folder / "antes" / "home_9.perfetto-trace.gz"))  # sin registro: desconocida
+        self.assertIsNone(perf.trace_config(self.dir / "suelta.perfetto-trace"))
+
+    def test_una_configuracion_propia_se_registra_con_su_nombre_y_sus_fuentes(self):
+        self.tp_outputs(GOOD)
+        write(self.plan.parent / "mia.pbtx", 'data_sources { config { name: "linux.ftrace" ftrace_config {\n'
+                                             '  ftrace_events: "sched/sched_switch"\n  atrace_apps: "{{PAQUETE}}"\n} } }\n')
+        self.capture("--prueba", "--config", "mia.pbtx")
+        config = perf.trace_config(self.plan.parent / "prueba" / "home_1.perfetto-trace.gz")
+        self.assertEqual((config["nombre"], config["fuentes"]),
+                         ("mia.pbtx", ["atrace_apps", "ds:linux.ftrace", "ftrace:sched/sched_switch"]))
+
+    def test_en_android_11_la_configuracion_va_sin_los_campos_que_no_conoce_y_frametimeline_es_no_medido(self):
+        completa = (perf.ASSETS / "perfetto" / "completa.pbtx").read_text(encoding="utf-8")
+        self.assertIn("symbolize_ksyms: true", perf.config_for_sdk(completa, 31))
+        self.assertNotIn("symbolize_ksyms:", perf.config_for_sdk(completa, 30))
+        self.assertIn("sched/sched_blocked_reason", perf.config_for_sdk(completa, 29))
+        self.tp_outputs(GOOD)
+        sent = self.dir / "enviada.pbtx"
+        self.env.update({"FAKE_SDK": "30", "FAKE_PERFETTO_CONFIG": str(sent)})
+        self.capture("--prueba", "--config", "completa")
+        self.assertNotIn("symbolize_ksyms:", sent.read_text(encoding="utf-8"))
+        self.assertIn("sched/sched_blocked_reason", sent.read_text(encoding="utf-8"))
+        trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        self.assertEqual(perf.trace_config(trace)["no_disponibles"],
+                         {"ds:android.surfaceflinger.frametimeline": "FrameTimeline es de Android 12 o superior"})
+        out = self.ok("consulta", trace, "jank_por_tipo")
+        self.assertIn("no medido: el dispositivo no entrega ds:android.surfaceflinger.frametimeline (FrameTimeline es de "
+                      "Android 12 o superior)", out)
+        self.assertNotIn("--config", out)  # ninguna configuración lo arregla
+        self.env["FAKE_SDK"] = "34"
+        self.capture("--prueba", "--config", "completa")
+        self.assertIn("symbolize_ksyms: true", sent.read_text(encoding="utf-8"))
+        self.assertEqual(perf.trace_config(trace)["no_disponibles"], {})
+
+    def test_consulta_dice_no_medido_sin_correr_la_consulta_si_la_configuracion_no_captura_la_fuente(self):
+        self.tp_outputs(GOOD)
+        self.capture("--prueba")
+        trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        (self.dir / "tp.sql").unlink()
+        out = self.ok("consulta", trace, "cpu_por_libreria")
+        self.assertIn("no medido: la configuración base no captura ds:linux.perf", out)
+        self.assertIn("No quiere decir que no ocurra", out)
+        self.assertIn("--config cpu", out)
+        self.assertFalse((self.dir / "tp.sql").exists())  # ni siquiera se corrió
+        out = self.ok("consulta", trace, "bloqueo_hilo_principal")
+        self.assertIn("no medido: la configuración base no captura ftrace:sched/sched_waking, "
+                      "ftrace:sched/sched_blocked_reason", out)
+        self.assertIn("--config completa", out)
+
+    def test_consulta_distingue_medido_sin_casos_de_configuracion_desconocida(self):
+        self.tp_outputs(GOOD)
+        self.capture("--prueba")
+        trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        self.tp_outputs(EMPTY_TABLE)
+        (self.dir / "tp.count").unlink()
+        out = self.ok("consulta", trace, "binder_hilo_principal")
+        self.assertIn("Medido y sin casos: la configuración base captura lo que pide la consulta "
+                      "(ftrace:binder/binder_transaction, ftrace:binder/binder_transaction_received)", out)
+        (self.plan.parent / "prueba" / perf.CONFIG_FILE).unlink()  # como una traza de una versión anterior
+        out = self.ok("consulta", trace, "binder_hilo_principal")
+        self.assertIn("configuración desconocida", out)
+        self.assertIn("no se puede afirmar que no ocurra", out)
+        self.assertNotIn("Medido y sin casos", out)
+        out = self.ok("consulta", trace, "--sql", "SELECT 1 AS a WHERE 0")  # una consulta propia no declara fuentes
+        self.assertNotIn("configuración", out)
+
+    def startup_folder(self, registered=True, config="base"):
+        folder = self.plan.parent
+        write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["hilo_max_ms"], "flujos": {
+            "home": {"inicio": "MainActivity", "recorrido": "true"}}}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "hilo_max_ms", [40, 50, 45]))
+        for run in (1, 2, 3):
+            name = "home_%d.perfetto-trace.gz" % run
+            write(folder / "antes" / name, "x")
+            if registered:
+                perf.save_trace_config(folder / "antes", name, skill_config(config), "2026-11-05 10:00:00")
+        return folder
+
+    def test_diagnostico_separa_medido_sin_casos_de_no_medido(self):
+        folder = self.startup_folder()
+        self.env["FAKE_TP_OTRA"] = EMPTY_TABLE
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("_Medido y sin casos (la configuración de la traza captura lo que la consulta necesita y no hubo "
+                      "filas): ", md)
+        measured = md.split("_Medido y sin casos")[1].split("\n")[0]
+        self.assertIn("binder_hilo_principal", measured)
+        self.assertIn("contencion_locks", measured)
+        self.assertNotIn("cpu_por_libreria", measured)
+        self.assertNotIn("bloqueo_hilo_principal", measured)
+        self.assertIn("_`cpu_por_libreria`: no medido: la configuración base no captura ds:linux.perf. No quiere decir que no "
+                      "ocurra._", md)
+        self.assertNotIn("bloqueo_hilo_principal", md)  # sin señal de espera, la captura completa ni se menciona
+        self.assertIn("capturar --prueba --config cpu", md)  # la pista de siempre para atribuir el CPU a funciones
+        self.assertNotIn("configuración desconocida", md)
+        sql = (self.dir / "tp.sql").read_text(encoding="utf-8")
+        self.assertNotIn("perf_sample", sql)  # lo no medido no se corre
+        self.assertNotIn("blocked_function", sql)
+        self.assertIn("binder transaction", sql)
+
+    def test_diagnostico_con_solo_consultas_no_medidas_no_llama_a_trace_processor_y_lo_dice(self):
+        folder = self.startup_folder()
+        self.tp_outputs('"x"\n1\n')
+        out = self.ok("diagnostico", "--carpeta", folder, "--consultas", "cpu_por_libreria,bloqueo_hilo_principal")
+        self.assertFalse((self.dir / "tp.sql").exists())  # un lote vacío haría fallar a trace_processor
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("_`cpu_por_libreria`: no medido: la configuración base no captura ds:linux.perf.", md)
+        self.assertIn("_`bloqueo_hilo_principal`: no medido: la configuración base no captura ftrace:sched/sched_waking, "
+                      "ftrace:sched/sched_blocked_reason.", md)  # pedida a propósito: se dice por qué no hay tabla
+        self.assertNotIn("completa)", out)
+
+    def test_diagnostico_con_trazas_sin_registro_dice_configuracion_desconocida_y_no_afirma_ausencia(self):
+        folder = self.startup_folder(registered=False)
+        self.env["FAKE_TP_OTRA"] = EMPTY_TABLE
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertNotIn("Medido y sin casos", md)
+        self.assertNotIn("no medido:", md)
+        unknown = md.split("_Sin tabla, con configuración desconocida")[1].split("\n")[0]
+        for name in ("binder_hilo_principal", "contencion_locks", "cpu_por_libreria", "bloqueo_hilo_principal"):
+            self.assertIn(name, unknown)
+        self.assertIn("no se afirma que no ocurra", unknown)
+        self.assertNotIn("blocked_function", (self.dir / "tp.sql").read_text(encoding="utf-8"))  # la de completa no se corre a ciegas
+
+    def test_diagnostico_sobre_una_captura_completa_corre_la_consulta_de_bloqueo(self):
+        folder = self.startup_folder(config="completa")
+        self.env["FAKE_TP_OTRA"] = '"estado","bloqueado_en"\n"D","filemap_fault (E/S)"\n'
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("`bloqueo_hilo_principal`", md)
+        self.assertIn("| D | filemap_fault (E/S) |", md)
+        self.assertIn("_`cpu_por_libreria`: no medido: la configuración completa no captura ds:linux.perf.", md)
+        self.assertNotIn("Captura pendiente", md)  # ya es la captura completa
+
+    def test_comparar_avisa_sin_bloquear_si_las_fases_no_usaron_la_misma_configuracion(self):
+        folder = self.dir / "cmp"
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "principales": ["hilo_max_ms"], "flujos": {"home": {}}}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "hilo_max_ms", [40, 41, 42, 43, 44])
+              + rows("despues", "home", "hilo_max_ms", [30, 31, 32, 33, 34]))
+
+        def phases(antes, despues):
+            write(folder / "fases.json", json.dumps({
+                "antes": dict({"fecha": "2026-11-05T10:00:00", "corridas": 5}, **({"configs": antes} if antes else {})),
+                "despues": dict({"fecha": "2026-11-06T10:00:00", "corridas": 5}, **({"configs": despues} if despues else {}))}))
+            return self.ok("comparar", folder / "metricas.csv")
+
+        self.assertNotIn("configuración de Perfetto", phases(["base@aaa"], ["base@aaa"]))
+        self.assertNotIn("configuración de Perfetto", phases(None, None))  # versiones anteriores: sin el dato, sin aviso
+        out = phases(["base@aaa"], ["completa@bbb"])
+        self.assertIn("⚠ home: las fases no se midieron con la misma configuración de Perfetto (antes: base@aaa; despues: "
+                      "completa@bbb)", out)
+        self.assertIn("--rehacer", out)
+        self.assertIn("| home | hilo_max_ms |", out)  # no bloquea: la comparación sale igual
+        out = phases(None, ["base@aaa"])
+        self.assertIn("antes: desconocida; despues: base@aaa", out)
+        self.assertIn("medida con una versión anterior", out)
+
+    def test_sumar_corridas_a_una_fase_de_una_version_anterior_deja_la_configuracion_desconocida_a_la_vista(self):
+        folder = self.dir / "mezcla"
+        folder.mkdir()
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 3}}))
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T10:00:00", "corridas": 2, "configs": ["base@aaa"]})
+        self.assertEqual(perf.read_phases(folder)["antes"]["configs"], ["desconocida", "base@aaa"])
+        perf.write_phase(folder, "antes", {"fecha": "2026-11-06T11:00:00", "corridas": 1, "configs": ["base@aaa"]})
+        self.assertEqual(perf.read_phases(folder)["antes"]["configs"], ["desconocida", "base@aaa"])
+
+
+class BlockedMainThreadTest(DeviceBase):
+    """La captura con --config completa se pide solo cuando el hilo principal espera dentro de sus frames más largos."""
+
+    def folder_with(self, signal_row):
+        folder = self.plan.parent
+        write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["hilo_max_ms"], "flujos": {
+            "home": {"inicio": "MainActivity", "recorrido": "true"}}}))
+        write(folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "hilo_max_ms", [40]))
+        write(folder / "antes" / "home_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "antes", "home_1.perfetto-trace.gz", skill_config("base"))
+        self.env["FAKE_TP_POR_CONSULTA"] = json.dumps({
+            "senal_bloqueo": '"frames","frames_ms","espera_ms","max_d_ms"\n' + signal_row + "\n"})
+        self.env["FAKE_TP_OTRA"] = '"slice","ms"\n"Choreographer#doFrame 1",12.5\n'
+        self.tp_outputs('"x"\n1\n')
+        return folder
+
+    def test_la_senal_lee_la_fila_y_aplica_los_umbrales(self):
+        header = ["frames", "frames_ms", "espera_ms", "max_d_ms"]
+        self.assertEqual(perf.blocked_signal([(header, [["3", "100.0", "30.0", "2.5"]])]), (0.3, 2.5, 100.0))
+        self.assertIsNone(perf.blocked_signal([(header, [["0", "0.0", "0.0", "0.0"]])]))  # sin frames no hay señal
+        self.assertIsNone(perf.blocked_signal([]))
+        self.assertIsNone(perf.blocked_signal([(["otra"], [["1"]])]))
+        self.assertEqual((perf.BLOCKED_SHARE_MIN, perf.BLOCKED_D_MIN_MS), (0.25, 4.0))
+
+    def test_con_espera_importante_deja_la_captura_pendiente_y_siguiente_la_ofrece(self):
+        folder = self.folder_with("3,100.0,30.0,2.5")
+        out = self.ok("diagnostico", "--carpeta", folder)
+        self.assertIn("deja una captura pendiente con --config completa", out)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("el 30 % del tiempo de sus 3 frames más largos", md)
+        self.assertIn("Captura pendiente: `capturar --plan %s --prueba --config completa`" % (folder / "plan.json"), md)
+        self.assertIn("bloqueo_hilo_principal", md)
+        self.assertEqual(perf.diagnostic_captures(folder),
+                         ["capturar --plan %s --prueba --config completa" % (folder / "plan.json")])
+        self.assertIn("Siguiente · sesión 2 · diagnóstico", out)
+        step = out.split("Siguiente · sesión 2 · diagnóstico")[1]
+        self.assertRegex(step, r"1\. Terminal \(sin chat\) · captura opcional que pide diagnostico.md")
+        self.assertRegex(step, r"perf\.py capturar --plan \S+ --prueba --config completa\n")
+        self.assertIn("2. Chat nuevo", step)
+        # hecha la captura completa, ya no se ofrece
+        (folder / "prueba").mkdir()
+        perf.save_trace_config(folder / "prueba", "home_1.perfetto-trace.gz", skill_config("completa"))
+        self.assertEqual(len(perf.diagnostic_captures(folder)), 1)  # registrada, pero la traza no está: se sigue ofreciendo
+        write(folder / "prueba" / "home_1.perfetto-trace.gz", "x")
+        self.assertEqual(perf.diagnostic_captures(folder), [])
+        self.assertNotIn("captura opcional", self.ok("siguiente", "--carpeta", folder))
+
+    def test_el_cierre_sin_mejoras_tambien_ofrece_la_captura_y_una_prueba_con_base_no_la_da_por_hecha(self):
+        folder = self.folder_with("3,100.0,30.0,2.5")
+        self.ok("diagnostico", "--carpeta", folder)
+        write(folder / "reporte-inicial.md", "x")
+        out = self.ok("siguiente", "--carpeta", folder)
+        self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
+        self.assertIn("la captura que el diagnóstico dejó pendiente", out)
+        self.assertIn("--prueba --config completa", out)
+        (folder / "prueba").mkdir()
+        write(folder / "prueba" / "home_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "prueba", "home_1.perfetto-trace.gz", skill_config("completa"))
+        perf.save_trace_config(folder / "prueba", "home_1.perfetto-trace.gz", skill_config("base"))  # otra prueba la pisó
+        self.assertEqual(len(perf.diagnostic_captures(folder)), 1)
+
+    def test_si_trace_processor_no_puede_con_la_consulta_de_bloqueo_el_resto_del_diagnostico_sale(self):
+        folder = self.folder_with("3,100.0,30.0,2.5")
+        perf.save_trace_config(folder / "antes", "home_1.perfetto-trace.gz", skill_config("completa"))
+        self.env["FAKE_TP_FALLA"] = "bloqueo_hilo_principal"
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("_`bloqueo_hilo_principal`: no disponible: trace_processor no pudo correr la consulta (no such column: "
+                      "blocked_function). Actualiza trace_processor._", md)
+        self.assertIn("| Choreographer#doFrame 1 | 12.5 |", md)
+
+    def test_una_espera_larga_en_d_tambien_la_pide_y_sin_senal_no_aparece_nada(self):
+        folder = self.folder_with("3,100.0,6.0,4.5")  # 6 % del tiempo, pero una espera de 4,5 ms en D
+        self.ok("diagnostico", "--carpeta", folder)
+        self.assertIn("Captura pendiente:", (folder / "diagnostico.md").read_text(encoding="utf-8"))
+        folder = self.folder_with("3,100.0,10.0,1.0")  # 10 % y 1 ms: el hilo principal casi no espera
+        out = self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertNotIn("Captura pendiente", md)
+        self.assertNotIn("falta una captura", md)
+        self.assertNotIn("captura opcional", out)
+
+    def test_estado_hilo_principal_no_se_usa_para_la_senal(self):
+        signal = (perf.ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
+        self.assertIn("Choreographer#doFrame", signal)  # mira solo dentro de los frames largos
+        self.assertIn("LIMIT 3", signal)
+
+
+@unittest.skipUnless(REAL_TP, "necesita trace_processor instalado: valida las consultas contra una traza de texto inventada")
+class RealTraceProcessorTest(unittest.TestCase):
+    """Las consultas nuevas, sobre una traza de ftrace en texto (inventada) y con trace_processor de verdad: los slices de
+    binder se arman con los dos eventos que ahora captura base, y la razón de bloqueo y quién despierta al hilo salen de
+    sched_blocked_reason y sched_waking."""
+
+    def query(self, sql):
+        # la traza de texto no trae el nombre del proceso: se elige por pid
+        sql = sql.replace("WHERE name = '{{PAQUETE}}'", "WHERE pid = 1000")
+        return perf.run_tp(REAL_TP, FIXTURE_TRACES / "bloqueo.systrace", perf.fill_sql(sql, None, {}))
+
+    def diagnostic(self, name):
+        return self.query((perf.ASSETS / "queries" / "diagnostico" / (name + ".sql")).read_text(encoding="utf-8"))
+
+    def test_binder_hilo_principal_encuentra_la_transaccion(self):
+        header, body = self.diagnostic("binder_hilo_principal")[-1]
+        self.assertEqual(header, ["dentro_de", "veces", "total_ms", "max_ms"])
+        self.assertEqual(body[0][0], "cargar")
+        self.assertAlmostEqual(float(body[0][2]), 6.6)
+
+    def test_bloqueo_hilo_principal_dice_la_funcion_y_quien_lo_desperto(self):
+        header, body = self.diagnostic("bloqueo_hilo_principal")[-1]
+        self.assertEqual(header, ["frame_t_ms", "frame_ms", "estado", "ms", "bloqueado_en", "lo_desperto", "dentro_de"])
+        rows_by_state = {row[2]: row for row in body}
+        self.assertEqual(rows_by_state["D"][4], "filemap_fault+0x1c/0x40 (E/S)")
+        self.assertTrue(rows_by_state["D"][5].startswith("Binder:2000_1"))
+        self.assertEqual(rows_by_state["S"][4], "—")
+        self.assertTrue(rows_by_state["S"][5].startswith("Binder:2000_1"))
+
+    def test_sin_el_evento_dice_no_disponible_en_este_dispositivo(self):
+        text = (FIXTURE_TRACES / "bloqueo.systrace").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "sin-razon.systrace"
+            trace.write_text("".join(line + "\n" for line in text.splitlines() if "sched_blocked_reason" not in line),
+                             encoding="utf-8")
+            sql = (perf.ASSETS / "queries" / "diagnostico" / "bloqueo_hilo_principal.sql").read_text(encoding="utf-8")
+            header, body = perf.run_tp(REAL_TP, trace, perf.fill_sql(
+                sql.replace("WHERE name = '{{PAQUETE}}'", "WHERE pid = 1000"), None, {}))[-1]
+        blocked = [row for row in body if row[2] == "D"]
+        self.assertEqual(blocked[0][4], "no disponible en este dispositivo")
+
+    def test_la_senal_de_espera_mide_solo_dentro_de_los_frames_largos(self):
+        found = perf.blocked_signal(self.query((perf.ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")))
+        self.assertAlmostEqual(found[0], 10.5 / 29.0, places=3)
+        self.assertAlmostEqual(found[1], 5.5)
+        self.assertGreaterEqual(found[0], perf.BLOCKED_SHARE_MIN)
+
+
+class CompatVersionsTest(DeviceBase):
+    """Una investigación en curso de 0.6.0, 0.7.0 o 0.8.0 (su plan.json, su fases.json y su estado.md, sin ningún campo
+    de 0.9.0) carga y corre `siguiente`, `diagnostico`, `reporte --inicial` y `comparar` sin errores."""
+
+    VERSIONS = ("0.6.0", "0.7.0", "0.8.0")
+
+    def investigation(self, version):
+        fixture = ROOT / "tests" / "fixtures" / ("hb-performance-%s" % version)
+        folder = self.dir / version / "reports" / "perf" / "caso"
+        folder.mkdir(parents=True)
+        for name in ("plan.json", "estado.md", "metricas.csv", "fases.json"):
+            write(folder / name, (fixture / name).read_text(encoding="utf-8"))
+        return fixture, folder
+
+    def test_los_planes_y_las_fases_anteriores_no_traen_campos_nuevos_y_cargan(self):
+        for version in self.VERSIONS:
+            fixture, folder = self.investigation(version)
+            plan = perf.load_plan(folder / "plan.json")
+            for field in ("mapping", "desde_triage"):
+                self.assertNotIn(field, plan, version)
+            phases = perf.read_phases(folder)
+            self.assertTrue(phases, version)
+            for record in phases.values():
+                self.assertNotIn("skill", record, version)
+                self.assertNotIn("configs", record, version)
+            flow = next(iter(plan["flujos"]))
+            self.assertIsNone(perf.phase_skill(phases.get("antes"), flow), version)
+            self.assertEqual(perf.config_notes(folder, [flow]), [], version)  # sin el dato en ninguna fase, sin aviso
+            self.assertEqual(perf.diagnostic_captures(folder), [], version)
+
+    def test_siguiente_diagnostico_reporte_inicial_y_comparar_corren_sin_errores(self):
+        for name in ("PERF_USUARIO", "PERF_CLAVE"):
+            self.env.pop(name, None)
+        for version in self.VERSIONS:
+            fixture, folder = self.investigation(version)
+            plan = perf.load_plan(folder / "plan.json")
+            flow = next(iter(plan["flujos"]))
+            before = perf.next_steps(folder, plan)[0]
+            out = self.ok("siguiente", "--carpeta", folder)
+            self.assertIn("Siguiente · %s" % before, out, version)
+            self.assertNotIn("completar la línea base", out, version)  # una investigación ya decidida sigue donde estaba
+            if (fixture / "traza.json").is_file():
+                # la traza reducida del fixture: sus filas son lo que devuelve metricas.sql
+                data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
+                table = '"tipo","ts","dur","prof","nombre"\n' + "".join(
+                    '"%s",%d,%d,%d,"%s"\n' % tuple(row) for row in data["filas"])
+                self.tp_outputs(table)
+                if (self.dir / "tp.count").exists():
+                    (self.dir / "tp.count").unlink()
+                runs = sorted({r["corrida"] for r in perf.read_rows(folder / "metricas.csv")
+                               if r["fase"] == "antes" and r["flujo"] == flow})
+                for run in runs:
+                    write(folder / "antes" / ("%s_%s.perfetto-trace.gz" % (flow, run)), "x")
+                self.env["FAKE_TP_OTRA"] = '"a"\n'
+                out = self.ok("diagnostico", "--carpeta", folder)
+                md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+                # trazas de una versión anterior: no se sabe qué capturaron, así que no se afirma ausencia
+                self.assertIn("configuración desconocida", md, version)
+                self.assertNotIn("Medido y sin casos", md, version)
+                self.assertNotIn("no medido:", md, version)
+                self.assertIn("Red por tramo", md, version)
+                (folder / "diagnostico.md").unlink()  # el fixture no lo trae: el paso siguiente no debe cambiar por él
+            self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
+            self.assertTrue((folder / "reporte-inicial.md").is_file(), version)
+            out = self.ok("comparar", folder / "metricas.csv")
+            self.assertIn("Veredictos:", out, version)
+            self.assertNotIn("configuración de Perfetto", out, version)
+            self.assertNotIn("otra versión de hb-performance", out, version)
+
+    def test_las_metricas_que_calculaba_0_8_0_no_cambian_de_nombre_ni_de_valor(self):
+        fixture, folder = self.investigation("0.8.0")
+        data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
+        plan = perf.load_plan(folder / "plan.json")
+        flow = plan["flujos"]["detalle"]
+        self.assertEqual((flow["duracion_max_s"], len(flow["pausas"]), flow["segmentos"][1]["solo_red"]), (1200, 1, True))
+        metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
+        self.assertIsNone(invalid)
+        self.assertEqual([list(m) for m in metrics], data["metricas"])  # las mismas, con el mismo valor y en el mismo orden
+        self.assertEqual(len(data["metricas"]), 35)
+
+
+MAPPING = (FIXTURE_TRACES / "mapping.txt")
+REAL_RETRACE = perf.find_retrace()
+FAKE_RETRACE = r'''#!{python}
+import re, sys
+mapping, stack = sys.argv[1], sys.argv[2]
+assert "pg_map_id" in open(mapping).read() or "->" in open(mapping).read()
+names = {{"a.b.a": ["com.example.app.data.Repo.load", "com.example.app.data.Repo.save"],
+         "a.b.b": ["com.example.app.data.Repo.refresh"]}}
+for line in open(stack).read().splitlines():
+    found = re.search(r"at ([\w.$]+)\(([^)]*)\)", line)
+    if not found or found.group(1) not in names:
+        print(line)
+        continue
+    options = names[found.group(1)]
+    if found.group(2) != "Unknown Source":
+        options = options[:1]
+    for i, option in enumerate(options):
+        text = line.replace(found.group(0), "at %s(Repo.kt)" % option)
+        print(text if i == 0 else "\t<OR> " + text.strip())
+'''
+CPU_TABLE = ('"hilo","libreria","funcion","muestras"\n"main","base.odex","a.b.a",40\n"main","base.odex","a.b.b",12\n'
+             '"main","boot-framework.oat","android.os.Handler.dispatchMessage",9\n"main","libexample.so","?",7\n'
+             '"main","base.odex","x.y.z",3\n"main","libexample.so","render.cold",2\n')
+
+
+class MappingTest(PerfBase):
+    """Ubicar el mapping de la variante medida y verificar que corresponde al APK medido."""
+
+    def mapping_at(self, relative, text=None):
+        path = self.dir / relative
+        write(path, text if text is not None else MAPPING.read_text(encoding="utf-8"))
+        return path
+
+    def test_la_variante_sale_del_comando_instalar(self):
+        self.assertEqual(perf.install_variant("./gradlew :app:installDemoProfiling"), ("app", "demoProfiling"))
+        self.assertEqual(perf.install_variant("ANDROID_SERIAL=emulator-5554 ./gradlew installProfiling -Pperf"),
+                         (None, "profiling"))
+        self.assertEqual(perf.install_variant("./gradlew :feature:app:installProfiling"), ("feature/app", "profiling"))
+        self.assertEqual(perf.install_variant("adb install -r app.apk"), (None, None))
+        self.assertEqual(perf.install_variant(None), (None, None))
+
+    def test_ubica_el_mapping_del_plan_de_la_variante_instalada_o_el_unico(self):
+        profiling = self.mapping_at("app/build/outputs/mapping/profiling/mapping.txt")
+        self.mapping_at("app/build/outputs/mapping/release/mapping.txt")
+        self.assertEqual(perf.locate_mapping({}, self.dir), (profiling, False, ""))  # el único que no es debug ni release
+        demo = self.mapping_at("app/build/outputs/mapping/demoProfiling/mapping.txt")
+        path, explicit, warning = perf.locate_mapping({}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("hay 2 mappings", warning)
+        self.assertIn('"mapping" de plan.json o con --mapping', warning)
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew :app:installDemoProfiling"}, self.dir)[0], demo)
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew installProfiling"}, self.dir)[0], profiling)
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew :app:installDemoProfiling",
+                                              "mapping": "app/build/outputs/mapping/release/mapping.txt"}, self.dir)[0],
+                         self.dir / "app/build/outputs/mapping/release/mapping.txt")  # el del plan manda
+        other = self.mapping_at("otro/mapping.txt")
+        self.assertEqual(perf.locate_mapping({"instalar": "./gradlew :app:installDemoProfiling"}, self.dir, str(other)),
+                         (other, True, ""))  # --mapping manda sobre todo, y es explícito
+
+    def test_sin_mapping_lo_dice_y_no_falla_salvo_un_mapping_explicito_que_no_existe(self):
+        path, _, warning = perf.locate_mapping({}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("no encontré ningún mapping.txt", warning)
+        path, _, warning = perf.locate_mapping({"instalar": "./gradlew :app:installProfiling"}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("no encontré el mapping de la variante profiling", warning)
+        path, _, warning = perf.locate_mapping({"mapping": "app/no-existe.txt"}, self.dir)
+        self.assertIsNone(path)
+        self.assertIn("no existe", warning)
+        with self.assertRaises(perf.PerfError):
+            perf.locate_mapping({}, self.dir, str(self.dir / "no-existe.txt"))
+
+    def test_lee_el_identificador_del_mapping_y_reconoce_uno_que_no_es_de_proguard(self):
+        mapping = perf.read_mapping(MAPPING)
+        self.assertEqual((mapping["id"], mapping["valido"]), ("1a2b3c4", True))
+        plain = perf.read_mapping(self.mapping_at("m/mapping.txt", "com.example.app.data.Repo -> a.b:\n    int count -> a\n"))
+        self.assertEqual((plain["id"], plain["valido"]), (None, True))
+        other = perf.read_mapping(self.mapping_at("o/mapping.txt", "<?xml version='1.0'?>\n<mapa cifrado='si'/>\n"))
+        self.assertEqual((other["id"], other["valido"]), (None, False))
+
+    def test_lee_el_identificador_que_r8_deja_en_el_apk(self):
+        apk = self.dir / "app.apk"
+        with zipfile.ZipFile(str(apk), "w") as archive:
+            archive.writestr("classes.dex", b'dex\n035\x00~~R8{"backend":"dex","compilation-mode":"release","min-api":24,'
+                                            b'"pg-map-id":"1a2b3c4","r8-mode":"full","version":"8.5.35"}\x00')
+            archive.writestr("classes2.dex", b"dex\n035\x00sin marcador")
+            archive.writestr("lib/arm64-v8a/libexample.so", b'"pg-map-id":"no-es-un-dex"')
+        self.assertEqual(perf.apk_map_ids(apk), {"1a2b3c4"})
+        with zipfile.ZipFile(str(apk), "w") as archive:
+            archive.writestr("classes.dex", b"dex\n035\x00sin R8")
+        self.assertEqual(perf.apk_map_ids(apk), set())
+
+    def test_verifica_por_identificador_y_si_no_coincide_no_se_usa_ni_con_mapping_explicito(self):
+        mapping = perf.read_mapping(MAPPING)
+        self.assertEqual(perf.verify_mapping(mapping, None, False, {"1a2b3c4"})[0], True)
+        self.assertIn("pg_map_id (1a2b3c4) es el del APK instalado", perf.verify_mapping(mapping, None, False, {"1a2b3c4"})[1])
+        for explicit in (False, True):
+            use, note = perf.verify_mapping(mapping, None, explicit, {"9z9z9z9"})
+            self.assertFalse(use)
+            self.assertIn("no es el del APK instalado", note)
+
+    def test_sin_identificador_verifica_por_fechas_de_forma_conservadora(self):
+        path = self.mapping_at("app/build/outputs/mapping/profiling/mapping.txt")
+        mapping = dict(perf.read_mapping(path), id=None)
+        stamp = lambda delta: datetime.datetime.fromtimestamp(mapping["mtime"] + delta).strftime("%Y-%m-%d %H:%M:%S")
+        use, note = perf.verify_mapping(mapping, stamp(600), False)  # la app se instaló después de generar el mapping
+        self.assertTrue(use)
+        self.assertIn("verificado solo por fecha", note)
+        use, note = perf.verify_mapping(mapping, stamp(-3600), False)  # el mapping es posterior a la instalación
+        self.assertFalse(use)
+        self.assertIn("se generó después de instalar la app", note)
+        use, note = perf.verify_mapping(mapping, None, False)  # sin fecha de instalación no se puede verificar
+        self.assertFalse(use)
+        self.assertIn("no se pudo verificar", note)
+        self.assertIn("--mapping", note)
+        use, note = perf.verify_mapping(mapping, None, True)  # pero un --mapping explícito se usa, y lo dice
+        self.assertTrue(use)
+        self.assertIn("sin verificar contra el APK instalado", note)
+        # el APK de salida de esa variante, más nuevo que la instalación: es otro build
+        apk = self.dir / "app/build/outputs/apk/profiling/app-profiling.apk"
+        write(apk, "x")
+        os.utime(str(apk), (mapping["mtime"] + 7200, mapping["mtime"] + 7200))
+        use, note = perf.verify_mapping(mapping, stamp(600), False)
+        self.assertFalse(use)
+        self.assertIn("APK de salida", note)
+        os.utime(str(apk), (mapping["mtime"] + 60, mapping["mtime"] + 60))
+        self.assertTrue(perf.verify_mapping(mapping, stamp(600), False)[0])
+
+    def test_el_plan_valida_el_campo_mapping_y_sin_el_carga_igual(self):
+        write(self.dir / "plan.json", json.dumps({"paquete": "com.example.app", "flujos": {"home": {}}, "mapping": 7}))
+        with self.assertRaises(perf.PerfError):
+            perf.load_plan(self.dir / "plan.json")
+        write(self.dir / "plan.json", json.dumps({"paquete": "com.example.app", "flujos": {"home": {}},
+                                                  "mapping": "app/build/outputs/mapping/profiling/mapping.txt"}))
+        self.assertIn("mapping", perf.load_plan(self.dir / "plan.json"))
+
+
+class DeobfuscateTest(DeviceBase):
+    """La desofuscación con `retrace` (simulado) donde hay nombres de métodos: cpu_por_libreria y la pila de un crash."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.pop("ANDROID_HOME", None)
+        self.env.pop("ANDROID_SDK_ROOT", None)
+        self.env.pop("RETRACE", None)
+        # solo las herramientas simuladas y las del sistema: un retrace real en el PATH de la máquina no cuenta
+        self.env["PATH"] = os.pathsep.join([str(self.dir / "bin"), "/usr/bin", "/bin"])
+        self.mapping = self.dir / "app" / "build" / "outputs" / "mapping" / "profiling" / "mapping.txt"
+        write(self.mapping, MAPPING.read_text(encoding="utf-8"))
+        old = time.time() - 30 * 24 * 3600  # generado mucho antes de la instalación simulada (2026-11-05 10:00:00)
+        os.utime(str(self.mapping), (old, old))
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["instalar"] = "./gradlew :app:installProfiling"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.trace = self.plan.parent / "prueba" / "home_1.perfetto-trace.gz"
+        write(self.trace, "x")
+        perf.save_trace_config(self.trace.parent, self.trace.name, skill_config("cpu"), "2099-01-01 10:00:00")
+        self.tp_outputs(CPU_TABLE)
+
+    def install_retrace(self):
+        path = self.dir / "bin" / "retrace"
+        path.write_text(textwrap.dedent(FAKE_RETRACE).replace("{python}", sys.executable).replace("{{", "{")
+                        .replace("}}", "}"), encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+    def consulta(self, *extra):
+        if (self.dir / "tp.count").exists():
+            (self.dir / "tp.count").unlink()
+        return self.ok("consulta", self.trace, "cpu_por_libreria", "--ancho", "120", *extra)
+
+    def test_cpu_por_libreria_sale_con_los_nombres_reales_y_avisa_lo_que_no_pudo(self):
+        self.install_retrace()
+        out = self.consulta()
+        self.assertIn("✔ Desofuscado con app/build/outputs/mapping/profiling/mapping.txt (verificado solo por fecha", out)
+        self.assertIn("| main | base.odex | com.example.app.data.Repo.load o com.example.app.data.Repo.save | 40 |", out)
+        self.assertIn("| main | base.odex | com.example.app.data.Repo.refresh | 12 |", out)
+        self.assertIn("| main | boot-framework.oat | android.os.Handler.dispatchMessage | 9 |", out)  # lo que no es de la app, igual
+        self.assertIn("⚠ 1 nombre sigue ofuscado después de aplicar el mapping (x.y.z)", out)  # render.cold es nativo: no cuenta
+        self.assertIn("| main | libexample.so | render.cold | 2 |", out)
+        self.assertIn("mide con una variante sin cifrado de clases", out)
+        self.assertIn("· Código nativo sin símbolos: se muestra la librería, no la función", out)
+        self.assertNotIn("| a.b.a |", out)
+
+    def test_un_mapping_posterior_a_la_instalacion_no_se_usa_salvo_que_se_pase_con_mapping(self):
+        self.install_retrace()
+        perf.save_trace_config(self.trace.parent, self.trace.name, skill_config("cpu"), "2020-01-01 10:00:00")
+        out = self.consulta()
+        self.assertIn("⚠ Sin desofuscar: el mapping se generó después de instalar la app", out)
+        self.assertIn("| main | base.odex | a.b.a | 40 |", out)  # los nombres quedan como estaban
+        out = self.consulta("--mapping", self.mapping)
+        self.assertIn("sin verificar contra el APK instalado: se usa porque lo pasaste con --mapping", out)
+        self.assertIn("com.example.app.data.Repo.refresh", out)
+
+    def test_sin_retrace_dice_como_instalarlo_y_sigue_sin_desofuscar(self):
+        out = self.consulta()
+        self.assertIn("· Sin desofuscar: falta `retrace`", out)
+        self.assertIn("cmdline-tools;latest", out)
+        self.assertIn("| main | base.odex | a.b.a | 40 |", out)
+
+    def test_sin_mapping_o_con_uno_de_otro_ofuscador_avisa_y_nunca_falla(self):
+        self.install_retrace()
+        self.mapping.unlink()
+        out = self.consulta()
+        self.assertIn("· Sin desofuscar: no encontré el mapping de la variante profiling", out)
+        self.assertIn("| main | base.odex | a.b.a | 40 |", out)
+        write(self.mapping, "<?xml version='1.0'?>\n<mapa cifrado='si'/>\n")
+        out = self.consulta()
+        self.assertIn("no tiene el formato de un mapping de ProGuard/R8", out)
+        self.assertIn("mide con una variante sin cifrado de clases", out)
+
+    def test_sin_nombres_ofuscados_no_busca_el_mapping_ni_imprime_nada(self):
+        self.tp_outputs('"hilo","libreria","funcion","muestras"\n"main","base.odex","com.example.app.data.Repo.load",40\n')
+        out = self.consulta()
+        self.assertNotIn("esofusc", out)
+        self.assertIn("com.example.app.data.Repo.load", out)
+
+    def test_la_pila_de_un_crash_en_capturar_sale_desofuscada(self):
+        self.install_retrace()
+        self.tp_outputs(GOOD)
+        self.env["FAKE_DEAD"] = "1"
+        self.env["FAKE_CRASH_FRAMES"] = "\tat a.b.b(SourceFile:7)|\tat com.example.app.MainActivity.onCreate(SourceFile:20)"
+        self.env["FAKE_UPDATED"] = "2099-01-01 10:00:00"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("IllegalStateException: boom", result.stdout)
+        self.assertIn("at com.example.app.data.Repo.refresh(Repo.kt)", result.stdout)
+        self.assertNotIn("at a.b.b(", result.stdout)
+        self.assertIn("✔ Desofuscado con", result.stdout)
+
+    def test_salidas_desofusca_la_pila_del_crash(self):
+        self.install_retrace()
+        write(self.dir / "exit-info.txt", EXIT_ANDROID_11)
+        self.env.update({"FAKE_EXIT_INFO": str(self.dir / "exit-info.txt"), "FAKE_UPDATED": "2099-01-01 10:00:00",
+                         "FAKE_CRASH_FRAMES": "\tat a.b.b(SourceFile:7)"})
+        out = self.ok("salidas", "--carpeta", self.plan.parent)
+        self.assertIn("Crash de las 10:00:01 (pid 1234), inicio de la pila (logcat -b crash):", out)
+        self.assertIn("at com.example.app.data.Repo.refresh(Repo.kt)", out)
+        self.assertNotIn("at a.b.b(", out)
+        result = self.perf("salidas", "--carpeta", self.plan.parent, "--mapping", self.dir / "no-existe.txt")
+        self.assertEqual(result.returncode, 2)  # un --mapping que no existe se dice al empezar
+        self.assertIn("no existe el mapping", result.stderr)
+
+    def test_diagnostico_desofusca_la_tabla_y_deja_la_nota_en_el_archivo(self):
+        self.install_retrace()
+        folder = self.plan.parent
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "jank_app_pct", [10]))
+        write(folder / "antes" / "home_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "antes", "home_1.perfetto-trace.gz", skill_config("cpu"))
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 1,
+                                                         "instalada": "2099-01-01 10:00:00"}}))
+        self.env["FAKE_TP_POR_CONSULTA"] = json.dumps({"cpu_por_libreria": CPU_TABLE})
+        self.env["FAKE_TP_OTRA"] = '"a"\n'
+        self.tp_outputs('"x"\n1\n')
+        self.ok("diagnostico", "--carpeta", folder)
+        md = (folder / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("| main | base.odex | com.example.app.data.Repo.refresh | 12 |", md)
+        self.assertIn("_Desofuscado con", md)
+        self.assertIn("nombre sigue ofuscado después de aplicar el mapping (x.y.z)", md)
+
+
+@unittest.skipUnless(REAL_RETRACE and not os.environ.get("CI"),
+                     "validación local con retrace (cmdline-tools del SDK) y un mapping inventado; en el CI no corre")
+class RealRetraceTest(PerfBase):
+    def deobfuscator(self):
+        return perf.Deobfuscator({"paquete": "com.example.app"}, self.dir, str(MAPPING))
+
+    def test_nombres_sueltos_y_una_pila_con_lineas(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            tool = self.deobfuscator()
+            names = tool.names(["a.b.a", "a.b.b", "android.os.Handler.dispatchMessage", "?"])
+            stack = tool.stack(["E AndroidRuntime: java.lang.IllegalStateException: boom",
+                                "E AndroidRuntime: \tat a.b.b(SourceFile:7)", "E AndroidRuntime: \tat a.b.a(SourceFile:3)"])
+        # sin depender de la versión de retrace: ni el orden de los candidatos ni el formato exacto de la línea
+        self.assertEqual(set(names), {"a.b.a", "a.b.b"})
+        self.assertEqual(set(names["a.b.a"].split(" o ")), {"com.example.app.data.Repo.load", "com.example.app.data.Repo.save"})
+        self.assertIn("com.example.app.data.Repo.refresh", names["a.b.b"])
+        text = "\n".join(stack)
+        self.assertIn("com.example.app.data.Repo.refresh(", text)
+        self.assertIn("com.example.app.data.Repo.load(", text)
+        self.assertNotIn("at a.b.", text)
+
+
+EXIT_HEAD = ("ACTIVITY MANAGER PROCESS EXIT INFO (dumpsys activity exit-info)\n"
+             "Last Timestamp of Persistence Into Persistent Storage: 2026-11-05 10:00:05.000\n"
+             "  package: com.example.app\n    Historical Process Exit for uid=10234\n")
+
+
+def exit_entry(index, stamp, pid, reason, extra="", description="crash", trace="null", memory="pss=118MB rss=201MB"):
+    return ("        ApplicationExitInfo #%d:\n          timestamp=%s pid=%d realUid=10234 packageUid=10234 definingUid=10234 "
+            "user=0 process=com.example.app reason=%s %sstatus=0 importance=100 %s description=%s state=empty trace=%s\n"
+            % (index, stamp, pid, reason, extra, memory, description, trace))
+
+
+# Muestras inventadas con la forma que imprime la plataforma en cada versión.
+EXIT_ANDROID_11 = EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.120", 1234, "4 (APP CRASH(EXCEPTION))") + \
+    exit_entry(1, "2026-11-05 09:50:00.000", 4000, "10 (USER REQUESTED)", memory="pss=0.00 rss=0.00",
+               description="stop com.example.app due to from pid 999")
+EXIT_ANDROID_13 = EXIT_HEAD + \
+    exit_entry(0, "2026-11-05 10:00:01.500", 1234, "3 (LOW_MEMORY)", "subreason=3 (MEMORY PRESSURE) ", description="null") + \
+    exit_entry(1, "2026-11-05 09:40:00.000", 3900, "6 (ANR)", "subreason=0 (UNKNOWN) ",
+               description="user request after error: Input dispatching timed out", trace="/data/system/procexitstore/anr_1.gz") + \
+    exit_entry(2, "2026-11-05 09:30:00.000", 3800, "5 (APP CRASH(NATIVE))", "subreason=0 (UNKNOWN) ", description="null")
+EXIT_ANDROID_16 = EXIT_HEAD + \
+    exit_entry(0, "2026-11-05 10:00:01.900", 1234, "9 (EXCESSIVE RESOURCE USAGE)", "subreason=7 (EXCESSIVE CPU USAGE) ",
+               description="excessive cpu 12000 during 300000 dur=600000 limit=2") + \
+    exit_entry(1, "2026-11-05 09:20:00.000", 3700, "16 (PACKAGE UPDATED)", "subreason=0 (UNKNOWN) ", description="null") + \
+    exit_entry(2, "2026-11-05 09:10:00.000", 3600, "14 (FREEZER)", "subreason=0 (UNKNOWN) ", description="null") + \
+    exit_entry(3, "2026-11-05 09:00:00.000", 3500, "2 (SIGNALED)", "subreason=0 (UNKNOWN) ", description="null")
+
+
+class ExitInfoTest(DeviceBase):
+    """Por qué se cerró la app: el parser de exit-info, `perf.py salidas` y la detección por corrida en `capturar`."""
+
+    def exit_info(self, text):
+        # el proceso principal se llama como el paquete del plan de estos tests
+        write(self.dir / "exit-info.txt", text.replace("process=com.example.app ", "process=%s " % PKG))
+        self.env["FAKE_EXIT_INFO"] = str(self.dir / "exit-info.txt")
+
+    def test_lee_las_salidas_de_android_11_sin_submotivo(self):
+        first, second = perf.parse_exit_info(EXIT_ANDROID_11)
+        self.assertEqual(first, {"hora": "2026-11-05 10:00:01.120", "proceso": "com.example.app", "pid": 1234, "motivo": 4, "motivo_texto": "crash",
+                                 "submotivo": "", "estado": "0", "importancia": "100", "pss": "118MB", "rss": "201MB",
+                                 "descripcion": "crash", "traza": ""})
+        self.assertEqual((second["motivo"], second["descripcion"], second["pid"]),
+                         (10, "stop com.example.app due to from pid 999", 4000))
+        self.assertIn("detenida a pedido del usuario", second["motivo_texto"])
+
+    def test_lee_submotivo_traza_y_los_motivos_de_versiones_mas_nuevas(self):
+        memory, anr, native = perf.parse_exit_info(EXIT_ANDROID_13)
+        self.assertEqual((memory["motivo_texto"], memory["submotivo"], memory["descripcion"]),
+                         ("poca memoria (la cerró el sistema)", "MEMORY PRESSURE", ""))
+        self.assertEqual((anr["motivo_texto"], anr["submotivo"], anr["traza"]),
+                         ("ANR", "", "/data/system/procexitstore/anr_1.gz"))
+        self.assertIn("Input dispatching timed out", anr["descripcion"])
+        self.assertEqual(native["motivo_texto"], "crash nativo")
+        texts = [entry["motivo_texto"] for entry in perf.parse_exit_info(EXIT_ANDROID_16)]
+        self.assertEqual(texts, ["uso excesivo de recursos", "paquete actualizado", "detenida por el freezer",
+                                 "señal del sistema operativo"])
+        self.assertEqual(perf.exit_text(perf.parse_exit_info(EXIT_ANDROID_16)[0]),
+                         "uso excesivo de recursos · excessive cpu usage (excessive cpu 12000 during 300000 dur=600000 limit=2)")
+
+    def test_un_campo_que_falta_queda_vacio_y_uno_que_no_conoce_no_rompe(self):
+        self.assertEqual(perf.parse_exit_info(""), [])
+        self.assertEqual(perf.parse_exit_info(EXIT_HEAD), [])
+        entry, = perf.parse_exit_info("ApplicationExitInfo #0:\n  timestamp=2026-11-05 10:00:01.120 campoNuevo=7 "
+                                      "reason=99 (ALGO NUEVO) otroNuevo=x\n")
+        self.assertEqual((entry["hora"], entry["pid"], entry["motivo"], entry["pss"], entry["descripcion"]),
+                         ("2026-11-05 10:00:01.120", None, 99, "", ""))
+        self.assertIn("motivo 99", entry["motivo_texto"])
+        entry, = perf.parse_exit_info("ApplicationExitInfo #0:\n  pid=12\n")
+        self.assertEqual((entry["hora"], entry["motivo"], entry["motivo_texto"]), ("", None, "sin dato"))
+
+    def test_las_salidas_de_una_corrida_filtran_por_ventana_por_pid_y_por_lo_que_ya_estaba(self):
+        entries = perf.parse_exit_info(EXIT_ANDROID_11)
+        before = ("2026-11-05 10:00:00", 1234, entries[1:])
+        after = ("2026-11-05 10:00:02", None, entries)
+        self.assertEqual([e["pid"] for e in perf.run_exits(before, after, 1234)], [1234])
+        self.assertEqual(perf.run_exits(before, after, 5555), [])  # no es el proceso medido
+        self.assertEqual(perf.run_exits(before, after, None, killed=(1234,)), [])  # el que detiene la propia skill
+        self.assertEqual(perf.run_exits(("2026-11-05 10:00:02", 1234, entries[1:]), ("2026-11-05 10:00:03", None, entries), 1234),
+                         [])  # pasó antes de que empezara la corrida
+        self.assertEqual(perf.run_exits(("2026-11-05 10:00:00", 1234, entries), after, 1234), [])  # ya estaba registrada
+        self.assertEqual(perf.run_exits(("", None, []), after, 1234), [])  # sin hora del dispositivo no se afirma nada
+        # un proceso secundario de la app (un servicio en otro proceso) no es el que se mide
+        other = perf.parse_exit_info(EXIT_ANDROID_11.replace("process=com.example.app reason=4", "process=com.example.app:push reason=4"))
+        self.assertEqual(perf.run_exits(before, ("2026-11-05 10:00:02", None, other), None, package="com.example.app"), [])
+        self.assertEqual(len(perf.run_exits(before, after, None, package="com.example.app")), 1)
+
+    def test_salidas_imprime_la_tabla_en_espanol_y_acota_con_desde_y_limite(self):
+        self.exit_info(EXIT_ANDROID_13)
+        out = self.ok("salidas", "--paquete", "com.example.app")
+        self.assertIn("| Hora | pid | Motivo | Descripción | PSS | RSS |", out)
+        self.assertIn("| 2026-11-05 10:00:01.500 | 1234 | poca memoria (la cerró el sistema) · memory pressure | — | 118MB | 201MB |",
+                      out)
+        self.assertIn("| ANR |", out)
+        self.assertIn("| crash nativo |", out)
+        self.assertIn("Con traza del sistema (ANR o crash nativo): 09:40:00 ANR", out)
+        out = self.ok("salidas", "--paquete", "com.example.app", "--limite", "1")
+        self.assertNotIn("| ANR |", out)
+        self.assertIn("… 2 salidas más", out)
+        out = self.ok("salidas", "--paquete", "com.example.app", "--desde", "2026-11-05 09:35")
+        self.assertIn("| ANR |", out)
+        self.assertNotIn("| crash nativo |", out)
+        out = self.ok("salidas", "--paquete", "com.example.app", "--desde", "2026-11-06")
+        self.assertIn("Sin salidas registradas de com.example.app desde 2026-11-06", out)
+        self.assertIn("no cubre lo que pasó antes", out)
+
+    def test_salidas_muestra_la_pila_del_crash_y_toma_el_paquete_del_plan(self):
+        self.exit_info(EXIT_ANDROID_11)
+        out = self.ok("salidas", "--carpeta", self.plan.parent)  # el paquete del plan es com.ejemplo.app
+        self.assertIn("| 2026-11-05 10:00:01.120 | 1234 | crash | crash | 118MB | 201MB |", out)
+        self.assertIn("Crash de las 10:00:01 (pid 1234), inicio de la pila (logcat -b crash):", out)
+        self.assertIn("IllegalStateException: boom", out)
+        result = self.perf("salidas")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--paquete", result.stderr)
+
+    def test_en_android_10_dice_que_no_esta_disponible(self):
+        self.env["FAKE_SDK"] = "29"
+        out = self.ok("salidas", "--paquete", "com.example.app")
+        self.assertIn("no disponible (Android 11 o superior; el dispositivo tiene API 29)", out)
+        self.assertIn("No quiere decir que la app no se haya cerrado", out)
+
+    def capture(self, *extra):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar", *extra)
+
+    def test_una_salida_del_proceso_medido_dentro_de_la_corrida_la_invalida_con_el_motivo(self):
+        self.tp_outputs(GOOD)
+        self.exit_info(EXIT_ANDROID_13)  # poca memoria a las 10:00:01, pid 1234: dentro de la primera corrida
+        result = self.capture("--fase", "antes", "--corridas", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✖ corrida 1 inválida: la app salió: poca memoria (la cerró el sistema) · memory pressure", result.stdout)
+        self.assertIn("corrida 2/2", result.stdout)  # se repite con las reglas de siempre
+        folder = self.plan.parent
+        self.assertTrue(any("_invalida_la-app-sali" in f.name for f in (folder / "antes").iterdir()))
+        runs = {r["corrida"] for r in perf.read_rows(folder / "metricas.csv")}
+        self.assertEqual(len(runs), 2)
+
+    def test_el_force_stop_y_las_salidas_de_otro_proceso_o_de_antes_no_invalidan(self):
+        self.tp_outputs(GOOD)
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 1234, "10 (USER REQUESTED)",
+                                              description="stop com.example.app due to from pid 999"))
+        result = self.capture("--fase", "antes", "--corridas", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("inválida", result.stdout)
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 777, "4 (APP CRASH(EXCEPTION))")
+                       + exit_entry(1, "2026-11-05 09:00:00.000", 1234, "4 (APP CRASH(EXCEPTION))"))
+        result = self.capture("--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("inválida", result.stdout)
+
+    def test_en_un_arranque_en_frio_ignora_el_proceso_que_detiene_la_skill_y_ve_el_del_proceso_nuevo(self):
+        write(self.plan, json.dumps({"paquete": PKG, "hz": 60, "principales": ["ttid_ms"], "flujos": {"arranque": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 0}}}}))
+        self.tp_outputs(GOOD)
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 1234, "10 (USER REQUESTED)",
+                                              description="stop com.example.app due to from pid 999"))
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Salida de la app", result.stdout)  # era el proceso anterior, que detuvo perf.py
+        self.exit_info(EXIT_HEAD + exit_entry(0, "2026-11-05 10:00:01.000", 4321, "4 (APP CRASH(EXCEPTION))"))
+        (self.dir / "adb.log.salidas").unlink()
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("✖ Salida de la app durante la corrida (10:00:01, pid 4321): crash (crash)", result.stdout)
+        self.assertIn("la corrida de prueba fue inválida: la app salió: crash", result.stderr)
+
+    def test_si_la_app_se_cayo_el_motivo_es_el_de_exit_info_y_se_mantiene_el_aviso_de_crash(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_DEAD"] = "1"
+        self.exit_info(EXIT_ANDROID_11)
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("✖ La app se cayó durante la corrida. Inicio del crash (logcat -b crash):", result.stdout)
+        self.assertIn("IllegalStateException: boom", result.stdout)
+        self.assertIn("la app salió: crash", result.stderr)
+
+    def test_en_android_10_avisa_una_vez_que_no_hay_registro_de_salidas(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_SDK"] = "29"
+        self.exit_info(EXIT_ANDROID_11)
+        result = self.capture("--fase", "antes", "--corridas", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("sin registro de salidas de la app por corrida"), 1)
+        self.assertNotIn("inválida", result.stdout)

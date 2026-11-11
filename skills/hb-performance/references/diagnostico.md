@@ -24,10 +24,23 @@ Cruza la evidencia con el código para encontrar las causas y propone un plan de
 | `cpu_por_hilo` | CPU, espera y sueño por grupo de hilos (base de datos, red, dispatchers). Si el plan declara `hilos_ajenos`, los grupos que calzan con esas expresiones no son de la app: no los cuentes como trabajo de la app |
 | `contencion_locks` | Hilos que esperan un lock, con su dueño y el lugar |
 | `binder_hilo_principal` | IPC síncrono que bloquea el hilo principal |
+| `bloqueo_hilo_principal` (solo en una captura con `--config completa`) | Por qué espera el hilo principal dentro de los frames más largos: en `D`, la función del kernel que lo bloquea y si es E/S; en `S`, el hilo que lo despertó |
 | `jank_por_tipo` | Frames por tipo de jank |
 | `linea_de_tiempo` | Marcas propias en orden: qué precede a cada llamada |
 | `llamadas_solapadas`, `inflate_tras_http` | Cargas duplicadas y vistas recreadas con cada respuesta (si hay red) |
 | Red por tramo (si el plan tiene `segmentos`) | Qué llamadas empiezan en cada tramo del flujo: cuántas, a qué endpoints, su duración y su TTFB medianos, las repetidas y las solapadas, y las que quedan fuera de todos los tramos |
+
+### "No medido" no es "sin problema"
+
+Cada consulta declara en su cabecera qué fuentes de la traza necesita (`-- requiere:`) y `perf.py` lo valida contra la configuración con la que se grabó **esa** traza (queda registrada junto a las trazas, en `configuracion.json`). Una consulta sin tabla sale al final de `diagnostico.md` de una de estas tres formas, y no se leen igual:
+
+| Lo que dice | Qué quiere decir | Qué puedes afirmar |
+| --- | --- | --- |
+| `Medido y sin casos` | La configuración de la traza captura lo que la consulta necesita y no hubo filas | Que no ocurrió en esa corrida: sirve como evidencia para descartar (sección 8), salvo que ese dato no salga en **ninguna** corrida ni consulta de ese dispositivo (un kernel que no emite el evento): entonces compruébalo con `consulta --sql` antes de afirmarlo |
+| `no medido: la configuración <nombre> no captura <fuente>` o `no medido: el dispositivo no entrega <fuente>` | La traza no tiene ese dato: la configuración no lo graba, o ese Android no lo tiene (FrameTimeline, antes de Android 12) | Nada. Si la pregunta importa, pide la captura con la configuración que sí lo trae (`cpu` o `completa`, con `--prueba`) |
+| `configuración desconocida` | La traza es de una versión anterior de la skill y no se sabe qué capturó | Nada: no afirmes ausencia. Una corrida nueva lo resuelve |
+
+Un hallazgo `descartado` nunca se apoya en una consulta "no medida" ni en una de "configuración desconocida".
 
 ## 3. Una pregunta puntual
 
@@ -48,20 +61,50 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py consulta <carpeta>/prueba/<flujo>_1.perfetto-trace.gz cpu_por_libreria --param HILO='<prefijo-del-hilo>*'
 ```
 
-La corrida de prueba no fija la compilación de ART: si el build se acaba de instalar y todavía no se midió ninguna fase con él, agrega `--compilar`, o el muestreo va a mostrar al intérprete y al JIT en lugar del código de la app. Las librerías nativas sin símbolos muestran la librería y no la función; el código Java o Kotlin sale ofuscado por R8: desofúscalo con el mapping de profiling.
+La corrida de prueba no fija la compilación de ART: si el build se acaba de instalar y todavía no se midió ninguna fase con él, agrega `--compilar`, o el muestreo va a mostrar al intérprete y al JIT en lugar del código de la app. Las librerías nativas sin símbolos muestran la librería y no la función. El código Java o Kotlin sale ofuscado por R8 y `consulta` lo desofusca sola con el mapping de la variante medida (`--mapping <ruta>` si no lo encuentra o no lo puede verificar): si en la salida dice `Sin desofuscar`, lee el motivo antes de atribuir nada a una función ([setup.md](setup.md) · Desofuscación automática). Un nombre con varios candidatos (`A.x o A.y`) no está resuelto: confírmalo en el código.
 
 **Compose y R8: qué nombres trae la traza.** Sin composition tracing, la traza no nombra los composables: muestra los frames y cuánto duran, no qué función los ocupa. Con R8, las clases y los métodos de las muestras de CPU, las pilas y el heap salen ofuscados; las secciones propias (`MARK`, `NAV`, `HTTP`…) son texto y no cambian. Antes de atribuir un frame largo a un composable o a un método, consigue el nombre ([setup.md](setup.md) · Atribución en Compose y con R8); si no lo consigues, el hallazgo queda `sin confirmar` y, si el síntoma es estable, puede ir como mejora a prueba (abajo).
 
 `android-profiler` queda para heap dumps y fugas, o el triage guiado de una traza anómala; su documentación es extensa: cárgala una vez, para esa pregunta. Para Compose, `jetpack-compose-performance`. Para ANR, `anr-audit-and-fix`.
 
-## 5. Leer la red
+## 5. Por qué espera el hilo principal
+
+`dormido_en_frames_largos` dice **dónde** duerme el hilo principal dentro de los frames más largos, no **por qué**. Cuando esa espera pesa (25 % o más del tiempo de los 3 frames más largos en `S` o `D`, o una espera de 4 ms o más en `D`; son las constantes `BLOCKED_SHARE_MIN` y `BLOCKED_D_MIN_MS` de `perf.py`), `perf.py diagnostico` deja en `diagnostico.md` una "Captura pendiente" con el comando, y `siguiente` la ofrece como paso opcional antes del chat:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --prueba --config completa
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py consulta <carpeta>/prueba/<flujo>_1.perfetto-trace.gz bloqueo_hilo_principal
+```
+
+- **`D` (bloqueado sin poder interrumpirse):** `bloqueado_en` trae la función del kernel y si es E/S (lectura de disco, una falla de página, un lock del kernel). `no disponible en este dispositivo` quiere decir que el kernel no emite la razón de bloqueo: no es "sin bloqueos".
+- **`S` (dormido):** `lo_desperto` trae el hilo y el proceso que lo despertaron: otro hilo de la app (espera un resultado: un `runBlocking`, un `Future.get`, un lock), un hilo de binder de otro proceso (IPC síncrono; crúzalo con `binder_hilo_principal`) o el sistema.
+- La señal sale de los frames largos y no de `estado_hilo_principal`, que cubre toda la traza: el hilo principal duerme legítimamente cuando no tiene nada que hacer.
+- `completa` pesa varias veces más que `base`: es para entender, con `--prueba`; no para medir fases.
+
+## 6. Por qué se cerró la app
+
+Si una corrida salió inválida con "la app salió: <motivo>", o el síntoma es que la app se cierra, se reinicia o pierde el estado, el sistema guarda el motivo de cada salida del proceso (Android 11 o superior):
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py salidas --carpeta <carpeta> --limite 10
+```
+
+Imprime una tabla corta con la hora (del dispositivo), el pid, el motivo en claro (crash, crash nativo, ANR, poca memoria, uso excesivo de recursos, señal, detenida por el sistema o a pedido del usuario), la descripción y la memoria (PSS y RSS) al salir. Para un crash agrega el inicio de su pila, desofuscada si hay mapping. `--paquete` en vez de `--carpeta` si no hay investigación; `--desde "AAAA-MM-DD HH:MM"` acota.
+
+- **Poca memoria** con un PSS alto apunta a la app; con un PSS normal, a la presión del dispositivo (otras apps): no es un hallazgo de la app sin más evidencia (`--memoria`, `android-profiler`).
+- **Uso excesivo de recursos** y **ANR** traen la causa en la descripción; para la traza del ANR, `anr-audit-and-fix`.
+- Los cierres **a pedido** (un `force-stop`, reinstalar) también quedan registrados y no son fallas: `capturar` no invalida corridas por ellos.
+- **Límite:** esto es lo que pasó en el dispositivo de quien investiga. Lo que pasa en los teléfonos de los usuarios se mira con Android vitals (Play Console), con Crashlytics o con `ProfilingManager` ([medicion.md](medicion.md) · Salidas inesperadas de la app); la skill no los integra.
+- En Android 10 dice `no disponible (Android 11 o superior)`: no quiere decir que la app no se haya cerrado.
+
+## 7. Leer la red
 
 - **Duplicados:** `red_solapadas` o `red_repetidas_2s` mayores que 0 (la misma plantilla **y** la misma query), o más llamadas que las esperadas en el mapa.
 - **Dónde se va el tiempo de una llamada:** `ms` = `cola_ms` (cola del dispatcher e interceptores) + conexión nueva (`red_conexion_ms`: DNS, TCP y TLS) + `ttfb_ms` (servidor y red) + `cliente_ms` (envío, lectura del body y conversión). La lectura de cada una está en [red.md](patrones/red.md).
 - **Huecos:** antes de la llamada, con el hilo principal ocupado, la app tarda en dispararla; después, antes de que cambie la UI, el parseo o el mapeo es pesado.
 - **Por tramo:** con `segmentos`, la tabla "Red por tramo" de `diagnostico.md` dice qué llamadas hace la app en cada parte del flujo (cada llamada va al tramo donde empieza) y las métricas `<tramo> red_*` lo miden en todas las corridas. En un tramo con polling (la app consulta un estado hasta que cambia), la cantidad de llamadas depende de cuánto tardó lo que se espera, sea el backend o una persona: explica el patrón (cuántas consultas y cada cuánto) y compara medianas, sin leer una o dos llamadas de diferencia como hallazgo.
 
-## 6. Descartar exige evidencia de la traza
+## 8. Descartar exige evidencia de la traza
 
 Un hallazgo `descartado` afirma que la causa **no** ocurrió, y eso también se prueba: con un slice o una marca que muestran que corrió otro camino, o con una ausencia medible (0 llamadas, ningún slice con ese nombre, 0 ms en ese tramo). El valor de una configuración estática no alcanza.
 
@@ -70,13 +113,13 @@ Un hallazgo `descartado` afirma que la causa **no** ocurrió, y eso también se 
 - **Cruza cada hipótesis de la ficha con los picos medidos.** Un pico estable en el tramo donde la hipótesis lo predice es evidencia a favor aunque el código parezca decir lo contrario: explica el pico antes de descartar la hipótesis.
 - **Un pico de una sola pantalla se diluye en la ventana.** Si el síntoma vive en un tramo (entrar a una pantalla, un scroll) y el plan no tiene su métrica, propón un `segmentos` para ese tramo ([ficha.md](ficha.md)): sale en todas las corridas, con ruido y veredicto.
 
-## 7. Entregable
+## 9. Entregable
 
 1. **Resumen ejecutivo** en `estado.md`, de 3 a 5 líneas, **también para el reporte inicial**: qué se midió, qué se encontró y qué se propone, o por qué no hay mejoras. Reemplaza el texto de la plantilla: `perf.py reporte` avisa si sigue ahí y no lo publica.
 2. **Hallazgos** en `estado.md`, ordenados por impacto, con evidencia (métrica, consulta y `archivo:línea`). En "Tipo" usa una de estas palabras, porque el reporte las explica al lector:
    - `bug` (hay que corregirlo) o `mejorable` (intencional, se decide con el negocio): dan lugar a una mejora.
    - `consecuencia de H#`: lo arregla otro hallazgo.
-   - `descartado`: se investigó y la traza muestra que no es la causa (sección 6). No genera mejora.
+   - `descartado`: se investigó y la traza muestra que no es la causa (sección 8). No genera mejora.
    - `sin confirmar` (antes `sin veredicto estadístico`, que se sigue leyendo): no se pudo confirmar ni descartar. No quiere decir que falten trazas ni que la captura fallara. Separa siempre las dos cosas en la fila: en "Síntoma" y "Evidencia", **si el síntoma es estable** (tiene su métrica, en cuántas corridas, con qué ruido) o si salió de una consulta sobre una o dos trazas; en "Causa raíz", que **la causa no está probada**; y en la columna **"Qué falta para decidir"**, lo que lo cerraría: una métrica propia del tramo (`segmentos`), otra clase de captura (`--config cpu`, composition tracing) o probar un cambio. Repetir las mismas corridas no lo cierra. Si el síntoma es estable y está fuera de presupuesto, da lugar a una mejora a prueba (abajo).
 
    La columna "Qué falta para decidir" es opcional (una tabla sin ella se sigue leyendo) y va vacía (`—`) en los demás tipos.

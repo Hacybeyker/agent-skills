@@ -26,8 +26,8 @@ Qué hace, en orden:
    Compilar tarda: en una app grande, varios minutos. `capturar` lo avisa antes de empezar ("… fijando la compilación de ART… no es un cuelgue") y al terminar dice cuánto tardó; lo mismo con cada traza que procesa ("… procesando la traza 2 de 10"). Con `completa`, si la app ya tiene el filtro `speed` en todo su código (lo lee de `dumpsys package dexopt`) y es la misma instalación en la que esta investigación la compiló la última vez (versión y fecha de instalación, guardadas en `<carpeta>/compilacion.json`), no recompila y lo dice; `--recompilar` la fuerza. Un build recién instalado, otro filtro o una salida que no se puede leer compilan como siempre.
 
    Sin esto, un build recién instalado corre con JIT y parece una regresión que no existe. Con `completa`, el TTID suele salir algo más alto que con `perfil` (un ejecutable más grande que cargar): sirve para comparar fases entre sí, no como el TTID que verá el usuario de Play. Cada corrida guarda `jit_ms` (informativa) y `comparar` avisa si la compilación o el JIT cambiaron entre fases. Después, el **calentamiento** (una corrida que no cuenta).
-3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash y cómo desofuscarlo), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**.
-4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase, la tasa de refresco que midió cada corrida en `hz_corridas`, los avisos y, en `flujos`, lo de cada flujo). Si el `hz` del plan difiere en más de un 6 % de la tasa que midió la traza, o si no hay `hz` y la tasa cambió entre corridas, lo avisa en la salida, en "Métricas" de `estado.md` y en `avisos` de `fases.json`; `comparar` lo repite. El presupuesto de frame se calculó con el `hz` del plan: corrígelo y repite lo medido así con `--rehacer`.
+3. **Por cada corrida:** corre `preparar` (o relanza la app si no está al frente), valida la pantalla de inicio, inicia Perfetto, recorre el flujo (Enter, el comando o el arranque), cierra la traza, comprueba que la app siga viva (si se cayó, imprime el inicio del crash, desofuscado si encuentra el mapping de la variante medida) y que el sistema no haya registrado una salida del proceso medido durante la corrida (abajo, "Salidas inesperadas de la app"), corre las consultas, agrega las filas a `metricas.csv`, comprime la traza e imprime **una línea**. Si en la carpeta de la fase quedó una traza con el número de la corrida que toca y sin fila en `metricas.csv` (una captura que se cortó entre bajar la traza y escribir la métrica), no la pisa: la aparta en `<fase>-descartada-<hora>/` y lo avisa.
+4. **Al final:** un resumen compacto, `resumen.md`, la sección "Métricas" de `estado.md` y `fases.json` (fecha, commit, versión, fecha de instalación y Hz de cada fase, la tasa de refresco que midió cada corrida en `hz_corridas`, los avisos, la versión de la skill y la configuración de Perfetto con que se midió, y, en `flujos`, lo de cada flujo). Además, cada carpeta de trazas (`antes/`, `control/`, `despues/`, `prueba/`) lleva un `configuracion.json` con la configuración de cada traza: su nombre, una huella de su contenido y las fuentes que captura. Si el `hz` del plan difiere en más de un 6 % de la tasa que midió la traza, o si no hay `hz` y la tasa cambió entre corridas, lo avisa en la salida, en "Métricas" de `estado.md` y en `avisos` de `fases.json`; `comparar` lo repite. El presupuesto de frame se calculó con el `hz` del plan: corrígelo y repite lo medido así con `--rehacer`.
 
 Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), con intentos de reserva: 3 como mínimo y la mitad de las pedidas si son más (5 → 8 intentos, 10 → 15, 20 → 30), así que unas pocas inválidas sueltas no cortan una captura larga. Tres inválidas **seguidas** la detienen antes, sin gastar la reserva: algo falla de forma sistemática. Una corrida inválida se guarda como `_invalida_<motivo>` para auditoría y no entra al CSV.
 
@@ -39,6 +39,7 @@ Sigue hasta juntar las corridas válidas pedidas (`--corridas`, por defecto 5), 
 | `--preparar "<comando>"` | Deja la app en el punto de partida antes de cada corrida, en vez del `preparar` del plan. Sin ninguno, si la app no está al frente el script la relanza (la compilación de ART puede cerrarla) y avisa |
 | (`ventana` del plan) | Frames, jank e hilo principal solo entre dos marcas del flujo (`ventana_ms` queda como informativa); sin ventana cubren toda la traza, lo que en un recorrido manual depende de cuánto tarda el usuario en presionar Enter |
 | `--config cpu` | Una captura con muestreo de CPU, solo para el diagnóstico (con `--prueba`) |
+| `--config completa` | Una captura con quién despierta a cada hilo y por qué se bloquea, solo para el diagnóstico (con `--prueba`): la pide `diagnostico` cuando el hilo principal espera dentro de sus frames más largos ([diagnostico.md](diagnostico.md) · Por qué espera el hilo principal) |
 | `--memoria` | `dumpsys meminfo` después de cada corrida: PSS, heaps, actividades y vistas vivas |
 | `--prueba` | Una corrida que imprime las métricas y no escribe el CSV. **No fija la compilación de ART** (sus números no se guardan ni se comparan), así que tarda lo que el recorrido; `--compilar` la fija igual que en una fase. Al terminar dice qué marcas del plan salieron (✔) y cuáles no (✖), la última marca vista con su momento, cuánto dura la traza y cuántas secciones `HTTP` trae, también si la corrida se cortó a la mitad |
 | `--sin-compilar` | No fija la compilación de ART (en una fase, solo para depurar el recorrido: esos números no se comparan con los de otra fase) |
@@ -58,6 +59,21 @@ Cada comando de `perf.py` termina con el paso siguiente, completo y en orden, y 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py siguiente --carpeta <carpeta>
 ```
+
+## De triage a riguroso
+
+Un triage termina en el reporte inicial ("triage cerrado"). Si después quieres aplicar una mejora, no edites `plan.json` a mano:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --profundidad riguroso
+```
+
+Cambia `profundidad`, lo anota en "Decisiones" e imprime lo que falta, en orden: completar `antes` (hasta 10 corridas con recorrido automático; 5 con recorrido manual o con pausa humana), medir `control` y, recién entonces, la decisión. `siguiente` hace la misma comprobación en cualquier investigación rigurosa con mejoras sin decidir: sin la línea base completa y sin control, no ofrece `decidir`.
+
+- **Las corridas del triage cuentan si nada cambió:** mismo build instalado (versión y fecha de instalación), mismas condiciones y la misma versión de la skill. Entonces solo se suman las que faltan (`--fase antes --corridas <faltantes>`).
+- **Si algo cambió, no se completan: se repiten.** Si reinstalaste la app o el build es otro, `capturar` lo avisa y hay que usar `--rehacer`. Si las corridas se midieron con otra versión de la skill (la configuración de la traza pudo cambiar), `siguiente` imprime directamente el comando con `--rehacer`.
+- **Aplicar una mejora invalida el `antes` de otras investigaciones abiertas que pasen por el mismo código.** Su línea base ya no describe el código actual: antes de medir su `después`, repite su `antes` (y `control`) con `--rehacer`, o ciérralas primero.
+- Si el triage no propuso mejoras, no hay nada que pasar a riguroso: el cierre es el corto, sin fase después.
 
 ## Después de medir antes (y control)
 
@@ -97,6 +113,32 @@ Frames con FrameTimeline: Android 12 o superior. En Android 10 y 11, el script u
 | Render por software (SwiftShader, llvmpipe), en emulador o no | `no` | Aviso, y `comparar` y el reporte dan `no confiable` a los frames en lugar de un veredicto; los conteos y los tiempos que no son de frame siguen con el suyo |
 
 Un emulador es una buena herramienta para lo que no depende del hardware: comprobar que las marcas y la red del plan salen (la corrida de prueba), contar llamadas, ver duplicados y el orden en que se disparan. Para decidir con tiempos, mide en un dispositivo físico. Con `no`, relanza el emulador con `-gpu host` (AVD: Graphics = Hardware; `emulator -avd <nombre> -gpu host`) o mide en un dispositivo físico, y repite las fases con `--rehacer`. El entorno queda en `fases.json` (`entorno`; si una fase se mide en varias tandas, conserva el peor nivel: relanzar el emulador con `-gpu host` no la vuelve confiable, hay que repetirla con `--rehacer`) y en la línea "Dispositivo" de `estado.md` cuando el investigador se crea con `nuevo`. Si el recorrido es en un emulador, **no elijas `jank_app_pct` ni `frame_*` como métrica principal** ([ficha.md](ficha.md) · Métricas principales).
+
+## Salidas inesperadas de la app
+
+En Android 11 o superior, `capturar` toma una foto de las salidas del proceso que registra el sistema (`dumpsys activity exit-info`) antes y después de cada corrida, fuera de la traza. Si aparece una salida nueva **del proceso medido y dentro del tiempo de la corrida**, la corrida es inválida con el motivo (`la app salió: poca memoria…`, `crash`, `ANR`, `uso excesivo de recursos`…) y se repite con las reglas de siempre. Detecta lo que el aviso de crash no ve: un cierre por memoria o un ANR que el sistema resolvió reiniciando el proceso.
+
+- **Cuenta el proceso principal de la app:** la salida de un proceso secundario (`<paquete>:servicio`) no invalida la corrida; se ve con `perf.py salidas`.
+- **No cuenta lo que provoca la propia medición:** el `force-stop` de `preparar` y el de la compilación de ART quedan fuera de la ventana de la corrida; en un arranque en frío, el proceso que `perf.py` detiene antes de abrir la app se ignora por su pid. Los cierres a pedido (un `force-stop` del recorrido, una reinstalación) no invalidan.
+- **Con `--prueba`** imprime cada salida que hubo durante la corrida, también las que no invalidan.
+- **En Android 10** lo dice una vez al empezar: no hay registro de salidas, solo el aviso de crash.
+- Para ver el historial fuera de una captura, `perf.py salidas` ([diagnostico.md](diagnostico.md) · Por qué se cerró la app).
+
+**Lo que la skill no mide.** Todo esto pasa en el dispositivo de quien investiga. Lo que pasa en los teléfonos de los usuarios se mira con otras herramientas, que la skill no integra:
+
+| Herramienta | Para qué |
+| --- | --- |
+| Android vitals (Play Console) | Tasas de crash y de ANR, arranques lentos y frames lentos de los usuarios reales, por versión y por dispositivo |
+| Firebase Crashlytics | Pilas de crashes y de ANR de producción, agrupadas |
+| `ProfilingManager` (API 35 o superior) | Que la app pida al sistema un perfil o una traza en el dispositivo del usuario. Desde la API 36 (Android 16) puede dispararlo el sistema: ante un ANR (`TRIGGER_TYPE_ANR`) y al reportar el dibujado completo de un arranque en frío (`TRIGGER_TYPE_APP_FULLY_DRAWN`). Según la guía de Android, desde la API 37 se suman el arranque en frío, la falta de memoria (OOM), el cierre por uso excesivo de CPU y las anomalías que detecta el sistema. Confirma los disparadores de tu `compileSdk` en la [guía de captura por disparadores](https://developer.android.com/topic/performance/tracing/profiling-manager/trigger-based-capture) |
+
+## Con qué configuración se midió
+
+`base` es la configuración de las fases: liviana, con lo que necesitan las métricas y las consultas de diagnóstico (incluidos los dos eventos de binder con los que se arman los slices de IPC). `cpu` y `completa` son capturas de diagnóstico, con `--prueba`.
+
+- **Por traza.** `capturar` anota la configuración de cada traza. `diagnostico` y `consulta` la usan para no confundir "no lo medí" con "no hay problema": si a la traza le falta una fuente que la consulta necesita, dicen `no medido` en vez de mostrar una tabla vacía ([diagnostico.md](diagnostico.md) · "No medido" no es "sin problema"). Se guarda junto a las trazas y no solo en `fases.json` porque también hace falta para las de `--prueba` y porque `consulta` recibe una traza suelta.
+- **Por fase.** `fases.json` guarda `configs` (`<nombre>@<huella>`) por fase y por flujo. `comparar` avisa, sin bloquear, si antes, control y después de un flujo no se midieron con la misma configuración (también si una fase es de una versión anterior, que no lo registraba): lo que cada una captura y su costo pueden diferir. Se resuelve repitiendo con `--rehacer` la fase que no corresponde.
+- **Entre versiones de la skill.** Una versión nueva puede cambiar `base`. Por eso `fases.json` guarda también la versión que midió cada fase, y completar una fase medida con otra versión se desaconseja ("De triage a riguroso", arriba).
 
 ## Familias de métricas
 

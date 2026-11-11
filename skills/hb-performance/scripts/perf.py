@@ -19,6 +19,7 @@ Comandos (cada uno con --help):
   instrumentar  copia la instrumentación genérica (secciones HTTP, QUEUE, CONN, TTFB, SCREEN y NAV) a un módulo
   nodos         busca un nodo en un volcado de uiautomator y da el centro de sus bounds para tocarlo con adb
   pausa         desde un recorrido: muestra un texto en la terminal y espera a la persona (un paso humano)
+  salidas       por qué se cerró la app: sus últimas salidas según el sistema (Android 11+), con el motivo en claro
 
 Códigos de salida: 0 bien · 2 uso o datos inválidos · 3 precondición (dispositivo, app o herramientas) ·
 4 captura fallida · 5 no se juntaron las corridas válidas pedidas.
@@ -43,10 +44,12 @@ import sys
 import tempfile
 import textwrap
 import time
+import uuid
 import xml.etree.ElementTree as ElementTree
+import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -582,6 +585,9 @@ def load_plan(path):
                             "confirma o refuta la hipótesis con esa métrica" % (path, item["id"]))
     if plan.get("instalar") is not None and not isinstance(plan["instalar"], str):
         raise PerfError("%s: 'instalar' es el comando que compila e instala el build de profiling (texto)" % path)
+    if plan.get("mapping") is not None and not (isinstance(plan["mapping"], str) and plan["mapping"].strip()):
+        raise PerfError("%s: 'mapping' es la ruta del mapping.txt de R8 de la variante medida (texto), por ejemplo "
+                        "app/build/outputs/mapping/profiling/mapping.txt" % path)
     if plan.get("profundidad", "riguroso") not in ("riguroso", "triage"):
         raise PerfError("%s: 'profundidad' es riguroso o triage" % path)
     for name, flow in plan["flujos"].items():
@@ -1929,13 +1935,7 @@ def app_died(adb, package):
 
 def crash_excerpt(adb, package):
     """Primeras líneas del último crash de la app en logcat -b crash."""
-    lines = adb.shell("logcat -b crash -d -t 400").stdout.splitlines()
-    starts = [i for i, line in enumerate(lines) if "FATAL EXCEPTION" in line]
-    for start in reversed(starts):
-        block = lines[start:start + 14]
-        if any(package in line for line in block):
-            return block
-    return []
+    return crash_block(adb.shell("logcat -b crash -d -t 400").stdout.splitlines(), package=package)
 
 
 def mapping_hint():
@@ -1956,6 +1956,28 @@ def next_run_number(csv_path, phase, flow):
         return 1
     runs = [to_int(r["corrida"]) for r in read_rows(csv_path) if r["fase"] == phase and r["flujo"] == flow]
     return max(runs, default=0) + 1
+
+
+def set_aside_orphan(folder, out_dir, phase, flow, n, csv_path):
+    """Una traza `<flujo>_<n>` que quedó sin fila en el CSV (una captura cortada entre bajar la traza y escribir la
+    métrica) no se pisa: se aparta en `<fase>-descartada-<hora>/`, como hace --rehacer. Devuelve la carpeta, o None."""
+    found = [out_dir / ("%s_%d.perfetto-trace%s" % (flow, n, suffix)) for suffix in ("", ".gz")]
+    found = [path for path in found if path.is_file()]
+    if not found:
+        return None
+    if csv_path.is_file() and any(r["fase"] == phase and r["flujo"] == flow and to_int(r["corrida"]) == n
+                                  for r in read_rows(csv_path)):
+        return None  # tiene su fila: no es huérfana (no debería pasar: n es el número que sigue al último del CSV)
+    target = folder / ("%s-descartada-%s" % (phase, datetime.datetime.now().strftime("%H%M%S")))
+    target.mkdir(parents=True, exist_ok=True)
+    for path in found:
+        destination = target / path.name
+        if destination.exists():
+            destination = target / ("%s-%s" % (uuid.uuid4().hex[:6], path.name))
+        path.rename(destination)
+    print("⚠ había una traza de la corrida %d sin fila en metricas.csv (una captura que se cortó): no se pisa, quedó en %s/"
+          % (n, target.name))
+    return target
 
 
 def run_line(n, size_mb, metrics):
@@ -1984,6 +2006,9 @@ def worst_environment(environments):
     return max(environments, key=lambda e: FRAMES_LEVEL.get(e.get("frames", "ok"), 0)) if environments else None
 
 
+UNKNOWN_CONFIG = "desconocida"
+
+
 def merge_run_data(previous, data):
     """Lo que se acumula entre tandas de una fase (o de un flujo): corridas, tasa de cada corrida, avisos y el peor
     entorno."""
@@ -1995,6 +2020,12 @@ def merge_run_data(previous, data):
     warnings += [w for w in data.get("avisos") or [] if w not in warnings]
     if warnings:
         out["avisos"] = warnings
+    configs = list(previous.get("configs") or [])
+    if previous.get("corridas") and not configs and data.get("configs"):
+        configs.append(UNKNOWN_CONFIG)  # las corridas que ya había son de una versión que no lo registraba
+    configs += [c for c in data.get("configs") or [] if c not in configs]
+    if configs:
+        out["configs"] = configs
     environment = worst_environment([previous.get("entorno"), data.get("entorno")])
     if environment:
         out["entorno"] = environment
@@ -2014,12 +2045,20 @@ def write_phase(folder, phase, data, flow=None):
     previous = phases.get(phase) or {}
     flows = dict(previous.get("flujos") or {})
     if flow:
-        flows[flow] = merge_run_data(flows.get(flow) or {}, data)
+        before_flow = flows.get(flow) or {}
+        flows[flow] = merge_run_data(before_flow, data)
+        if "skill" in data:
+            # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
+            flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
+                else data["skill"]
     merged = merge_run_data(previous, data)
-    for key in ("hz_corridas", "avisos", "entorno"):
+    for key in ("hz_corridas", "avisos", "entorno", "configs"):
         data.pop(key, None)
     data.update(merged)
     data["fecha"] = previous.get("fecha") or data["fecha"]
+    if previous.get("corridas") and "skill" in data:
+        # La fase ya tenía corridas: vale la versión que las midió (sin dato, una anterior a 0.9.0), no la de esta tanda.
+        data["skill"] = previous.get("skill") or "anterior a 0.9.0"
     if flows:
         data["flujos"] = flows
     phases[phase] = data
@@ -2050,7 +2089,7 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("fecha", None)
         complete = set(tracked) == set(others) and all(tracked[name].get("corridas") == len(others[name]) for name in others)
         if complete:  # lo que queda tiene su registro entero: se recalcula sin el flujo que se rehace
-            for key in ("hz_corridas", "avisos", "entorno"):
+            for key in ("hz_corridas", "avisos", "entorno", "configs"):
                 record.pop(key, None)
             rest = {}
             for data in tracked.values():
@@ -2062,13 +2101,29 @@ def forget_flow(folder, csv_path, phase, flow):
     save_phases(folder, phases)
 
 
-def check_build(folder, phase, build, commit, force):
-    """Avisos (o un error) según el build y el commit que midió antes."""
+def check_build(folder, phase, build, commit, force, flow=None, redo=False):
+    """Avisos (o un error) según el build y el commit que midió antes. En `antes`, si la fase ya tiene corridas de ese
+    flujo y se van a sumar más (sin --rehacer), avisa cuando el build instalado o la versión de la skill no son los de
+    esas corridas: mezclarlas da una línea base de dos estados distintos."""
     before = read_phases(folder).get("antes")
-    if not before or phase == "antes":
+    if not before:
         return []
     same = bool(before.get("instalada")) and before.get("instalada") == build.get("instalada") \
         and before.get("version") == build.get("version")
+    if phase == "antes":
+        tracked = before.get("flujos")
+        if redo or (flow and tracked and flow not in tracked):
+            return []
+        notes = []
+        if before.get("instalada") and not same:
+            notes.append("el build instalado (%s, instalado %s) no es el que midió las corridas que 'antes' ya tiene (%s, "
+                         "instalado %s): no las completes, repite la fase con --rehacer"
+                         % (build.get("version"), build.get("instalada"), before.get("version"), before.get("instalada")))
+        if phase_skill(before, flow) != VERSION:
+            notes.append("las corridas que 'antes' ya tiene se midieron con otra versión de hb-performance (%s; esta es "
+                         "%s): la configuración de la traza puede no ser la misma; repite la fase con --rehacer"
+                         % (phase_skill(before, flow) or "anterior a 0.9.0", VERSION))
+        return notes
     notes = []
     if phase == "despues" and same and not force:
         raise Precondicion("el build instalado es el mismo que midió antes (instalado %s): instala el build con la "
@@ -2234,6 +2289,138 @@ def resolve_config(plan, folder, override):
     return path
 
 
+CONFIG_SOURCE = re.compile(r'\b(ftrace_events|atrace_categories|atrace_apps|name)[ \t]*:[ \t]*"([^"]*)"')
+CONFIG_PREFIX = {"ftrace_events": "ftrace:", "atrace_categories": "atrace:", "name": "ds:"}
+TRACE_KEY = re.compile(r"^(.+?_\d+)(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?$")
+CONFIG_FILE = "configuracion.json"
+SKILL_CONFIGS = ("base", "cpu", "completa")
+
+
+def config_sources(text):
+    """Las fuentes que captura una configuración de Perfetto (.pbtx), con los nombres que usan las consultas en su línea
+    `-- requiere:`: `ftrace:<grupo>/<evento>`, `atrace:<categoría>`, `atrace_apps` (las secciones de la app) y
+    `ds:<fuente de datos>`."""
+    sources = set()
+    for line in text.splitlines():
+        for key, value in CONFIG_SOURCE.findall(line.split("#", 1)[0]):
+            sources.add("atrace_apps" if key == "atrace_apps" else CONFIG_PREFIX[key] + value)
+    return sorted(sources)
+
+
+def config_record(path):
+    """Nombre, huella del contenido y fuentes de una configuración. La huella sale del archivo tal cual (sin el paquete
+    ni el tope de duración), así que es la misma en todas las investigaciones que usan esa configuración."""
+    path = pathlib.Path(path)
+    text = path.read_text(encoding="utf-8")
+    name = path.stem if path.parent == ASSETS / "perfetto" else path.name
+    return {"nombre": name, "hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12], "fuentes": config_sources(text)}
+
+
+# Campos de la configuración que el `perfetto` de un Android anterior no conoce: su lector de texto rechaza la
+# configuración entera si los encuentra, así que se quitan antes de enviarla. (campo, API mínima)
+CONFIG_FIELDS_SINCE = (("symbolize_ksyms", 31),)
+# Fuentes que la configuración pide y un Android anterior no entrega: (fuente, API mínima, motivo)
+SOURCES_SINCE = (("ds:android.surfaceflinger.frametimeline", 31, "FrameTimeline es de Android 12 o superior"),)
+
+
+def config_for_sdk(text, sdk):
+    """La configuración sin los campos que ese Android no conoce."""
+    for field, since in CONFIG_FIELDS_SINCE:
+        if sdk < since:
+            text = re.sub(r"^[ \t]*%s[ \t]*:[^\n]*\n" % field, "", text, flags=re.M)
+    return text
+
+
+def device_sources(record, sdk):
+    """El registro de la configuración con lo que ese dispositivo no entrega aunque la configuración lo pida
+    (`no_disponibles`: {fuente: motivo}): para una consulta que lo necesita es "no medido", no "sin casos"."""
+    missing = {source: reason for source, since, reason in SOURCES_SINCE if sdk < since and source in record["fuentes"]}
+    return dict(record, no_disponibles=missing) if missing else record
+
+
+def config_label(record):
+    return "%s@%s" % (record["nombre"], record["hash"])
+
+
+def save_trace_config(out_dir, trace_name, record, installed=None):
+    """Anota con qué configuración se grabó una traza (y la fecha de instalación del build medido, para verificar el
+    mapping al desofuscar) en `<carpeta de la fase>/configuracion.json`. Va junto a las trazas (y no solo en
+    fases.json) porque también lo necesitan las de `--prueba`, que no son de ninguna fase, y porque `consulta` recibe
+    una traza suelta."""
+    found = TRACE_KEY.match(trace_name)
+    if not found:
+        return
+    path = pathlib.Path(out_dir) / CONFIG_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict) or not isinstance(data.get("configuraciones"), dict) \
+            or not isinstance(data.get("trazas"), dict):
+        data = {"configuraciones": {}, "trazas": {}}
+    data["configuraciones"][record["hash"]] = {"nombre": record["nombre"], "fuentes": record["fuentes"]}
+    if record.get("no_disponibles"):
+        data["configuraciones"][record["hash"]]["no_disponibles"] = record["no_disponibles"]
+    data["trazas"][found.group(1)] = record["hash"]
+    if installed:
+        if not isinstance(data.get("instaladas"), dict):
+            data["instaladas"] = {}
+        data["instaladas"][found.group(1)] = installed
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def trace_config(trace):
+    """La configuración con la que se grabó la traza ({"nombre", "hash", "fuentes", "instalada"}), o None si no se sabe:
+    una traza de una versión anterior de la skill, o una que se movió de su carpeta."""
+    trace = pathlib.Path(trace)
+    found = TRACE_KEY.match(trace.name)
+    try:
+        data = json.loads((trace.parent / CONFIG_FILE).read_text(encoding="utf-8"))
+        digest = data["trazas"][found.group(1)]
+        saved = data["configuraciones"][digest]
+        installed = (data.get("instaladas") or {}).get(found.group(1))
+        absent = saved.get("no_disponibles")
+        return {"nombre": str(saved["nombre"]), "hash": str(digest), "fuentes": [str(x) for x in saved["fuentes"]],
+                "no_disponibles": {str(k): str(v) for k, v in absent.items()} if isinstance(absent, dict) else {},
+                "instalada": installed if isinstance(installed, str) else None}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def query_requires(sql):
+    """Las fuentes que una consulta declara en su cabecera (`-- requiere: ftrace:sched/sched_switch atrace:view`)."""
+    for line in sql.splitlines():
+        if line.startswith("-- requiere:"):
+            return line.split(":", 1)[1].split()
+    return []
+
+
+def missing_sources(requires, config):
+    """Las fuentes que la consulta necesita y la traza no tiene: las que su configuración no captura y las que ese
+    dispositivo no entrega."""
+    absent = config.get("no_disponibles") or {}
+    return [source for source in requires if source not in config["fuentes"] or source in absent]
+
+
+def configs_with(requires):
+    """Las configuraciones de la skill que capturan todas esas fuentes."""
+    found = []
+    for name in SKILL_CONFIGS:
+        path = ASSETS / "perfetto" / ("%s.pbtx" % name)
+        if path.is_file() and not missing_sources(requires, config_record(path)):
+            found.append(name)
+    return found
+
+
+def unmeasured(config, missing):
+    """El texto de una consulta que no se puede responder con esa traza: no es lo mismo que "no hubo casos"."""
+    absent = config.get("no_disponibles") or {}
+    device = [source for source in missing if source in absent]
+    if device:
+        return "no medido: el dispositivo no entrega %s (%s)" % (", ".join(device), "; ".join(absent[s] for s in device))
+    return "no medido: la configuración %s no captura %s" % (config["nombre"], ", ".join(missing))
+
+
 def custom_queries(flow, folder, package):
     queries = []
     for spec in flow.get("metricas_sql", []):
@@ -2376,6 +2563,14 @@ def next_steps(folder, plan, flow=None):
     def command(*parts):
         return "cd %s && python3 -I %s %s" % (root, HERE / "perf.py", " ".join(str(part) for part in parts))
 
+    def full_command(pending):
+        """Una "Captura pendiente" como comando completo: tal cual si ya empieza con cd; con la ruta de este script si
+        es un comando de perf.py (con o sin "python3 -I .../perf.py" delante); si no, con cd a la raíz."""
+        own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
+        if pending.startswith("cd "):
+            return pending
+        return command(own.group(1)) if own else "cd %s && %s" % (root, pending)
+
     flows = plan["flujos"]
     flow = flow if flow in flows else next(iter(flows))
     spec = flows[flow]
@@ -2406,9 +2601,57 @@ def next_steps(folder, plan, flow=None):
         return "investigación cerrada", [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
     initial = state.parent / ("reporte-inicial.html" if (state.parent / "reporte-inicial.html").is_file() else "reporte-inicial.md")
     if triage and initial.is_file():
-        return "triage cerrado", [{"tipo": "archivo", "texto": str(initial),
-                                   "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después); "
-                                          "para aplicar mejoras, cambia profundidad a riguroso y mide control y después"}]
+        closed = [{"tipo": "archivo", "texto": str(initial),
+                   "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después)"}]
+        if not mejoras:  # sin mejoras propuestas no hay nada que pasar a riguroso
+            return "triage cerrado", closed
+        return "triage cerrado", closed + [
+            terminal(command("decidir", "--carpeta", folder, "--profundidad", "riguroso"),
+                     "solo si quieres aplicar una mejora: pasa la investigación a riguroso y te da, en orden, las capturas "
+                     "que faltan (completar antes y medir control) y la decisión",
+                     "córrelo solo si vas a aplicar una mejora; si no, el triage termina aquí")]
+    # Riguroso pide, antes de decidir, la línea base completa (10 corridas de antes con recorrido automático, 5 con
+    # recorrido manual o con pausa humana) y el control. Falta cuando la investigación viene de un triage.
+    undecided = "propuesta" in estados and "aprobada" not in estados
+    # Con una mejora ya aprobada solo se pide el control que falta de un antes medido (aprobar y pasar a riguroso en el
+    # mismo comando): una investigación rigurosa ya decidida sigue como estaba.
+    if not triage and (undecided or ("aprobada" in estados and "antes" in phases)) and "aplicada" not in estados \
+            and "despues" not in phases:
+        have = measured_runs(root / folder, phases, "antes", flow)
+        missing = 0 if not (undecided or plan.get("desde_triage")) else runs if "antes" not in phases \
+            else max(0, runs - have) if have is not None else 0
+        if missing or "control" not in phases:
+            # Con otra versión de la skill (o sin el dato: una anterior a 0.9.0) la configuración de la traza pudo
+            # cambiar: las corridas que hay no se completan, se repiten.
+            measured_with = phase_skill(phases.get("antes"), flow)
+            redo = "antes" in phases and measured_with != VERSION
+            steps = []
+            if redo:
+                steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", runs, "--rehacer"])),
+                                      "repite la fase antes completa: las corridas que hay se midieron con otra versión de "
+                                      "hb-performance (%s) y no se mezclan con las nuevas"
+                                      % (measured_with or "anterior a 0.9.0"), you_run))
+            elif missing:
+                steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", missing])),
+                                      "completa la fase antes hasta las %d corridas que pide riguroso (tiene %d: las que ya "
+                                      "hay cuentan si nada cambió)" % (runs, runs - missing),
+                                      you_run.replace(str(runs), str(missing)) + "; si reinstalaste la app o cambió el build "
+                                      "desde esas corridas, agrega --rehacer y pide --corridas %d: las anteriores ya no "
+                                      "cuentan (capturar lo avisa)" % runs))
+            if "control" not in phases or redo:
+                again = "control" in phases  # el control que había midió el ruido del antes que se repite: va de nuevo
+                steps.append(terminal(command(*(capture + ["--fase", "control", "--corridas", runs]
+                                                + (["--rehacer"] if again else []))),
+                                      "repite la medición sin cambiar nada, con el mismo build de antes: mide el ruido"
+                                      + (" (de nuevo: el control anterior era del antes que se repite)" if again else ""),
+                                      you_run))
+            if undecided:
+                ids = ",".join(m["id"] for m in mejoras if m.get("estado", "propuesta") == "propuesta")
+                steps.append(terminal(
+                    command("decidir", "--carpeta", folder, "--aprobar", ids, "--descartar", "-", "--pendiente", "-"),
+                    "registra qué mejoras se aplican y da el chat de la sesión 3",
+                    "deja en cada lista los ids que correspondan (- es ninguno); mira las mejoras en estado.md"))
+            return "completar la línea base de riguroso (sin chat)", steps
     if "aprobada" in estados:
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         return "sesión 3 · %s" % first["id"], [
@@ -2438,15 +2681,10 @@ def next_steps(folder, plan, flow=None):
         # La sesión 2 ya entregó su reporte y no propuso mejoras: no se repite. Queda el cierre corto y, si el
         # diagnóstico dejó una captura pendiente en estado.md, esa captura como comando.
         steps = []
-        for pending in pending_captures(state):
-            own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
-            if pending.startswith("cd "):
-                pass  # ya es un comando completo
-            elif own:  # un comando de perf.py, con o sin "python3 -I .../perf.py" delante: se arma con la ruta de este script
-                pending = command(own.group(1))
-            else:
-                pending = "cd %s && %s" % (root, pending)
-            steps.append(terminal(pending, "la captura que el diagnóstico dejó pendiente (opcional: cierra un pendiente)",
+        listed = pending_captures(state)
+        for pending in listed + [extra for extra in diagnostic_captures(state.parent) if extra not in listed]:
+            steps.append(terminal(full_command(pending),
+                                  "la captura que el diagnóstico dejó pendiente (opcional: cierra un pendiente)",
                                   "córrela solo si quieres cerrar ese pendiente antes de terminar; lo que salga se "
                                   "analiza en un chat aparte (prompts.md · Una pregunta sobre una traza)"))
         steps.append(chat("%s: cierra la investigación sin fase después" % resume, "economico", "bajo",
@@ -2454,7 +2692,14 @@ def next_steps(folder, plan, flow=None):
                           "el reporte final", plan))
         return "sesión 4 · cierre sin mejoras", steps
     if (state.parent / "diagnostico.md").is_file():
-        return "sesión 2 · diagnóstico", [session2]
+        # Si el diagnóstico pidió una captura (el hilo principal espera en sus frames largos), va antes del chat y es
+        # opcional: con ella, la sesión 2 puede decir por qué espera en vez de dejarlo sin confirmar.
+        steps = [terminal(full_command(pending),
+                          "captura opcional que pide diagnostico.md: una corrida con la configuración completa, para saber "
+                          "por qué espera el hilo principal en sus frames más largos (no cuenta como medición)",
+                          "córrela si quieres ese dato antes del diagnóstico; después, la consulta que indica diagnostico.md")
+                 for pending in diagnostic_captures(state.parent)]
+        return "sesión 2 · diagnóstico", steps + [session2]
     steps = []
     if triage:
         you_run = you_run.replace(str(runs), "3")
@@ -2477,6 +2722,31 @@ def next_steps(folder, plan, flow=None):
             "control y diagnóstico (sin chat)" if "control" not in phases and not triage else "diagnóstico (sin chat)"), steps
 
 
+def phase_skill(record, flow=None):
+    """La versión de hb-performance que midió las corridas de un flujo en una fase (la del flujo si fases.json la guarda
+    por flujo; si no, la de la fase). None si no hay dato: la midió una versión anterior a 0.9.0."""
+    record = record or {}
+    tracked = (record.get("flujos") or {}).get(flow) or {}
+    return tracked.get("skill") or record.get("skill")
+
+
+def measured_runs(folder, phases, phase, flow):
+    """Cuántas corridas válidas tiene el flujo en esa fase: las de metricas.csv o, sin CSV, las de fases.json. None si
+    no se sabe."""
+    path = pathlib.Path(folder) / "metricas.csv"
+    if path.is_file():
+        try:
+            found = {r["corrida"] for r in read_rows(path) if r["fase"] == phase and r["flujo"] == flow}
+        except PerfError:
+            found = set()
+        if found:
+            return len(found)
+    record = phases.get(phase) or {}
+    tracked = record.get("flujos") or {}
+    value = (tracked.get(flow) or {}).get("corridas") if tracked else record.get("corridas")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 PENDING_CAPTURE = re.compile(r"captura pendiente[^`\n]*`([^`\n]+)`", re.I)
 
 
@@ -2488,6 +2758,30 @@ def pending_captures(state):
         return []
     text = next((body for title, body in sections.items() if title.startswith("pendientes")), "")
     return [found.strip() for found in PENDING_CAPTURE.findall(without_placeholders(text)) if "<" not in found]
+
+
+def diagnostic_captures(folder):
+    """Las capturas que `perf.py diagnostico` dejó pendientes en diagnostico.md (o diagnostico-<fase>.md) como "Captura
+    pendiente: `<comando>`". Vacío si la corrida de prueba que hay en la carpeta ya es una captura con la razón de
+    bloqueo (la captura completa ya se hizo)."""
+    folder = pathlib.Path(folder)
+    found = []
+    for path in sorted(folder.glob("diagnostico*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        found += [item.strip() for item in PENDING_CAPTURE.findall(text) if "<" not in item and item.strip() not in found]
+    if not found:
+        return []
+    try:
+        data = json.loads((folder / "prueba" / CONFIG_FILE).read_text(encoding="utf-8"))
+        saved = data["configuraciones"]
+        done = any(BLOCKED_SOURCE in saved[digest]["fuentes"] and any((folder / "prueba").glob(key + ".perfetto-trace*"))
+                   for key, digest in data["trazas"].items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        done = False
+    return [] if done else found
 
 
 def has_human_pause(flow, folder):
@@ -2654,20 +2948,32 @@ def cmd_decidir(args):
         for item in (getattr(args, option) or "").split(","):
             if item.strip() and item.strip() != "-":
                 choices[item.strip()] = estado
-    if not choices:
-        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente o --aplicada")
+    depth = getattr(args, "profundidad", None)
+    if not choices and not depth:
+        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente o --aplicada (o cambia la "
+                        "profundidad con --profundidad)")
     known = [m["id"] for m in plan.get("mejoras", [])]
     unknown = sorted(set(choices) - set(known))
     if unknown:
         raise PerfError("plan.json no tiene las mejoras %s (tiene: %s)" % (", ".join(unknown), ", ".join(known) or "ninguna"))
-    for item in plan["mejoras"]:
+    for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
             if choices[item["id"]] == "aplicada":
                 item["aplicada_en"] = datetime.datetime.now().isoformat(timespec="seconds")
+    parts = []
+    if depth and depth != plan.get("profundidad", "riguroso"):
+        parts.append("profundidad %s (era %s)" % (depth, plan.get("profundidad", "riguroso")))
+        if depth == "riguroso":
+            plan["desde_triage"] = True  # la línea base es la de un triage: `siguiente` pide completarla aunque ya haya una mejora aprobada
+        else:
+            plan.pop("desde_triage", None)
+        plan["profundidad"] = depth
+    elif depth:
+        parts.append("profundidad %s (ya lo era)" % depth)
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    parts = ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
-             for _, estado, label in DECISIONS if estado in choices.values()]
+    parts += ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
+              for _, estado, label in DECISIONS if estado in choices.values()]
     line = "- %s: %s (perf.py decidir)" % (datetime.date.today().isoformat(), "; ".join(parts))
     state = folder / "estado.md"
     if state.is_file():
@@ -2739,15 +3045,17 @@ def cmd_capturar(args, plan=None):
     warnings += environment_warnings(environment)
     commit, dirty = git_info()
     if not args.prueba:
-        warnings += check_build(folder, phase, build, commit, args.forzar)
+        warnings += check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
     for warning in warnings:
         print("⚠ " + warning)
     folder.mkdir(parents=True, exist_ok=True)
     free_gb = shutil.disk_usage(str(folder)).free / 1e9
     if free_gb < 3:
         print("⚠ quedan %.1f GB libres: cada traza puede pesar decenas o cientos de MB" % free_gb)
-    config = with_trace_cap(resolve_config(plan, folder, args.config).read_text(encoding="utf-8")
-                            .replace("{{PAQUETE}}", package), flow.get("duracion_max_s"))
+    config_path = resolve_config(plan, folder, args.config)
+    used_config = device_sources(config_record(config_path), sdk)
+    config = with_trace_cap(config_for_sdk(config_path.read_text(encoding="utf-8"), sdk).replace("{{PAQUETE}}", package),
+                            flow.get("duracion_max_s"))
     input_glob = plan.get("input_slices") or INPUT_SLICES
     queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), package,
                                      {"INPUT_GLOB": input_glob}))]
@@ -2756,6 +3064,11 @@ def cmd_capturar(args, plan=None):
     out_dir = folder / ("prueba" if args.prueba else phase)
     out_dir.mkdir(parents=True, exist_ok=True)
     known = known_metrics(csv_path, flow_name)
+    deobfuscator = Deobfuscator(plan, project_root(folder).resolve(), getattr(args, "mapping", None), build.get("instalada"),
+                                adb)
+    if sdk < EXIT_MIN_SDK:
+        print("· Android %s: sin registro de salidas de la app por corrida (exit-info es de Android 11 o superior). Solo "
+              "queda el aviso de crash; un cierre por memoria o un ANR no se detectan aquí." % ("10" if sdk == 29 else sdk))
     start_screen = None if startup else flow.get("inicio")
 
     def check_start():
@@ -2862,12 +3175,36 @@ def cmd_capturar(args, plan=None):
         if sdk < 31:
             adb.shell("dumpsys gfxinfo %s reset" % package)
         local = out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))
+        if not args.prueba:
+            set_aside_orphan(folder, out_dir, phase, flow_name, n, csv_path)
         label = "prueba" if args.prueba else "corrida %d de %d (%s, %s)" % (valid + 1, target, flow_name, phase)
+        # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida nueva
+        # del proceso medido dentro de la corrida la invalida.
+        exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
         reason, extra = record_run(adb, config, recorrido, label, local, startup, package)
+        save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
-        if not invalid and app_died(adb, package):
+        died = not invalid and app_died(adb, package)
+        if died:
             invalid = "la app no estaba viva al terminar la corrida (¿se cayó?)"
             crash = crash_excerpt(adb, package)
+        exits = []
+        if exits_before is not None:
+            # En un arranque en frío el proceso nace en la corrida (no se sabe su pid antes) y el que había lo detiene
+            # la propia skill: ese pid se ignora. En los demás flujos, cuenta solo el proceso que estaba al empezar.
+            old_pid = exits_before[1]
+            exits = run_exits(exits_before, exit_snapshot(adb, package), None if startup else old_pid,
+                              (old_pid,) if startup and old_pid else (), package)
+        unexpected = [entry for entry in exits if entry["motivo"] not in EXIT_DELIBERATE]
+        if unexpected:
+            if not invalid or died:
+                invalid = "la app salió: %s" % exit_text(unexpected[0])
+            if not crash and unexpected[0]["motivo"] == 4:
+                crash = crash_block(adb.shell("logcat -b crash -d -t 400").stdout.splitlines(), pid=unexpected[0]["pid"])
+        if args.prueba:
+            for entry in exits:
+                print("%s Salida de la app durante la corrida (%s, pid %s): %s" % (
+                    "✖" if entry in unexpected else "·", entry["hora"][11:19], entry["pid"], exit_text(entry)))
         if not invalid:
             print("… procesando la traza %s (%.0f MB)" % (
                 "de prueba" if args.prueba else "%d de %d" % (valid + 1, target), local.stat().st_size / 1e6), flush=True)
@@ -2914,8 +3251,9 @@ def cmd_capturar(args, plan=None):
         size_mb = local.stat().st_size / 1e6
         if crash:
             print("✖ La app se cayó durante la corrida. Inicio del crash (logcat -b crash):")
-            print("\n".join("  " + line for line in crash))
-            print("  " + mapping_hint())
+            print("\n".join("  " + line for line in deobfuscator.stack(crash)))
+            if deobfuscator.mapping is None:
+                print("  " + mapping_hint())
         if invalid and args.prueba:
             if not info:  # el recorrido se cortó (o la app se cayó): la traza igual dice hasta dónde llegó
                 try:
@@ -2984,7 +3322,8 @@ def cmd_capturar(args, plan=None):
         n += 1
     seen_hz = {h for h in run_hz if h}
     record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
-              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation}
+              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
+              "configs": [config_label(used_config)]}
     if seen_hz:
         record["hz_corridas"] = run_hz
     rate_warning = hz_warning(hz, seen_hz)
@@ -3026,6 +3365,498 @@ def write_summary(csv_path, rows, plan):
         print("✔ estado.md actualizado (Métricas)")
 
 
+# ── desofuscación (R8) ───────────────────────────────────────────────────────
+
+RETRACE_INSTALL = ("instala las Command-line Tools del SDK de Android (Android Studio · SDK Manager · SDK Tools · \"Android SDK "
+                   "Command-line Tools\", o `sdkmanager \"cmdline-tools;latest\"`): traen `retrace` en "
+                   "<sdk>/cmdline-tools/latest/bin. Necesita Java. Si está en otra ruta, pásala con RETRACE=<ruta>")
+MAPPING_ID = re.compile(r"^#[ \t]*pg_map_id:[ \t]*(\S+)", re.M)
+MAPPING_CLASS = re.compile(r"^[^\s#][^\n]* -> [^\s:]+:[ \t]*$", re.M)
+APK_MAP_ID = re.compile(br'"pg-map-id":"([^"]+)"')  # el marcador que R8 deja en cada classes.dex: ~~R8{...,"pg-map-id":"<id>",...}
+INSTALL_TASK = re.compile(r"(?:^|[\s:])((?:[\w.-]+:)*)install([A-Z]\w*)")
+JAVA_NAME = re.compile(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$<][\w$<>]*)+")
+# Un nombre `paquete.Clase.método` parece ofuscado si su clase tiene 1 o 2 caracteres o empieza con minúscula (a.b.c,
+# com.example.app.data.a.b, o.aB.d): R8 puede conservar los paquetes y renombrar solo la clase y el método.
+OBFUSCATED_NAME = re.compile(r"(?:[\w$]+\.)*(?:[a-z_$][\w$]*|[A-Za-z_$][\w$]?)\.[A-Za-z_$<][\w$<>]*")
+STACK_FRAME = re.compile(r"\bat[ \t]+([\w$.<>]+)\(")
+RETRACED = re.compile(r"^\s*(<OR>\s+)?at\s+(.+?)\(")
+CLOCK_MARGIN_S = 120  # el reloj del dispositivo y el de la máquina no van al segundo
+ENCRYPTED_HINT = ("la app puede usar cifrado de clases u otro ofuscador (ofuscadores comerciales con cifrado de clases), que "
+                  "este mapping no deshace: mide con una variante sin cifrado de clases")
+
+
+def find_retrace():
+    """La ruta de `retrace` (cmdline-tools del SDK), o None."""
+    candidates = [os.environ.get("RETRACE"), shutil.which("retrace")]
+    homes = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT")]
+    adb = shutil.which("adb")
+    if adb:
+        homes.append(str(pathlib.Path(adb).resolve().parent.parent))
+    for home in homes:
+        if home:
+            candidates += [str(path) for path in sorted(pathlib.Path(home).glob("cmdline-tools/*/bin/retrace"), reverse=True)]
+    for candidate in candidates:
+        if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
+            return candidate
+    return None
+
+
+def read_mapping(path):
+    """{"ruta", "id" (pg_map_id de la cabecera, o None), "valido" (tiene líneas de clase de ProGuard/R8), "mtime"}."""
+    path = pathlib.Path(path)
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        head = f.read(2_000_000)
+    found = MAPPING_ID.search(head[:20_000])
+    return {"ruta": path, "id": found.group(1) if found else None, "valido": bool(MAPPING_CLASS.search(head)),
+            "mtime": path.stat().st_mtime}
+
+
+def install_variant(install):
+    """(módulo como ruta, variante) de un comando con `:app:installDemoProfiling`: ("app", "demoProfiling"). (None, None)
+    si el comando no instala con una tarea install<Variante> de Gradle."""
+    found = INSTALL_TASK.search(install or "")
+    if not found:
+        return None, None
+    variant = found.group(2)
+    return found.group(1).strip(":").replace(":", "/") or None, variant[0].lower() + variant[1:]
+
+
+def mapping_candidates(root, variant="*"):
+    found = []
+    for pattern in ("build/outputs/mapping/%s/mapping.txt", "*/build/outputs/mapping/%s/mapping.txt",
+                    "*/*/build/outputs/mapping/%s/mapping.txt"):
+        found += sorted(pathlib.Path(root).glob(pattern % variant))
+    return found
+
+
+def locate_mapping(plan, root, override=None):
+    """(ruta o None, explícito, aviso) del mapping.txt de la variante medida. Con R8 hay uno por variante, en el módulo
+    de la app. Orden: --mapping; `mapping` de plan.json; la variante del comando `instalar` del plan; y, si en el
+    proyecto hay un solo mapping que no sea de debug ni de release, ese."""
+    root = pathlib.Path(root)
+    if override:
+        path = pathlib.Path(override)
+        if not path.is_file():
+            raise PerfError("no existe el mapping %s" % path)
+        return path, True, ""
+    if plan.get("mapping"):
+        path = pathlib.Path(plan["mapping"])
+        path = path if path.is_absolute() else root / path
+        if path.is_file():
+            return path, False, ""
+        return None, False, "el 'mapping' de plan.json (%s) no existe: ¿falta compilar esa variante?" % plan["mapping"]
+    module, variant = install_variant(plan.get("instalar"))
+    if variant:
+        found = [root / module / "build" / "outputs" / "mapping" / variant / "mapping.txt"] if module else \
+            mapping_candidates(root, variant)
+        found = [path for path in found if path.is_file()]
+        if len(found) == 1:
+            return found[0], False, ""
+        if not found:
+            return None, False, ("no encontré el mapping de la variante %s (la del comando 'instalar' del plan): ¿la variante "
+                                 "usa R8 (minifyEnabled)? Si está en otra ruta, ponla en \"mapping\" de plan.json o pásala "
+                                 "con --mapping" % variant)
+    else:
+        found = [path for path in mapping_candidates(root) if path.parent.name not in ("release", "debug")]
+        if len(found) == 1:
+            return found[0], False, ""
+        if not found:
+            return None, False, ("no encontré ningún mapping.txt (<módulo>/build/outputs/mapping/<variante>/): indica el de "
+                                 "la variante medida en \"mapping\" de plan.json o con --mapping")
+    return None, False, ("hay %d mappings (%s) y no sé cuál es el de la variante medida: indícalo en \"mapping\" de "
+                         "plan.json o con --mapping" % (len(found), ", ".join(str(path.parent.name) for path in found[:4])))
+
+
+def apk_map_ids(apk):
+    """Los pg_map_id que R8 dejó en los classes*.dex de un APK. Vacío si el APK no los trae (sin R8, u otro ofuscador)."""
+    ids = set()
+    with zipfile.ZipFile(str(apk)) as archive:
+        for name in archive.namelist():
+            if re.fullmatch(r"classes\d*\.dex", name):
+                ids |= {found.decode("ascii", "replace") for found in APK_MAP_ID.findall(archive.read(name))}
+    return ids
+
+
+def installed_map_ids(adb, package):
+    """Los pg_map_id del APK instalado (baja base.apk a una carpeta temporal y la borra). None si no se pudo leer."""
+    paths = re.findall(r"^package:(\S+)", adb.shell("pm path %s" % package).stdout, re.M)
+    base = next((path for path in paths if path.endswith("base.apk")), paths[0] if paths else None)
+    if not base:
+        return None
+    work = tempfile.mkdtemp(prefix="hbperf-apk-")
+    try:
+        local = pathlib.Path(work) / "base.apk"
+        pulled = adb.run("pull", base, str(local), timeout=600)
+        if pulled.returncode != 0 or not local.is_file():
+            return None
+        return apk_map_ids(local)
+    except (OSError, zipfile.BadZipFile, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def parse_installed(text):
+    try:
+        return datetime.datetime.strptime(text or "", "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return None
+
+
+def output_apk_mtime(mapping_path):
+    """La fecha del APK de salida de la variante del mapping (<módulo>/build/outputs/apk/**/<variante>/*.apk), o None."""
+    mapping_path = pathlib.Path(mapping_path)
+    variant, outputs = mapping_path.parent.name, mapping_path.parent.parent.parent
+    apks = [path for path in (outputs / "apk").glob("**/*.apk")
+            if "".join(path.relative_to(outputs / "apk").parts[:-1]).lower() == variant.lower()] \
+        if (outputs / "apk").is_dir() else []
+    return max((path.stat().st_mtime for path in apks), default=None)
+
+
+def verify_mapping(mapping, installed, explicit, apk_ids=None):
+    """(se usa, nota). Un mapping de otro build da nombres equivocados sin ningún error, así que solo se usa si
+    corresponde al APK medido:
+
+    - con el pg_map_id del mapping y los del APK instalado, se comparan: si no coinciden, no se usa nunca;
+    - sin esos identificadores, por fechas y de forma conservadora: el mapping (y el APK de salida de su variante) no
+      pueden ser posteriores a la instalación de la app, ni el mapping posterior a ese APK;
+    - si no se puede verificar, no se usa, salvo que se haya pasado con --mapping.
+    """
+    if mapping["id"] and apk_ids:
+        if mapping["id"] in apk_ids:
+            return True, "verificado: su pg_map_id (%s) es el del APK instalado" % mapping["id"]
+        return False, ("el mapping no es el del APK instalado (pg_map_id %s; el APK tiene %s): daría nombres equivocados. "
+                       "Compila e instala de nuevo esa variante, o indica el mapping correcto"
+                       % (mapping["id"], ", ".join(sorted(apk_ids))))
+    if explicit:
+        return True, "sin verificar contra el APK instalado: se usa porque lo pasaste con --mapping"
+    moment = parse_installed(installed)
+    if moment is None:
+        return False, ("no se pudo verificar que el mapping corresponda al APK medido (sin pg_map_id comparable ni fecha de "
+                       "instalación): no se desofusca. Si estás seguro de que es el de ese build, pásalo con --mapping")
+    if mapping["mtime"] > moment + CLOCK_MARGIN_S:
+        return False, ("el mapping se generó después de instalar la app (instalada %s): es de otro build y daría nombres "
+                       "equivocados. Instala de nuevo esa variante, o pasa con --mapping el del build medido" % installed)
+    apk = output_apk_mtime(mapping["ruta"])
+    if apk is not None and (apk > moment + CLOCK_MARGIN_S or mapping["mtime"] > apk + CLOCK_MARGIN_S):
+        return False, ("el APK de salida de esa variante no corresponde con la instalación (instalada %s) o con el mapping: "
+                       "puede ser de otro build. Instala de nuevo esa variante, o pasa con --mapping el del build medido"
+                       % installed)
+    return True, ("verificado solo por fecha (el mapping%s no es posterior a la instalación, %s): sin pg_map_id comparable"
+                  % (" y el APK de salida" if apk is not None else "", installed))
+
+
+class Deobfuscator:
+    """Desofusca con `retrace` y el mapping de la variante medida, solo cuando hace falta: lo que tarda (ubicar el
+    mapping, verificarlo contra el APK) se hace la primera vez que aparece un nombre ofuscado. Nunca falla por no tener
+    mapping ni `retrace`: lo dice una vez y deja los nombres como están."""
+
+    def __init__(self, plan, root, override=None, installed=None, adb=None):
+        self.plan, self.root, self.override, self.installed, self.adb = plan or {}, root, override, installed, adb
+        if override and not pathlib.Path(override).is_file():
+            raise PerfError("no existe el mapping %s" % override)  # al empezar el comando, no a mitad de una captura
+        self.ready, self.retrace, self.mapping, self.notes = False, None, None, []
+
+    def note(self, text):
+        if text not in self.notes:
+            self.notes.append(text)
+            print(text)
+
+    def prepare(self):
+        if self.ready:
+            return self.mapping is not None
+        self.ready = True
+        path, explicit, warning = locate_mapping(self.plan, self.root, self.override)
+        if path is None:
+            self.note("· Sin desofuscar: %s." % warning)
+            return False
+        mapping = read_mapping(path)
+        if not mapping["valido"]:
+            self.note("⚠ Sin desofuscar: %s no tiene el formato de un mapping de ProGuard/R8 (¿lo generó otro ofuscador?); %s."
+                      % (path, ENCRYPTED_HINT))
+            return False
+        adb = self.adb() if callable(self.adb) else self.adb
+        ids = installed_map_ids(adb, self.plan.get("paquete")) if adb and mapping["id"] and self.plan.get("paquete") else None
+        use, detail = verify_mapping(mapping, self.installed, explicit, ids)
+        if not use:
+            self.note("⚠ Sin desofuscar: %s." % detail)
+            return False
+        self.retrace = find_retrace()
+        if not self.retrace:
+            self.note("· Sin desofuscar: falta `retrace`; %s." % RETRACE_INSTALL)
+            return False
+        self.mapping = mapping
+        try:  # relativa a la raíz: esta nota también queda en diagnostico.md
+            shown = pathlib.Path(path).resolve().relative_to(pathlib.Path(self.root).resolve())
+        except ValueError:
+            shown = path
+        self.note("✔ Desofuscado con %s (%s)." % (shown, detail))
+        return True
+
+    def run(self, lines):
+        """Las líneas pasadas por retrace, o None si falló."""
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+            source = f.name
+        try:
+            result = subprocess.run([self.retrace, str(self.mapping["ruta"]), source], capture_output=True, text=True,
+                                    timeout=300)
+        except (OSError, subprocess.SubprocessError) as error:
+            self.note("⚠ Sin desofuscar: retrace no corrió (%s)." % str(error)[:120])
+            return None
+        finally:
+            os.unlink(source)
+        if result.returncode != 0:
+            self.note("⚠ Sin desofuscar: retrace falló (%s)." % ((result.stderr or result.stdout).strip().splitlines() or ["sin salida"])[-1][:160])
+            return None
+        return result.stdout.splitlines()
+
+    def stack(self, lines):
+        """Una pila (logcat, una traza de salida) con los nombres reales. Sin frames ofuscados, o sin mapping, igual."""
+        if not any(OBFUSCATED_NAME.fullmatch(name) for line in lines for name in STACK_FRAME.findall(line)):
+            return lines
+        if not self.prepare():
+            return lines
+        out = self.run(lines)
+        if out is None:
+            return lines
+        self.leftover([name for line in out for name in STACK_FRAME.findall(line)])
+        return out
+
+    def names(self, names):
+        """{nombre ofuscado: nombre real} para nombres `clase.método` sueltos (sin número de línea, retrace puede
+        devolver varios candidatos: van separados por ' o ')."""
+        if not any(OBFUSCATED_NAME.fullmatch(name or "") for name in names) or not self.prepare():
+            return {}
+        # Con un nombre que parece ofuscado ya vale la pena: van todos los que tienen forma de `clase.método`, porque
+        # una clase ofuscada también puede llamarse Ab0 o ABc.
+        wanted = sorted({name for name in names if JAVA_NAME.fullmatch(name or "")})
+        out = self.run(["\tat %s(Unknown Source)" % name for name in wanted])
+        if out is None:
+            return {}
+        groups = []
+        for line in out:
+            found = RETRACED.match(line)
+            if not found:
+                continue
+            if found.group(1) and groups:
+                groups[-1].append(found.group(2))
+            else:
+                groups.append([found.group(2)])
+        if len(groups) != len(wanted):  # la salida no tiene la forma esperada: mejor sin tocar que con nombres corridos
+            self.note("⚠ Sin desofuscar: la salida de retrace no se pudo emparejar con los nombres.")
+            return {}
+        mapped = {}
+        for name, options in zip(wanted, groups):
+            unique = [option for i, option in enumerate(options) if option not in options[:i]]
+            mapped[name] = " o ".join(unique[:3]) + (" o …" if len(unique) > 3 else "")
+        self.leftover([value for name, value in mapped.items() if value == name])
+        return {name: value for name, value in mapped.items() if value != name}
+
+    def leftover(self, names):
+        still = sorted({name for name in names if OBFUSCATED_NAME.fullmatch(name)})
+        if still:
+            self.note("⚠ %d nombre%s ofuscado%s después de aplicar el mapping (%s): el mapping no los trae; %s."
+                      % (len(still), " sigue" if len(still) == 1 else "s siguen", "" if len(still) == 1 else "s",
+                         ", ".join(still[:3]) + ("…" if len(still) > 3 else ""), ENCRYPTED_HINT))
+
+
+def query_deobfuscate(sql):
+    """Las columnas con nombres de métodos que una consulta declara en su cabecera (`-- desofuscar: funcion`)."""
+    for line in sql.splitlines():
+        if line.startswith("-- desofuscar:"):
+            return line.split(":", 1)[1].split()
+    return []
+
+
+def deobfuscate_sets(sets, columns, deobfuscator):
+    """Los resultados de una consulta con las columnas de nombres de métodos desofuscadas. Avisa también del código
+    nativo sin símbolos, que se muestra como librería."""
+    if not columns or deobfuscator is None:
+        return sets
+    out, native = [], False
+    for header, body in sets:
+        indexes = [i for i, name in enumerate(header) if name in columns]
+        library = header.index("libreria") if "libreria" in header else None
+
+        def managed(row):  # el código nativo y el del kernel no pasan por el mapping de R8
+            origin = str(row[library]) if library is not None and library < len(row) else ""
+            return ".so" not in origin and not origin.startswith("[kernel")
+
+        names = deobfuscator.names([row[i] for row in body if managed(row) for i in indexes if i < len(row)]) \
+            if indexes else {}
+        native = native or any(i < len(row) and row[i] in ("?", "") and library is not None and library < len(row)
+                               and ".so" in str(row[library]) for row in body for i in indexes)
+        out.append((header, [[names.get(cell, cell) if i in indexes and managed(row) else cell
+                              for i, cell in enumerate(row)] for row in body] if names else body))
+    if native:
+        deobfuscator.note("· Código nativo sin símbolos: se muestra la librería, no la función (hacen falta los símbolos de "
+                          "esa librería; el mapping de R8 no los trae).")
+    return out
+
+
+# ── salidas de la app (ApplicationExitInfo) ──────────────────────────────────
+
+EXIT_REASONS = {0: "desconocido", 1: "la app terminó sola (exit)", 2: "señal del sistema operativo",
+                3: "poca memoria (la cerró el sistema)", 4: "crash", 5: "crash nativo", 6: "ANR",
+                7: "falló al iniciar", 8: "cambio de permisos", 9: "uso excesivo de recursos",
+                10: "detenida a pedido del usuario (o force-stop)", 11: "usuario del dispositivo detenido",
+                12: "murió un proceso del que dependía", 13: "detenida por el sistema", 14: "detenida por el freezer",
+                15: "cambio de estado del paquete", 16: "paquete actualizado"}
+# Cierres que pide alguien (un force-stop del recorrido o de la propia skill, una reinstalación): no son fallas de la app.
+EXIT_DELIBERATE = (8, 10, 11, 15, 16)
+EXIT_KEYS = ("timestamp", "pid", "realUid", "packageUid", "definingUid", "user", "process", "reason", "subreason",
+             "status", "importance", "pss", "rss", "description", "state", "trace")
+EXIT_ENTRY = re.compile(r"ApplicationExitInfo #\d+:")
+EXIT_END = re.compile(r"^\s*(?:package:|Historical Process Exit|ACTIVITY MANAGER|Last Timestamp)", re.M)
+EXIT_MIN_SDK = 30
+
+
+def parse_exit_info(text):
+    """Las salidas de `dumpsys activity exit-info <paquete>` (Android 11+), de la más reciente a la más vieja. Cada una:
+    hora ('AAAA-MM-DD HH:MM:SS.mmm', hora del dispositivo), proceso, pid, motivo (código), motivo_texto, submotivo, estado,
+    importancia, pss, rss, descripcion y traza. Tolerante a las diferencias entre versiones: un campo que no está queda
+    vacío (None en pid y motivo), y los que no conoce se ignoran."""
+    entries = []
+    for block in EXIT_ENTRY.split(text or "")[1:]:
+        end = EXIT_END.search(block)
+        body = " ".join((block[:end.start()] if end else block).split())
+        marks = []
+        for key in EXIT_KEYS:
+            # 'state' y 'trace' van después de la descripción, que es texto libre: se toma la última vez que salen
+            found = list(re.finditer(r"(?:^|\s)%s=" % key, body))
+            if found:
+                marks.append((found[-1] if key in ("state", "trace") else found[0], key))
+        marks.sort(key=lambda item: item[0].start())
+        values = {}
+        for index, (found, key) in enumerate(marks):
+            stop = marks[index + 1][0].start() if index + 1 < len(marks) else len(body)
+            values.setdefault(key, body[found.end():stop].strip())
+        code = re.match(r"\d+", values.get("reason", ""))
+        code = int(code.group(0)) if code else None
+        sub = re.match(r"\d+\s*\((.*)\)\s*$", values.get("subreason", ""))
+        pid = re.match(r"\d+", values.get("pid", ""))
+        described = values.get("description", "")
+        stamp = re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?", values.get("timestamp", ""))
+        entries.append({
+            "hora": stamp.group(0) if stamp else "", "proceso": values.get("process", ""), "pid": int(pid.group(0)) if pid else None, "motivo": code,
+            "motivo_texto": EXIT_REASONS.get(code, "motivo %s" % values.get("reason", "sin dato") if values.get("reason")
+                                             else "sin dato"),
+            "submotivo": "" if not sub or sub.group(1).upper() == "UNKNOWN" else sub.group(1),
+            "estado": values.get("status", ""), "importancia": values.get("importance", ""),
+            "pss": values.get("pss", ""), "rss": values.get("rss", ""),
+            "descripcion": "" if described == "null" else described,
+            "traza": "" if values.get("trace", "null") == "null" else values.get("trace", "")})
+    return entries
+
+
+def exit_text(entry):
+    """El motivo de una salida, en una línea."""
+    text = entry["motivo_texto"]
+    if entry["submotivo"]:
+        text += " · %s" % entry["submotivo"].lower()
+    if entry["descripcion"]:
+        text += " (%s)" % entry["descripcion"][:80]
+    return text
+
+
+def exit_snapshot(adb, package):
+    """(hora del dispositivo 'AAAA-MM-DD HH:MM:SS', pid de la app o None, salidas registradas), en una sola llamada a adb.
+    La hora sale del mismo reloj y con la misma zona que las de exit-info: se comparan como texto."""
+    out = adb.shell("date '+hora=%%Y-%%m-%%d %%H:%%M:%%S'; echo \"pid=$(pidof %s)\"; dumpsys activity exit-info %s"
+                    % (package, package)).stdout
+    moment = re.search(r"^hora=(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$", out, re.M)
+    pid = re.search(r"^pid=(\d+)", out, re.M)
+    return moment.group(1) if moment else "", int(pid.group(1)) if pid else None, parse_exit_info(out)
+
+
+def run_exits(before, after, measured_pid=None, killed=(), package=None):
+    """Las salidas de la app que pasaron dentro de una corrida: las que aparecen en `after` (foto al terminar) y no
+    estaban en `before` (foto al empezar), con hora dentro de la ventana y, si se conoce, del pid medido. Deja fuera
+    las que provoca la propia skill: los pids de `killed` (el proceso que detiene antes de un arranque en frío) y todo
+    lo que está fuera de la ventana (el force-stop de `preparar` y el de la compilación de ART). Con `package`, tampoco
+    cuentan los procesos secundarios de la app (`<paquete>:servicio`): el que se mide es el principal."""
+    start, _, known = before
+    end, _, entries = after
+    if not start or not end:
+        return []
+    seen = {(entry["hora"], entry["pid"]) for entry in known}
+    found = []
+    for entry in entries:
+        moment = entry["hora"][:19]
+        if (entry["hora"], entry["pid"]) in seen or not start <= moment <= end or entry["pid"] in killed:
+            continue
+        if measured_pid is not None and entry["pid"] != measured_pid:
+            continue
+        if package and entry.get("proceso") and entry["proceso"] != package:
+            continue
+        found.append(entry)
+    return found
+
+
+def crash_block(lines, package=None, pid=None, size=14):
+    """El último bloque FATAL EXCEPTION de logcat -b crash que es de ese pid (o, sin pid, de ese paquete)."""
+    starts = [i for i, line in enumerate(lines) if "FATAL EXCEPTION" in line]
+    for start in reversed(starts):
+        block = lines[start:start + size]
+        if pid is not None and any(re.search(r"\bPID: %d\b" % pid, line) for line in block):
+            return block
+        if pid is None and package and any(package in line for line in block):
+            return block
+    return []
+
+
+def cmd_salidas(args):
+    plan, folder = {}, None
+    if args.carpeta:
+        folder = pathlib.Path(args.carpeta)
+        plan = load_plan(folder / "plan.json")
+    package = args.paquete or plan.get("paquete")
+    if not package:
+        raise PerfError("indica la app con --paquete (o --carpeta, para tomarla del plan)")
+    serial = select_device(args.serial or plan.get("serial"))
+    adb = Adb(serial)
+    sdk = to_int(adb.shell("getprop ro.build.version.sdk").stdout.strip())
+    if sdk < EXIT_MIN_SDK:
+        print("Salidas de la app: no disponible (Android 11 o superior; el dispositivo tiene API %d). No quiere decir que "
+              "la app no se haya cerrado: en este dispositivo solo queda el aviso de crash de `capturar`." % sdk)
+        return
+    dump = adb.shell("dumpsys activity exit-info %s" % package).stdout
+    entries = parse_exit_info(dump)
+    if args.desde:
+        entries = [entry for entry in entries if entry["hora"] >= args.desde]
+    since = " desde %s" % args.desde if args.desde else ""
+    if not entries:
+        print("Sin salidas registradas de %s%s. El sistema guarda un historial acotado por paquete y lo borra al "
+              "desinstalar: una lista vacía no cubre lo que pasó antes." % (package, since))
+        return
+    shown = entries[:args.limite]
+    print(markdown_table(["Hora", "pid", "Motivo", "Descripción", "PSS", "RSS"],
+                         [[entry["hora"], entry["pid"] if entry["pid"] is not None else "—",
+                           entry["motivo_texto"] + (" · %s" % entry["submotivo"].lower() if entry["submotivo"] else ""),
+                           entry["descripcion"][:60] or "—", entry["pss"] or "—", entry["rss"] or "—"] for entry in shown]))
+    if len(entries) > len(shown):
+        print("… %d salidas más (sube --limite o acota con --desde)" % (len(entries) - len(shown)))
+    print("Hora del dispositivo. Los cierres a pedido (force-stop, reinstalar) también quedan registrados: no son fallas.")
+    crashes = [entry for entry in shown if entry["motivo"] == 4 and entry["pid"] is not None]
+    if crashes:
+        root = project_root(folder if folder is not None else pathlib.Path.cwd()).resolve()
+        build = package_build(adb.shell("dumpsys package %s" % package).stdout)
+        deobfuscator = Deobfuscator(dict(plan, paquete=package), root, args.mapping, build.get("instalada"), adb)
+        lines = adb.shell("logcat -b crash -d -t 2000").stdout.splitlines()
+        for entry in crashes[:3]:
+            block = crash_block(lines, pid=entry["pid"])
+            if block:
+                print("Crash de las %s (pid %d), inicio de la pila (logcat -b crash):" % (entry["hora"][11:19], entry["pid"]))
+                print("\n".join("  " + line for line in deobfuscator.stack(block)))
+            else:
+                print("Crash de las %s (pid %d): su pila ya no está en logcat -b crash." % (entry["hora"][11:19], entry["pid"]))
+    traced = [entry for entry in shown if entry["traza"]]
+    if traced:
+        print("Con traza del sistema (ANR o crash nativo): %s. Para leerlas, `anr-audit-and-fix` o `android-profiler`."
+              % ", ".join("%s %s" % (entry["hora"][11:19], entry["motivo_texto"]) for entry in traced[:3]))
+
+
 # ── consulta y diagnostico ───────────────────────────────────────────────────
 
 def parse_params(items):
@@ -3046,6 +3877,32 @@ def package_near(trace):
             except ValueError:
                 return None
     return None
+
+
+def trace_plan(trace):
+    """(raíz del proyecto, plan.json de la investigación de esa traza, o {} si no hay)."""
+    for folder in list(pathlib.Path(trace).resolve().parents)[:3]:
+        if (folder / "plan.json").is_file():
+            try:
+                plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+            except ValueError:
+                plan = {}
+            return project_root(folder).resolve(), plan if isinstance(plan, dict) else {}
+    return project_root(pathlib.Path.cwd()).resolve(), {}
+
+
+def measured_device(plan, installed):
+    """El dispositivo, solo si está conectado y todavía tiene instalado el build que se midió (misma fecha de
+    instalación): con él se compara el pg_map_id del mapping con el del APK. None si no: se verifica por fechas."""
+    package = plan.get("paquete")
+    if not package or not installed:
+        return None
+    try:
+        adb = Adb(select_device(plan.get("serial")))
+        current = package_build(adb.shell("dumpsys package %s" % package).stdout)
+    except (PerfError, OSError, subprocess.SubprocessError):
+        return None
+    return adb if current.get("instalada") == installed else None
 
 
 def query_path(name):
@@ -3075,14 +3932,62 @@ def cmd_consulta(args):
         sql = query_path(args.archivo).read_text(encoding="utf-8")
     else:
         raise PerfError("pasa un archivo .sql (o el nombre de una consulta de la skill) o --sql")
+    requires = query_requires(sql)
+    config = trace_config(args.traza)
+    missing = missing_sources(requires, config) if config else []
+    if missing:
+        capture = configs_with(requires)
+        print("✖ %s. No quiere decir que no ocurra: esta traza no lo puede responder.%s" % (
+            unmeasured(config, missing), " Captura una corrida con --config %s y consulta esa traza." % " o ".join(capture)
+            if capture and not any(source in (config.get("no_disponibles") or {}) for source in missing) else ""))
+        return
     sql = fill_sql(sql, args.paquete or package_near(args.traza), parse_params(args.param))
-    print_sets(run_tp(tp, args.traza, sql), args.limite, args.ancho)
+    sets = run_tp(tp, args.traza, sql)
+    columns = query_deobfuscate(sql)
+    if columns:
+        root, near = trace_plan(args.traza)
+        sets = deobfuscate_sets(sets, columns, Deobfuscator(
+            near, root, args.mapping, (config or {}).get("instalada"),
+            lambda: measured_device(near, (config or {}).get("instalada"))))
+    print_sets(sets, args.limite, args.ancho)
+    if requires and not config:
+        print("⚠ %s: no se sabe con qué configuración se grabó esta traza (es de una versión anterior o "
+              "se movió de su carpeta), así que %s. La consulta necesita: %s."
+              % ("Con configuración desconocida" if any(body for _, body in sets) else "Sin filas, con configuración "
+                 "desconocida", "lo que falte puede no haberse medido" if any(body for _, body in sets)
+                 else "no se puede afirmar que no ocurra", ", ".join(requires)))
+    elif requires and not any(body for _, body in sets):
+        print("Medido y sin casos: la configuración %s captura lo que pide la consulta (%s) y no hubo filas. Vale como "
+              "ausencia si el dispositivo emite ese dato: si nunca sale nada, comprueba que la traza lo traiga."
+              % (config["nombre"], ", ".join(requires)))
 
 
 DIAG_ORDER = ["arranque_hitos", "linea_hilo_principal", "hilo_principal_top", "estado_hilo_principal",
-              "hijos_mas_largos", "dormido_en_frames_largos", "estado_primeros_frames", "frames_por_tramo",
+              "hijos_mas_largos", "dormido_en_frames_largos", "bloqueo_hilo_principal", "estado_primeros_frames", "frames_por_tramo",
               "cpu_por_tramo", "cpu_por_hilo", "contencion_locks", "binder_hilo_principal", "jank_por_tipo",
               "linea_de_tiempo", "llamadas_solapadas", "inflate_tras_http", "cpu_por_libreria"]
+
+
+# Cuándo vale la pena una captura con --config completa para saber por qué espera el hilo principal: si pasa dormido o
+# bloqueado al menos esta parte del tiempo de sus 3 frames más largos, o si tiene ahí una espera en D de al menos estos
+# milisegundos (un cuarto del presupuesto de un frame a 60 Hz). Punto de partida, sin calibrar con datos de campo.
+BLOCKED_SHARE_MIN = 0.25
+BLOCKED_D_MIN_MS = 4.0
+BLOCKED_SOURCE = "ftrace:sched/sched_blocked_reason"
+
+
+def blocked_signal(sets):
+    """(parte del tiempo de los frames largos en S o D, espera más larga en D en ms, ms de los frames) a partir del
+    resultado de senal_bloqueo.sql; None si no hay frames o la consulta no devolvió su fila."""
+    for header, body in sets or []:
+        if body and all(name in header for name in ("frames_ms", "espera_ms", "max_d_ms")):
+            row = dict(zip(header, body[0]))
+            try:
+                frames, waiting, longest = float(row["frames_ms"]), float(row["espera_ms"]), float(row["max_d_ms"])
+            except (TypeError, ValueError):
+                return None
+            return (waiting / frames, longest, frames) if frames > 0 else None
+    return None
 
 
 def query_catalog():
@@ -3167,7 +4072,7 @@ def cmd_diagnostico(args):
     flow_metrics = {r["metrica"] for r in rows if r["flujo"] == flow_name}
     startup = bool(startup_spec(flow)) or "ttid_ms" in flow_metrics
     network = any(r["metrica"] == "red_llamadas" and r["valor"] > 0 for r in rows if r["flujo"] == flow_name)
-    groups = {"base", "cpu"} | ({"arranque"} if startup else set()) | ({"red"} if network else set())
+    groups = {"base", "cpu", "completa"} | ({"arranque"} if startup else set()) | ({"red"} if network else set())
     wanted = set(args.consultas.split(",")) if args.consultas else None
     params = {"TRAMO_MS": str(args.tramo_ms or (250 if startup else 500))}
     catalog = [q for q in query_catalog() if (q[0] in wanted if wanted else set(q[2]) & groups)]
@@ -3176,7 +4081,12 @@ def cmd_diagnostico(args):
           "_Corridas: %s. `t_ms` y `desde_ms`: ms desde que nace el proceso (arranque) o desde el inicio de la "
           "traza. Generado por hb-performance %s._" % (", ".join("%s = %s (%s %s)" % (label, run, metric, fmt(value, unit))
                                                                  for label, run, value in runs), VERSION)]
-    printed, empty = [], []
+    printed, empty, unknown, not_measured, failed = [], [], [], {}, {}
+    installed = (read_phases(folder).get(phase) or {}).get("instalada")
+    deobfuscator = Deobfuscator(plan, project_root(folder).resolve(), args.mapping, installed,
+                                lambda: measured_device(plan, installed))
+    signal_sql = (ASSETS / "queries" / "senal_bloqueo.sql").read_text(encoding="utf-8")
+    blocked = None  # (parte, espera más larga en D, ms de los frames, corrida) de la corrida donde más pesa la espera
     segments = flow.get("segmentos") or []
     for index, (label, run, _) in enumerate(runs):
         chosen = [q for q in catalog if index == 0 or "peor" in q[2]]
@@ -3184,11 +4094,44 @@ def cmd_diagnostico(args):
             continue
         trace = trace_of(folder, phase, flow_name, run)
         print("… procesando la traza %d de %d (corrida %s, %s)" % (index + 1, len(runs), run, label), flush=True)
-        batch = [(q[0], fill_sql(q[3], plan["paquete"], params)) for q in chosen]
+        # Cada consulta declara qué fuentes necesita (`-- requiere:`) y se valida contra la configuración con la que se
+        # grabó esta traza: sin la fuente, es "no medido", que no es lo mismo que "sin casos".
+        config = trace_config(trace)
+        runnable = []
+        for q in chosen:
+            requires = query_requires(q[3])
+            missing = missing_sources(requires, config) if config else []
+            if missing and "completa" in q[2] and not wanted:
+                pass  # una captura especial: si hace falta, la pide la señal de espera ("Captura pendiente"), más abajo
+            elif missing:
+                not_measured.setdefault(q[0], unmeasured(config, missing))
+            elif not config and set(q[2]) & {"completa"}:
+                unknown.append(q[0])  # pide una captura especial y no se sabe si esta traza lo es: no se corre
+            else:
+                runnable.append(q)
+        chosen = runnable
+        batch = [(q[0], fill_sql(q[3], plan["paquete"], params)) for q in chosen if "completa" not in q[2]]
         if segments and not wanted:  # la red por tramo sale de las mismas filas que las métricas de la corrida
             batch.append(("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"),
                                                plan["paquete"], {"INPUT_GLOB": plan.get("input_slices") or INPUT_SLICES})))
-        results = run_tp_batch(tp, trace, batch)
+        # La señal de espera solo tiene sentido si la traza no trae ya la razón de bloqueo (una captura completa).
+        watch = not wanted and not (config and (BLOCKED_SOURCE in config["fuentes"]
+                                                or missing_sources(query_requires(signal_sql), config)))
+        if watch:
+            batch.append(("senal_bloqueo", fill_sql(signal_sql, plan["paquete"], params)))
+        results = run_tp_batch(tp, trace, batch) if batch else {}  # trace_processor no acepta un archivo sin consultas
+        found = blocked_signal(results.get("senal_bloqueo")) if watch else None
+        if found and (found[0] >= BLOCKED_SHARE_MIN or found[1] >= BLOCKED_D_MIN_MS) and (blocked is None or found[0] > blocked[0]):
+            blocked = found + (run,)
+        for q in chosen:
+            if "completa" in q[2]:
+                # Aparte: usan columnas que una versión antigua de trace_processor puede no tener, y un error ahí no
+                # debe tumbar el resto del diagnóstico.
+                try:
+                    results.update(run_tp_batch(tp, trace, [(q[0], fill_sql(q[3], plan["paquete"], params))]))
+                except PerfError as error:
+                    results[q[0]] = []
+                    failed.setdefault(q[0], str(error).strip().splitlines()[-1][:160])
         if index:
             md += ["", "## Corrida %s (%s)" % (run, label)]
         network_table = segment_network_table(results.get("metricas") or [], segments)
@@ -3198,10 +4141,12 @@ def cmd_diagnostico(args):
                    "", "_De esta corrida, sin veredicto estadístico: los valores con veredicto son las métricas "
                        "`<tramo> red_*` de todas las corridas._"]
             printed.append("red por tramo (%s)" % label)
-        for name, title, _, _ in chosen:
-            sets = [s for s in results[name] if s[1]]
+        for name, title, _, sql in chosen:
+            sets = deobfuscate_sets([s for s in results[name] if s[1]], query_deobfuscate(sql), deobfuscator)
+            if name in failed:
+                continue
             if not sets:
-                empty.append(name)
+                (empty if config else unknown).append(name)
                 continue
             md += ["", "%s %s · `%s`" % ("###" if index else "##", title.replace("{{TRAMO_MS}}", params["TRAMO_MS"]),
                                          name), ""]
@@ -3209,14 +4154,41 @@ def cmd_diagnostico(args):
                 md.append(markdown_table(header, [[fmt_cell(c)[:args.ancho] for c in row] for row in body[:args.limite]]))
             printed.append("%s (%s)" % (name, label))
     if empty:
-        md += ["", "_Sin filas: %s._" % ", ".join(sorted(set(empty)))]
-    if "cpu_por_libreria" in empty:
+        md += ["", "_Medido y sin casos (la configuración de la traza captura lo que la consulta necesita y no hubo "
+                   "filas): %s._" % ", ".join(sorted(set(empty)))]
+    for name in sorted(not_measured):
+        md += ["", "_`%s`: %s. No quiere decir que no ocurra._" % (name, not_measured[name])]
+    if unknown:
+        md += ["", "_Sin tabla, con configuración desconocida (trazas de una versión anterior: no se sabe qué fuentes "
+                   "capturaron, así que no se afirma que no ocurra): %s._" % ", ".join(sorted(set(unknown)))]
+    for name in sorted(failed):
+        md += ["", "_`%s`: no disponible: trace_processor no pudo correr la consulta (%s). Actualiza trace_processor._"
+               % (name, failed[name])]
+    if "cpu_por_libreria" in set(empty) | set(unknown) | set(not_measured):
         md += ["", "_Sin muestras de CPU: para atribuir el CPU a funciones, captura una corrida con "
                    "`capturar --prueba --config cpu` y consulta `cpu_por_libreria` sobre esa traza._"]
+    for note in deobfuscator.notes:
+        md += ["", "_%s_" % note.lstrip("·⚠✔ ")]
+    if blocked:
+        capture = "capturar --plan %s%s --prueba --config completa" % (
+            folder / "plan.json", " --flujo %s" % flow_name if len(plan["flujos"]) > 1 else "")
+        md += ["", "## Por qué espera el hilo principal: falta una captura", "",
+               "En la corrida %s, el hilo principal pasó dormido o bloqueado el %s %% del tiempo de sus 3 frames más largos "
+               "(%s ms en total; su espera más larga en D fue de %s ms). Esta traza dice dónde espera "
+               "(`dormido_en_frames_largos`), no quién lo bloquea ni quién lo despierta. Captura pendiente: `%s` y, sobre "
+               "esa traza, `consulta %s bloqueo_hilo_principal`."
+               % (blocked[3], fmt(round(blocked[0] * 100, 1)), fmt(round(blocked[2], 1)), fmt(round(blocked[1], 1)), capture,
+                  folder / "prueba" / ("%s_1.perfetto-trace.gz" % flow_name)),
+               "", "_Umbral: %d %% o más del tiempo de los frames largos en S o D, o una espera de %s ms o más en D. Es una "
+                   "captura de diagnóstico: pesa varias veces más que la base y sus tiempos no se comparan._"
+               % (BLOCKED_SHARE_MIN * 100, fmt(BLOCKED_D_MIN_MS))]
     target = folder / ("diagnostico.md" if phase == "antes" else "diagnostico-%s.md" % phase)
     target.write_text("\n".join(md) + "\n", encoding="utf-8")
+    if blocked:
+        print("· El hilo principal espera dentro de sus frames más largos (%s %% del tiempo): %s deja una captura pendiente "
+              "con --config completa para saber por qué." % (fmt(round(blocked[0] * 100, 1)), target.name))
     print("✔ %s: %d tablas de %s (%s)." % (target, len(printed), ", ".join("corrida %s" % r[1] for r in runs),
-                                          ", ".join(sorted(groups - {"cpu"}))))
+                                          ", ".join(sorted(groups - {"cpu", "completa"}))))
     print_next(folder, plan, flow_name)
 
 
@@ -3348,6 +4320,32 @@ def trial_md(plan):
 LOGRADO_HEADERS = ["#", "Mejora", "Métrica", "Antes", "Esperado", "Después", "Δ %", "Veredicto", "Estado", "Resultado"]
 
 
+def config_notes(folder, flows):
+    """Avisos de `comparar`: las fases de un flujo que no se midieron con la misma configuración de Perfetto. No
+    bloquea. Sin el dato en ninguna fase (investigaciones de versiones anteriores) no dice nada."""
+    phases = read_phases(folder)
+    notes = []
+    for flow in flows:
+        used = {}
+        for phase in FASES:
+            record = phases.get(phase)
+            if not record:
+                continue
+            tracked = record.get("flujos") or {}
+            if tracked and flow not in tracked:
+                continue
+            used[phase] = list((tracked.get(flow) or {}).get("configs") or record.get("configs") or [UNKNOWN_CONFIG])
+        distinct = {label for labels in used.values() for label in labels}
+        if len(used) > 1 and len(distinct) > 1:
+            notes.append("%s: las fases no se midieron con la misma configuración de Perfetto (%s): lo que cada una "
+                         "captura y su costo pueden diferir, y las métricas no ser comparables. Repite con --rehacer las "
+                         "fases que no correspondan%s" % (
+                             flow, "; ".join("%s: %s" % (phase, ", ".join(labels)) for phase, labels in used.items()),
+                             " ('desconocida': medida con una versión anterior, que no lo registraba)"
+                             if UNKNOWN_CONFIG in distinct else ""))
+    return notes
+
+
 def cmd_comparar(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
@@ -3378,6 +4376,7 @@ def cmd_comparar(args):
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
+    notes += config_notes(folder, sorted({r["flujo"] for r in rows}))
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -4324,12 +5323,13 @@ def read_request(path):
 
 
 def session1_prompt(request, serial):
-    """El texto del chat de la sesión 1: el de "flujo largo" si para llegar al tramo hay login u otras pantallas."""
+    """El texto del chat de la sesión 1: el de "flujo largo" si para llegar al tramo hay login u otras pantallas. Dice
+    qué hay que pasar para llegar, no cómo recorrerlo: el modo de recorrido se elige en las preguntas de la sesión 1."""
     flow = request["flujo"].strip().rstrip(".")
     reach = (request.get("llegar") or "").strip().rstrip(".")
     if reach:
-        return ("Usa hb-performance: medir %s. Para llegar ahí hay que %s: usa un flow de Maestro en preparar y adb para "
-                "el tramo medido. Dispositivo %s." % (flow, reach, serial))
+        # No fija cómo se recorre (adb, Maestro en preparar, deep link o manual): esa pregunta es de la sesión 1.
+        return "Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial)
     return "Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial)
 
 
@@ -5513,6 +6513,10 @@ def cmd_instrumentar(args):
 
 # ── Entrada ──────────────────────────────────────────────────────────────────
 
+MAPPING_HELP = ("mapping.txt de R8 de la variante medida, para desofuscar; si no, el 'mapping' del plan o el de la variante "
+                "del comando 'instalar'. Pasado así se usa aunque no se pueda verificar contra el APK instalado")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Captura, métricas, diagnóstico, comparación y reporte de hb-performance.")
     parser.add_argument("--version", action="version", version="hb-performance %s" % VERSION)
@@ -5573,6 +6577,9 @@ def main(argv=None):
     p.add_argument("--descartar", help="ids separados por coma (- es ninguno)")
     p.add_argument("--pendiente", help="ids separados por coma (- es ninguno)")
     p.add_argument("--aplicada", help="ids que la sesión 3 ya aplicó (la usa el agente al terminar la mejora)")
+    p.add_argument("--profundidad", choices=["riguroso", "triage"],
+                   help="cambia la profundidad del plan sin editar plan.json: de triage a riguroso para aplicar una mejora "
+                        "(el paso siguiente pide completar antes y medir control)")
     p.set_defaults(func=cmd_decidir)
 
     p = sub.add_parser("capturar", help="calentamiento, compilación y N corridas con traza, consultas y CSV")
@@ -5604,6 +6611,7 @@ def main(argv=None):
                         "Profile + speed-profile); si no, la del plan")
     p.add_argument("--paquete", help="con --prueba y sin plan")
     p.add_argument("--carpeta", help="con --prueba y sin plan")
+    p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_capturar)
 
     p = sub.add_parser("diagnostico", help="consultas de diagnóstico sobre la corrida mediana y la peor")
@@ -5616,6 +6624,7 @@ def main(argv=None):
     p.add_argument("--limite", type=int, default=25)
     p.add_argument("--ancho", type=int, default=80)
     p.add_argument("--tp")
+    p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_diagnostico)
 
     p = sub.add_parser("consulta", help="consulta SQL acotada sobre una traza")
@@ -5627,7 +6636,17 @@ def main(argv=None):
     p.add_argument("--limite", type=int, default=20)
     p.add_argument("--ancho", type=int, default=80)
     p.add_argument("--tp")
+    p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_consulta)
+
+    p = sub.add_parser("salidas", help="por qué se cerró la app: sus últimas salidas según el sistema (Android 11 o superior)")
+    p.add_argument("--paquete", help="applicationId; si no, el del plan de --carpeta")
+    p.add_argument("--carpeta", help="carpeta de la investigación: toma de su plan el paquete, el serial y el mapping")
+    p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
+    p.add_argument("--desde", help="solo las salidas desde esa hora del dispositivo: 'AAAA-MM-DD' o 'AAAA-MM-DD HH:MM'")
+    p.add_argument("--limite", type=int, default=10, help="cuántas salidas, de la más reciente hacia atrás (10)")
+    p.add_argument("--mapping", help=MAPPING_HELP)
+    p.set_defaults(func=cmd_salidas)
 
     p = sub.add_parser("resumen", help="estadísticas por fase y avisos")
     p.add_argument("csv")
