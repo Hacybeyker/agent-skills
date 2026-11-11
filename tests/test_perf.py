@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -61,9 +62,13 @@ class PerfBase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def perf(self, *args, stdin=None):
+    def perf(self, *args, stdin=None, interruptible=False):
+        # interruptible: el proceso recibe SIGINT con su manejo por defecto aunque quien corre los tests lo ignore (un
+        # trabajo en segundo plano, algunos CI); sin eso, Python no levanta KeyboardInterrupt.
+        default_sigint = (lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)) if interruptible else None
         return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(self.dir),
-                              env=self.env, input=stdin, capture_output=True, text=True, encoding="utf-8")
+                              env=self.env, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                              preexec_fn=default_sigint)
 
     def ok(self, *args, stdin=None):
         result = self.perf(*args, stdin=stdin)
@@ -385,8 +390,14 @@ with open(os.environ["FAKE_LOG"], "a") as f:
 if args[:1] == ["-s"]:
     args = args[2:]
 if args == ["devices"]:
+    if os.environ.get("FAKE_LISTA"):  # la lista tal cual, para estados que no son "device" (unauthorized, offline)
+        print("List of devices attached\n" + os.environ["FAKE_LISTA"])
+        sys.exit(0)
     print("List of devices attached\n" + "".join("%s\tdevice\n" % d for d in os.environ.get("FAKE_DEVICES", "emulator-5554").split(",")))
     sys.exit(0)
+if os.environ.get("FAKE_DESCONECTA") and os.environ["FAKE_DESCONECTA"] in " ".join(args):
+    sys.stderr.write("adb: device 'emulator-5554' not found\n")  # el cable se soltó a mitad del comando
+    sys.exit(1)
 if args[0] == "pull":
     if os.environ.get("FAKE_PULL_FALLA"):
         sys.stderr.write("adb: error: failed to stat remote object '%s': No such file or directory\n" % args[1])
@@ -2813,13 +2824,14 @@ class PrepareSecretsTest(DeviceBase):
         self.assertFalse((self.plan.parent / "logs" / "preparar.log").exists())  # si funciona, no queda nada en disco
 
     def test_sin_requiere_env_la_salida_estandar_se_descarta_como_siempre_y_solo_se_lee_la_de_error(self):
-        self.plan_with('echo "Input text clave-sin-declarar"; echo "no aparece Inicio" >&2; exit 1', env=())
+        # lo que el comando escribe ("clave-sin-2") no es el texto del comando, que sí se muestra para correrlo a mano
+        self.plan_with('echo "Input text clave-sin-$((1+1))"; echo "no aparece Inicio" >&2; exit 1', env=())
         self.tp_outputs(GOOD)
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("    no aparece Inicio", result.stdout)
-        self.assertNotIn("clave-sin-declarar", result.stdout + result.stderr)
-        self.assertNotIn("clave-sin-declarar", (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8"))
+        self.assertNotIn("clave-sin-2", result.stdout + result.stderr)
+        self.assertNotIn("clave-sin-2", (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8"))
 
     def test_enmascara_primero_el_valor_mas_largo(self):
         os.environ.update({"HBPERF_T1": "abc", "HBPERF_T2": "abc123"})
@@ -6062,3 +6074,332 @@ class ExitInfoTest(DeviceBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("sin registro de salidas de la app por corrida"), 1)
         self.assertNotIn("inválida", result.stdout)
+
+
+class GuidedFailureTest(DeviceBase):
+    """Todo fallo termina con qué pasó, qué quedó guardado y el comando para seguir, que empieza con cd."""
+
+    def capture(self, *extra, interruptible=False):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", *extra, interruptible=interruptible)
+
+    def update_flow(self, **fields):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"].update(fields)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def assert_guided(self, result, saved, *commands):
+        """La salida de error termina con las tres partes, en orden, y cada comando empieza con cd."""
+        text = result.stderr
+        self.assertIn("✖ ", text)
+        self.assertLess(text.index("✖ "), text.index("  Qué quedó guardado: "), text)
+        self.assertLess(text.index("  Qué quedó guardado: "), text.index("  Cómo seguir:"), text)
+        self.assertIn(saved, text.split("  Qué quedó guardado: ")[1].split("\n")[0])
+        steps = [line.strip() for line in text.split("  Cómo seguir:")[1].splitlines() if line.startswith("     ")]
+        self.assertTrue(steps, text)
+        for line in steps:
+            self.assertTrue(line.startswith("cd "), line)
+        for command in commands:
+            self.assertTrue(any(command in line for line in steps), (command, steps))
+        return steps
+
+    def phases(self):
+        return json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+
+    def test_ctrl_c_dice_cuantas_corridas_quedaron_y_como_completar_la_fase(self):
+        counter = self.dir / "vueltas.txt"
+        # el recorrido interrumpe a perf.py (Ctrl+C) en la tercera corrida
+        self.update_flow(recorrido='n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; [ "$n" -lt 2 ] || kill -INT $PPID; '
+                                   'sleep 0.3' % (counter, counter))
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar",
+                              interruptible=True)
+        self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+        self.assertIn("✖ interrumpido (Ctrl+C)", result.stderr)
+        steps = self.assert_guided(result, "2 de 5 corridas válidas de antes en ", "--corridas 3")
+        self.assertIn("capturar --plan", steps[0])
+        self.assertNotIn("--corridas 5", steps[0])
+        self.assertIn("--rehacer", steps[1])  # la otra salida: repetir la fase entera
+        self.assertEqual(self.phases()["antes"]["corridas"], 2)  # las válidas quedan con su registro
+        self.assertIn("kill -TERM 4242", (self.dir / "adb.log").read_text(encoding="utf-8"))  # Perfetto no queda grabando
+        counter.unlink()
+        self.update_flow(recorrido="true")
+        self.capture("--fase", "antes", "--corridas", "3", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(self.phases()["antes"]["corridas"], 5)
+        self.assertEqual(len({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}), 5)
+
+    def read_csv_at(self, path):
+        with path.open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+    def test_ctrl_c_sin_corridas_validas_no_guarda_nada_y_da_el_mismo_comando(self):
+        self.update_flow(recorrido="kill -INT $PPID; sleep 0.3")
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar",
+                              interruptible=True)
+        self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+        self.assert_guided(result, "ninguna corrida de esta tanda (0 de 5 válidas de antes)", "--corridas 5")
+        self.assertFalse((self.plan.parent / "fases.json").exists())
+
+    def test_tres_invalidas_seguidas_y_corridas_insuficientes_dan_el_comando_para_completar(self):
+        self.tp_outputs(GOOD, LOGIN, LOGIN, LOGIN)
+        result = self.capture("--fase", "antes", "--corridas", "10", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("3 corridas inválidas seguidas", result.stderr)
+        self.assert_guided(result, "1 de 10 corridas válidas de antes en ", "--corridas 9")
+        self.assertEqual(self.phases()["antes"]["corridas"], 1)
+        notes = perf.read_notes(self.plan.parent)
+        self.assertEqual(notes["invalidas"]["antes"]["home"], {"apareció 'SCREEN LoginActivity onCreate'": 3})
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN)
+        result = self.capture("--fase", "control", "--corridas", "4", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("solo 3 de 4 corridas válidas en 7 intentos", result.stderr)
+        self.assert_guided(result, "3 de 4 corridas válidas de control en ", "--corridas 1")
+
+    def test_variables_faltantes_dan_el_comando_para_cargarlas_y_el_mismo_comando(self):
+        self.update_flow(preparar="true", requiere_env=["PERF_USUARIO", "PERF_CLAVE", "PERF_TOKEN_API"])
+        for name in ("PERF_USUARIO", "PERF_CLAVE", "PERF_TOKEN_API"):
+            self.env.pop(name, None)
+        result = self.capture("--fase", "antes", "--corridas", "5")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        steps = self.assert_guided(result, "nada", "capturar --plan")
+        self.assertIn("printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO", steps[0])  # lectura normal
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", steps[1])  # oculta
+        self.assertIn("read -r -s PERF_TOKEN_API && echo && export PERF_TOKEN_API", steps[2])
+        self.assertIn("--fase antes --corridas 5", steps[3])  # y el mismo comando que se estaba corriendo
+        self.assertIn("lectura oculta", result.stderr)
+
+    def test_el_comando_para_cargar_una_variable_funciona_en_bash_y_en_zsh(self):
+        command = perf.env_steps(["PERF_CLAVE"])[0][1].split(" && ", 1)[1] + ' && printf "%s" "[$PERF_CLAVE]"'
+        for shell in ("bash", "zsh"):
+            if not shutil.which(shell):
+                continue
+            result = subprocess.run([shell, "-c", command], input="secreta\n", capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, shell + result.stderr)
+            self.assertTrue(result.stdout.endswith("[secreta]"), (shell, result.stdout))
+        self.assertEqual([bool(perf.SECRET_NAME.search(name)) for name in
+                          ("PERF_CLAVE", "APP_PASSWORD", "PIN_TARJETA", "API_TOKEN", "CLIENT_SECRET", "API_KEY", "PERF_USUARIO",
+                           "AMBIENTE")], [True, True, True, True, True, True, False, False])
+
+    def test_un_preparar_que_falla_sin_salida_da_el_comando_para_correrlo_a_mano(self):
+        self.update_flow(preparar="exit 1 > /dev/null 2>&1")
+        self.tp_outputs(GOOD)
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("córrelo a mano en tu terminal para ver el error:", result.stdout)
+        self.assertRegex(result.stdout, r"\n    cd \S+ && \( exit 1 > /dev/null 2>&1 \)\n")
+        steps = self.assert_guided(result, "nada", "( exit 1 > /dev/null 2>&1 )", "--prueba")
+        self.assertIn("( exit 1", steps[0])  # primero 'preparar' a mano; después, repetir
+        self.assertIn("no dejó la app en el punto de partida", result.stderr)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home")[0]["tipo"], "preparar")
+
+    def test_preparar_a_mano_lleva_los_valores_enmascarados(self):
+        self.update_flow(preparar="echo clave-de-mentira > /dev/null; exit 3", requiere_env=["PERF_CLAVE"])
+        self.env["PERF_CLAVE"] = "clave-de-mentira"
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertNotIn("clave-de-mentira", result.stdout + result.stderr)
+        self.assert_guided(result, "ninguna corrida de esta tanda", "( echo *** > /dev/null; exit 3 )", "--corridas 5")
+        self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"],
+                         {"'preparar' terminó con código 3": 3})
+
+    def test_despues_del_calentamiento_hay_un_respiro_antes_del_primer_preparar(self):
+        self.assertGreaterEqual(perf.WARMUP_SETTLE_S, 1)
+        source = inspect_source()
+        self.assertIn("settle(WARMUP_SETTLE_S)", source.split("def cmd_capturar")[1].split("while valid < target")[0])
+
+    def test_sin_dispositivo_sin_autorizar_o_desconectado_a_mitad_explica_y_da_el_comando(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_LISTA"] = "\n"  # adb devices sin ningún dispositivo
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("no hay ningún dispositivo conectado", result.stderr)
+        self.assert_guided(result, "nada", "--prueba")
+        self.env["FAKE_LISTA"] = "emulator-5554\tunauthorized\n"
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("el dispositivo emulator-5554 está conectado pero sin autorizar: acepta en su pantalla", result.stderr)
+        self.assert_guided(result, "nada", "--prueba")
+        self.env["FAKE_LISTA"] = "emulator-5554\toffline\n"
+        self.assertIn("sin responder (offline)", self.capture("--prueba", "--serial", "emulator-5554").stderr)
+        del self.env["FAKE_LISTA"]
+        self.env["FAKE_DESCONECTA"] = "pidof"  # el cable se suelta en medio de la primera corrida
+        result = self.capture("--fase", "control", "--corridas", "3", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el dispositivo dejó de estar disponible para adb (adb: device 'emulator-5554' not found)", result.stderr)
+        self.assert_guided(result, "ninguna corrida de esta tanda", "--corridas 3")
+
+    def test_una_traza_que_no_se_procesa_dice_lo_guardado_y_como_seguir(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_TP_FALLA"] = "metricas"
+        result = self.capture("--fase", "antes", "--corridas", "2", "--calentamiento", "0", "--sin-compilar")
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_guided(result, "ninguna corrida de esta tanda", "--corridas 2")
+
+    def test_build_repetido_en_despues_da_el_comando_de_instalar_y_el_de_medir(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["instalar"] = "./gradlew :app:installProfiling"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        result = self.capture("--fase", "despues", "--corridas", "5")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el build instalado es el mismo que midió antes", result.stderr)
+        steps = self.assert_guided(result, "ninguna corrida de esta tanda", "./gradlew :app:installProfiling",
+                                   "--fase despues --corridas 5")
+        self.assertIn("installProfiling", steps[0])
+
+    def test_un_plan_invalido_y_un_error_inesperado_tambien_terminan_con_el_comando(self):
+        self.plan.write_text("{no es json", encoding="utf-8")
+        result = self.perf("siguiente", "--carpeta", self.plan.parent)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no se pudo leer", result.stderr)
+        self.assert_guided(result, "nada", "siguiente --carpeta")
+        self.plan.write_text(json.dumps({"paquete": PKG, "flujos": {"home": {"recorrido": "true"}}}), encoding="utf-8")
+        write(self.plan.parent / "fases.json", "[1, 2]")  # un archivo de la carpeta con una forma que perf.py no espera
+        result = self.perf("siguiente", "--carpeta", self.plan.parent)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("✖ error inesperado en perf.py (", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assert_guided(result, "nada", "siguiente --carpeta")
+        self.env["HB_PERF_DEBUG"] = "1"
+        self.assertIn("Traceback", self.perf("siguiente", "--carpeta", self.plan.parent).stderr)
+
+    def test_pausa_no_imprime_la_guia_porque_corre_dentro_de_un_recorrido(self):
+        self.env["HB_PERF_TTY"] = str(self.dir / "no-existe" / "tty")
+        result = self.perf("pausa", "autoriza en la otra app")
+        self.assertEqual(result.returncode, 3)
+        self.assertNotIn("Cómo seguir", result.stderr)
+
+    def test_el_mismo_comando_cambia_corridas_y_quita_rehacer(self):
+        argv = ["capturar", "--plan", "reports/perf/x y/plan.json", "--fase", "antes", "--corridas=10", "--rehacer"]
+        command = perf.same_command(corridas=4, sin=("--rehacer",), argv=argv)
+        self.assertTrue(command.startswith("cd "))
+        self.assertTrue(command.endswith("capturar --plan 'reports/perf/x y/plan.json' --fase antes --corridas 4"), command)
+        self.assertIn("--corridas 10 --rehacer", perf.same_command(argv=["capturar", "--corridas", "10", "--rehacer"]))
+
+
+class TestRunWarningsTest(DeviceBase):
+    """Los avisos de la corrida de prueba se guardan y, mientras sigan vigentes, `siguiente` no ofrece medir antes."""
+
+    REPEATED = GOOD.replace('"seccion",10,5,0,"SCREEN MainActivity onResume"\n', "") + \
+        '"seccion",400000000,0,0,"MARK reparto"\n"seccion",450000000,0,0,"MARK reparto"\n'
+
+    def setUp(self):
+        super().setUp()
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["instalar"] = "./gradlew :app:installProfiling"
+        plan["flujos"]["home"]["metricas_usuario"] = [{"nombre": "reparto_ms", "desde": {"marca": "HTTP GET items/{id}"},
+                                                       "hasta": {"marca": "MARK reparto"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(self.dir / "app/src/main/kotlin/com/example/app/RepartoScreen.kt",
+              "package com.example.app\n\nfun cargado() {\n    PerfHooks.mark(\"reparto\")\n}\n")
+
+    def test_la_prueba_guarda_sus_avisos_y_siguiente_pide_corregir_antes_de_medir(self):
+        self.tp_outputs(self.REPEATED)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("⚠ 'MARK reparto' salió 2 veces en una misma carga", out)
+        self.assertIn("⚠ 1 avisos por corregir antes de medir", out)
+        self.assertIn("Siguiente · corrige antes de medir (avisos de la corrida de prueba)", out)
+        saved = perf.test_warnings(self.plan.parent, "home")
+        self.assertEqual([item["tipo"] for item in saved], ["repetida"])
+        self.assertEqual(saved[0]["donde"], ["app/src/main/kotlin/com/example/app/RepartoScreen.kt:4"])
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        lines = out.splitlines()
+        head = next(i for i, line in enumerate(lines) if line.strip() == "Corrige antes de medir:")
+        self.assertIn("- la marca 'MARK reparto' salió 2 veces en una misma carga", lines[head + 1])
+        self.assertIn("RepartoScreen.kt:4", lines[head + 1])
+        chat = next(line for line in lines if "Texto:" in line)
+        self.assertIn("corrige los avisos de la corrida de prueba del flujo 'home', sin compilar, instalar ni capturar", chat)
+        self.assertIn("1) la marca 'MARK reparto' sale 2 veces por carga", chat)
+        self.assertIn("(app/src/main/kotlin/com/example/app/RepartoScreen.kt:4)", chat)
+        self.assertRegex(out, r"1\. Chat nuevo · Modelo: Sonnet 5\.5 · Esfuerzo: medio")
+        self.assertRegex(out, r"2\. Terminal \(sin chat\) · compila e instala")
+        self.assertIn("./gradlew :app:installProfiling", out)
+        self.assertRegex(out, r"3\. Terminal \(sin chat\) · repite la corrida de prueba")
+        self.assertRegex(out, r"4\. Terminal \(sin chat\) · OPCIÓN, solo si decides medir igual")
+        option = lines[next(i for i, line in enumerate(lines) if "OPCIÓN" in line) + 1]
+        self.assertIn("--fase antes --corridas 10", option)
+        self.assertTrue(option.strip().startswith("cd "))
+        state_title = perf.next_steps(self.plan.parent, perf.load_plan(self.plan))[0]
+        self.assertEqual(state_title, "corrige antes de medir (avisos de la corrida de prueba)")
+
+    def test_una_prueba_sin_avisos_los_da_por_resueltos_y_medir_igual_tambien_sigue(self):
+        self.tp_outputs(self.REPEATED)
+        self.ok("capturar", "--plan", self.plan, "--prueba")
+        clean = GOOD + '"seccion",400000000,0,0,"MARK reparto"\n'
+        self.tp_outputs(clean)
+        (self.dir / "tp.count").unlink()
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertNotIn("avisos por corregir", out)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home"), [])
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertNotIn("Corrige antes de medir", out)
+        self.assertIn("Siguiente · medición antes y control (sin chat)", out)
+        # con avisos vigentes, medir igual es una decisión del usuario: con antes medido, el flujo sigue su curso
+        self.tp_outputs(self.REPEATED)
+        (self.dir / "tp.count").unlink()
+        self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.assertNotIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
+
+    def test_sin_avisos_guardados_siguiente_es_el_de_siempre(self):
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertNotIn("Corrige antes de medir", out)
+        self.assertIn("--prueba", out)
+        self.assertFalse((self.plan.parent / perf.NOTES_FILE).exists())
+
+    def test_cada_tipo_de_aviso_queda_en_una_linea_con_su_texto_corto(self):
+        info = {"hz_traza": 120, "marcas_plan": [("MARK reparto", ["reparto_ms.hasta"], False),
+                                                 ("NAV lista", ["ventana.desde"], True)],
+                "faltantes": ["reparto_ms"], "con_input": {"lista_a_reparto_ms": 2}, "marcas_repetidas": {"MARK lista": 3},
+                "nombres": {"HTTP GET " + "a" * 118: 1, "HTTP GET corta": 2}}
+        found = perf.test_run_warnings(self.dir, 60, info, "RED SIN MEDIR: ...", ["app/Red.kt:10"])
+        self.assertEqual([item["tipo"] for item in found], ["hz", "marca", "input", "repetida", "red", "nombre"])
+        for item in found:
+            self.assertNotIn("\n", item["texto"])
+            self.assertLessEqual(len(item["texto"]), perf.NOTE_MAX)
+            self.assertTrue(item["corto"])
+        self.assertEqual(found[1]["donde"], ["app/src/main/kotlin/com/example/app/RepartoScreen.kt:4"])
+        self.assertEqual(found[4]["donde"], ["app/Red.kt:10"])
+        self.assertIn("127 caracteres", found[5]["texto"])
+        self.assertEqual(perf.test_run_warnings(self.dir, 60, {"hz_traza": 60, "nombres": {"HTTP GET x": 1}}, "", []), [])
+
+    def test_una_prueba_invalida_tambien_frena_la_medicion(self):
+        self.tp_outputs(LOGIN)
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertEqual(result.returncode, 5)
+        saved = perf.test_warnings(self.plan.parent, "home")
+        self.assertEqual(saved[0]["tipo"], "invalida")
+        self.assertIn("apareció 'SCREEN LoginActivity onCreate'", saved[0]["texto"])
+        self.assertIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
+
+    def test_busca_la_marca_en_el_codigo_sin_leer_las_rutas_prohibidas(self):
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK reparto"),
+                         ["app/src/main/kotlin/com/example/app/RepartoScreen.kt:4"])
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK reparto", ["app/src/main/kotlin/com/example/app/Reparto*"]), [])
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK otra"), [])
+        self.assertEqual(perf.find_mark_sources(self.dir, "SCREEN MainActivity onResume"), [])  # no es una marca de código
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK rep*"), [])  # un patrón no se busca como texto
+
+
+class SummaryWritesTest(PerfBase):
+    def test_resumen_dice_lo_que_escribe_y_solo_imprimir_no_escribe_nada(self):
+        help_text = self.ok("resumen", "--help")
+        self.assertIn("resumen.md", help_text)
+        self.assertIn("estado.md", help_text)
+        self.assertIn("--solo-imprimir", help_text)
+        write(self.csv, HEADER + rows("antes", "f", "jank_app_pct", [9] * 5, "%"))
+        state = "# E\n\n## Métricas\n<!-- perf:metricas -->\nviejo\n<!-- /perf:metricas -->\n"
+        write(self.dir / "estado.md", state)
+        out = self.ok("resumen", self.csv, "--solo-imprimir")
+        self.assertIn("| antes | f | jank_app_pct |", out)
+        self.assertIn("no se escribió resumen.md", out)
+        self.assertFalse((self.dir / "resumen.md").exists())
+        self.assertEqual((self.dir / "estado.md").read_text(encoding="utf-8"), state)
+        out = self.ok("resumen", self.csv)
+        self.assertTrue((self.dir / "resumen.md").is_file())
+        self.assertIn("resumen.md escrito", out)
+        self.assertNotIn("viejo", (self.dir / "estado.md").read_text(encoding="utf-8"))
+

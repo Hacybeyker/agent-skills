@@ -44,6 +44,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import traceback
 import uuid
 import xml.etree.ElementTree as ElementTree
 import zipfile
@@ -124,10 +125,13 @@ MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": 
 MODEL_FALLBACK = {"diagnostico": "intermedio"}
 SECTION_PREFIXES = ("HTTP", "QUEUE", "CONN", "TTFB", "SCREEN", "NAV", "MARK")
 QUERY_TAG = re.compile(r" #[0-9a-f]{4,8}$")
+# android.os.Trace.beginSection: el nombre de una sección admite hasta 127 unidades de código (documentación de la API).
+SECTION_NAME_MAX = 127
 e = html.escape
 
 
 MAX_CONSECUTIVE_INVALID = 3
+WARMUP_SETTLE_S = 2  # respiro después del calentamiento, antes del primer 'preparar' medido
 
 
 def max_attempts(target):
@@ -138,7 +142,18 @@ def max_attempts(target):
 
 
 class PerfError(Exception):
+    """Un error con salida guiada: el manejador de main() imprime qué pasó (el mensaje), qué quedó guardado y el comando
+    para seguir. `guardado` y `seguir` ([(para qué, comando)]) son opcionales: sin ellos valen los de GUIA."""
     code = 2
+    guardado = None
+    seguir = None
+
+    def con(self, guardado=None, seguir=None):
+        if guardado is not None:
+            self.guardado = guardado
+        if seguir is not None:
+            self.seguir = list(seguir)
+        return self
 
 
 class Precondicion(PerfError):
@@ -156,6 +171,60 @@ class CorridasInsuficientes(PerfError):
 class CorridaDescartada(PerfError):
     """`perf.py pausa`: la persona respondió que la corrida no vale. El recorrido termina con 1 y la corrida se repite."""
     code = 1
+
+
+# ── Salida guiada de los fallos ──────────────────────────────────────────────
+# Todo comando que falla, se detiene o se interrumpe termina con tres cosas, en este orden: qué pasó, qué quedó guardado
+# y el comando exacto para seguir. Se arma en un solo lugar (main), con lo que cada comando va dejando aquí mientras
+# avanza: así ningún camino de error queda sin su comando.
+GUIA = {"argv": [], "guardado": None, "seguir": None, "previos": [], "omitir": False, "al_fallar": None}
+RETRY = "cuando lo corrijas, repite el comando"
+
+
+def reset_guide(argv):
+    GUIA.update({"argv": list(argv), "guardado": None, "seguir": None, "previos": [], "omitir": False, "al_fallar": None})
+
+
+def same_command(corridas=None, sin=(), argv=None):
+    """El comando que se está corriendo, listo para pegar: empieza con cd a la carpeta desde la que se corrió (las rutas
+    relativas de sus argumentos parten de ahí; es la raíz del proyecto en los comandos que entrega la skill). `corridas`
+    cambia --corridas y `sin` quita opciones sin valor (--rehacer)."""
+    args, out, skip = list(GUIA["argv"] if argv is None else argv), [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in sin:
+            continue
+        if corridas is not None and (arg == "--corridas" or arg.startswith("--corridas=")):
+            skip = arg == "--corridas"
+            continue
+        out.append(arg)
+    if corridas is not None:
+        out += ["--corridas", str(corridas)]
+    return "cd %s && python3 -I %s %s" % (shlex.quote(os.getcwd()), shlex.quote(str(HERE / "perf.py")),
+                                          " ".join(shlex.quote(arg) for arg in out))
+
+
+def guide_lines(error=None):
+    """Las líneas que cierran un fallo: qué quedó guardado y cómo seguir. Lo que trae el error gana a lo que dejó el
+    comando en GUIA; sin nada, no quedó nada guardado y se repite el mismo comando. Antes corre lo que el comando dejó
+    para un corte (`al_fallar`: guardar el registro de las corridas válidas), sin que un fallo ahí tape el original."""
+    hook, GUIA["al_fallar"] = GUIA["al_fallar"], None
+    if hook:
+        try:
+            hook()
+        except (PerfError, OSError, ValueError):
+            pass
+    if GUIA["omitir"]:
+        return []
+    saved = getattr(error, "guardado", None) or GUIA["guardado"] or "nada"
+    steps = getattr(error, "seguir", None) or GUIA["seguir"] or [(RETRY, same_command())]
+    steps = list(GUIA["previos"]) + [step for step in steps if step not in GUIA["previos"]]
+    lines = ["  Qué quedó guardado: %s." % saved.rstrip("."), "  Cómo seguir:"]
+    for index, (what, command) in enumerate(steps, start=1):
+        lines += ["  %d. %s:" % (index, what[0].upper() + what[1:]), "     %s" % command]
+    return lines
 
 
 # ── CSV ──────────────────────────────────────────────────────────────────────
@@ -1395,10 +1464,39 @@ class Adb:
         self.base = [adb_binary()] + (["-s", serial] if serial else [])
 
     def run(self, *args, stdin=None, timeout=120):
-        return subprocess.run(self.base + list(args), input=stdin, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(self.base + list(args), input=stdin, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0 and ADB_GONE.search(result.stderr or ""):
+            raise Precondicion(device_gone(result.stderr))
+        return result
 
     def shell(self, command, stdin=None, timeout=120):
         return self.run("shell", command, stdin=stdin, timeout=timeout)
+
+
+# Lo que adb escribe cuando el dispositivo dejó de estar disponible a mitad de un comando.
+ADB_GONE = re.compile(r"device '[^']*' not found|device offline|device unauthorized|no devices/emulators found|"
+                      r"device still authorizing")
+ADB_STATES = {"unauthorized": "sin autorizar: acepta en su pantalla el diálogo \"¿Permitir depuración USB?\" (si no "
+                              "aparece, desconecta y conecta el cable, o revoca las autorizaciones en Opciones de desarrollador)",
+              "offline": "sin responder (offline): desconecta y conecta el cable, o reinicia adb con `adb kill-server`",
+              "authorizing": "esperando la autorización: acepta el diálogo de depuración USB en su pantalla"}
+
+
+def device_gone(stderr):
+    """El mensaje de un dispositivo que dejó de responder a adb en medio de un comando."""
+    detail = (stderr or "").strip().splitlines()[-1][:160] if (stderr or "").strip() else "sin detalle"
+    return ("el dispositivo dejó de estar disponible para adb (%s): se desconectó el cable, se apagó o perdió la "
+            "autorización de depuración USB. Comprueba que `adb devices` lo liste como 'device'" % detail)
+
+
+def unavailable_devices(listing):
+    """{serial: por qué no sirve} de los dispositivos que `adb devices` lista sin estar listos (sin autorizar, offline)."""
+    out = {}
+    for line in listing.splitlines()[1:]:
+        serial, _, state = line.partition("\t")
+        if serial.strip() and state.strip() in ADB_STATES:
+            out[serial.strip()] = ADB_STATES[state.strip()]
+    return out
 
 
 def select_device(serial):
@@ -1406,10 +1504,16 @@ def select_device(serial):
     serial = serial or os.environ.get("ANDROID_SERIAL")
     result = subprocess.run([adb_binary(), "devices"], capture_output=True, text=True, timeout=60)
     devices = [line.split("\t")[0] for line in result.stdout.splitlines()[1:] if line.endswith("\tdevice")]
+    unavailable = unavailable_devices(result.stdout)
     if serial:
+        if serial in unavailable:
+            raise Precondicion("el dispositivo %s está conectado pero %s" % (serial, unavailable[serial]))
         if serial not in devices:
-            raise Precondicion("el dispositivo %s no está conectado (conectados: %s)" % (serial, ", ".join(devices) or "ninguno"))
+            raise Precondicion("el dispositivo %s no está conectado (conectados: %s): revisa el cable y la depuración USB"
+                               % (serial, ", ".join(devices) or "ninguno"))
         return serial
+    if not devices and unavailable:
+        raise Precondicion("; ".join("el dispositivo %s está conectado pero %s" % item for item in unavailable.items()))
     if not devices:
         raise Precondicion("no hay ningún dispositivo conectado con depuración USB autorizada (adb devices)")
     if len(devices) > 1:
@@ -1808,6 +1912,7 @@ def human_pause(message, tty):
 
 
 def cmd_pausa(args):
+    GUIA["omitir"] = True  # corre dentro de un recorrido: cómo seguir lo dice la captura que lo llama
     tty = open_tty()
     if tty is None:
         raise Precondicion("pausa: " + NO_TTY)
@@ -1901,10 +2006,17 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None)
     if started.returncode != 0 or not pid:
         raise CapturaFallida("no se pudo iniciar Perfetto: %s" % (started.stderr or started.stdout).strip()[-300:])
     time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1.5")))  # Perfetto tarda en arrancar sus fuentes
-    if startup:
-        reason, extra = launch(adb, package, startup)
-    else:
-        reason, extra = drive(recorrido, label), []
+    try:
+        if startup:
+            reason, extra = launch(adb, package, startup)
+        else:
+            reason, extra = drive(recorrido, label), []
+    except KeyboardInterrupt:  # Ctrl+C en medio de la corrida: Perfetto no queda grabando en el dispositivo
+        try:
+            adb.shell("kill -TERM %s; rm -f %s" % (pid, remote), timeout=20)
+        except (PerfError, OSError, subprocess.SubprocessError):
+            pass
+        raise
     # Si Perfetto ya no corre, la traza llegó a su tope (duration_ms o el tamaño máximo) antes de que terminara el
     # recorrido: le falta el final. Solo cuenta una respuesta explícita: un adb que no contesta no invalida la corrida.
     # Se mira /proc/<pid>, como hace el script oficial de Perfetto para saber si su proceso sigue: no depende de que el
@@ -2704,6 +2816,13 @@ def next_steps(folder, plan, flow=None):
     if triage:
         you_run = you_run.replace(str(runs), "3")
         runs = 3
+    pending = test_warnings(root / folder, flow) if "antes" not in phases else []
+    if pending:
+        # La última corrida de prueba dejó avisos: medir así da un antes sin red o que mide el recorrido. Primero se
+        # corrigen; medir igual queda como opción.
+        return "corrige antes de medir (avisos de la corrida de prueba)", test_warning_steps(
+            root / folder, root, plan, flow, pending, resume, command(*(capture + ["--prueba"])),
+            command(*(capture + ["--fase", "antes", "--corridas", runs])), you_run)
     if "antes" not in phases:
         if not any((state.parent / "prueba").glob("*.perfetto-trace*")):
             steps.append(terminal(command(*(capture + ["--prueba"])),
@@ -2840,8 +2959,13 @@ def route_block(plan, root, folder=None):
 def render_steps(steps, markdown):
     """Los pasos como texto: para la terminal (markdown=False) o para estado.md."""
     code = (lambda s: "`%s`" % s) if markdown else (lambda s: s)
-    lines = []
-    for i, step in enumerate(steps, start=1):
+    lines, i = [], 0
+    for step in steps:
+        if step["tipo"] == "avisos":  # sin número: no es un paso, es lo que hay que saber antes de los pasos
+            lines.append(("**%s:**" if markdown else "%s:") % step["titulo"])
+            lines += ["   - %s" % line for line in step["lineas"]]
+            continue
+        i += 1
         if step["tipo"] == "terminal":
             lines.append("%d. **Terminal** (sin chat) · %s" % (i, step["que"]) if markdown else
                          "%d. Terminal (sin chat) · %s" % (i, step["que"]))
@@ -2991,6 +3115,222 @@ def cmd_decidir(args):
     print_next(folder, plan)
 
 
+# ── avisos que frenan o acompañan la medición ────────────────────────────────
+
+SECRET_NAME = re.compile(r"CLAVE|PASS|PIN|TOKEN|SECRET|KEY", re.I)
+
+
+def env_steps(names):
+    """[(para qué, comando)] para cargar en la terminal cada variable de entorno que falta: lectura oculta si el nombre
+    parece un secreto (SECRET_NAME) y normal si no. Usa printf y read sin -p para que sirva igual en bash y en zsh (en
+    zsh, `read -p` no es el texto de la pregunta)."""
+    steps = []
+    for name in names:
+        hidden = bool(SECRET_NAME.search(name))
+        steps.append(("carga %s en esta terminal (%s)" % (name, "lectura oculta: lo que escribas no se ve" if hidden
+                                                          else "lectura normal"),
+                      "cd %s && printf '%s: ' && read -r %s%s && export %s"
+                      % (shlex.quote(os.getcwd()), name, "-s " if hidden else "", name + (" && echo" if hidden else ""), name)))
+    return steps
+
+
+NOTES_FILE = "advertencias.json"
+NOTE_MAX = 300
+
+
+def read_notes(folder):
+    """Lo que perf.py observó en los comandos de esta investigación y todavía importa (advertencias.json): los avisos
+    de la última corrida de prueba, las corridas inválidas, los avisos de cada captura y lo que el diagnóstico no midió."""
+    try:
+        data = json.loads((pathlib.Path(folder) / NOTES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_notes(folder, data):
+    path = pathlib.Path(folder) / NOTES_FILE
+    data = {key: value for key, value in data.items() if value}
+    if not data and not path.is_file():
+        return
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def note_bucket(data, *keys):
+    """El diccionario anidado data[k1][k2]…, creado si falta (o si lo guardado no tiene esa forma)."""
+    for key in keys:
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+        data = data[key]
+    return data
+
+
+def one_line(text):
+    text = " ".join(str(text).split())
+    return text if len(text) <= NOTE_MAX else text[:NOTE_MAX - 1].rstrip() + "…"
+
+
+def save_test_warnings(folder, flow, warnings):
+    """Guarda los avisos de la corrida de prueba de un flujo; una corrida sin avisos los da por resueltos."""
+    data = read_notes(folder)
+    tests = note_bucket(data, "prueba")
+    if warnings:
+        tests[flow] = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "skill": VERSION,
+                       "avisos": warnings}
+    elif flow in tests:
+        tests.pop(flow)
+    else:
+        return
+    save_notes(folder, data)
+
+
+def test_warnings(folder, flow):
+    """Los avisos vigentes de la última corrida de prueba del flujo: [{"tipo", "texto", "corto", "donde"}]."""
+    record = (read_notes(folder).get("prueba") or {}).get(flow) or {}
+    found = record.get("avisos") if isinstance(record, dict) else None
+    return [item for item in found or [] if isinstance(item, dict) and item.get("texto")]
+
+
+def count_invalid(folder, phase, flow, reason):
+    """Suma una corrida inválida (con su motivo) a lo que la sección de advertencias cuenta de esa fase y ese flujo."""
+    data = read_notes(folder)
+    bucket = note_bucket(data, "invalidas", phase, flow)
+    key = one_line(reason)[:160]
+    bucket[key] = to_int(bucket.get(key)) + 1
+    save_notes(folder, data)
+
+
+def save_capture_warnings(folder, phase, flow, warnings):
+    """Los avisos con los que arrancó una captura de esa fase y ese flujo (build depurable, dispositivo tibio, batería,
+    build o versión distintos), sin repetir."""
+    if not warnings:
+        return
+    data = read_notes(folder)
+    bucket = note_bucket(data, "capturar", phase)
+    known = [text for text in bucket.get(flow) or [] if isinstance(text, str)]
+    bucket[flow] = known + [text for text in (one_line(w) for w in warnings) if text not in known]
+    save_notes(folder, data)
+
+
+def forget_notes(folder, phase, flow):
+    """--rehacer: lo que se anotó de las corridas que se descartan ya no vale."""
+    data = read_notes(folder)
+    changed = False
+    for kind in ("invalidas", "capturar"):
+        bucket = (data.get(kind) or {}).get(phase)
+        if isinstance(bucket, dict) and flow in bucket:
+            bucket.pop(flow)
+            changed = True
+    if changed:
+        save_notes(folder, data)
+
+
+MARK_LITERAL = re.compile(r"MARK ([\w.:-]+)")
+MARK_SOURCES_MAX = 3
+
+
+def find_mark_sources(root, mark, patterns=None):
+    """Dónde emite el código una marca `MARK <nombre>`: los "archivo:línea" (hasta MARK_SOURCES_MAX) donde aparece su
+    nombre como texto entre comillas, en los .kt y .java del proyecto y de los módulos que settings.gradle incluye desde
+    fuera. Es una búsqueda por texto, sin leer las rutas prohibidas; vacío si la marca no es una MARK con nombre fijo."""
+    found = MARK_LITERAL.fullmatch(mark or "")
+    if not found:
+        return []
+    needle, root = '"%s"' % found.group(1), pathlib.Path(root)
+    patterns = read_no_leer(root) if patterns is None else patterns
+    out = []
+    for base in [root] + list(external_roots(root, patterns)[0]):
+        for path in walk_files(base, patterns, (".kt", ".java"), root):
+            try:
+                if path.stat().st_size > SCAN_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            start = text.find(needle)
+            while start != -1 and len(out) < MARK_SOURCES_MAX:
+                out.append("%s:%d" % (relative_to_root(path, root), text.count("\n", 0, start) + 1))
+                start = text.find(needle, start + 1)
+            if len(out) >= MARK_SOURCES_MAX:
+                return out
+    return out
+
+
+def warning(kind, text, short, where=()):
+    return {"tipo": kind, "texto": one_line(text), "corto": one_line(short), "donde": list(where)[:5]}
+
+
+def at_limit(names):
+    """Los nombres de sección que llegan al límite de android.os.Trace (127 caracteres): están cortados, y dos endpoints
+    con el mismo comienzo pueden contar como uno."""
+    return sorted(name for name in names if len(name) >= SECTION_NAME_MAX)
+
+
+def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=False):
+    """Los avisos de una corrida de prueba válida que conviene corregir antes de medir, como los guarda
+    save_test_warnings: la tasa de refresco, las marcas del plan que no salieron, las métricas que incluyen pasos del
+    recorrido, las marcas repetidas en una carga, la red sin medir y los nombres de sección cortados."""
+    out = []
+    rate = hz_warning(plan_rate, [info.get("hz_traza")])
+    if rate:
+        out.append(warning("hz", rate, "la tasa de refresco del plan no es la que midió la traza: corrige 'hz' en plan.json"))
+    unseen = [(mark, where) for mark, where, seen in info.get("marcas_plan") or [] if not seen]
+    for mark, where in unseen:
+        out.append(warning("marca", "la marca '%s' del plan (%s) no salió en la traza" % (mark, ", ".join(where)),
+                           "la marca '%s' del plan no salió en la traza: revisa dónde se emite, o el plan" % mark,
+                           find_mark_sources(root, mark)))
+    if info.get("faltantes") and not unseen:
+        out.append(warning("sin_marcas", "sin marcas en orden para: %s" % ", ".join(info["faltantes"]),
+                           "sin marcas en orden para %s: revisa 'desde' y 'hasta' en plan.json" % ", ".join(info["faltantes"])))
+    for name, count in sorted((info.get("con_input") or {}).items()):
+        out.append(warning("input", "la métrica %s incluye pasos del recorrido (%d eventos de input entre sus marcas): "
+                                    "mide el script, no la app" % (name, count),
+                           "la métrica %s incluye pasos del recorrido: acórtala en plan.json a un solo salto, de la marca de "
+                           "la acción a la de su contenido" % name))
+    for name, count in sorted((info.get("marcas_repetidas") or {}).items()):
+        out.append(warning("repetida", "la marca '%s' salió %d veces en una misma carga: el gancho que la emite se llama "
+                                       "más de una vez por carga" % (name, count),
+                           "la marca '%s' sale %d veces por carga: que se emita una sola vez por carga" % (name, count),
+                           find_mark_sources(root, name)))
+    if gap:
+        out.append(warning("red", "red sin medir: la corrida no tiene ninguna sección HTTP y el proyecto o el plan la "
+                                  "esperan", "red sin medir: conecta el gancho de red de PerfHooks en cada "
+                                             "OkHttpClient.Builder (setup.md · Red: conectar cada builder)",
+                           missing_builders))
+    cut = at_limit(info.get("nombres") or {})
+    if cut:
+        out.append(warning("nombre", "%d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están "
+                                     "cortados (por ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno"
+                           % (len(cut), SECTION_NAME_MAX, cut[0][-40:]),
+                           "hay nombres de sección cortados en %d caracteres: actualiza la instrumentación (perf.py "
+                           "instrumentar --actualizar) para que HttpSectionName acorte desde la izquierda"
+                           % SECTION_NAME_MAX))
+    return out
+
+
+def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, capture_before, you_run):
+    """Los pasos de `siguiente` mientras la última corrida de prueba tenga avisos: no ofrece medir antes como paso
+    normal. Primero los avisos, uno por línea; después el chat que los corrige (sin compilar, instalar ni capturar), los
+    comandos del usuario (instalar y repetir la prueba) y, como opción, medir igual."""
+    listed = []
+    for index, item in enumerate(pending, start=1):
+        where = " (%s)" % ", ".join(item.get("donde") or []) if item.get("donde") else ""
+        listed.append("%d) %s%s" % (index, (item.get("corto") or item["texto"]).rstrip("."), where))
+    prompt = ("%s: corrige los avisos de la corrida de prueba del flujo '%s', sin compilar, instalar ni capturar (eso lo "
+              "hago yo en mi terminal): %s." % (resume, flow, "; ".join(listed)))
+    return [
+        {"tipo": "avisos", "titulo": "Corrige antes de medir",
+         "lineas": [item["texto"] + (" · %s" % ", ".join(item["donde"]) if item.get("donde") else "") for item in pending]},
+        chat(prompt, "intermedio", "medio", "corrige en el código o en plan.json lo que dicen los avisos; no compila, no "
+             "instala y no captura", plan),
+        terminal(install_command(plan, root), "compila e instala el build de profiling con las correcciones",
+                 "espera; si solo cambió plan.json, salta este paso"),
+        terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente pasa "
+                 "a ser medir antes", "lo mismo que en una corrida, una sola vez"),
+        terminal(capture_before, "OPCIÓN, solo si decides medir igual con estos avisos: lo que se mida así puede salir sin "
+                 "red o midiendo el recorrido, y habría que repetirlo con --rehacer", you_run)]
+
+
 def cmd_capturar(args, plan=None):
     if args.plan:
         plan = load_plan(args.plan)
@@ -3028,8 +3368,31 @@ def cmd_capturar(args, plan=None):
             ". Si alguna no hace falta de verdad, dale un valor por defecto en el script (${VAR:-}) o usa --forzar"
         raise Precondicion("faltan variables de entorno que el flujo '%s' necesita (%s): %s. Expórtalas en esta "
                            "terminal antes de correr el comando; si lo corre un agente, antes de abrir el agente (solo ve "
-                           "las de la terminal donde se abrió)%s" % (flow_name, origin, ", ".join(absent), hint))
+                           "las de la terminal donde se abrió)%s" % (flow_name, origin, ", ".join(absent), hint)).con(
+            seguir=env_steps(absent) + [("corre de nuevo el comando, en esta misma terminal", same_command())])
     phase = "antes" if args.prueba else normalize_phase(args.fase)
+    csv_path = folder / "metricas.csv"
+    target = 1 if args.prueba else args.corridas
+    progress = {"validas": 0}
+
+    def guide():
+        """Deja en GUIA qué quedó guardado y el comando para seguir, según las corridas válidas de esta tanda."""
+        if args.prueba:
+            GUIA.update(guardado="nada: la corrida de prueba no guarda métricas", seguir=[(RETRY, same_command())])
+            return
+        done = progress["validas"]
+        if not done:
+            GUIA.update(guardado="ninguna corrida de esta tanda (0 de %d válidas de %s); lo que %s ya tenía sigue igual"
+                        % (target, phase, csv_path), seguir=[(RETRY, same_command())])
+            return
+        GUIA.update(
+            guardado="%d de %d corridas válidas de %s en %s (y su registro en fases.json)" % (done, target, phase, csv_path),
+            seguir=[("completa la fase con las %d corridas que faltan (las %d guardadas cuentan si nada cambió)"
+                     % (target - done, done), same_command(corridas=target - done, sin=("--rehacer",))),
+                    ("o, si cambió el build o las condiciones, repite la fase entera",
+                     same_command(corridas=target, sin=("--rehacer",)) + " --rehacer")])
+
+    guide()
     package = plan["paquete"]
     hz = args.hz or (plan.get("hz") if isinstance(plan.get("hz"), int) else None)
     route = None if startup else args.recorrido or flow.get("recorrido")
@@ -3044,10 +3407,15 @@ def cmd_capturar(args, plan=None):
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
     commit, dirty = git_info()
+    build_warnings = []
     if not args.prueba:
-        warnings += check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
-    for warning in warnings:
-        print("⚠ " + warning)
+        try:
+            build_warnings = check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
+        except Precondicion as error:
+            raise error.con(seguir=[("instala el build con la mejora", install_command(plan, project_root(folder).resolve())),
+                                    ("y repite la medición", same_command())])
+    for text in warnings + build_warnings:
+        print("⚠ " + text)
     folder.mkdir(parents=True, exist_ok=True)
     free_gb = shutil.disk_usage(str(folder)).free / 1e9
     if free_gb < 3:
@@ -3060,7 +3428,6 @@ def cmd_capturar(args, plan=None):
     queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), package,
                                      {"INPUT_GLOB": input_glob}))]
     queries += custom_queries(flow, folder, package)
-    csv_path = folder / "metricas.csv"
     out_dir = folder / ("prueba" if args.prueba else phase)
     out_dir.mkdir(parents=True, exist_ok=True)
     known = known_metrics(csv_path, flow_name)
@@ -3095,6 +3462,8 @@ def cmd_capturar(args, plan=None):
             print("… dejando la app en el punto de partida ('preparar')", flush=True)
             code, tail, log = run_prepare(prepare_command, folder, mask_names, capture=bool(declared))
             if code != 0:
+                # Entre paréntesis: un `exit` o un `;` del comando no cierran ni desordenan la terminal de quien lo pega.
+                by_hand = "cd %s && ( %s )" % (shlex.quote(os.getcwd()), mask_secrets(prepare_command, mask_names))
                 if not prepare_shown:  # una vez por captura: las corridas siguientes fallan igual
                     prepare_shown.append(True)
                     if tail:
@@ -3104,8 +3473,14 @@ def cmd_capturar(args, plan=None):
                     else:
                         print("✖ 'preparar' falló (código %d) sin dejar salida: si el comando la manda a /dev/null (o el "
                               "flujo no declara requiere_env, y entonces solo se lee su salida de error), córrelo a "
-                              "mano en tu terminal para ver el error" % code)
-                raise Precondicion("'preparar' terminó con código %d" % code)
+                              "mano en tu terminal para ver el error:" % code)
+                        print("    %s" % by_hand)
+                    GUIA["previos"] = [("corre 'preparar' a mano para ver por qué falla (si manda su salida a /dev/null, "
+                                        "quítale esa parte para verla)", by_hand)]
+                failure = Precondicion("'preparar' terminó con código %d: no dejó la app en el punto de partida (un "
+                                       "login que no entró, una pantalla que no cargó a tiempo o el backend caído)" % code)
+                failure.corto = "'preparar' terminó con código %d" % code
+                raise failure
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
             component = launcher_activity(adb, package)
             if component:
@@ -3127,6 +3502,7 @@ def cmd_capturar(args, plan=None):
                                       force=getattr(args, "recompilar", False))
     if args.rehacer and not args.prueba:
         discard_phase(folder, csv_path, phase, flow_name)
+        forget_notes(folder, phase, flow_name)
         known = known_metrics(csv_path, flow_name)
     warmups = 0 if args.prueba else args.calentamiento
     for i in range(warmups):
@@ -3142,34 +3518,73 @@ def cmd_capturar(args, plan=None):
             except Precondicion as error:
                 if not prepare_command:
                     raise
-                print("⚠ calentamiento: %s" % error)
+                print("⚠ calentamiento: %s" % getattr(error, "corto", error))
                 continue
             reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups))
+            # Entre dos corridas pasan varios segundos (cerrar la traza, descargarla, procesarla) antes del 'preparar'
+            # siguiente; después del calentamiento no pasaba ninguno, y el primer 'preparar' medido encontraba la app
+            # todavía terminando el recorrido. Va fuera de toda traza: no cambia lo que se mide.
+            settle(WARMUP_SETTLE_S)
         if reason:
             print("⚠ calentamiento: %s" % reason)
 
-    target = 1 if args.prueba else args.corridas
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
+    if not args.prueba:
+        save_capture_warnings(folder, phase, flow_name, warnings + build_warnings)
+
+    def save_record():
+        """El registro de la fase en fases.json con las corridas válidas de esta tanda. También cuando la tanda se
+        corta (Ctrl+C, inválidas seguidas): lo que ya está en el CSV queda con su build, su commit y su configuración."""
+        seen_hz = {h for h in run_hz if h}
+        record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
+                  "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
+                  "configs": [config_label(used_config)]}
+        if seen_hz:
+            record["hz_corridas"] = run_hz
+        rate_warning = hz_warning(hz, seen_hz)
+        if rate_warning:
+            record["avisos"] = [rate_warning]
+            print("⚠ " + rate_warning)
+        if environment["emulador"] or environment["software"]:
+            record["entorno"] = environment
+        record.update(build)
+        write_phase(folder, phase, record, flow_name)
+
+    def mark_invalid(reason):
+        if not args.prueba:
+            count_invalid(folder, phase, flow_name, reason)
+
+    def on_failure():
+        if valid and not args.prueba:
+            save_record()
+
+    GUIA["al_fallar"] = on_failure  # lo llama main() si la tanda se corta: las válidas no quedan sin su registro
     while valid < target:
         if consecutive >= MAX_CONSECUTIVE_INVALID:
             raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
                                         "suerte. Revisa el recorrido, 'preparar' o el backend y vuelve a correr; las "
                                         "%d válidas quedan guardadas" % (consecutive, last_invalid, valid))
         if attempts >= max_attempts(target):
-            raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones"
-                                        % (valid, target, attempts))
+            raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones (el "
+                                        "recorrido, 'preparar', el backend); los motivos de cada corrida inválida están "
+                                        "más arriba" % (valid, target, attempts))
         attempts += 1
         try:
             prepare()
         except Precondicion as error:
             if not prepare_command or args.prueba:
+                if args.prueba and args.plan:
+                    save_test_warnings(folder, flow_name, [warning(
+                        "preparar", "la corrida de prueba no empezó: %s" % error,
+                        "'preparar' falla: corrige el comando o el flow que deja la app en el punto de partida")])
                 raise
             # 'preparar' falló (un login que no entró, un backend caído): la corrida no vale, se repite y cuenta
             # para el tope de inválidas seguidas.
-            consecutive, last_invalid = consecutive + 1, str(error)
-            print("✖ corrida %d inválida: %s (se repite)" % (n, error))
+            consecutive, last_invalid = consecutive + 1, getattr(error, "corto", str(error))
+            mark_invalid(last_invalid)
+            print("✖ corrida %d inválida: %s (se repite)" % (n, last_invalid))
             n += 1
             continue
         if sdk < 31:
@@ -3264,6 +3679,13 @@ def cmd_capturar(args, plan=None):
             print("Secciones propias: %s" % sections_summary(info.get("nombres", {})))
             if info:
                 print("\n".join(marks_report(info)))
+            if args.plan:
+                unseen = [mark for mark, _, seen in info.get("marcas_plan") or [] if not seen]
+                save_test_warnings(folder, flow_name, [warning(
+                    "invalida", "la corrida de prueba fue inválida: %s%s" % (
+                        invalid, " (marcas del plan que no salieron: %s)" % ", ".join(unseen) if unseen else ""),
+                    "la corrida de prueba fue inválida (%s): corrige el recorrido, 'preparar' o las marcas del plan"
+                    % invalid, [place for mark in unseen for place in find_mark_sources(project_root(folder).resolve(), mark)])])
             raise CorridasInsuficientes("la corrida de prueba fue inválida: %s (traza en %s)" % (invalid, local))
         if invalid:
             target_name = local.with_name("%s_%d_invalida_%s.perfetto-trace" % (flow_name, n, slug(invalid)))
@@ -3271,6 +3693,7 @@ def cmd_capturar(args, plan=None):
             if not args.sin_comprimir:
                 compress(target_name)
             print("✖ corrida %d inválida: %s (traza guardada para auditoría)" % (n, invalid))
+            mark_invalid(invalid)
             consecutive, last_invalid = consecutive + 1, invalid
             n += 1
             continue
@@ -3302,10 +3725,24 @@ def cmd_capturar(args, plan=None):
                       "en una vez por carga (setup.md · Contenido visible)" % (name, count))
             if startup and "ttfd_ms" not in {m[0] for m in metrics}:
                 print("⚠ Sin ttfd_ms: la app no llama a reportFullyDrawn() (ver setup.md · Contenido visible)")
-            gap = "" if getattr(args, "sin_red", False) else network_gap(project_root(folder).resolve(), plan, flow,
-                                                                         info["nombres"])
+            root = project_root(folder).resolve()
+            gap, unwired = ("", []) if getattr(args, "sin_red", False) else network_gap(root, plan, flow, info["nombres"],
+                                                                                        detail=True)
             if gap and not getattr(args, "red_obligatoria", False):
                 print("⚠ " + gap)
+            cut = at_limit(info["nombres"])
+            if cut:
+                print("⚠ %d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están cortados (por "
+                      "ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno. Actualiza la "
+                      "instrumentación entre investigaciones (perf.py instrumentar --actualizar): HttpSectionName acorta "
+                      "desde la izquierda y conserva el final de la ruta (setup.md · Nombres de endpoint largos)"
+                      % (len(cut), SECTION_NAME_MAX, cut[0][-40:]))
+            if args.plan:
+                pending = test_run_warnings(root, hz, info, gap, unwired)
+                save_test_warnings(folder, flow_name, pending)
+                if pending:
+                    print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` los lista con el texto para "
+                          "un chat; una corrida de prueba sin avisos los da por resueltos" % (len(pending), folder / NOTES_FILE))
             print("Traza: %s" % saved)
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
@@ -3320,20 +3757,13 @@ def cmd_capturar(args, plan=None):
         run_hz.append(info.get("hz_traza"))
         valid += 1
         n += 1
-    seen_hz = {h for h in run_hz if h}
-    record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
-              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
-              "configs": [config_label(used_config)]}
-    if seen_hz:
-        record["hz_corridas"] = run_hz
-    rate_warning = hz_warning(hz, seen_hz)
-    if rate_warning:
-        record["avisos"] = [rate_warning]
-        print("⚠ " + rate_warning)
-    if environment["emulador"] or environment["software"]:
-        record["entorno"] = environment
-    record.update(build)
-    write_phase(folder, phase, record, flow_name)
+        progress["validas"] = valid
+        guide()
+    GUIA["al_fallar"] = None
+    save_record()
+    GUIA.update(guardado="las %d corridas válidas de %s en %s y su registro en fases.json" % (valid, phase, csv_path),
+                seguir=[("pide el paso siguiente", "cd %s && python3 -I %s siguiente --carpeta %s"
+                         % (shlex.quote(os.getcwd()), shlex.quote(str(HERE / "perf.py")), shlex.quote(str(folder))))])
     rows = read_rows(csv_path)
     table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,), trust=frames_trust(folder))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
@@ -4205,7 +4635,11 @@ def cmd_resumen(args):
     if flagged:
         print("⚠ %d con avisos: con 'pocas corridas' suma corridas; con 'inestable' (CV > %s %%) estabiliza las "
               "condiciones antes de comparar." % (len(flagged), fmt(CV_MAX)))
+    if getattr(args, "solo_imprimir", False):
+        print("· --solo-imprimir: no se escribió resumen.md ni la sección Métricas de estado.md")
+        return
     write_summary(args.csv, rows, plan)
+    print("✔ %s escrito" % pathlib.Path(args.csv).with_name("resumen.md"))
 
 
 def definition_notes(results):
@@ -6209,14 +6643,15 @@ def plan_expects_network(plan, flow):
                for spec in specs if isinstance(spec, dict) for side in ("desde", "hasta"))
 
 
-def network_gap(root, plan, flow, names):
+def network_gap(root, plan, flow, names, detail=False):
     """El aviso de "red sin medir": la corrida no trajo ninguna sección HTTP aunque el proyecto tiene la instrumentación
-    de red generada o el plan declara la red. Dice la causa probable y qué builders no llaman al gancho. '' si no aplica."""
+    de red generada o el plan declara la red. Dice la causa probable y qué builders no llaman al gancho. '' si no aplica.
+    Con `detail`, (aviso, builders sin conectar como "archivo:línea")."""
     if any(name.startswith("HTTP ") for name in names):
-        return ""
+        return ("", []) if detail else ""
     generated = find_generated(root, "TraceEventListener.kt")
     if not generated and not plan_expects_network(plan, flow):
-        return ""
+        return ("", []) if detail else ""
     missing, derived = wiring_report(root)
     why = "el proyecto tiene la instrumentación de red generada" if generated else "el plan usa métricas o marcas de red"
     text = ("RED SIN MEDIR: la corrida no tiene ninguna sección HTTP y %s. Causa probable: el listener no está conectado a "
@@ -6231,7 +6666,7 @@ def network_gap(root, plan, flow, names):
     if derived:
         text += " Clientes derivados con .newBuilder() por revisar (heredan el listener de su cliente base): %s%s." % (
             ", ".join(derived[:5]), " …" if len(derived) > 5 else "")
-    return text
+    return (text, missing) if detail else text
 
 
 REAPPLY_HINT = re.compile(r"git apply|parche|\.patch\b", re.I)
@@ -6648,9 +7083,15 @@ def main(argv=None):
     p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_salidas)
 
-    p = sub.add_parser("resumen", help="estadísticas por fase y avisos")
-    p.add_argument("csv")
+    p = sub.add_parser("resumen", help="estadísticas por fase y avisos; escribe resumen.md y la sección Métricas de "
+                                       "estado.md en la carpeta del CSV",
+                       description="Imprime las estadísticas por fase y los avisos de estabilidad. Además ESCRIBE dos "
+                                   "archivos en la carpeta del CSV: resumen.md (todas las métricas) y, si hay un estado.md "
+                                   "con su bloque, la sección Métricas de estado.md. Con --solo-imprimir no escribe nada.")
+    p.add_argument("csv", help="metricas.csv de la investigación; resumen.md y estado.md se escriben en su misma carpeta")
     p.add_argument("--todo", action="store_true", help="todas las métricas, no solo las principales")
+    p.add_argument("--solo-imprimir", dest="solo_imprimir", action="store_true",
+                   help="solo imprime la tabla: no escribe resumen.md ni toca estado.md")
     p.set_defaults(func=cmd_resumen)
 
     p = sub.add_parser("comparar", help="antes contra después, con veredicto")
@@ -6718,14 +7159,31 @@ def main(argv=None):
     p.set_defaults(func=cmd_instrumentar)
 
     args = parser.parse_args(argv)
+    reset_guide(sys.argv[1:] if argv is None else argv)
+    # El único lugar que cierra un fallo: qué pasó, qué quedó guardado y el comando para seguir (guide_lines).
     try:
         args.func(args)
     except PerfError as error:
-        print("✖ %s" % error, file=sys.stderr)
+        print("\n".join(["✖ %s" % error] + guide_lines(error)), file=sys.stderr)
         return error.code
     except KeyboardInterrupt:
-        print("\n✖ interrumpido", file=sys.stderr)
+        print("\n".join(["", "✖ interrumpido (Ctrl+C): el comando no terminó; lo que estaba a medias (una corrida, una "
+                             "traza) no cuenta"] + guide_lines()), file=sys.stderr)
         return 130
+    except subprocess.TimeoutExpired as error:
+        tool = pathlib.Path(str(error.cmd[0] if isinstance(error.cmd, (list, tuple)) else error.cmd).split(" ")[0]).name
+        print("\n".join(["✖ %s no respondió en %d s: si es adb, el dispositivo se desconectó, se bloqueó o quedó sin "
+                         "responder. Revisa el cable y que `adb devices` lo liste como 'device'"
+                         % (tool, error.timeout)] + guide_lines()), file=sys.stderr)
+        return Precondicion.code
+    except Exception as error:  # un fallo que perf.py no esperaba: igual termina con cómo seguir
+        if os.environ.get("HB_PERF_DEBUG"):
+            raise
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        print("\n".join(["✖ error inesperado en perf.py (%s: %s; línea %d). Suele ser un archivo de la carpeta con un "
+                         "formato que no esperaba; con HB_PERF_DEBUG=1 delante del comando sale la traza completa"
+                         % (type(error).__name__, error, frame.lineno)] + guide_lines()), file=sys.stderr)
+        return 1
     return 0
 
 

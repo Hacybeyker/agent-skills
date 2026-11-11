@@ -248,6 +248,8 @@ Antes de aprobar, una corrida que imprime las métricas y no escribe el CSV. No 
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --flujo <flujo> --prueba
 ```
 
+Los avisos de la prueba quedan guardados y **frenan la medición**: mientras sigan vigentes, `perf.py siguiente` no ofrece medir antes, sino "Corrige antes de medir" con cada aviso y los pasos para corregirlo ([medicion.md](medicion.md) · Los avisos de la corrida de prueba frenan la medición). Corrígelos en esta sesión y repite la prueba: una corrida sin avisos los da por resueltos.
+
 ## Entregable
 
 `estado.md` con la ficha, el mapa y las hipótesis. **Llena la tabla "Ficha" que ya trae `estado.md`**, fila por fila, reemplazando cada texto entre `<>` (Síntoma, Métricas principales, Build y ambiente, Modos, Stack; en Precondiciones, "primer uso hecho" y lo que haya que restaurar): no escribas una sección de ficha aparte, porque el reporte publica esa tabla y una fila con el texto de la plantilla sale como "sin completar". `perf.py siguiente` avisa de las filas que falten. Muestra la ficha y el plan (pasos, métricas principales, ventana y recorrido) y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2, con lo que le toca hacer al usuario en cada uno. Pégalo tal cual y detente. Presupuesto: 15 pasos, o 25 en un flujo largo (login, pantallas de una sola vez o `preparar` con varias pantallas); el mapa va a un subagente económico, las preguntas van todas en un mensaje y las coordenadas salen de `perf.py nodos`, un paso por elemento.
