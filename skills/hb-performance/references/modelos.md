@@ -15,7 +15,7 @@ Este es el único lugar donde se definen. `perf.py siguiente` (y `humo`, `decidi
 
 - Los flags son los de las referencias de la línea de comandos de cada herramienta: `--model` (en Claude Code, el nombre completo o un alias) y `--effort` (`low`, `medium`, `high`, `xhigh` o `max`; en GitHub Copilot CLI también se llama `--reasoning-effort`). Dentro de la sesión, `/model` cambia el modelo y el esfuerzo en las dos.
 - **Si tu herramienta usa otros ids**, ponlos una vez en `plan.json`, por herramienta y por nivel: `"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-5.5"}}`. Lo que no esté ahí sale de `modelos`.
-- **Si tu versión usa otro comando** (por ejemplo, una versión anterior de Copilot CLI sin `--effort`), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo} --effort {esfuerzo}`: `perf.py` reemplaza `{modelo}` por el id y `{esfuerzo}` por `low`, `medium` o `high`.
+- **Si tu versión usa otro comando** (por ejemplo, una versión anterior de Copilot CLI sin `--effort`), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo}`: `perf.py` reemplaza `{modelo}` por el id y, si el comando lleva `{esfuerzo}`, lo reemplaza por `low`, `medium` o `high`; si no lo lleva, el paso pide elegir el esfuerzo con `/model` al abrir el chat.
 
 ## Por qué se encarece
 

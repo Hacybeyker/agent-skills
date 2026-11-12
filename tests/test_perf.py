@@ -8389,7 +8389,7 @@ class BusinessJargonTest(PerfBase):
         self.assertIn("tiene términos técnicos y no se publica", text)
         self.assertIn("## Qué notaba el usuario\n\n_sin completar_", text)
         self.assertIn("- La lista tarda: _sin completar_", text)
-        self.assertIn("- _sin completar_\n- Cargar las imágenes después", text)
+        self.assertIn("- Una mejora con el título sin completar\n- Cargar las imágenes después", text)
         # el reporte técnico no cambia: publica todo
         self.assertIn("cargarClientes", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
 
@@ -8770,3 +8770,28 @@ class BusinessAxisTest(unittest.TestCase):
         dev = perf.range_chart([("Antes", 410, 400, 420, "before")], "ms", "x")
         self.assertIn("410 ms", dev)
         self.assertIn('text-anchor="end">milisegundos<', dev)
+
+    def test_eje_en_la_unidad_de_los_valores_escritos(self):
+        # mediana bajo 100 ms y la corrida más lenta sobre 100 ms: el valor va en milisegundos y el eje también
+        svg = perf.range_chart([("Hoy", 95, 80, 120, "before")], "ms", "x", plain=True)
+        self.assertIn(">95 milisegundos<", svg)
+        self.assertIn('text-anchor="end">milisegundos<', svg)
+
+
+class BusinessUnfilledTitleTest(PerfBase):
+    """En gerencia, una mejora cuyo título trae términos técnicos se nombra igual en todas las listas, sin líneas a medias."""
+
+    def test_titulo_con_terminos_tecnicos(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "Usar LazyColumn en vez de RecyclerView", "metrica": "lista_ms",
+                             "riesgo": "bajo", "estado": "pendiente"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
+        self.ok("reporte", "--carpeta", folder, "--inicial")
+        text = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("## Qué se propone\n\n- Una mejora con el título sin completar", text)
+        self.assertIn("- Una mejora con el título sin completar: riesgo bajo.", text)
+        self.assertNotIn("_sin completar_: riesgo", text)
+        self.assertNotIn("LazyColumn", text)

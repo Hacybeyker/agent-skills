@@ -6990,10 +6990,12 @@ def change_pct(before, after):
     return "%s%s %%" % ("+" if value > 0 else "−" if value < 0 else "", trim(abs(value), 0 if abs(value) >= 10 else 1))
 
 
-def axis_scale(top, unit, plain=False):
+def axis_scale(top, unit, plain=False, basis=None):
     """(divisor, unidad del eje, paso) para un eje de 0 a `top`: los tiempos de un segundo o más, en segundos; en el
-    reporte para gerencia, desde 100 ms, igual que sus valores (plain_time)."""
-    divisor, label = (1000.0, "s") if unit == "ms" and top >= (100 if plain else 1000) else (1.0, unit)
+    reporte para gerencia, desde 100 ms, igual que sus valores (plain_time). `basis` (opcional) es el valor que decide la
+    unidad: la mediana más alta, para que el eje use la misma unidad que los valores escritos."""
+    basis = top if basis is None else basis
+    divisor, label = (1000.0, "s") if unit == "ms" and basis >= (100 if plain else 1000) else (1.0, unit)
     span = (top / divisor) or 1
     raw = span / 4
     power = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
@@ -7001,10 +7003,10 @@ def axis_scale(top, unit, plain=False):
     return divisor, label, step
 
 
-def svg_axis(x0, width, y, top, unit, plain=False):
+def svg_axis(x0, width, y, top, unit, plain=False, unit_top=None):
     """El eje horizontal con 3 a 6 marcas y la unidad. Devuelve (partes del SVG, función valor → x)."""
     top = top or 1
-    divisor, label, step = axis_scale(top, unit, plain)
+    divisor, label, step = axis_scale(top, unit, plain, unit_top)
     ticks, value = [], 0.0
     while value * divisor <= top * 1.0001 and len(ticks) < 8:
         ticks.append(value)
@@ -7049,7 +7051,8 @@ def range_chart(series, unit, label, noise=None, plain=False):
     x0, width, row = 86, 300, 30
     pad = 14 if noise else 0  # lugar para el rótulo del ruido, arriba
     height = 14 + pad + row * len(series) + 36
-    axis, scale = svg_axis(x0, width, 10 + pad + row * len(series), top, unit, plain)
+    axis, scale = svg_axis(x0, width, 10 + pad + row * len(series), top, unit, plain,
+                           max(item[1] for item in series) if plain else None)
     show = (lambda value: plain_value(value, unit)) if plain else (lambda value: nice(value, unit))
     parts = [hatch_defs(uid)]
     if noise:
@@ -7777,6 +7780,11 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
         return plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id", "una mejora"),
                                  problems)
 
+    def named(item):
+        """El título para una lista; si no se publica, dice que es una mejora con el título sin completar."""
+        text = title(item)
+        return "Una mejora con el título sin completar" if text.startswith("_") else text
+
     summary = without_placeholders(pick(MANAGEMENT_SECTION))
     if summary:
         summary = plain_or_unfilled(summary, "\"Resumen para gerencia\" de estado.md", problems)
@@ -7815,9 +7823,9 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
 
     applied = [m for m in mejoras if m.get("estado") == "aplicada"]
     if final:
-        done_md = "\n".join("- %s" % title(m) for m in applied) if applied else "No se aplicó ningún cambio."
+        done_md = "\n".join("- %s" % named(m) for m in applied) if applied else "No se aplicó ningún cambio."
     else:
-        done_md = "\n".join("- %s" % title(m) for m in mejoras) + \
+        done_md = "\n".join("- %s" % named(m) for m in mejoras) + \
             "\n\nQué se aplica lo decides tú; lo aprobado se implementa y se vuelve a medir." if mejoras else \
             "No se propone ningún cambio."
 
@@ -7854,8 +7862,7 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
     waiting = [m for m in mejoras if m.get("estado", "propuesta") != "aplicada"] if final else []
     state_words = {"propuesta": "sin decidir", "aprobada": "aprobado, sin aplicar", "descartada": "descartado",
                    "pendiente": "para más adelante"}
-    pending = ["- %s (%s)" % (title(m) if not title(m).startswith("_") else "Una mejora con el título sin completar",
-                              state_words.get(m.get("estado", "propuesta"), m.get("estado")))
+    pending = ["- %s (%s)" % (named(m), state_words.get(m.get("estado", "propuesta"), m.get("estado")))
                for m in waiting]
     open_points = [line for line in without_placeholders(pick("pendientes")).splitlines() if line.strip().startswith(("-", "*"))]
     if open_points:
@@ -7863,8 +7870,7 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
             len(open_points), "punto" if len(open_points) == 1 else "puntos"))
     pending_md = "\n".join(pending) if pending else "Nada pendiente."
 
-    risks = ["- %s: riesgo %s." % (title(m), m["riesgo"]) if not title(m).startswith("_") else
-             "- Una mejora (su título está sin completar): riesgo %s." % m["riesgo"] for m in (applied if final else mejoras)
+    risks = ["- %s: riesgo %s." % (named(m), m["riesgo"]) for m in (applied if final else mejoras)
              if str(m.get("riesgo") or "").strip() not in ("", "—", "-")]
     if final:
         # Solo las medidas principales: las demás (también los tiempos de cada servicio, que son orientativos) están
