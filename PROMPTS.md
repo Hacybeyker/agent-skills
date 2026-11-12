@@ -64,7 +64,7 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 
 Tiene varias sesiones y comandos de terminal: su guía completa está en [skills/hb-performance/references/prompts.md](skills/hb-performance/references/prompts.md). Copia solo el bloque de cada caso; la explicación va fuera. El mismo texto sirve la primera vez y las siguientes: la skill elige la sesión según el estado del proyecto (sin setup, lo hace; con setup, arma la ficha y el plan) y el agente lo dice en su primera línea.
 
-Cada chat de hb-performance se abre nuevo, desde la terminal y en la raíz del proyecto, con el modelo y el esfuerzo de su sesión. Para empezar (modelo intermedio, esfuerzo medio): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI (el esfuerzo, con `/model`). Después, `perf.py siguiente` imprime el comando de cada sesión y el texto para pegar.
+Cada chat de hb-performance se abre nuevo, desde la terminal y en la raíz del proyecto, con el modelo y el esfuerzo de su sesión. Para empezar (modelo intermedio, esfuerzo medio): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después, `perf.py siguiente` imprime el comando de cada sesión y el texto para pegar.
 
 **Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo):
 

@@ -11,11 +11,11 @@ Este es el único lugar donde se definen. `perf.py siguiente` (y `humo`, `decidi
 | Herramienta | Comando | Modelo (`modelos` → id) | Esfuerzo |
 | --- | --- | --- | --- |
 | Claude Code | `cd <raíz> && claude --model <id> --effort <nivel>` | "Sonnet 5.5" → `claude-sonnet-5-5` | `bajo` → `low`, `medio` → `medium`, `alto` → `high` |
-| GitHub Copilot CLI | `cd <raíz> && copilot --model <id>` | "Sonnet 5.5" → `claude-sonnet-5.5`; un nombre de otro proveedor va en minúsculas y con guiones ("GPT 5.3 Codex" → `gpt-5.3-codex`) | con `/model` dentro de la sesión, al abrirla |
+| GitHub Copilot CLI | `cd <raíz> && copilot --model <id> --effort <nivel>` | "Sonnet 5.5" → `claude-sonnet-5.5`; un nombre de otro proveedor va en minúsculas y con guiones ("GPT 5.3 Codex" → `gpt-5.3-codex`) | igual que en Claude Code |
 
-- Los flags de Claude Code (`--model` con el nombre completo o un alias, y `--effort`) son los de su referencia de la línea de comandos. En GitHub Copilot CLI, `--model` está documentado y el esfuerzo se elige con `/model` o con `effortLevel` en su configuración: su referencia no documenta un flag de esfuerzo.
+- Los flags son los de las referencias de la línea de comandos de cada herramienta: `--model` (en Claude Code, el nombre completo o un alias) y `--effort` (`low`, `medium`, `high`, `xhigh` o `max`; en GitHub Copilot CLI también se llama `--reasoning-effort`). Dentro de la sesión, `/model` cambia el modelo y el esfuerzo en las dos.
 - **Si tu herramienta usa otros ids**, ponlos una vez en `plan.json`, por herramienta y por nivel: `"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-5.5"}}`. Lo que no esté ahí sale de `modelos`.
-- **Si tu versión acepta otro comando** (por ejemplo, un flag de esfuerzo en Copilot CLI), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo} --effort {esfuerzo}`: `perf.py` reemplaza `{modelo}` por el id y `{esfuerzo}` por `low`, `medium` o `high`.
+- **Si tu versión usa otro comando** (por ejemplo, una versión anterior de Copilot CLI sin `--effort`), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo} --effort {esfuerzo}`: `perf.py` reemplaza `{modelo}` por el id y `{esfuerzo}` por `low`, `medium` o `high`.
 
 ## Por qué se encarece
 

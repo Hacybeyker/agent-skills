@@ -16,7 +16,7 @@ Para el usuario, no para el agente. Cada caso trae dónde va (un chat nuevo, con
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo: de dónde a dónde y qué debe verse al final; qué se nota: "tarda", "jank al hacer scroll">. Dispositivo <serial>. No hagas commit ni push.
@@ -28,7 +28,7 @@ Sin build de profiling, el agente hace el setup (sesión 0) y te deja el comando
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ahí hay que <login, aceptar términos, omitir huella, ir al tab X>. Dispositivo <serial>. No hagas commit ni push.
@@ -40,7 +40,7 @@ Sesión 1 con el patrón de flujos largos. El texto no fija cómo se recorre: el
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Usa hb-performance en modo triage: medir <flujo: de qué pantalla a qué resultado>. En el medio hay un paso que hago yo (<autorizar en otra app, resolver un desafío>): déjalo como pausa del recorrido y no midas ese tiempo. Dispositivo <serial>. No hagas commit ni push.
@@ -62,7 +62,7 @@ Arma el plan sin sesión 1 e imprime los comandos para medir. Agrega `--red` si 
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>. No hagas commit ni push.
@@ -134,7 +134,7 @@ Imprime el chat de la sesión 3. Las mejoras a prueba se aprueban igual.
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Sigue hb-performance con <ruta>/estado.md: sesión 3, aplica <id>. No hagas commit ni push.
@@ -144,7 +144,7 @@ Sigue hb-performance con <ruta>/estado.md: sesión 3, aplica <id>. No hagas comm
 
 **Dónde:** chat nuevo · Económico · bajo
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code, o `cd <raíz> && copilot --model claude-haiku-5.5` en GitHub Copilot CLI y elige el esfuerzo low con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code, o `cd <raíz> && copilot --model claude-haiku-5.5 --effort low` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Sigue hb-performance con <ruta>/estado.md. No hagas commit ni push.
@@ -154,7 +154,7 @@ Sigue hb-performance con <ruta>/estado.md. No hagas commit ni push.
 
 **Dónde:** chat nuevo · Económico · bajo
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code, o `cd <raíz> && copilot --model claude-haiku-5.5` en GitHub Copilot CLI y elige el esfuerzo low con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code, o `cd <raíz> && copilot --model claude-haiku-5.5 --effort low` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Sigue hb-performance con <ruta>/estado.md: cierra la investigación sin fase después. No hagas commit ni push.
@@ -186,7 +186,7 @@ Con varios flujos, `--flujo <nombre>`: solo se rehace ese.
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Con hb-performance, lee <ruta>/comparacion.md y <ruta>/estado.md y explícame por qué <métrica> dio <veredicto>. No cambies nada. No hagas commit ni push.
@@ -196,7 +196,7 @@ Con hb-performance, lee <ruta>/comparacion.md y <ruta>/estado.md y explícame po
 
 **Dónde:** chat nuevo · Económico · bajo
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code, o `cd <raíz> && copilot --model claude-haiku-5.5` en GitHub Copilot CLI y elige el esfuerzo low con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code, o `cd <raíz> && copilot --model claude-haiku-5.5 --effort low` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Con hb-performance, mejora el resumen ejecutivo, el resumen para gerencia y la lectura de la comparación en <ruta>/estado.md (<qué falta o qué sobra>) y vuelve a generar el reporte con perf.py reporte --carpeta <carpeta> --html. No hagas commit ni push.
@@ -216,7 +216,7 @@ Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-ger
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tramo en segmentos) desde <marca> hasta <marca> (familia <app|e2e>) y dime si hace falta medir de nuevo. No hagas commit ni push.
@@ -226,7 +226,7 @@ Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tr
 
 **Dónde:** chat nuevo · Diagnóstico · alto
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort high` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo high con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort high` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort high` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Con hb-performance, en la traza <ruta>/antes/<flujo>_<n>.perfetto-trace.gz responde: <pregunta>. Usa perf.py consulta con LIMIT. No hagas commit ni push.
@@ -266,7 +266,7 @@ Hazlo **entre** investigaciones, no en medio de una: una plantilla nueva puede n
 
 **Dónde:** chat nuevo · Intermedio · medio
 
-**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5` en GitHub Copilot CLI y elige el esfuerzo medium con `/model`. Después pega el bloque.
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
 
 ```text
 Usa hb-performance: nueva investigación sobre <pendiente, con el H# del estado.md anterior en <ruta>>. Dispositivo <serial>. No hagas commit ni push.

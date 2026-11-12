@@ -8429,7 +8429,7 @@ class ChatCommandTest(PerfBase):
         self.assertEqual(block[1].strip(), "Abrir (Terminal, Claude Code): cd %s && claude --model claude-sonnet-5-5 "
                                            "--effort high" % root)
         self.assertEqual(block[2].strip(), "Abrir (Terminal, GitHub Copilot CLI): cd %s && copilot --model "
-                                           "claude-sonnet-5.5 · elige el esfuerzo high con /model al abrirlo" % root)
+                                           "claude-sonnet-5.5 --effort high" % root)
         self.assertTrue(block[3].strip().startswith('Texto: "Sigue hb-performance con '))
         self.assertTrue(block[3].strip().endswith('No hagas commit ni push."'))
         self.assertIn("Qué hace: sesión 2", block[4])
@@ -8445,13 +8445,12 @@ class ChatCommandTest(PerfBase):
         self.agents("**Herramienta de IA:** GitHub Copilot CLI")
         block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
         self.assertIn("Abrir (Terminal, GitHub Copilot CLI):", block[1])
-        self.assertIn("copilot --model claude-sonnet-5.5 · elige el esfuerzo high con /model", block[1])
-        self.assertNotIn("claude --model", "\n".join(block))
-        # un comando propio en AGENTS.md (por ejemplo, con un flag de esfuerzo) gana al de fábrica
-        self.agents("Herramienta de IA: GitHub Copilot CLI", "Comando del chat: `copilot --model {modelo} --effort {esfuerzo}`")
-        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
         self.assertIn("copilot --model claude-sonnet-5.5 --effort high", block[1])
-        self.assertNotIn("/model", block[1])
+        self.assertNotIn("claude --model", "\n".join(block))
+        # un comando propio en AGENTS.md (por ejemplo, una versión sin --effort) gana al de fábrica
+        self.agents("Herramienta de IA: GitHub Copilot CLI", "Comando del chat: `copilot --model {modelo}`")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("copilot --model claude-sonnet-5.5 · elige el esfuerzo high con /model al abrirlo", block[1])
 
     def test_los_ids_salen_de_modelos_y_se_pueden_cambiar(self):
         self.assertEqual(perf.cli_model_id({}, "economico", "claude"), "claude-haiku-5-5")
@@ -8757,3 +8756,17 @@ class TimelineCaptureTest(DeviceBase):
         self.assertTrue(data["llamadas"])  # GOOD trae secciones HTTP
         self.assertTrue(all(len(call) == 3 for call in data["llamadas"]))
         self.assertNotIn("linea", (self.plan.parent / "metricas.csv").read_text(encoding="utf-8"))
+
+
+class BusinessAxisTest(unittest.TestCase):
+    """El gráfico de gerencia usa en el eje la misma unidad que sus valores: segundos desde 100 ms."""
+
+    def test_eje_y_valores_en_segundos(self):
+        svg = perf.range_chart([("Antes", 410, 400, 420, "before"), ("Después", 300, 290, 310, "after")], "ms", "x",
+                               plain=True)
+        self.assertIn(">0.41 s<", svg)
+        self.assertIn('text-anchor="end">segundos<', svg)
+        self.assertNotIn("milisegundos", svg)
+        dev = perf.range_chart([("Antes", 410, 400, 420, "before")], "ms", "x")
+        self.assertIn("410 ms", dev)
+        self.assertIn('text-anchor="end">milisegundos<', dev)

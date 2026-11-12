@@ -3203,11 +3203,11 @@ def chat(text, tier, effort, what, plan):
 
 # ── Abrir un chat con el modelo y el esfuerzo (modelos.md · Abrir el chat con el modelo y el esfuerzo) ─────────
 # Las herramientas que `siguiente` sabe abrir desde la terminal: (clave, nombre, comando). {modelo} es el id del modelo en
-# esa herramienta y {esfuerzo}, el nivel en inglés. Los flags de Claude Code (--model y --effort) son los de su referencia
-# de la línea de comandos; la de GitHub Copilot CLI documenta --model y no un flag de esfuerzo: se elige con /model. Una
-# línea "Comando del chat:" en la sección de rendimiento de AGENTS.md reemplaza el comando de la herramienta del proyecto.
+# esa herramienta y {esfuerzo}, el nivel en inglés. Los flags (--model y --effort, con low, medium, high, xhigh o max) son
+# los de las referencias de la línea de comandos de Claude Code y de GitHub Copilot CLI. Una línea "Comando del chat:" en
+# la sección de rendimiento de AGENTS.md reemplaza el comando de la herramienta del proyecto.
 CHAT_TOOLS = (("claude", "Claude Code", "claude --model {modelo} --effort {esfuerzo}"),
-              ("copilot", "GitHub Copilot CLI", "copilot --model {modelo}"))
+              ("copilot", "GitHub Copilot CLI", "copilot --model {modelo} --effort {esfuerzo}"))
 EFFORT_CLI = {"bajo": "low", "medio": "medium", "alto": "high"}
 CLAUDE_FAMILIES = ("haiku", "sonnet", "opus", "fable")
 TOOL_KEY = re.compile(r"herramienta(?:\s+de\s+(?:la\s+)?ia)?|ai\s+tool", re.I)
@@ -6990,9 +6990,10 @@ def change_pct(before, after):
     return "%s%s %%" % ("+" if value > 0 else "−" if value < 0 else "", trim(abs(value), 0 if abs(value) >= 10 else 1))
 
 
-def axis_scale(top, unit):
-    """(divisor, unidad del eje, paso) para un eje de 0 a `top`: los tiempos de un segundo o más, en segundos."""
-    divisor, label = (1000.0, "s") if unit == "ms" and top >= 1000 else (1.0, unit)
+def axis_scale(top, unit, plain=False):
+    """(divisor, unidad del eje, paso) para un eje de 0 a `top`: los tiempos de un segundo o más, en segundos; en el
+    reporte para gerencia, desde 100 ms, igual que sus valores (plain_time)."""
+    divisor, label = (1000.0, "s") if unit == "ms" and top >= (100 if plain else 1000) else (1.0, unit)
     span = (top / divisor) or 1
     raw = span / 4
     power = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
@@ -7003,7 +7004,7 @@ def axis_scale(top, unit):
 def svg_axis(x0, width, y, top, unit, plain=False):
     """El eje horizontal con 3 a 6 marcas y la unidad. Devuelve (partes del SVG, función valor → x)."""
     top = top or 1
-    divisor, label, step = axis_scale(top, unit)
+    divisor, label, step = axis_scale(top, unit, plain)
     ticks, value = [], 0.0
     while value * divisor <= top * 1.0001 and len(ticks) < 8:
         ticks.append(value)
@@ -7853,7 +7854,8 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
     waiting = [m for m in mejoras if m.get("estado", "propuesta") != "aplicada"] if final else []
     state_words = {"propuesta": "sin decidir", "aprobada": "aprobado, sin aplicar", "descartada": "descartado",
                    "pendiente": "para más adelante"}
-    pending = ["- %s (%s)" % (title(m), state_words.get(m.get("estado", "propuesta"), m.get("estado")))
+    pending = ["- %s (%s)" % (title(m) if not title(m).startswith("_") else "Una mejora con el título sin completar",
+                              state_words.get(m.get("estado", "propuesta"), m.get("estado")))
                for m in waiting]
     open_points = [line for line in without_placeholders(pick("pendientes")).splitlines() if line.strip().startswith(("-", "*"))]
     if open_points:
@@ -7861,7 +7863,8 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
             len(open_points), "punto" if len(open_points) == 1 else "puntos"))
     pending_md = "\n".join(pending) if pending else "Nada pendiente."
 
-    risks = ["- %s: riesgo %s." % (title(m), m["riesgo"]) for m in (applied if final else mejoras)
+    risks = ["- %s: riesgo %s." % (title(m), m["riesgo"]) if not title(m).startswith("_") else
+             "- Una mejora (su título está sin completar): riesgo %s." % m["riesgo"] for m in (applied if final else mejoras)
              if str(m.get("riesgo") or "").strip() not in ("", "—", "-")]
     if final:
         # Solo las medidas principales: las demás (también los tiempos de cada servicio, que son orientativos) están
