@@ -1,8 +1,21 @@
 # Modelo, razonamiento y costo por sesión
 
-La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `diagnostico`, `alto`; por defecto Haiku 5.5, Sonnet 5.5, Sonnet 5.5 y Opus 5.5). Con otra herramienta (Copilot, Cursor), cambia esos nombres una vez en el plan.
+La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `diagnostico`, `alto`; por defecto Haiku 5.5, Sonnet 5.5, Sonnet 5.5 y Opus 5.5), y el comando para abrir el chat con ese modelo y su esfuerzo (abajo). Con otra herramienta, cambia esos nombres una vez en el plan.
 
 `diagnostico` es el modelo de la sesión 2 y es opcional: un plan sin `diagnostico` (por ejemplo, uno creado antes de que existiera) usa su `intermedio`, así que nada cambia si no lo tocas. Sirve para bajar el modelo de lo mecánico (setup, ficha y mejoras usan `intermedio`) sin bajar el del diagnóstico, o para subir solo el diagnóstico.
+
+## Abrir el chat con el modelo y el esfuerzo
+
+Este es el único lugar donde se definen. `perf.py siguiente` (y `humo`, `decidir`, `reporte`) imprime cada chat nuevo con el comando que lo abre en la terminal, desde la raíz del proyecto, y el texto exacto para pegar. La herramienta sale de la línea `Herramienta de IA:` de la sección de rendimiento de `AGENTS.md` (la anota la sesión 0); sin esa línea, imprime las dos formas.
+
+| Herramienta | Comando | Modelo (`modelos` → id) | Esfuerzo |
+| --- | --- | --- | --- |
+| Claude Code | `cd <raíz> && claude --model <id> --effort <nivel>` | "Sonnet 5.5" → `claude-sonnet-5-5` | `bajo` → `low`, `medio` → `medium`, `alto` → `high` |
+| GitHub Copilot CLI | `cd <raíz> && copilot --model <id>` | "Sonnet 5.5" → `claude-sonnet-5.5`; un nombre de otro proveedor va en minúsculas y con guiones ("GPT 5.3 Codex" → `gpt-5.3-codex`) | con `/model` dentro de la sesión, al abrirla |
+
+- Los flags de Claude Code (`--model` con el nombre completo o un alias, y `--effort`) son los de su referencia de la línea de comandos. En GitHub Copilot CLI, `--model` está documentado y el esfuerzo se elige con `/model` o con `effortLevel` en su configuración: su referencia no documenta un flag de esfuerzo.
+- **Si tu herramienta usa otros ids**, ponlos una vez en `plan.json`, por herramienta y por nivel: `"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-5.5"}}`. Lo que no esté ahí sale de `modelos`.
+- **Si tu versión acepta otro comando** (por ejemplo, un flag de esfuerzo en Copilot CLI), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo} --effort {esfuerzo}`: `perf.py` reemplaza `{modelo}` por el id y `{esfuerzo}` por `low`, `medium` o `high`.
 
 ## Por qué se encarece
 

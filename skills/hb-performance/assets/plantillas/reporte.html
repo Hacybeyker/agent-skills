@@ -57,6 +57,9 @@
          padding: 1px 5px; border-radius: 4px; }
   pre { background: var(--soft); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; }
   pre code { background: none; padding: 0; }
+  pre.diff { font-size: 12.5px; line-height: 1.45; } pre.diff span { display: block; }
+  pre.diff .add { background: var(--ok-soft); color: var(--ok); } pre.diff .del { background: var(--ko-soft); color: var(--ko); }
+  pre.diff .file { font-weight: 700; margin-top: 6px; } pre.diff .hunk { color: var(--muted); }
   .verdict, .state { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
                      white-space: nowrap; }
   .v-better { color: var(--ok); background: var(--ok-soft); }
@@ -82,16 +85,34 @@
   .chart { margin: 0; background: var(--soft); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
   .chart figcaption { font-weight: 600; margin-bottom: 8px; font-size: 14px; display: flex; gap: 8px; align-items: center;
                       flex-wrap: wrap; }
-  .chart svg { width: 100%; height: auto; }
-  .bar-before { fill: var(--before); } .bar-after { fill: var(--after); }
+  .chart svg { width: 100%; max-width: 720px; height: auto; display: block; }
+  .bar-before { fill: var(--before); } .bar-after { fill: var(--after); } .bar-server { fill: var(--after); }
   .bar-label, .bar-value { fill: var(--text); font-size: 12px; }
+  .hatch { stroke: var(--before); stroke-width: 3; } .hatch-bg { fill: var(--surface); }
+  .whisker { stroke: var(--text); stroke-width: 1.2; } .median { stroke: var(--text); stroke-width: 2; }
+  .axis { stroke: var(--muted); stroke-width: 1; } .tick { stroke: var(--muted); }
+  .axis-label { fill: var(--muted); font-size: 11px; }
+  .noise { fill: var(--warn-soft); stroke: var(--warn); stroke-dasharray: 3 2; opacity: .9; }
+  .lane { stroke: var(--border); } .mark { stroke: var(--warn); stroke-dasharray: 4 3; }
+  .dot-before { fill: var(--before); stroke: var(--text); stroke-width: .6; }
+  .dot-control { fill: var(--surface); stroke: var(--text); stroke-width: 1.2; }
+  .chart-note { color: var(--muted); font-size: 13.5px; margin: 8px 0 0; }
+  details > summary { cursor: pointer; color: var(--accent); font-weight: 600; margin: 8px 0; }
   ul, ol { margin: 6px 0; padding-left: 22px; }
   li { margin: 3px 0; }
   li code:first-child { font-weight: 600; }
   .muted { color: var(--muted); }
   footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 32px; color: var(--muted); font-size: 12.5px; }
   @media print {
+    :root {
+      --bg: #ffffff; --surface: #ffffff; --text: #1c1d21; --muted: #555a63; --border: #d5d8de; --soft: #f7f8fa;
+      --accent: #3657d6; --accent-soft: #e9edfb; --before: #a3abb8; --after: #3657d6;
+      --ok: #1e7f48; --ok-soft: #e3f4ea; --ko: #bf3a2f; --ko-soft: #fbe7e4; --same: #646872; --same-soft: #eef0f3;
+      --warn: #9a6400; --warn-soft: #fff3d6;
+    }
     body { background: #fff; } header { background: #333; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .chart, svg { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .chart { break-inside: avoid; }
+    details > summary { display: none; }
     section { break-inside: avoid; border-color: #ccc; } .toc { display: none; }
   }
 </style>

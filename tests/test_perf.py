@@ -1150,7 +1150,7 @@ class ReportTest(PerfBase):
         md = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Métricas principales", md)
         self.assertIn("| Depende de | Antes | Después | Cambio | Veredicto | Qué significa |", md)
-        self.assertIn("| solo la app | 9 % | 3 % | -6 % (-66.67 %) | mejora | funcionó", md)
+        self.assertIn("| solo la app | 9 % | 3 % | −6 % (−67 %) | mejora | Mejora clara · funcionó", md)
         self.assertIn("## Cómo leer este reporte", md)
         self.assertIn("El jank bajó **mucho**.", md)
         self.assertFalse((folder / "reporte.md").exists())
@@ -1199,7 +1199,7 @@ class ReportTest(PerfBase):
         self.assertIn("> Lo que se propone cambiar", initial)
         self.assertIn("| M1 | Clave raw | H0 | ttid_ms | 402 ms | -20 % | alta |", initial)
         self.assertIn("| Depende de | Mediana | P90 | Mín – máx | Corridas | Ruido de medición | Avisos |", initial)
-        self.assertIn("| a | ttid_ms | solo la app | 402 ms | 410 ms | 395 – 410 | 5 | — | — |", initial)
+        self.assertIn("| a | ttid_ms | solo la app | 402 ms | 410 ms | 395 ms – 410 ms | 5 | — | — |", initial)
         self.assertIn("## Cómo leer este reporte", initial)
         self.assertIn("Arranque en frío", initial)
         self.assertNotIn("secreto", initial)
@@ -1211,7 +1211,7 @@ class ReportTest(PerfBase):
         self.ok("reporte", "--carpeta", folder)
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Mejoras: esperado contra logrado", final)
-        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | -24.88 % | mejora | aprobada | — no aplicada |", final)
+        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | −25 % | mejora | aprobada | — no aplicada |", final)
         self.assertIn("## De los hallazgos al resultado", final)
         self.assertIn("1 hallazgos → 1 mejoras propuestas → 0 aplicadas → 0 funcionaron", final)
         self.assertIn("El TTID bajó.", final)
@@ -1220,7 +1220,7 @@ class ReportTest(PerfBase):
         write(folder / "plan.json", json.dumps(plan))
         self.ok("reporte", "--carpeta", folder, "--html")
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| M1 | Clave raw | H0 | ✔ funcionó | ttid_ms: 402 ms → 302 ms (-24.88 %) · funcionó", final)
+        self.assertIn("| M1 | Clave raw | H0 | ✔ funcionó | ttid_ms: 402 ms → 302 ms (−25 %) · funcionó", final)
         page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn('<div class="step ok"><b>1</b><span>Funcionaron</span></div>', page)
         self.assertIn('<td class="ok">✔ funcionó</td>', page)
@@ -2476,13 +2476,13 @@ class TrialImprovementTest(PerfBase):
         final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("| M1 | Caché | H1 | ✔ funcionó | carga_ms: 131 ms → 46 ms", final)
         self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
-                      "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (-75 %)", final)
+                      "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (−75 %)", final)
         self.assertIn("| M3 | Precalcular el layout del texto (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el layout del texto largo · "
                       "cierre hilo_max_ms: 37 ms → 37 ms", final)
         self.assertIn("| sin confirmar | ✔ M2: hipótesis confirmada (detalle hilo_max_ms mejora) |", final)
         self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (cierre hilo_max_ms sin cambio) |", final)
         self.assertIn("3 hallazgos → 3 mejoras propuestas → 3 aplicadas → 2 funcionaron", final)
-        self.assertIn("| ≤ 16 ms | 11 ms | -75 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
+        self.assertIn("| ≤ 16 ms | 11 ms | −75 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
         page = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn('<td class="ok">✔ hipótesis confirmada</td>', page)
         self.assertIn('<td class="ko">✖ hipótesis refutada</td>', page)
@@ -2717,11 +2717,16 @@ class RedoFlowTest(DeviceBase):
         self.assertEqual(phase["entorno"]["frames"], "no")  # el entorno de 'detalle' no se pierde
         self.assertEqual(len(phase["hz_corridas"]), 4)
         self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2", "3"], ["1"]))
-        kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE)
+        kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE
+                      and not p.name.endswith(perf.TIMELINE_SUFFIX))
         self.assertEqual(kept, ["detalle_1.perfetto-trace.gz", "detalle_2.perfetto-trace.gz", "detalle_3.perfetto-trace.gz",
                                 "home_1.perfetto-trace.gz"])
+        timelines = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name.endswith(perf.TIMELINE_SUFFIX))
+        self.assertEqual(timelines, ["detalle_1.linea.json", "detalle_2.linea.json", "detalle_3.linea.json",
+                                     "home_1.linea.json"])  # la del flujo rehecho es la de la tanda nueva
         discarded = next(p for p in self.folder.iterdir() if p.name.startswith("antes-descartada-"))
-        self.assertEqual(sorted(p.name for p in discarded.iterdir()), ["home_1.perfetto-trace.gz", "home_2.perfetto-trace.gz"])
+        self.assertEqual(sorted(p.name for p in discarded.iterdir()), ["home_1.linea.json", "home_1.perfetto-trace.gz",
+                                                                       "home_2.linea.json", "home_2.perfetto-trace.gz"])
 
     def test_rehacer_despues_con_dos_flujos_renueva_la_fecha_y_siguiente_no_vuelve_a_pedirlo(self):
         self.tp_outputs(GOOD)
@@ -3071,7 +3076,7 @@ class SmokeNextStepTest(DeviceBase):
                       "Esfuerzo: medio", out)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista de películas al detalle de la primera, hasta ver el '
                       'reparto. Dispositivo emulator-5554. No hagas commit ni push."', out)
-        self.assertIn("ábrelo en un chat nuevo, no en el del setup", out)
+        self.assertIn("es un chat nuevo, no el del setup", out)
         recipe = out.index("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         self.assertLess(out.index("Siguiente · sesión 1"), recipe)
         self.assertIn("nuevo --receta arranque-frio --paquete %s" % PKG, out[recipe:])
@@ -3142,7 +3147,8 @@ class RouteFileTest(DeviceBase):
         self.assertIn("**detalle**\n- `preparar` (antes de cada corrida, fuera de la traza): `bash inv/preparar.sh`\n"
                       "- `recorrido` (el tramo medido): `bash inv/recorrido.sh`\n", block)
         self.assertRegex(block, r"- Para verlo correr a mano, sin medir: `cd \S+ && bash inv/preparar\.sh && bash inv/recorrido\.sh`")
-        self.assertIn("- Variables de entorno que necesita (expórtalas antes): `PERF_CLAVE`", block)
+        self.assertIn("- Variables de entorno que necesita: `PERF_CLAVE`. Cárgalas en la terminal donde mides", block)
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", block)
         self.assertIn("**lista**\n- `preparar` (antes de cada corrida, fuera de la traza): no tiene\n- `recorrido`: manual", block)
         self.assertIn("**inicio**", block)
         self.assertIn("arranque en frío", block)
@@ -4655,7 +4661,8 @@ class SegmentNetworkTest(DeviceBase):
         self.assertIn("consulta hilo_max_ms", m)
         self.assertIn("consulta frame_p90_ms", m)
         self.assertEqual(sorted(k for k in m if k.startswith("pago ") and not k.startswith("pago red ")),
-                         ["pago red_llamadas", "pago red_ms", "pago red_repetidas_2s", "pago red_solapadas", "pago red_ttfb_ms"])
+                         ["pago fin_ms", "pago inicio_ms", "pago red_llamadas", "pago red_ms", "pago red_repetidas_2s", "pago red_solapadas",
+                          "pago red_ttfb_ms"])  # inicio y fin del tramo, para la línea de tiempo
         flow = network_flow()
         self.assertEqual(perf.segment_metric_names(flow), ["consulta hilo_max_ms", "consulta frame_p90_ms", "consulta jank_app_pct"])
         self.assertIn("pago red_llamadas", perf.segment_network_names(flow))
@@ -4854,7 +4861,8 @@ class KeyboardTest(DeviceBase):
         state = (folder / "estado.md").read_text(encoding="utf-8")
         section = state[state.index("## Cambios temporales por revertir"):state.index("## Mapa del alcance")]
         self.assertIn("las ediciones de cableado en código de `main`", section)
-        self.assertIn("`cd <repo> && git diff --binary -- <archivos> > <parche> && git apply --check -R <parche>`", section)
+        self.assertIn("`cd <repo> && ( set -C && git diff --binary -- <archivos> > <parche> ) && git apply --check -R "
+                      "<parche>`", section)  # set -C: no pisa un parche que ya existe
         self.assertIn("Quitar: `cd <repo> && git apply -R <parche>`", section)
         self.assertIn("Volver a aplicar: `cd <repo> && git apply <parche>`", section)
         for marker in ("<repo>", "<archivos>", "<parche>"):  # de una sola palabra: no cuentan como relleno de la plantilla
@@ -4895,7 +4903,7 @@ class Compat070Test(PerfBase):
         self.assertNotIn("no declara", out)  # las variables de `preparar` ya están en requiere_env
         self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos)", out)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
-        self.assertIn("- Variables de entorno que necesita (expórtalas antes): `PERF_USUARIO`, `PERF_CLAVE`", state)
+        self.assertIn("- Variables de entorno que necesita: `PERF_USUARIO`, `PERF_CLAVE`. Cárgalas", state)
         self.assertNotIn("Paso humano", state)
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
@@ -7369,7 +7377,7 @@ class CostTest(PerfBase):
     def test_siguiente_lista_las_sesiones_hechas_sin_fila_con_un_comando_completo_por_cada_una(self):
         write(self.folder / "reporte-inicial.md", "x")
         out = self.ok("siguiente", "--carpeta", self.folder)
-        self.assertIn("Costo (opcional): 3 sesiones hechas sin anotar. Un comando por cada una; solo falta el costo", out)
+        self.assertIn("Costo (opcional, Terminal): 3 sesiones hechas sin anotar. Un comando por cada una; solo falta el costo", out)
         self.assertIn("/cost en Claude Code; /usage en GitHub Copilot CLI, que informa AI Credits y tokens", out)
         commands = [line.strip() for line in out.splitlines() if " consumo --carpeta " in line]
         self.assertEqual(len(commands), 3, out)
@@ -7409,7 +7417,7 @@ class CostTest(PerfBase):
     def test_los_modelos_del_comando_salen_del_plan_y_la_receta_de_arranque_no_tiene_sesion_1(self):
         self.plan.update(modelos={"economico": "Modelo Chico", "intermedio": "Modelo Medio", "alto": "Modelo Grande"},
                          flujos={"arranque-frio": {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}},
-                         mejoras=[])
+                         mejoras=[], receta="arranque-frio")  # lo que deja `nuevo --receta`
         write(self.folder / "plan.json", json.dumps(self.plan))
         write(self.folder / "reporte-inicial-dev.md", "x")
         self.assertEqual(perf.missing_costs(self.folder, self.plan), [("2 · diagnóstico", "Modelo Medio", "alto")])
@@ -7710,25 +7718,32 @@ class ServicesReportTest(PerfBase):
         write(self.folder / "plan.json", json.dumps(self.plan))
         write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
 
-    def test_los_5_que_mas_tiempo_suman_con_el_servidor_frente_a_la_app_y_el_resto_en_una_linea(self):
+    def test_todos_los_servicios_con_el_servidor_frente_a_la_app_en_un_desplegable_abierto(self):
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         md = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         section = md[md.index("## Servicios del flujo"):md.index("## Red por tramo") if "## Red por tramo" in md
                      else md.index("## Hallazgos")]
-        self.assertIn("**Orientativa.**", section)
+        self.assertIn("**Informativa.**", section)
         self.assertIn("no para decidir una mejora de la app", section)
+        self.assertIn("si se mueve entre fases, es variación del backend, no efecto de la mejora", section)
         table = [line for line in section.splitlines() if line.startswith("| `")]
-        self.assertEqual(len(table), 5)
-        self.assertEqual(table[0], "| `GET api/v1/clientes` | 2 | 410 ms / 900 ms | 300 ms | cola 5 ms · conexión 20 ms · "
-                                   "lectura 15 ms | carga | 1 | 0 | 820 ms |")
+        self.assertEqual(len(table), 7)  # la lista completa: los 7 que se llaman en esta fase
+        self.assertIn("<details open>\n<summary>Los 7 servicios del flujo</summary>", section)
+        self.assertIn("**Tramo `carga`**", section)
+        self.assertIn("**Fuera de los tramos**", section)
+        self.assertIn("| `GET api/v1/clientes` | 2 | sin dato | 410 ms / 900 ms | 300 ms | cola 5 ms · conexión 20 ms · "
+                      "lectura 15 ms | 1 | 0 |", section)
         # sin TTFB ni desglose en el CSV, lo dice: no es cero
-        self.assertEqual(table[1], "| `GET api/v1/clientes/{id}` | 1 | 150 ms / 150 ms | 100 ms | sin dato | sin dato | "
-                                   "sin dato | sin dato | 150 ms |")
-        self.assertEqual([line.split("`")[1] for line in table[2:]],
-                         ["GET api/v1/catalogo/0", "GET api/v1/catalogo/1", "GET api/v1/catalogo/2"])
-        self.assertIn("Y 2 servicios más: 2 llamadas y 110 ms por corrida (todos están en `resumen.md`).", section)
+        self.assertIn("| `GET api/v1/clientes/{id}` | 1 | sin dato | 150 ms / 150 ms | 100 ms | sin dato | sin dato | "
+                      "sin dato |", section)
+        # sin el momento de cada llamada (una versión anterior), el orden es por lo que suman y lo dice
+        self.assertIn("Orden: por el tiempo que suman (estas corridas no traen el momento de cada llamada", section)
+        self.assertIn("**Espera de servicios: 1.32 s de 2 s del flujo (66 %)**, sumando las llamadas", section)
         self.assertNotIn("nunca", section)  # el que no se llama en esta fase no aparece
-        self.assertIn("Servicios del flujo", (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8"))
+        page = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        self.assertIn("Servicios que más tiempo suman", page)
+        self.assertIn("<details open>", page)
+        self.assertIn("servidor (TTFB)", page)  # la leyenda del gráfico separa servidor y app
 
     def test_en_el_final_cada_servicio_sale_antes_contra_despues(self):
         after = service_rows("despues", "GET api/v1/clientes", 1, [400] * 5, 300, FULL) \
@@ -7739,17 +7754,28 @@ class ServicesReportTest(PerfBase):
         self.ok("reporte", "--carpeta", self.folder)
         md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         section = md[md.index("## Servicios del flujo"):]
-        self.assertIn("| `GET api/v1/clientes` | antes | 2 | 410 ms / 900 ms |", section)
-        self.assertIn("| `GET api/v1/clientes` | despues | 1 | 400 ms / 400 ms |", section)
-        self.assertIn("| `GET api/v1/catalogo/0` | despues | no se llama |", section)
+        self.assertIn("| `GET api/v1/clientes` | antes | 2 | sin dato | 410 ms / 900 ms |", section)
+        self.assertIn("| `GET api/v1/clientes` | después | 1 | sin dato | 400 ms / 400 ms |", section)
+        self.assertIn("| `GET api/v1/catalogo/0` | después | no se llama |", section)
         self.assertIn("| `GET api/v1/nuevo` | antes | no se llama |", section)  # uno que solo aparece después no se pierde
-        self.assertIn("| `GET api/v1/nuevo` | despues | 1 | 500 ms / 500 ms |", section)
-        self.assertIn("servicios más: en antes, ", section)
+        self.assertIn("| `GET api/v1/nuevo` | después | 1 | sin dato | 500 ms / 500 ms |", section)
+        self.assertIn("- En antes, 7 servicios", section)
+        self.assertIn("- En después, 3 servicios", section)
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
         # no todos traen el tiempo del servidor: suma la duración de las llamadas y lo dice así
-        self.assertIn("De los 1.3 s del recorrido, los servicios suman 1.05 s en llamadas a servicios (si van en paralelo, "
-                      "parte se solapa); el más lento es `GET api/v1/nuevo` (0.5 s por llamada). Es orientativo", business)
+        self.assertIn("El recorrido llama a 3 servicios (3 llamadas en total). De los 1.3 s del recorrido, las llamadas "
+                      "suman 1.05 s (si van en paralelo, parte se solapa); el más lento es `GET api/v1/nuevo` (0.5 s por "
+                      "llamada). Es orientativo", business)
         self.assertNotIn("red get", business.lower())  # los tiempos de un servicio no salen como riesgo ni con su métrica
+
+    def test_el_servidor_que_cambia_entre_fases_es_variacion_del_backend(self):
+        after = service_rows("despues", "GET api/v1/clientes", 2, [700] * 5, 600, FULL) \
+            + rows("despues", "lista", "lista_ms", [1700] * 5)
+        write(self.folder / "metricas.csv", self.before + after)
+        self.ok("reporte", "--carpeta", self.folder)
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("El servidor cambió entre fases en `GET api/v1/clientes` (300 ms → 600 ms): es variación del "
+                      "backend o de la red del momento, no efecto de la mejora", md)
 
     def test_sin_filas_de_red_la_seccion_no_sale_y_gerencia_dice_que_no_se_midio(self):
         write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
@@ -7767,13 +7793,15 @@ class ServicesReportTest(PerfBase):
         self.assertIn("hace 1 llamada a servicios", perf.services_line(
             perf.read_rows(self.folder / "metricas.csv")[:0] + [dict(row, valor=1.0) for row in
                                                                perf.read_rows(self.folder / "metricas.csv")], self.plan))
-        # sin ventana, el total del recorrido sale de la primera métrica principal en tiempo; todos con TTFB: es del servidor
+        # con el tiempo en curso de esta versión: cuánto del recorrido es espera y el más lento
         write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
-              + service_rows("antes", "GET api/v1/clientes", 2, [400] * 5, 300))
+              + service_rows("antes", "GET api/v1/clientes", 2, [400] * 5, 300)
+              + rows("antes", "lista", "red_en_curso_ms", [450] * 5, family="info"))
         self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
-                         "De los 1.8 s del recorrido, los servicios suman 0.6 s de espera del servidor (si van en paralelo, "
-                         "parte se solapa); el más lento es `GET api/v1/clientes` (0.4 s por llamada). Es orientativo: "
-                         "depende del servidor y de la red del momento.")
+                         "El recorrido llama a 1 servicio (2 llamadas en total). De los 1.8 s del recorrido, durante "
+                         "0.45 s (25 %) se está esperando a algún servicio; el más lento es `GET api/v1/clientes` (0.4 s "
+                         "por llamada). Es orientativo: depende del servidor y de la red del momento.")
+
 
     def test_las_filas_por_servicio_salen_de_la_traza_y_van_al_final(self):
         call = lambda ts, dur, name: ("seccion", ts, dur, 0, name)
@@ -7845,10 +7873,10 @@ class AudienceReportsTest(PerfBase):
         self.assertIn("## Qué se encontró\n\n- La lista tarda: Pide los clientes dos veces\n\nOtras causas posibles: 1 se "
                       "investigó y se descartó y 1 quedó sin confirmar.", text)
         self.assertIn("## Qué se hizo\n\n- Pedir los clientes una sola vez", text)
-        self.assertIn("- **Tiempo de \"lista\":** pasó de 1.8 s a 1.1 s · mejora clara.", text)
-        self.assertIn("- **Cuadros que se ven trabados:** pasó de 6 % a 1 % · orientativo: varía mucho entre corridas "
+        self.assertIn("- **Tiempo de \"lista\":** pasó de 1.8 s a 1.1 s (39 % menos) · mejora clara.", text)
+        self.assertIn("- **Cuadros que se ven trabados:** pasó de 6 % a 1 % (83 % menos) · orientativo: varía mucho entre corridas "
                       "(mejora clara).", text)
-        self.assertIn("- **Mayor congelamiento de la pantalla:** pasó de 40 milisegundos a 90 milisegundos · empeoró.", text)
+        self.assertIn("- **Mayor congelamiento de la pantalla:** pasó de 40 milisegundos a 90 milisegundos (125 % más) · empeoró.", text)
         self.assertIn("## Lo que queda pendiente\n\n- Cargar las imágenes después (para más adelante)\n- 1 punto de la "
                       "investigación sin cerrar", text)
         self.assertIn("- Pedir los clientes una sola vez: riesgo bajo.", text)
@@ -8136,3 +8164,596 @@ class DevSettingsTest(DeviceBase):
         self.assertIn("1) la marca 'MARK x' no salió", steps[2]["texto"])
         self.assertNotIn("animación", steps[2]["texto"])
         self.assertIn("installX", steps[3]["texto"])
+
+
+FIXTURE_090 = ROOT / "tests" / "fixtures" / "hb-performance-0.9.0"
+
+
+def timed_service(phase, service, calls, ms, ttfb, start, segment=None, flow="lista", runs=5):
+    """Las filas de un servicio con el momento de sus llamadas (inicio y fin desde el inicio del flujo), como las deja
+    esta versión al final de cada corrida."""
+    out = service_rows(phase, service, calls, [ms] * runs, ttfb, flow=flow)
+    out += rows(phase, flow, "red %s inicio_ms" % service, [start] * runs, family="info")
+    out += rows(phase, flow, "red %s fin_ms" % service, [start + ms * calls] * runs, family="info")
+    if segment:
+        out += rows(phase, flow, "%s red %s llamadas" % (segment, service), [calls] * runs, "llamadas", family="info")
+    return out
+
+
+class FlowServicesOrderTest(PerfBase):
+    """G4: la lista completa de servicios en el orden en que se invocan, por tramo, con la espera total, la línea de
+    tiempo de la corrida mediana y la variación del backend rotulada como tal."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true", "segmentos": [
+            {"nombre": "carga", "desde": {"marca": "NAV Lista"}, "hasta": {"marca": "MARK lista"}},
+            {"nombre": "detalle", "desde": {"marca": "MARK lista"}, "hasta": {"marca": "MARK detalle"}}]}}, "mejoras": []}
+        text = HEADER + rows("antes", "lista", "lista_ms", [1800, 1850, 1700, 1900, 1750]) \
+            + rows("antes", "lista", "ventana_ms", [2000, 2100, 1900, 2200, 2050], family="info") \
+            + rows("antes", "lista", "red_en_curso_ms", [900] * 5, family="info") \
+            + rows("antes", "lista", "carga inicio_ms", [0] * 5, family="info") \
+            + rows("antes", "lista", "carga fin_ms", [700] * 5, family="info") \
+            + rows("antes", "lista", "detalle inicio_ms", [700] * 5, family="info") \
+            + rows("antes", "lista", "detalle fin_ms", [2000] * 5, family="info")
+        # el más pesado se llama tercero: el orden es el de invocación, no el del tiempo que suman
+        text += timed_service("antes", "GET api/v1/sesion", 1, 100, 80, 0, "carga")
+        text += timed_service("antes", "GET api/v1/catalogo", 1, 150, 100, 120, "carga")
+        text += timed_service("antes", "GET api/v1/clientes", 2, 400, 300, 300, "carga")
+        text += timed_service("antes", "GET api/v1/clientes/{id}", 1, 200, 150, 1100, "detalle")
+        for index in range(3):
+            text += timed_service("antes", "GET api/v1/extra/%d" % index, 1, 40, 20, 1400 + 100 * index, "detalle")
+        self.before = text
+        write(self.folder / "metricas.csv", text)
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
+
+    def test_las_filas_con_el_momento_salen_de_la_traza(self):
+        call = lambda ts, dur, name: ("seccion", ts, dur, 0, name)
+        sections = [call(1000 * MS, 300 * MS, "HTTP GET api/v1/a"), call(1200 * MS, 300 * MS, "HTTP GET api/v1/b"),
+                    call(2000 * MS, 100 * MS, "HTTP GET api/v1/a")]
+        segment = [{"tramo": "carga", "endpoints": {"GET api/v1/a": 1}, "limites": (1000 * MS, 1600 * MS)}]
+        got = {m[0]: m for m in perf.service_metrics(sections, set(), segment, origin=1000 * MS)}
+        self.assertEqual(got["red GET api/v1/a inicio_ms"][1:], (0.0, "ms", "info"))
+        self.assertEqual(got["red GET api/v1/a fin_ms"][1], 1100.0)  # el fin de su última llamada
+        self.assertEqual(got["red GET api/v1/b inicio_ms"][1], 200.0)
+        self.assertEqual(got["red_en_curso_ms"][1], 600.0)  # 1000–1500 y 2000–2100: lo solapado cuenta una vez
+        self.assertEqual(got["carga inicio_ms"][1], 0.0)
+        self.assertEqual(got["carga fin_ms"][1], 600.0)
+        self.assertTrue(all(perf.SERVICE_EXTRA.fullmatch(name) for name in got), got)
+        # sin origen (como antes de esta versión) no salen
+        self.assertNotIn("red_en_curso_ms", {m[0] for m in perf.service_metrics(sections, set(), segment)})
+
+    def test_la_lista_completa_va_en_orden_de_invocacion_y_por_tramo(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        md = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        section = md[md.index("## Servicios del flujo"):md.index("## Red por tramo") if "## Red por tramo" in md
+                     else md.index("## Hallazgos")]
+        names = [line.split("`")[1] for line in section.splitlines() if line.startswith("| `")]
+        self.assertEqual(names, ["GET api/v1/sesion", "GET api/v1/catalogo", "GET api/v1/clientes", "GET api/v1/clientes/{id}",
+                                 "GET api/v1/extra/0", "GET api/v1/extra/1", "GET api/v1/extra/2"])
+        self.assertLess(section.index("**Tramo `carga`**"), section.index("**Tramo `detalle`**"))
+        self.assertIn("<details open>\n<summary>Los 7 servicios del flujo</summary>", section)
+        self.assertIn("En el orden en que se invocan", section)
+        self.assertIn("| `GET api/v1/clientes` | 2 | 300 ms | 400 ms / 400 ms | 300 ms |", section)
+        self.assertIn("**Espera de servicios: 900 ms de 2.05 s del flujo (44 %)**, el tiempo con al menos una llamada en "
+                      "curso", section)
+        page = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        self.assertIn("Línea de tiempo de los servicios", page)
+        self.assertIn("Corrida 5 (la de duración mediana)", page)  # ventana 2050 ms: la mediana de las 5
+        self.assertIn('class="mark"', page)  # dónde empieza cada tramo
+        self.assertIn("podrían ir en paralelo", page)
+        self.assertIn("Servicios que más tiempo suman", page)
+        business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("El recorrido llama a 7 servicios (8 llamadas en total). De los 2.05 s del recorrido, durante 0.9 s "
+                      "(44 %) se está esperando a algún servicio; el más lento es `GET api/v1/clientes` (0.4 s por "
+                      "llamada).", business)
+
+    def test_en_el_final_el_backend_que_se_mueve_es_variacion_del_backend(self):
+        after = rows("despues", "lista", "lista_ms", [1200] * 5) \
+            + timed_service("despues", "GET api/v1/sesion", 1, 100, 80, 0, "carga") \
+            + timed_service("despues", "GET api/v1/clientes", 1, 700, 600, 100, "carga")
+        write(self.folder / "metricas.csv", self.before + after)
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("| `GET api/v1/clientes` | antes | 2 | 300 ms |", md)
+        self.assertIn("| `GET api/v1/clientes` | después | 1 | 100 ms |", md)
+        self.assertIn("El servidor cambió entre fases en `GET api/v1/clientes` (300 ms → 600 ms): es variación del backend",
+                      md)
+        self.assertIn("| `GET api/v1/catalogo` | después | no se llama |", md)
+
+
+TECH_IN_BUSINESS = ("mediana", "P90", "CV", "slices", "TTFB", "jank", "lista_ms", "hilo_max_ms", "ventana_ms")
+
+
+class ReadableReportsTest(PerfBase):
+    """G1: los cuatro reportes se leen solos: secciones, gráficos en línea con su explicación, unidades y, en el de
+    gerencia, nada técnico. Autocontenidos: sin scripts ni recursos externos."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        shutil.copytree(str(FIXTURE_090), str(self.folder))
+
+    def generate(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        return {name: (self.folder / name).read_text(encoding="utf-8") for name in (
+            "reporte-inicial-dev.html", "reporte-inicial-gerencia.html", "reporte-final-dev.html",
+            "reporte-final-gerencia.html", "reporte-final-gerencia.md", "reporte-inicial-gerencia.md",
+            "reporte-final-dev.md", "reporte-inicial-dev.md")}
+
+    def test_los_cuatro_reportes_traen_graficos_explicados_y_son_autocontenidos(self):
+        pages = self.generate()
+        for name, page in pages.items():
+            if not name.endswith(".html"):
+                continue
+            self.assertIn("<svg", page, name)
+            self.assertIn('class="chart-note"', page, name)  # cada gráfico con su frase
+            self.assertNotIn("<script", page.lower(), name)
+            self.assertNotRegex(page, r'(?:src|href)="(?:https?:)?//', name)  # nada que cargar de la red
+            self.assertNotIn("@import", page, name)
+            self.assertIn("@media print", page, name)
+        dev = pages["reporte-final-dev.html"]
+        self.assertIn("Control", dev)
+        self.assertIn('class="noise"', dev)  # el ruido marcado
+        self.assertIn('class="whisker"', dev)  # el rango de las corridas
+        self.assertIn("La barra es la mediana y la línea fina va de la corrida más rápida a la más lenta", dev)
+        self.assertRegex(dev, r'class="axis-label" text-anchor="end">(?:mili)?segundos<')  # eje con unidad
+        self.assertIn("## Cómo leer este reporte", pages["reporte-final-dev.md"])
+        self.assertIn("**Unidades:**", pages["reporte-final-dev.md"])
+        self.assertIn("cada punto es una corrida", pages["reporte-inicial-dev.html"])
+        self.assertIn("| lista_a_detalle_ms | e2e", pages["reporte-final-dev.md"].replace("app + backend", "e2e")
+                      .replace("| detalle | ", "| "))
+        self.assertRegex(pages["reporte-final-dev.md"], r"\d+ ms \| \d+ ms \| −\d+ ms \(−\d+ %\)")
+
+    def test_el_de_gerencia_va_sin_terminos_tecnicos(self):
+        pages = self.generate()
+        for name in ("reporte-final-gerencia.md", "reporte-inicial-gerencia.md"):
+            text = pages[name]
+            visible = re.sub(r"`[^`]+`", "", text)  # el nombre corto de un servicio puede ir entre acentos graves
+            for term in TECH_IN_BUSINESS:
+                self.assertNotRegex(visible, r"(?<![\w-])%s(?![\w-])" % re.escape(term), (name, term))
+            self.assertEqual(perf.TECH_TERMS.findall(visible), [], name)
+        final = pages["reporte-final-gerencia.md"]
+        for section in ("Qué notaba el usuario", "Qué se hizo", "Resultado", "Lo que queda pendiente", "Riesgos", "Costo"):
+            self.assertIn("## %s" % section, final)
+        self.assertRegex(final, r"pasó de [\d.]+ s a [\d.]+ s \(\d+ % menos\) · mejora clara")
+        self.assertIn("Antes", pages["reporte-final-gerencia.html"])
+        self.assertIn("Después", pages["reporte-final-gerencia.html"])
+        self.assertNotIn("Control", pages["reporte-final-gerencia.html"])
+        self.assertIn("Hoy", pages["reporte-inicial-gerencia.html"])
+
+    def test_medidas_en_la_escala_que_se_entiende(self):
+        self.assertEqual(perf.nice(1810, "ms"), "1.81 s")
+        self.assertEqual(perf.nice(12400, "ms"), "12.4 s")
+        self.assertEqual(perf.nice(450.4, "ms"), "450 ms")
+        self.assertEqual(perf.nice(4.24, "ms"), "4.2 ms")
+        self.assertEqual(perf.nice(12.46, "%"), "12.5 %")
+        self.assertEqual(perf.nice(3, "llamadas"), "3 llamadas")
+        self.assertEqual(perf.nice(None, "ms"), "sin dato")
+        self.assertEqual(perf.change_pct(1800, 1100), "−39 %")
+        self.assertEqual(perf.change_pct(100, 105), "+5 %")
+        self.assertEqual(perf.change_pct(0, 5), "")
+        self.assertEqual(perf.nice_signed(-703.5, "ms"), "−704 ms")
+        self.assertEqual(perf.plain_pct(1800, 1100), " (39 % menos)")
+        self.assertEqual(perf.plain_value(34, "slices"), "34 bloqueos")
+        self.assertEqual(perf.plain_value(1800, "ms"), "1.8 s")
+
+
+class BusinessJargonTest(PerfBase):
+    """U4: lo que escribe la IA para gerencia se comprueba contra la lista de términos técnicos; si trae alguno, no se
+    publica: queda "sin completar" y el comando avisa en qué campo está y qué hacer."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "hallazgo": "H1", "titulo": "Sacar `cargarClientes()` del hilo principal",
+                             "metrica": "lista_ms", "estado": "propuesta"},
+                            {"id": "M2", "titulo": "Cargar las imágenes después", "metrica": "lista_ms", "estado": "propuesta"}]}
+        write(self.folder / "plan.json", json.dumps(plan))
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
+
+    def state(self, business, symptom="La lista tarda en aparecer", cause="Pide los clientes dos veces"):
+        write(self.folder / "estado.md", (
+            "# Rendimiento · Lista · 2026-11-09\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n| Síntoma | %s |\n\n"
+            "## Hallazgos\n\n| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n"
+            "| H1 | La lista tarda | `lista_ms` | %s | bug |\n\n## Resumen para gerencia\n\n%s\n\n"
+            "## Consumo\n\n| Sesión | Modelo | Costo o tokens | Pasos |\n| --- | --- | --- | --- |\n") % (symptom, cause, business))
+
+    def test_detecta_terminos_y_formato_de_codigo(self):
+        self.assertEqual(perf.jargon("La lista tarda en aparecer y se congela al escribir."), [])
+        self.assertEqual(perf.jargon("Abrir la lista pasó de unos 2 s a 1 s."), [])
+        found = perf.jargon("El P90 de lista_ms bajó; el jank y el CV del TTFB en ListaScreen y cargar() en Lista.kt")
+        for term in ("P90", "lista_ms", "jank", "CV", "TTFB", "ListaScreen", "cargar()", "Lista.kt"):
+            self.assertIn(term, found)
+        self.assertIn("`x`", perf.jargon("usa `x`"))
+        self.assertIn("slices", perf.jargon("34 slices"))
+        self.assertIn("viewModel.cargar", perf.jargon("en viewModel.cargar"))
+
+    def test_no_publica_lo_tecnico_y_dice_que_campo_reescribir(self):
+        self.state("El P90 de `lista_ms` bajó un 40 %.", symptom="Jank al abrir la lista", cause="Llama a cargar() dos veces")
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertIn('⚠ Gerencia: "Resumen para gerencia" de estado.md tiene términos técnicos (P90, `lista_ms`', out)
+        self.assertIn("⚠ Gerencia: el síntoma de la Ficha de estado.md tiene términos técnicos (Jank)", out)
+        self.assertIn("⚠ Gerencia: la causa de H1 en Hallazgos de estado.md tiene términos técnicos (cargar())", out)
+        self.assertIn("⚠ Gerencia: el título de M1 en plan.json tiene términos técnicos", out)
+        self.assertEqual(out.count("el título de M1 en plan.json"), 1)  # un aviso por campo, aunque salga en varias partes
+        self.assertIn("Qué hacer: reescríbelo en palabras", out)
+        self.assertRegex(out, r"\n    cd .+ reporte --carpeta \S+ --inicial --html\n")  # el mismo comando, para generar de nuevo
+        text = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        for term in ("P90", "lista_ms", "Jank", "cargar()", "cargarClientes"):
+            self.assertNotIn(term, text)
+        self.assertIn("tiene términos técnicos y no se publica", text)
+        self.assertIn("## Qué notaba el usuario\n\n_sin completar_", text)
+        self.assertIn("- La lista tarda: _sin completar_", text)
+        self.assertIn("- _sin completar_\n- Cargar las imágenes después", text)
+        # el reporte técnico no cambia: publica todo
+        self.assertIn("cargarClientes", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
+
+    def test_en_palabras_se_publica_sin_avisos(self):
+        self.state("Al abrir la lista se pedían los datos dos veces.")
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.assertNotIn("⚠ Gerencia: \"Resumen", out)
+        self.assertIn("Al abrir la lista se pedían los datos dos veces.",
+                      (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+
+
+class ChatCommandTest(PerfBase):
+    """G2: cada chat nuevo trae el comando que lo abre con su modelo y su esfuerzo, según la herramienta que anota
+    AGENTS.md (o las dos formas si no la anota), el texto exacto y qué te toca."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "serial": "emulator-5554", "principales": ["ttid_ms"], "flujos": {"arranque-frio": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main", "espera_s": 5}}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
+        write(self.folder / "diagnostico.md", "x")
+
+    def agents(self, *lines):
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n" + "".join("- %s\n" % line for line in lines))
+
+    def chat_lines(self, out):
+        lines = out.splitlines()
+        head = next(i for i, line in enumerate(lines) if "Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: alto" in line)
+        return lines[head:head + 6]
+
+    def test_sin_herramienta_anotada_imprime_las_dos_formas(self):
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        root = shlex_quote(str(self.dir.resolve()))
+        self.assertEqual(block[1].strip(), "Abrir (Terminal, Claude Code): cd %s && claude --model claude-sonnet-5-5 "
+                                           "--effort high" % root)
+        self.assertEqual(block[2].strip(), "Abrir (Terminal, GitHub Copilot CLI): cd %s && copilot --model "
+                                           "claude-sonnet-5.5 · elige el esfuerzo high con /model al abrirlo" % root)
+        self.assertTrue(block[3].strip().startswith('Texto: "Sigue hb-performance con '))
+        self.assertTrue(block[3].strip().endswith('No hagas commit ni push."'))
+        self.assertIn("Qué hace: sesión 2", block[4])
+        self.assertIn("Tú: abre el chat con ese comando, pega el texto tal cual", block[5])
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("Abrir (Terminal, Claude Code): `cd %s && claude --model claude-sonnet-5-5 --effort high`" % root, state)
+
+    def test_con_claude_code_o_copilot_solo_la_suya(self):
+        self.agents("Herramienta de IA: Claude Code")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("claude --model claude-sonnet-5-5 --effort high", block[1])
+        self.assertNotIn("copilot", "\n".join(block))
+        self.agents("**Herramienta de IA:** GitHub Copilot CLI")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("Abrir (Terminal, GitHub Copilot CLI):", block[1])
+        self.assertIn("copilot --model claude-sonnet-5.5 · elige el esfuerzo high con /model", block[1])
+        self.assertNotIn("claude --model", "\n".join(block))
+        # un comando propio en AGENTS.md (por ejemplo, con un flag de esfuerzo) gana al de fábrica
+        self.agents("Herramienta de IA: GitHub Copilot CLI", "Comando del chat: `copilot --model {modelo} --effort {esfuerzo}`")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("copilot --model claude-sonnet-5.5 --effort high", block[1])
+        self.assertNotIn("/model", block[1])
+
+    def test_los_ids_salen_de_modelos_y_se_pueden_cambiar(self):
+        self.assertEqual(perf.cli_model_id({}, "economico", "claude"), "claude-haiku-5-5")
+        self.assertEqual(perf.cli_model_id({}, "alto", "copilot"), "claude-opus-5.5")
+        self.assertEqual(perf.cli_model_id({"modelos": {"intermedio": "GPT 5.3 Codex"}}, "intermedio", "copilot"),
+                         "gpt-5.3-codex")
+        self.assertEqual(perf.cli_model_id({"modelos": {"intermedio": "sonnet"}}, "intermedio", "claude"), "sonnet")
+        plan = {"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-x"}}}
+        self.assertEqual(perf.cli_model_id(plan, "intermedio", "copilot"), "claude-sonnet-x")
+        self.assertEqual(perf.cli_model_id(plan, "diagnostico", "copilot"), "claude-sonnet-x")  # sin el suyo, el intermedio
+        self.assertEqual(perf.cli_model_id(plan, "intermedio", "claude"), "claude-sonnet-5-5")
+        self.assertEqual(perf.ai_tool(self.dir), (None, None, None))
+        self.agents("Herramienta de IA: Cursor")
+        self.assertEqual(perf.ai_tool(self.dir)[:2], ("otra", "Cursor"))
+        self.assertEqual(len(perf.chat_openers({}, self.dir, "intermedio", "medio")), 2)  # no la conoce: las dos formas
+
+    def test_una_raiz_con_espacios_va_entre_comillas(self):
+        root = Path("/proyecto con espacios")
+        commands = [command for _, command, _ in perf.chat_openers({}, root, "intermedio", "medio")]
+        self.assertTrue(all(command.startswith("cd '/proyecto con espacios' && ") for command in commands), commands)
+
+
+def shlex_quote(text):
+    import shlex
+    return shlex.quote(text)
+
+
+class MissingDataFirstTest(PerfBase):
+    """G3: antes de los pasos que capturan, el comando para cargar las variables que el flujo necesita (oculto para
+    las claves), o una línea si ya están cargadas; y, sin serial en el plan, cómo ver los dispositivos."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {
+            "recorrido": "true", "preparar": "true", "requiere_env": ["PERF_USUARIO", "PERF_CLAVE"]}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        for name in ("PERF_USUARIO", "PERF_CLAVE"):
+            self.env.pop(name, None)
+
+    def test_el_primer_paso_carga_las_variables_sin_mostrarlas(self):
+        out = self.ok("siguiente", "--carpeta", "inv")
+        lines = out.splitlines()
+        first = next(i for i, line in enumerate(lines) if line.strip().startswith("1. "))
+        self.assertIn("1. Terminal (sin chat) · carga en esta terminal PERF_USUARIO, PERF_CLAVE", lines[first])
+        command = lines[first + 1].strip()
+        self.assertTrue(command.startswith("cd "), command)
+        self.assertIn("printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO", command)
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", command)
+        self.assertEqual(command.count("cd "), 1)
+        self.assertIn("no queda en el historial ni en ningún archivo", lines[first + 2])
+        self.assertIn("2. Terminal (sin chat) · una corrida de prueba", out)
+        # sin serial en el plan: la primera captura dice cómo ver los dispositivos
+        self.assertIn("con más de un dispositivo conectado, mira cuál es con `cd ", out)
+        self.assertIn("adb devices -l` y agrega --serial <serial> al comando", out)
+        # el comando que carga una clave se puede correr: lee de la entrada, exporta y no imprime el valor
+        part = command[command.index("printf 'PERF_CLAVE"):]
+        done = subprocess.run(["bash", "-c", part + " && printf '[%s]' \"$PERF_CLAVE\""], input="secreto\n",
+                              capture_output=True, text=True)
+        self.assertEqual(done.stdout, "PERF_CLAVE: \n[secreto]")  # pregunta, exporta y no repite lo escrito
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertNotIn("secreto", state)
+        self.assertIn("Cárgalas en la terminal donde mides", state)  # también en "Cómo se recorre"
+
+    def test_si_ya_estan_cargadas_lo_dice_en_una_linea(self):
+        self.env.update({"PERF_USUARIO": "ana", "PERF_CLAVE": "no-se-imprime"})
+        out = self.ok("siguiente", "--carpeta", "inv")
+        self.assertIn("Antes de medir:", out)
+        self.assertIn("PERF_USUARIO, PERF_CLAVE ya están cargadas en esta terminal: mide en esta misma", out)
+        self.assertNotIn("no-se-imprime", out)
+        self.assertNotIn("ana", out.replace("analiza", ""))
+        self.assertNotIn("read -r", out.split("Cómo se recorre")[0] if "Cómo se recorre" in out else out)
+
+    def test_sin_captura_en_los_pasos_no_pide_nada(self):
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
+        write(self.folder / "diagnostico.md", "x")
+        out = self.ok("siguiente", "--carpeta", "inv")
+        self.assertNotIn("carga en esta terminal", out)
+        self.assertNotIn("Antes de medir", out)
+
+
+class SetupCostTest(PerfBase):
+    """U1: la sesión 0 (del proyecto) y una sesión 1 que arma a mano un flujo de arranque también salen en la lista de
+    costos sin anotar, con su comando listo."""
+
+    AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- setup listo\n\n<!-- hb-performance:estado -->\n"
+              "Estado del setup · prueba de humo: pasó el 2026-11-01\n<!-- /hb-performance:estado -->\n")
+
+    def setUp(self):
+        super().setUp()
+        from helpers import init_repo
+        init_repo(self.dir)  # la raíz del proyecto (y de su AGENTS.md) es la del repo
+        self.folder = self.dir / "reports" / "perf" / "lista" / "2026-11-10"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_COST % "")
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}}))
+
+    def labels(self):
+        return [label for label, _, _ in perf.done_sessions(self.folder, self.plan)]
+
+    def test_la_sesion_0_sale_hasta_que_una_investigacion_la_anota(self):
+        self.assertEqual(self.labels(), ["1 · ficha"])  # sin el bloque del setup en AGENTS.md no se sabe
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.assertEqual(self.labels(), ["0 · setup", "1 · ficha"])
+        out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn('consumo --carpeta reports/perf/lista/2026-11-10 --sesion "0 · setup" --modelo "Sonnet 5.5" '
+                      '--esfuerzo medio --costo "<costo>"', out)
+        # otra investigación del proyecto ya la anotó: no se pide dos veces
+        other = self.dir / "reports" / "perf" / "otra" / "2026-11-01"
+        write(other / "estado.md", STATE_COST % "" + "| 0 · setup | Sonnet 5.5 | 1.40 USD | 42 |\n")
+        self.assertEqual(self.labels(), ["1 · ficha"])
+
+    def test_un_arranque_armado_a_mano_cuenta_la_sesion_1_y_la_receta_no(self):
+        self.plan["flujos"] = {"arranque-frio": {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        self.assertEqual(self.labels(), ["1 · ficha"])  # sin la marca de la receta: lo armó una sesión 1
+        self.plan["receta"] = "arranque-frio"
+        self.assertEqual(self.labels(), [])
+        self.plan.pop("receta")
+        write(self.folder / "estado.md", (STATE_COST % "").replace("## Consumo", "| Síntoma | exploratoria (receta de "
+                                                                                "arranque en frío) |\n\n## Consumo"))
+        self.assertEqual(self.labels(), [])  # una receta de antes, que no guardaba la marca en el plan
+
+
+class QuotedPathsTest(PerfBase):
+    """U3: los comandos que imprime perf.py ponen entre comillas la raíz del proyecto y las rutas con espacios."""
+
+    def test_siguiente_con_espacios_en_la_raiz(self):
+        root = self.dir / "mi proyecto"
+        folder = root / "reports" / "perf" / "lista"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "instalar": "./gradlew installProfiling",
+                "flujos": {"lista": {"recorrido": "true"}}, "mejoras": [
+                    {"id": "M1", "titulo": "Una", "estado": "aplicada", "metrica": "lista_ms"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE_COST % "")
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
+        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "siguiente", "--carpeta", "reports/perf/lista"],
+                              cwd=str(root), env=self.env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        commands = [line.strip() for line in done.stdout.splitlines() if line.strip().startswith("cd ")]
+        self.assertTrue(commands)
+        quoted = "cd %s && " % shlex_quote(str(root.resolve()))
+        self.assertIn("'", quoted)
+        self.assertTrue(all(command.startswith(quoted) for command in commands), commands)
+        install = next(command for command in commands if "installProfiling" in command)
+        # el comando se puede correr tal cual: el cd entra a la carpeta con espacios
+        probe = install.split(" && ", 1)[0] + " && pwd"
+        self.assertEqual(subprocess.run(["bash", "-c", probe], capture_output=True, text=True).stdout.strip(),
+                         str(root.resolve()))
+        self.assertEqual(perf.q("/a b/c"), "'/a b/c'")
+        self.assertEqual(perf.q("reports/perf/x"), "reports/perf/x")
+        self.assertEqual(perf.q_repo("<repo de app>"), "<repo de app>")
+
+
+class CodeChangesTest(PerfBase):
+    """G5: `decidir --aplicada --archivos` guarda el diff de la mejora y el reporte final dev muestra, por mejora, el
+    código antes y después, por qué y qué mejoró; el de gerencia no lleva código."""
+
+    def setUp(self):
+        super().setUp()
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "class Lista {\n    fun cargar() {\n        pedir()\n        pedir()\n    }\n}\n")
+        write(self.dir / "app" / "Otro.kt", "class Otro\n")
+        commit_all(self.dir)
+        self.folder = self.dir / "reports" / "perf" / "lista"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                     "mejoras": [{"id": "M1", "hallazgo": "H1", "titulo": "Pedir la lista una sola vez", "metrica": "lista_ms",
+                                  "estado": "aprobada"},
+                                 {"id": "M2", "hallazgo": "H1", "titulo": "Otra", "metrica": "lista_ms", "estado": "aprobada"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
+              + rows("despues", "lista", "lista_ms", [1100] * 5))
+        # la mejora: una línea menos en un archivo y un archivo nuevo; Otro.kt cambia pero no es de la mejora
+        write(self.dir / "app" / "Lista.kt", "class Lista {\n    fun cargar() {\n        pedir()\n    }\n}\n")
+        write(self.dir / "app" / "ListaTest.kt", "class ListaTest\n")
+        write(self.dir / "app" / "Otro.kt", "class Otro // temporal\n")
+
+    def test_decidir_guarda_el_diff_sin_tocar_el_indice(self):
+        status = subprocess.run(["git", "status", "--short"], cwd=str(self.dir), capture_output=True, text=True).stdout
+        out = self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1", "--archivos",
+                      "app/Lista.kt,app/ListaTest.kt")
+        self.assertIn("✔ Diff de M1 guardado: ", out)
+        self.assertIn("(2 archivos, +1 −1 líneas)", out)
+        diff = (self.folder / "cambios" / "M1.diff").read_text(encoding="utf-8")
+        self.assertIn("-        pedir()", diff)
+        self.assertIn("+class ListaTest", diff)
+        self.assertNotIn("Otro", diff)  # solo los archivos de la mejora
+        self.assertEqual(subprocess.run(["git", "status", "--short"], cwd=str(self.dir), capture_output=True,
+                                        text=True).stdout, status)  # ni el índice ni el árbol cambian
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        entry = plan["mejoras"][0]["cambios"][0]
+        self.assertEqual((entry["diff"], entry["repo"], entry["archivos"]),
+                         ("cambios/M1.diff", ".", ["app/Lista.kt", "app/ListaTest.kt"]))
+        # sin --archivos lo dice; --archivos con dos mejoras no se acepta
+        out = self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M2")
+        self.assertIn("M2 quedó aplicada sin diff guardado", out)
+        result = self.perf("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1,M2", "--archivos", "app/Lista.kt")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("una sola mejora", result.stderr)
+        result = self.perf("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1", "--archivos", "app/NoExiste.kt")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no existe ni está en git", result.stderr)
+
+    def test_el_reporte_dev_muestra_antes_y_despues_y_el_de_gerencia_no(self):
+        self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1", "--archivos", "app/Lista.kt")
+        self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M2")
+        self.ok("reporte", "--carpeta", "reports/perf/lista", "--html")
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("_Reporte final · interno: contiene código · ", md)
+        section = md[md.index("## Cambios de código (interno: contiene código)"):]
+        self.assertIn("### M1 · Pedir la lista una sola vez", section)
+        self.assertIn("- **Por qué:** H1: La lista tarda; Pide los clientes dos veces. Evidencia: `lista_ms` 1800 ms", section)
+        self.assertIn("- **Qué mejoró:** `lista_ms` pasó de 1.8 s a 1.1 s (−39 %): Mejora clara · funcionó", section)
+        self.assertIn("- **Archivos:** `app/Lista.kt` · +0 −1 líneas · diff completo: `cambios/M1.diff`", section)
+        self.assertIn("```diff\n# app/Lista.kt\n@@", section)
+        self.assertIn("-        pedir()", section)
+        self.assertIn("### M2 · Otra", section)
+        self.assertIn("- **Código:** sin diff guardado", section)
+        page = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
+        self.assertIn('<pre class="diff">', page)
+        self.assertIn('<span class="del">-        pedir()</span>', page)
+        for name in ("reporte-final-gerencia.md", "reporte-final-gerencia.html"):
+            text = (self.folder / name).read_text(encoding="utf-8")
+            self.assertNotIn("pedir()", text)
+            self.assertNotIn("Cambios de código", text)
+            self.assertNotIn("interno: contiene código", text)
+
+    def test_un_diff_largo_se_recorta_y_una_investigacion_vieja_dice_sin_diff(self):
+        text = "diff --git a/x b/x\nindex 1..2\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n" + "".join("+l%d\n" % i for i in range(100))
+        excerpt, skipped = perf.diff_excerpt(text, limit=10)
+        self.assertEqual(excerpt.splitlines()[:2], ["# x", "@@ -1 +1 @@"])
+        self.assertEqual(len(excerpt.splitlines()), 10)
+        self.assertEqual(skipped, 92)
+        old = dict(self.plan["mejoras"][0], estado="aplicada")
+        md = perf.changes_md(self.folder, {"mejoras": [old]}, [], "")
+        self.assertIn("sin diff guardado", md)
+        self.assertEqual(perf.changes_md(self.folder, {"mejoras": []}, [], ""), "")
+
+
+class TimelineAndInternalTest(PerfBase):
+    """G4 y G5 tras la revisión: la línea de tiempo dibuja cada llamada y las marcas de pantalla de la corrida mediana;
+    con código en el reporte dev, `siguiente` lo da como interno; repetir `decidir --aplicada --archivos` en el mismo
+    repo no duplica el diff."""
+
+    def test_cada_llamada_y_las_marcas_de_pantalla(self):
+        sections = [("seccion", 1000 * MS, 0, 0, "NAV Lista"), ("seccion", 1050 * MS, 200 * MS, 0, "HTTP GET api/v1/a"),
+                    ("seccion", 1300 * MS, 100 * MS, 0, "HTTP GET api/v1/a"), ("seccion", 1500 * MS, 0, 0, "MARK lista"),
+                    ("seccion", 1600 * MS, 0, 0, "MARK lista")]
+        line = perf.run_timeline(sections, 1000 * MS)
+        self.assertEqual(line["llamadas"], [["GET api/v1/a", 50.0, 250.0], ["GET api/v1/a", 300.0, 400.0]])
+        self.assertEqual(line["marcas"], [["NAV Lista", 0.0], ["MARK lista", 500.0]])  # la primera vez de cada una
+        folder = self.dir / "inv"
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "ventana_ms", [900, 1000, 1100])
+              + service_rows("antes", "GET api/v1/a", 2, [150] * 3))
+        (folder / "antes").mkdir()  # la carpeta de la fase, donde capturar deja las trazas
+        for run in (1, 2, 3):
+            perf.save_timeline(folder / "antes", "lista", run, line)
+        plan = {"paquete": PKG, "flujos": {"lista": {"recorrido": "true"}}}
+        html = perf.timeline_chart(perf.read_rows(folder / "metricas.csv"), plan, "antes", folder)
+        self.assertIn("Corrida 2 (la de duración mediana): cada barra es una llamada", html)
+        self.assertEqual(html.count('class="bar-after"'), 2)  # una barra por llamada
+        self.assertIn("ir a Lista", html)
+        self.assertIn("1 llamada empieza cuando ya terminaron todas las anteriores", html)
+        self.assertIsNone(perf.load_timeline(folder, "antes", "lista", 9))
+
+    def test_el_reporte_con_codigo_es_interno_y_el_diff_no_se_duplica(self):
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "a\n")
+        commit_all(self.dir)
+        write(self.dir / "app" / "Lista.kt", "b\n")
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "Una", "metrica": "lista_ms", "estado": "aprobada"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
+              + rows("despues", "lista", "lista_ms", [1100] * 5))
+        self.ok("decidir", "--carpeta", "inv", "--aplicada", "M1", "--archivos", "app/Lista.kt")
+        self.ok("decidir", "--carpeta", "inv", "--aplicada", "M1", "--archivos", "app/Lista.kt")
+        saved = json.loads((folder / "plan.json").read_text(encoding="utf-8"))["mejoras"][0]["cambios"]
+        self.assertEqual([entry["diff"] for entry in saved], ["cambios/M1.diff"])
+        self.assertEqual(sorted(path.name for path in (folder / "cambios").iterdir()), ["M1.diff"])
+        result = self.perf("decidir", "--carpeta", "inv", "--aplicada", "M1", "--repo", ".")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--repo va con --archivos", result.stderr)
+        out = self.ok("reporte", "--carpeta", "inv", "--html")
+        self.assertIn("reporte final técnico (interno: contiene código; fuera del equipo, comparte el de gerencia)", out)
+
+
+class TimelineCaptureTest(DeviceBase):
+    """capturar deja la línea de tiempo de cada corrida válida junto a su traza (no en metricas.csv)."""
+
+    def test_cada_corrida_deja_su_linea_de_tiempo(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        data = perf.load_timeline(self.plan.parent, "antes", "home", 1)
+        self.assertIsNotNone(data)
+        self.assertTrue(data["llamadas"])  # GOOD trae secciones HTTP
+        self.assertTrue(all(len(call) == 3 for call in data["llamadas"]))
+        self.assertNotIn("linea", (self.plan.parent / "metricas.csv").read_text(encoding="utf-8"))

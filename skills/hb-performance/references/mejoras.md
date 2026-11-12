@@ -34,8 +34,8 @@ En `estado.md` y `plan.json`:
 - **Mejoras aplicadas:** archivos, el test que la fija, **los comandos del DoD que corriste y el resultado de cada uno** (por ejemplo `:lista:testDebugUnitTest`: 212 tests, 0 fallos; `:app:assembleProfiling`: ok) y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`).
 - **Pendientes** actualizados.
 - **`instalar` en `plan.json`:** si falta, agrégalo con el comando que compila e instala el build de profiling (el de `AGENTS.md`, por ejemplo `./gradlew :app:installProfiling`), para que la medición después no dependa de recordarlo. Si el plan tiene `serial`, `siguiente` le antepone `ANDROID_SERIAL=<serial>` solo.
-- **Al final**, marca la mejora aplicada; el comando imprime el siguiente paso (la siguiente mejora aprobada en un chat nuevo, o instalar y medir después) y lo deja en `estado.md`:
+- **Al final**, marca la mejora aplicada **con los archivos que cambió** (solo los de la mejora y su test: ni los cambios temporales ni los de otra mejora). `perf.py` guarda su diff contra el último commit en `<carpeta>/cambios/<id>.diff` (también los archivos nuevos, sin tocar el índice) y el reporte final dev lo muestra en "Cambios de código": antes y después, por qué y qué mejoró. Si cambió archivos de otro repo (un módulo incluido desde otra carpeta), repite el comando con `--repo <ruta-del-otro-repo>` y sus archivos. El comando imprime el siguiente paso (la siguiente mejora aprobada en un chat nuevo, o instalar y medir después) y lo deja en `estado.md`:
   ```bash
-  cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --aplicada <id>
+  cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --aplicada <id> --archivos <ruta/Archivo.kt>,<ruta/ArchivoTest.kt>
   ```
   Pégalos tal cual; antes, en tu resumen final, nombra los comandos del DoD que corriste y su resultado (y cuál no corriste, si hubo alguno), y si hubo migración de datos, dilo en una línea. Detente, sin pedir el costo ni que vuelva a este chat.
