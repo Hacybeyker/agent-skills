@@ -220,7 +220,7 @@ Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después in
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py nuevo --paquete <applicationId> --serial <serial> --carpeta <evidencias>/<alcance>/<AAAA-MM-DD> --flujo <nombre> --alcance "<alcance>" --instalar "<comando que instala el build de profiling>"
 ```
 
-Crea la carpeta (por defecto en `reports/perf/`, o la de `AGENTS.md`), la agrega a `.git/info/exclude` si git no la ignora (local: el repo no cambia; no toques `.gitignore`) y deja las plantillas. Complétalas:
+Crea la carpeta (sin `--carpeta`, `<carpeta de investigaciones>/<flujo>/<fecha>`: la de la sección de rendimiento de `AGENTS.md` o, sin ella, `reports/perf/`), la agrega a `.git/info/exclude` si git no la ignora (local: el repo no cambia; no toques `.gitignore`) y deja las plantillas. Complétalas:
 
 | Campo | Qué es |
 | --- | --- |
@@ -256,6 +256,8 @@ Las marcas se buscan entre las secciones propias (`HTTP`, `QUEUE`, `CONN`, `TTFB
 **Recorrido por comando:** si el flujo se puede reproducir con adb (`input tap`, `input keyevent`, `am start` con un deep link), es mejor que el manual: 10 corridas sin costo humano y siempre iguales.
 
 **El recorrido va en un archivo.** `nuevo` deja `<carpeta>/recorrido.sh` con el esqueleto: escribe ahí los toques del tramo medido, **con un comentario por paso** que diga qué elemento toca y qué debe abrirse, y apunta el plan a él: `"recorrido": "bash <carpeta>/recorrido.sh"` (un comando en línea se sigue aceptando, pero una línea de coordenadas dentro de un JSON no se puede leer ni revisar). Lo mismo con `preparar`: `<carpeta>/preparar.sh` o `<carpeta>/preparar.yaml`. `perf.py` escribe en "Cómo se recorre" de `estado.md` el `preparar` y el `recorrido` de cada flujo y el comando para verlos correr a mano, sin medir: dáselo al usuario antes de aprobar, para que vea en el dispositivo lo que se va a medir. La carpeta de la investigación está fuera de git y se borra al limpiar: si el recorrido o el flow se van a reutilizar (otra investigación, otra persona), díselo al usuario para que los archive fuera de `reports/`.
+
+**`etiquetas` (opcional):** el reporte para gerencia no nombra métricas, las dice en palabras. Las de la skill ya tienen su rótulo; para una métrica propia del flujo, dáselo en el plan: `"etiquetas": {"lista_ms": "Tiempo en mostrar la lista de clientes"}`. Sin él, sale el nombre de la métrica en palabras ("Tiempo de "lista"").
 
 ## 6. Corrida de prueba
 

@@ -185,6 +185,8 @@ En Android 11 o superior, `capturar` toma una foto de las salidas del proceso qu
 - `<métrica> hasta_ultima_red_ms`: para una métrica de usuario que termina en una llamada, cuánto hay desde su inicio hasta el fin de la última llamada de red. `comparar` avisa si se separan: la marca de fin dejó de ser la última llamada y la métrica cambió de definición.
 - El presupuesto de frame sale de `hz` (del plan o de la traza): 16,7 ms a 60 Hz, 11,1 ms a 90 Hz, 8,3 ms a 120 Hz.
 
+**Por servicio.** Cada servicio (método y plantilla de la ruta) que el flujo llama deja en cada corrida `red <servicio> llamadas`, `ms`, `ttfb_ms`, `cola_ms` y `cliente_ms`, y además `red <servicio> repetidas_2s`, `red <servicio> solapadas` (`app`) y `red <servicio> conexion_ms` (`e2e`: la conexión nueva de sus llamadas, 0 en las que reutilizaron una; la fila solo sale en las corridas que abrieron alguna conexión, así que su mediana entre corridas es la de esas corridas). Estas tres últimas van al final de las métricas de la corrida: las que ya existían no cambian de nombre, de valor ni de orden. Con ellas el reporte arma "Servicios del flujo": los 5 servicios que más tiempo suman, con sus llamadas por corrida, su duración (mediana y P90 entre corridas), el servidor frente a la app, el tramo donde se llaman y las repetidas y solapadas; en el final, antes contra después (ordenados por lo que más suman en cualquiera de las dos fases). El de gerencia lo resume en una línea: de lo que dura el recorrido (su ventana, el arranque completo o la primera métrica principal en tiempo), cuánto suman los servicios y cuál es el más lento. Es **orientativa**: los tiempos del servidor dependen del backend y de la red del momento. Una investigación medida con una versión anterior no trae las filas nuevas: esas columnas salen `sin dato`, no en cero.
+
 ## Métricas por tramo (`segmentos`)
 
 Las métricas de frames y del hilo principal cubren la ventana entera del flujo. Si el plan declara `segmentos` ([ficha.md](ficha.md)), cada corrida agrega, por tramo:
@@ -198,6 +200,7 @@ Las métricas de frames y del hilo principal cubren la ventana entera del flujo.
 | `<tramo> red_llamadas` | Cuántas llamadas `HTTP` empiezan dentro del tramo | `app` |
 | `<tramo> red_ms`, `<tramo> red_ttfb_ms` | Mediana de la duración y del TTFB de esas llamadas (no salen si el tramo no tuvo ninguna) | `e2e` |
 | `<tramo> red_repetidas_2s`, `<tramo> red_solapadas` | Cuántas de esas llamadas son repetidas o solapadas, con el mismo criterio que `red_repetidas_2s` y `red_solapadas` | `app` |
+| `<tramo> red <servicio> llamadas` | Cuántas llamadas de ese servicio empiezan dentro del tramo: dice en qué tramo se llama cada uno | `info` |
 
 - El tramo va de la marca `desde` a la marca `hasta` (más `margen_ms`, si lo tiene) y cuenta los slices y los frames que **se solapan** con él: el frame o el slice que ya estaba en curso cuando sale la marca de inicio también entra. Se calcula sobre toda la traza, así que un tramo puede quedar fuera de la ventana.
 - Las métricas de la ventana (`hilo_max_ms`, `frame_p90_ms`, `jank_app_pct`) no cambian por declarar tramos.

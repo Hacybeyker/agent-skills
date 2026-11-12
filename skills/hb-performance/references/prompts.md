@@ -6,7 +6,7 @@ Para el usuario, no para el agente. Cada caso trae dónde va (un chat nuevo, con
 - **El mismo texto sirve para empezar la primera vez y las siguientes.** La skill elige la sesión según el estado del proyecto: sin setup hace el setup (sesión 0); con el setup listo, la ficha y el plan (sesión 1); con un `estado.md`, la que diga su "Siguiente paso". No hace falta decirle cuál: el agente lo dice en su primera línea, con el motivo (`Sesión 1 · ficha (setup listo en AGENTS.md)`).
 - **Lo que sigue a cada sesión no hace falta pedirlo:** cada comando de `perf.py` y cada sesión terminan imprimiendo el paso siguiente, listo para copiar, y lo dejan en "Siguiente paso" de `estado.md`.
 - **Cada texto de chat termina con "No hagas commit ni push."** La skill ya dice que el agente solo propone el commit; la línea explícita evita que una herramienta o un modelo lo haga igual. `perf.py` la agrega sola en los textos que imprime (`siguiente`, `humo`, `decidir`, `reporte`).
-- **El costo de un chat** es lo que muestre tu herramienta al cerrarlo (`/cost` en Claude Code, los créditos del chat en Copilot).
+- **El costo de un chat** es lo que muestre tu herramienta al cerrarlo (`/cost` en Claude Code; `/usage` en GitHub Copilot CLI, que informa AI Credits y tokens). Anotarlo es opcional.
 
 ## Empezar
 
@@ -147,8 +147,10 @@ Sigue hb-performance con <ruta>/estado.md: cierra la investigación sin fase des
 **Dónde:** terminal, sin chat
 
 ```bash
-cd <raíz> && python3 -I <skill>/scripts/perf.py consumo --carpeta <carpeta> --sesion "<2 · diagnóstico>" --costo "<lo que muestre tu herramienta: 0.80 USD, 12 créditos>" --modelo "<modelo del chat>" --pasos <21>
+cd <raíz> && python3 -I <skill>/scripts/perf.py consumo --carpeta <carpeta> --sesion "<2 · diagnóstico>" --modelo "<modelo del chat>" --esfuerzo <alto> --costo "<0.80 USD>"
 ```
+
+Es opcional. `perf.py siguiente` imprime este comando ya completo por cada sesión hecha sin anotar: solo cambia `<costo>`. Con GitHub Copilot CLI, `/usage` informa AI Credits y tokens: usa `--creditos <n>` y `--tokens-entrada <n> --tokens-cache <n> --tokens-salida <n>` en vez de `--costo`. El total de la investigación queda debajo de la tabla "Consumo" de `estado.md` y en los reportes.
 
 ## Pedidos puntuales
 
@@ -175,7 +177,7 @@ Con hb-performance, lee <ruta>/comparacion.md y <ruta>/estado.md y explícame po
 **Dónde:** chat nuevo · Económico · bajo
 
 ```text
-Con hb-performance, mejora el resumen ejecutivo y la lectura de la comparación en <ruta>/estado.md (<qué falta o qué sobra>) y vuelve a generar el reporte con perf.py reporte --carpeta <carpeta> --html. No hagas commit ni push.
+Con hb-performance, mejora el resumen ejecutivo, el resumen para gerencia y la lectura de la comparación en <ruta>/estado.md (<qué falta o qué sobra>) y vuelve a generar el reporte con perf.py reporte --carpeta <carpeta> --html. No hagas commit ni push.
 ```
 
 ### Regenerar el reporte sin tocar el texto
@@ -185,6 +187,8 @@ Con hb-performance, mejora el resumen ejecutivo y la lectura de la comparación 
 ```bash
 cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
+
+Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (una página en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial.
 
 ### Agregar una métrica, un tramo o una marca
 
@@ -245,6 +249,7 @@ Usa hb-performance: nueva investigación sobre <pendiente, con el H# del estado.
 - **Un chat por sesión.** Si el agente dice que terminó, abre otro: seguir en el mismo cuesta varias veces más por paso.
 - **Si el paso siguiente es un comando, no abras un chat**: un chat que solo lee `estado.md` para decírtelo cuesta unos 0,2 USD.
 - Las mediciones y la decisión van en tu terminal: cero tokens.
+- Si una corrida se va a otra pantalla, no esperes a que termine: `x` + Enter en la terminal de la captura la corta y sigue con la siguiente.
 - Si el agente te pide el costo o que vuelvas a su chat, no hace falta: `perf.py consumo` lo anota desde la terminal, con lo que muestre tu herramienta.
 
 ## Permisos recomendados para auto mode

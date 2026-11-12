@@ -48,11 +48,11 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 | 0 · Setup, una vez por proyecto | Agente | [setup.md](references/setup.md) | Variante de profiling (la que el proyecto ya tenga, o `profiling`), `perf.py instrumentar` (genera también el cableado), los fragmentos que imprime (el de red, aplicado en cada `OkHttpClient.Builder`), DoD en un comando y `perf.py humo` | Aprobación del diff y el comando de humo | 40 |
 | 1 · Ficha y plan | Agente; con receta, `perf.py nuevo` sin chat | [ficha.md](references/ficha.md) | Preguntas fijas, `plan.json` (marcas, ventana, métricas), `estado.md` y corrida de prueba | Aprobación de ficha y plan | 15 (25 en flujos largos) |
 | Medición antes y control | Usuario, sin chat | [medicion.md](references/medicion.md) | `perf.py capturar` y `perf.py diagnostico` | — | — |
-| 2 · Diagnóstico | Agente | [diagnostico.md](references/diagnostico.md) | Lee primero "Advertencias para el diagnóstico" de `estado.md` (la escribe `perf.py`), después `diagnostico.md` y el código; hallazgos, plan de mejoras y reporte inicial | El comando de la decisión | 25 |
+| 2 · Diagnóstico | Agente | [diagnostico.md](references/diagnostico.md) | Lee primero "Advertencias para el diagnóstico" de `estado.md` (la escribe `perf.py`), después `diagnostico.md` y el código; hallazgos, plan de mejoras, los dos resúmenes y reporte inicial (dev y gerencia) | El comando de la decisión | 25 |
 | Decisión | Usuario, sin chat | — | `perf.py decidir`: aprueba, descarta o deja pendiente cada mejora | — | — |
-| 3 · Mejora | Agente, un chat por mejora | [mejoras.md](references/mejoras.md) | Una mejora, su test y el DoD | Commit propuesto y `perf.py decidir --aplicada` | 30 |
+| 3 · Mejora | Agente, un chat por mejora | [mejoras.md](references/mejoras.md) | Una mejora, su test y el DoD completo (los comandos de `## DoD`, no solo el test nuevo) | Commit propuesto y `perf.py decidir --aplicada` | 30 |
 | Medición después | Usuario, sin chat | [medicion.md](references/medicion.md) | `instalar` del plan y `perf.py capturar --fase despues` | — | — |
-| 4 · Cierre | Agente | [cierre.md](references/cierre.md) | `perf.py comparar`, lectura, resumen ejecutivo y reporte final | Entrega | 10 |
+| 4 · Cierre | Agente | [cierre.md](references/cierre.md) | `perf.py comparar`, lectura, los dos resúmenes y reporte final (dev y gerencia); los cambios temporales se quitan con su parche, nunca con `git checkout`, `restore`, `reset --hard` ni `clean` | Entrega | 10 |
 
 El costo de cada sesión lo anota el usuario desde la terminal con `perf.py consumo`, y es opcional: `siguiente` imprime un comando ya completo por cada sesión hecha sin anotar (solo falta el costo: `/cost` en Claude Code, `/usage` en GitHub Copilot CLI) y el total queda en `estado.md` y en los reportes. No se lo pidas en el chat.
 
@@ -65,8 +65,9 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 
 ## Herramientas
 
-- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `nodos`, `capturar`, `diagnostico`, `consulta`, `resumen` (escribe `resumen.md` y "Métricas" de `estado.md`; `--solo-imprimir` no escribe), `comparar`, `har`, `reporte`, `decidir`, `siguiente`, `consumo`, `pausa` y `salidas` (por qué se cerró la app, según el sistema; Android 11 o superior), cada uno con `--help`. Usa `adb` y `trace_processor`; para desofuscar, `retrace` y el `mapping.txt` de la variante medida, que busca y verifica solo ([setup.md](references/setup.md) · Atribución en Compose y con R8).
+- `python3 -I <carpeta-de-la-skill>/scripts/perf.py <comando>`: `instrumentar`, `humo`, `nuevo`, `nodos`, `capturar`, `diagnostico`, `consulta`, `resumen` (escribe `resumen.md` y "Métricas" de `estado.md`; `--solo-imprimir` no escribe), `comparar`, `har`, `reporte` (dos versiones de cada reporte: `-dev`, con "Servicios del flujo", y `-gerencia`, en palabras), `decidir`, `siguiente`, `consumo` (`--costo`, `--creditos`, `--tokens-…`), `pausa` y `salidas` (por qué se cerró la app, según el sistema; Android 11 o superior), cada uno con `--help`. Usa `adb` y `trace_processor`; para desofuscar, `retrace` y el `mapping.txt` de la variante medida, que busca y verifica solo ([setup.md](references/setup.md) · Atribución en Compose y con R8).
 - Permisos para auto mode de Claude Code (el clasificador puede denegar secuencias de `adb`; con otra herramienta, su equivalente): [prompts.md](references/prompts.md) · Permisos recomendados; los agrega el usuario, la skill no toca su configuración.
+- Durante una captura con recorrido automático, `x` + Enter en la terminal corta la corrida que se desvió; un build depurable en una fase medida detiene la captura antes de compilar ([medicion.md](references/medicion.md)). Las carpetas de investigaciones y de parches se pueden fijar en la sección de rendimiento de `AGENTS.md` ([setup.md](references/setup.md) · Cierre del setup).
 - Otras skills, por intención y sin depender de sus archivos: `android-profiler` (heap dumps y fugas), `jetpack-compose-performance`, `anr-audit-and-fix` y `r8-analyzer`.
 
 ## Checklist
@@ -79,7 +80,7 @@ El costo de cada sesión lo anota el usuario desde la terminal con `perf.py cons
 - [ ] Los nombres de métodos que se citan están desofuscados y con el mapping verificado; si la salida dice `Sin desofuscar` o trae varios candidatos, el hallazgo lo dice.
 - [ ] La sesión 2 leyó "Advertencias para el diagnóstico" y cada mejora que toca algo que una advertencia menciona lo dice.
 - [ ] Hallazgos con evidencia, también los descartados (de la traza, no de una configuración); mejoras en `plan.json` con su métrica y lo esperado (las que van a prueba, con su hipótesis); decisión del usuario registrada con `perf.py decidir`.
-- [ ] Una mejora por chat y por commit propuesto, con su test y el DoD en verde.
-- [ ] Veredictos de `perf.py`, lectura de la comparación escrita; e2e marcado como dependiente del backend.
+- [ ] Una mejora por chat y por commit propuesto, con su test y el DoD completo en verde; el resumen nombra los comandos del DoD que se corrieron y su resultado.
+- [ ] Veredictos de `perf.py`, lectura de la comparación escrita; e2e marcado como dependiente del backend. "Resumen ejecutivo" y "Resumen para gerencia" escritos (el segundo, sin términos técnicos) y las dos versiones del reporte generadas.
 - [ ] Ninguna marca cambia el comportamiento de la app; los cambios temporales que la alteran están anotados con las métricas que afectan.
-- [ ] Nada de evidencia cruda en commits, PRs ni en el reporte; ninguna clave escrita por el agente; `estado.md` sin texto de plantilla y los cambios temporales revertidos.
+- [ ] Nada de evidencia cruda en commits, PRs ni en el reporte; ninguna clave escrita por el agente; `estado.md` sin texto de plantilla y los cambios temporales revertidos con su parche guardado antes (nunca con un comando que descarta el archivo).

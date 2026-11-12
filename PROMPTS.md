@@ -82,6 +82,8 @@ Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin contr
 Sigue hb-performance con <ruta absoluta>/estado.md. No hagas commit ni push.
 ```
 
+El diagnóstico y el cierre dejan cada reporte en dos versiones: `-dev` (técnico) y `-gerencia` (una página en palabras, para un equipo no técnico). Anotar el costo es opcional: `perf.py siguiente` imprime el comando ya completo por cada sesión.
+
 ## hb-coach · aprender un tema
 
 | Caso | Prompt |

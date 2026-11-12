@@ -34,13 +34,15 @@ Escribe en `estado.md` ("Lectura de la comparación") una línea por cada métri
 
 De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las métricas principales, la causa en una frase y qué parte depende del backend. **Reemplaza el que dejó la sesión 2** para el reporte inicial: ya no es relleno de plantilla, así que nada avisa si se queda, y el reporte final publicaría el resumen del diagnóstico.
 
+**Y el "Resumen para gerencia"**, en su sección de `estado.md`, que también reemplaza al de la sesión 2: de 3 a 5 líneas para un lector no técnico, sin nombres de métricas, percentiles ni términos de la traza. Qué cambió para el usuario, en segundos o en lo que se percibe ("abrir la lista pasó de unos 2 s a 1 s", "deja de congelarse al escribir"), qué no cambió y qué queda pendiente. Es lo único que escribes para el reporte de gerencia; si la sección no existe (un `estado.md` de una versión anterior), agrégala antes de "Pendientes".
+
 ## 4. Reporte
 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
 
-Genera `reporte-final.md` y `reporte-final.html` (autocontenido, con gráficos antes y después, pensado para alguien que no siguió la investigación): resumen ejecutivo; de los hallazgos al resultado (cuántos hallazgos, cuántas mejoras, cuántas aplicadas y cuáles funcionaron ✔ o no ✖; en una mejora a prueba, si su hipótesis quedó confirmada ✔ o refutada ✖); métricas principales con qué significa cada veredicto; esperado contra logrado; hallazgos con su resultado; mejoras aplicadas; lectura de la comparación; comparación completa; las filas de la ficha que sirven al lector; los pendientes ("no son mejoras"); y un glosario ("Cómo leer este reporte"). Lleva solo métricas agregadas: se puede compartir. Lo que en `estado.md` siga con el texto de la plantilla no se publica: el comando avisa qué falta, omite esa sección o pone "sin completar" en la fila; complétalo y vuelve a generar. El reporte inicial (`reporte-inicial.*`, sesión 2) no se toca.
+Genera el reporte en **dos versiones**, con los mismos datos: `reporte-final-dev` (`.md` y `.html`: el técnico) y `reporte-final-gerencia` (una página corta en palabras: qué notaba el usuario, qué se encontró, qué se hizo, el resultado con el tiempo antes y después en segundos y su veredicto en palabras, cuánto del recorrido es espera de servicios, lo pendiente, los riesgos y el costo total; sin nombres de métricas ni percentiles). El de gerencia lo arma `perf.py`; tú solo escribiste su resumen. El técnico es autocontenido, con gráficos antes y después, pensado para alguien que no siguió la investigación: resumen ejecutivo; de los hallazgos al resultado (cuántos hallazgos, cuántas mejoras, cuántas aplicadas y cuáles funcionaron ✔ o no ✖; en una mejora a prueba, si su hipótesis quedó confirmada ✔ o refutada ✖); métricas principales con qué significa cada veredicto; "Servicios del flujo" (los 5 servicios que más tiempo suman, antes contra después; orientativa); esperado contra logrado; hallazgos con su resultado; mejoras aplicadas; lectura de la comparación; comparación completa; las filas de la ficha que sirven al lector; los pendientes ("no son mejoras"); y un glosario ("Cómo leer este reporte"). Lleva solo métricas agregadas: se puede compartir. Lo que en `estado.md` siga con el texto de la plantilla no se publica: el comando avisa qué falta, omite esa sección o pone "sin completar" en la fila; complétalo y vuelve a generar. El reporte inicial (`reporte-inicial-*`, sesión 2) no se toca. Una investigación anterior puede tener `reporte-inicial.*` o `reporte-final.*` con el nombre de antes: se siguen reconociendo, y no se actualizan ni se borran.
 
 ## 5. Guarda de regresión
 
@@ -48,7 +50,7 @@ Propón cómo proteger la mejora: el test de la sesión 3 y, si el flujo es crí
 
 ## Entrega
 
-- El resumen ejecutivo y la ruta de `reporte-final.html`.
+- El resumen ejecutivo y las rutas de `reporte-final-dev.html` y `reporte-final-gerencia.html`.
 - Los commits propuestos y el texto del PR, solo con métricas agregadas.
 - Pendientes y hallazgos fuera del alcance, para una próxima investigación.
 - Cómo validarlo en campo después del release (Android vitals: TTID y TTFD si la app llama a `reportFullyDrawn`).

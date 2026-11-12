@@ -98,6 +98,10 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 <3 a 5 líneas. Para el reporte inicial (sesión 2): qué se midió, qué se encontró y qué se propone, o por qué no hay mejoras. Para el final (sesión 4): estado inicial → estado final con las métricas principales, la causa en una frase y qué depende del backend>
 
+## Resumen para gerencia
+
+<3 a 5 líneas para un lector no técnico, sin nombres de métricas ni términos de la traza. Sesión 2: qué notaba el usuario, qué se encontró y qué se propone. Sesión 4: qué cambió para el usuario, en segundos o en lo que se percibe, y qué queda pendiente>
+
 ## Pendientes
 
 - <no son mejoras, sino lo que la investigación no pudo cerrar; uno por línea: H3 · síntoma y qué tan estable es (en cuántas corridas, con qué métrica) · qué falta para cerrarlo · cuánto cuesta (una corrida, una captura con muestreo, una sesión) · acción sugerida; si lo que falta es una captura que se puede correr ya, agrégala como Captura pendiente, con su comando entre acentos graves>
