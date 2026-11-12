@@ -7,7 +7,9 @@ import importlib.util
 import io
 import json
 import os
+import pty
 import re
+import select
 import shutil
 import signal
 import stat
@@ -49,7 +51,7 @@ MS = 1_000_000
 
 def without_new(record):
     """Un registro de fases.json sin los campos opcionales que agrega 0.9.0 (la versión de la skill y la configuración)."""
-    return {key: value for key, value in record.items() if key not in ("skill", "configs")}
+    return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable")}
 
 
 class PerfBase(unittest.TestCase):
@@ -419,8 +421,11 @@ elif cmd.startswith("dumpsys input_method"):
     print("  mShowRequested=true mShowExplicitlyRequested=false mShowForced=false mInputShown="
           + os.environ.get("FAKE_TECLADO", "false"))
 elif cmd.startswith("dumpsys package"):
-    print("    versionCode=7 minSdk=26 targetSdk=36\n    versionName=1.0\n    flags=[ HAS_CODE ALLOW_BACKUP ]\n"
+    print("    versionCode=7 minSdk=26 targetSdk=36\n    versionName=1.0\n    flags=[ "
+          + os.environ.get("FAKE_FLAGS", "HAS_CODE ALLOW_BACKUP") + " ]\n"
           "    lastUpdateTime=" + os.environ.get("FAKE_UPDATED", "2026-11-05 10:00:00"))
+elif cmd.startswith("dumpsys window"):
+    print("  mCurrentFocus=Window{{1 u0 %s}}" % os.environ.get("FAKE_FOCO", "com.ejemplo.app/com.ejemplo.app.MainActivity"))
 elif cmd.startswith("dumpsys thermalservice"):
     print("Thermal Status: " + os.environ.get("FAKE_THERMAL", "0"))
 elif cmd.startswith("dumpsys battery"):
@@ -541,7 +546,9 @@ class DeviceBase(PerfBase):
         self.env.update({"PATH": "%s%s%s" % (bin_dir, os.pathsep, os.environ.get("PATH", "")),
                          "FAKE_LOG": str(self.dir / "adb.log"), "FAKE_TP_OUT": str(self.dir / "tp.txt"),
                          "FAKE_TP_COUNTER": str(self.dir / "tp.count"), "FAKE_TP_SQL": str(self.dir / "tp.sql"),
-                         "HB_PERF_ESPERA": "0"})
+                         "HB_PERF_ESPERA": "0",
+                         # sin terminal interactiva, como en CI: quien corre los tests desde una terminal no la presta
+                         "HB_PERF_TTY": str(self.dir / "sin-terminal")})
         self.env.pop("TRACE_PROCESSOR", None)
         self.env.pop("ADB", None)
         self.env.pop("ANDROID_SERIAL", None)
@@ -7041,3 +7048,284 @@ class WarningShapesTest(PerfBase):
                                                           "invalidas": {"antes": {"home": {"m": 1}}}}))
         perf.forget_notes(self.dir, "antes", "home")  # --rehacer también olvida lo que el diagnóstico anotó de esas corridas
         self.assertEqual(perf.warnings_lines(self.dir, {"flujos": {"home": {}}}), [])
+
+
+class DebuggableBuildTest(DeviceBase):
+    """Un build depurable en una fase medida detiene la captura antes de compilar y da el comando para corregirlo."""
+
+    def capture(self, *extra):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", *extra)
+
+    def set_plan(self, **fields):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan.update(fields)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def phases(self):
+        return json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+
+    def compiled(self):
+        return "cmd package compile" in (self.dir / "adb.log").read_text(encoding="utf-8")
+
+    def test_se_detiene_antes_de_compilar_si_las_fases_medidas_usaron_un_build_no_depurable(self):
+        self.set_plan(instalar="./gradlew :app:installProfiling -Pperf", serial="emulator-5554")
+        self.tp_outputs(GOOD)
+        self.assertEqual(self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar").returncode, 0)
+        self.assertIs(self.phases()["antes"]["depurable"], False)
+        self.env.update({"FAKE_FLAGS": "DEBUGGABLE HAS_CODE", "FAKE_UPDATED": "2026-11-06 09:30:00"})
+        result = self.capture("--fase", "control", "--corridas", "2")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("✖ el build instalado es depurable (1.0 (7), instalado 2026-11-06 09:30:00)", result.stderr)
+        self.assertIn("la fase antes de este flujo se midió con un build no depurable (1.0 (7), instalado 2026-11-05 "
+                      "10:00:00)", result.stderr)
+        self.assertIn("el botón de ejecutar del IDE instala la variante de depuración", result.stderr)
+        self.assertIn("Qué quedó guardado: ninguna corrida de esta tanda (0 de 2 válidas de control)", result.stderr)
+        steps = [line.strip() for line in result.stderr.split("  Cómo seguir:")[1].splitlines() if line.startswith("     ")]
+        self.assertEqual(len(steps), 2, steps)
+        self.assertTrue(steps[0].startswith("cd ") and steps[0].endswith(
+            "ANDROID_SERIAL=emulator-5554 ./gradlew :app:installProfiling -Pperf"), steps[0])
+        self.assertTrue(steps[1].startswith("cd ") and "--fase control --corridas 2" in steps[1], steps[1])
+        self.assertFalse(self.compiled())  # se detuvo antes de compilar
+        self.assertNotIn("control", self.phases())
+        result = self.capture("--fase", "control", "--corridas", "1", "--sin-compilar", "--forzar")  # a propósito
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+        self.assertIs(self.phases()["control"]["depurable"], True)
+
+    def test_sin_fases_medidas_decide_el_instalar_del_plan(self):
+        self.env["FAKE_FLAGS"] = "DEBUGGABLE HAS_CODE"
+        self.tp_outputs(GOOD)
+        self.set_plan(instalar="./gradlew :app:installDemoProfiling")
+        result = self.capture("--fase", "antes", "--corridas", "1")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el plan mide la variante 'demoProfiling' (su comando 'instalar')", result.stderr)
+        self.assertIn("./gradlew :app:installDemoProfiling", result.stderr.split("  Cómo seguir:")[1])
+        self.assertFalse(self.compiled())
+        self.set_plan(instalar="./gradlew :app:installDebug")  # el plan mide la variante de depuración: solo avisa
+        result = self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+
+    def test_sin_dato_de_antes_ni_instalar_solo_avisa_como_siempre(self):
+        self.env["FAKE_FLAGS"] = "DEBUGGABLE HAS_CODE"
+        self.tp_outputs(GOOD)
+        # un registro de una versión anterior no dice si el build era depurable: no cuenta como "no depurable"
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {
+            "fecha": "2026-11-05T10:00:00", "corridas": 5, "version": "1.0 (7)", "instalada": "2026-11-05 10:00:00"}}))
+        result = self.capture("--fase", "control", "--corridas", "1", "--sin-compilar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+
+    def test_la_corrida_de_prueba_y_rehacer_la_misma_fase_no_se_detienen(self):
+        self.tp_outputs(GOOD)
+        self.assertEqual(self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar").returncode, 0)
+        self.env["FAKE_FLAGS"] = "DEBUGGABLE HAS_CODE"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+        # la única fase medida es la que se rehace: sus corridas se descartan, no hay con qué comparar
+        result = self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar", "--rehacer")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(perf.debuggable_stop(self.plan.parent, "antes", "home", {"depurable": False}, {}), None)
+        stop = perf.debuggable_stop(self.plan.parent, "despues", "otro", {"depurable": True, "version": "1.0 (7)"}, {})
+        self.assertIsNone(stop)  # la fase medida es de otro flujo (el registro lleva los flujos que midió)
+        # con varios flujos, vale el build de cada flujo y no el de la última tanda de la fase
+        folder = self.dir / "varios"
+        folder.mkdir()
+        base = {"fecha": "2026-11-09T10:00:00", "corridas": 5, "version": "1.0 (7)", "instalada": "2026-11-05 10:00:00"}
+        perf.write_phase(folder, "antes", dict(base, depurable=False), "a")
+        perf.write_phase(folder, "antes", dict(base, depurable=True), "b")
+        build = {"depurable": True, "version": "1.0 (7)", "instalada": "2026-11-06 09:00:00"}
+        self.assertIn("la fase antes de este flujo se midió con un build no depurable",
+                      perf.debuggable_stop(folder, "control", "a", build, {}))
+        self.assertIsNone(perf.debuggable_stop(folder, "control", "b", build, {}))
+
+
+class CutRunTest(DeviceBase):
+    """x + Enter corta la corrida en curso; una corrida inválida dice hasta dónde llegó; puntos de control del recorrido."""
+
+    def set_route(self, command):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["recorrido"] = command
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def in_terminal(self, args, react, timeout=90):
+        """Corre perf.py con una terminal de verdad (un pty) como su terminal de control. `react(salida, escribir)` se
+        llama con toda la salida acumulada cada vez que pasa un rato; `escribir` teclea en la terminal. Devuelve (código
+        de salida, salida)."""
+        env = dict(self.env)
+        env.pop("HB_PERF_TTY", None)  # /dev/tty: la terminal de control, como la de quien corre una captura
+        pid, master = pty.fork()
+        if pid == 0:  # el proceso hijo: su terminal de control es el pty
+            try:
+                os.chdir(str(self.dir))
+                os.execve(sys.executable, [sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], env)
+            finally:
+                os._exit(127)
+        output, deadline, alive = b"", time.time() + timeout, True
+        try:
+            while alive and time.time() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:  # en Linux, leer el pty de un proceso que terminó da EIO
+                        chunk = b""
+                    alive = bool(chunk)
+                    output += chunk
+                react(output.decode("utf-8", "replace"), lambda text: os.write(master, text.encode("utf-8")))
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+        finally:
+            _, status = os.waitpid(pid, 0)
+            os.close(master)
+        self.assertFalse(alive, "perf.py no terminó a tiempo:\n" + output.decode("utf-8", "replace"))
+        return os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1, output.decode("utf-8", "replace")
+
+    def test_x_enter_corta_la_corrida_descarta_su_traza_y_sigue_con_la_siguiente(self):
+        counter, child = self.dir / "vueltas.txt", self.dir / "espera.pid"
+        # la primera corrida se queda esperando (se desvió); las siguientes terminan enseguida
+        self.set_route('n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; if [ "$n" -eq 0 ]; then sleep 60 & '
+                       'echo $! > %s; wait $!; fi' % (counter, counter, child))
+        self.tp_outputs(GOOD)
+        sent = []
+
+        def react(output, write_keys):
+            if not sent and child.is_file() and child.read_text().strip():
+                sent.append(True)
+                write_keys("x\n")
+
+        started = time.time()
+        code, out = self.in_terminal(["capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas",
+                                      "2", "--calentamiento", "0", "--sin-compilar"], react)
+        self.assertEqual(code, 0, out)
+        self.assertLess(time.time() - started, 45)  # no esperó los 60 s del recorrido desviado
+        self.assertEqual(out.count("x + Enter la corta"), 1)  # lo dice una vez, al empezar
+        self.assertIn("✖ corrida 1 inválida: cortada a mano (x + Enter): su traza se descartó sin procesarla; se repite", out)
+        self.assertIn("corrida 2/2", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["corridas"], 2)
+        self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"], {"cortada a mano": 1})
+        log = [json.loads(line) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(sum(1 for call in log if "pull" in call), 2)  # la cortada no se bajó
+        self.assertTrue(any(" ".join(call).endswith("rm -f /data/misc/perfetto-traces/hbperf-%s.perfetto-trace" % pid)
+                            for call in log for pid in [call[-1].rsplit("hbperf-", 1)[-1].split(".")[0]]
+                            if "rm -f" in call[-1]))  # ni quedó en el dispositivo
+        self.assertEqual([f.name for f in (self.plan.parent / "antes").glob("*invalida*")], [])
+        waiting = int(child.read_text().strip())
+        for _ in range(50):  # lo que el recorrido tenía en curso también terminó
+            try:
+                os.kill(waiting, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(waiting, signal.SIGKILL)
+            self.fail("el proceso del recorrido cortado siguió corriendo")
+
+    def test_durante_una_pausa_la_tecla_la_atiende_la_pausa_y_no_el_corte(self):
+        script = self.plan.parent / "recorrido.sh"
+        write(script, "#!/usr/bin/env bash\nset -euo pipefail\n"
+                      "pausa() { %s -I \"%s\" pausa \"$1\" || exit $?; }\npausa \"Autoriza la operación\"\n"
+              % (sys.executable, SCRIPT))
+        self.set_route("bash %s" % script)
+        self.tp_outputs(GOOD)
+        answered, flags_before = [], set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*"))
+
+        def react(output, write_keys):
+            shown = output.count("▶ PAUSA")
+            if shown > len(answered):  # la primera pausa se responde con x; la segunda, con Enter
+                answered.append("x\n" if not answered else "\n")
+                write_keys(answered[-1])
+
+        code, out = self.in_terminal(["capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas",
+                                      "1", "--calentamiento", "0", "--sin-compilar"], react)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(answered, ["x\n", "\n"])
+        self.assertIn("✖ corrida 1 inválida: el recorrido terminó con código 1", out)  # la descartó la pausa
+        self.assertNotIn("cortada a mano", out)
+        self.assertIn("corrida 1/1", out)
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*")), flags_before)  # sin bandera vieja
+
+    def test_sin_terminal_interactiva_no_hay_corte_ni_aviso(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertNotIn("x + Enter la corta", out)
+        tty = self.dir / "terminal.txt"  # un archivo no es una terminal interactiva: tampoco
+        write(tty, "x\n")
+        self.env["HB_PERF_TTY"] = str(tty)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertNotIn("x + Enter la corta", out)
+        self.assertNotIn("cortada a mano", out)
+        self.assertIsNone(perf.drive("true", "corrida"))
+        self.assertEqual(perf.drive("exit 4", "corrida"), "el recorrido terminó con código 4")
+
+    def test_el_corte_solo_se_pide_con_x_y_respeta_la_bandera_de_la_pausa(self):
+        master, slave = pty.openpty()
+        try:
+            cutter = perf.RunCutter(os.open(os.ttyname(slave), os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK))
+            cutter.foreground = lambda: True  # esta terminal no es la de control del proceso de los tests
+
+            def typed(text):
+                os.write(master, text.encode("utf-8"))
+                time.sleep(0.2)
+                return cutter.pedido()
+
+            self.assertFalse(cutter.pedido())  # nada tecleado
+            self.assertFalse(typed("\n"))
+            self.assertFalse(typed("xx\n"))
+            self.assertTrue(typed(" X \n"))
+            write(Path(cutter.flag), "1")  # una pausa del recorrido está esperando su respuesta
+            self.assertFalse(typed("x\n"))
+            self.assertEqual(os.read(slave, 16).strip(), b"x")  # la línea sigue ahí para la pausa
+            cutter.empezar()  # la bandera vieja se quita al empezar el recorrido siguiente
+            self.assertFalse(os.path.exists(cutter.flag))
+            self.assertIn(perf.PAUSE_FLAG_ENV, cutter.entorno())
+            holder = cutter.folder
+            cutter.cerrar()
+            self.assertFalse(cutter.pedido())
+            self.assertFalse(os.path.exists(holder))  # la carpeta de la bandera no queda en el directorio temporal
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_una_corrida_invalida_dice_hasta_donde_llego(self):
+        self.tp_outputs(LOGIN, GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✖ corrida 1 inválida: apareció 'SCREEN LoginActivity onCreate' (traza guardada para auditoría)\n"
+                      "  Hasta dónde llegó: última marca vista: SCREEN LoginActivity onCreate a los 0 s", result.stdout)
+        self.assertEqual(perf.reach_text({}), "no se pudo leer la traza para saberlo")
+        self.assertEqual(perf.reach_text({"ultima_marca": None, "marcas_plan": [("MARK lista", ["ventana.hasta"], False)]}),
+                         "ninguna marca propia (SCREEN, NAV, MARK) en la traza · marcas del plan que no salieron: MARK lista")
+
+    def test_un_punto_de_control_corta_el_recorrido_y_la_corrida_dice_donde_quedo(self):
+        folder = self.dir / "reports" / "perf" / "lista"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "lista", "--serial", "emulator-5554")
+        script = folder / "recorrido.sh"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("# en_pantalla() {", text)
+        self.assertIn("no uses uiautomator aquí", text)
+        self.assertNotIn("uiautomator dump", text)
+        self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+        enabled = text.replace("# en_pantalla() {", "en_pantalla() {").replace('#   foco="$(', '  foco="$(') \
+            .replace('#   case "$foco"', '  case "$foco"').replace("# }\n# en_pantalla", "}\n# en_pantalla") \
+            .replace('# en_pantalla "<parte del nombre de la actividad>"', 'en_pantalla "ListaActivity"')
+        script.write_text(enabled, encoding="utf-8")
+        self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["flujos"]["lista"] = {"recorrido": "bash %s" % script, "preparar": "true"}
+        (folder / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        self.env["FAKE_FOCO"] = "com.ejemplo.app/com.ejemplo.app.ListaActivity"  # la pantalla esperada: sigue
+        capture = ("capturar", "--plan", folder / "plan.json", "--fase", "antes", "--calentamiento", "0", "--sin-compilar")
+        self.assertIn("corrida 1/1", self.ok(*capture, "--corridas", "1"))
+        self.env["FAKE_FOCO"] = "com.ejemplo.otra/com.ejemplo.otra.AvisoActivity"  # se fue a otra pantalla
+        result = self.perf(*capture, "--corridas", "2")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("punto de control: 'ListaActivity' no está al frente", result.stderr)
+        self.assertEqual(result.stdout.count("inválida: el recorrido terminó con código 1"), 3)
+        self.assertEqual(result.stdout.count("  Hasta dónde llegó: última marca vista: SCREEN MainActivity onResume"), 3)
+        self.assertIn("3 corridas inválidas seguidas (última: el recorrido terminó con código 1)", result.stderr)

@@ -18,7 +18,7 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py capt
 
 Qué hace, en orden:
 
-1. **Controles previos:** un solo dispositivo (o `--serial`), Android 10 o superior, app instalada, aviso si el build es `debuggable`, temperatura (se detiene si está caliente), batería, espacio libre y `trace_processor`. En `despues`, se detiene si el build instalado es el mismo que midió `antes`, y avisa si la línea base es vieja o de otro commit.
+1. **Controles previos:** un solo dispositivo (o `--serial`), Android 10 o superior, app instalada, build `debuggable` (avisa; en una fase medida **se detiene** si las fases ya medidas de ese flujo usaron un build no depurable o si el `instalar` del plan instala otra variante: abajo, "Build depurable en una fase medida"), temperatura (se detiene si está caliente), batería, espacio libre y `trace_processor`. En `despues`, se detiene si el build instalado es el mismo que midió `antes`, y avisa si la línea base es vieja o de otro commit.
 2. **Compilación de ART igual en todas las fases** (`compilacion` del plan o `--compilacion`):
    - `completa` (por defecto): todo compilado antes de correr, como `CompilationMode.Full` de Macrobenchmark. No depende de perfiles ni de librerías: es la que sirve para comparar un cambio de código.
    - `perfil`: borra los perfiles, instala el Baseline Profile del APK con `profileinstaller` y compila con `speed-profile` (`CompilationMode.Partial`). Más parecida a una instalación de Play; para medir un Baseline Profile. Si el perfil no se instala, se detiene.
@@ -63,11 +63,23 @@ Todo comando de `perf.py` que falla, se detiene o se corta con Ctrl+C termina co
 | `preparar` falla | El comando de `preparar` para correrlo a mano, con los valores de `requiere_env` enmascarados, y después el mismo `capturar` |
 | Dispositivo desconectado, sin autorizar o que deja de responder | Qué revisar (cable, diálogo de depuración USB, `adb devices`) y el mismo comando |
 | Build repetido en `despues` | El `instalar` del plan y el mismo comando |
+| Build depurable en una fase medida | El `instalar` del plan y el mismo comando (`--forzar` mide igual) |
 | Plan inválido, traza que no se procesa, un error que `perf.py` no esperaba | El mismo comando, para repetirlo cuando esté corregido |
 
 Si una tanda se corta con corridas válidas, `fases.json` guarda cuántas faltan y `siguiente` ofrece completar esa fase antes de seguir: no la da por medida a medias.
 
 Hay una espera corta después de fijar la compilación de ART (que deja la app detenida) y después del calentamiento, antes del `preparar` que sigue, igual que la hay entre dos corridas mientras se cierra y se procesa la traza. Es una precaución para un `preparar` que arranca con la app todavía asentándose; va fuera de toda traza y no cambia lo que se mide.
+
+## Build depurable en una fase medida
+
+Con un build depurable los tiempos y los frames no valen, y no se comparan con los de un build de medición. `capturar --fase …` lo comprueba **antes de compilar**: si el build instalado es depurable y las fases que ese flujo ya tiene medidas usaron uno no depurable (queda en `fases.json`, con la versión y la fecha de instalación), o si el `instalar` del plan instala una variante que no es la de depuración, se detiene, muestra el build instalado frente al de antes y entrega el `instalar` del plan y el mismo comando. La causa típica es el botón de ejecutar del IDE, que instala la variante de depuración sin la propiedad de medición. `--forzar` mide igual (sirven los conteos de red y las fugas). La corrida de prueba y un plan sin `instalar` ni fases medidas solo avisan, como antes. Un registro de una versión anterior no trae el dato: no cuenta como "no depurable".
+
+## Cortar una corrida desviada
+
+- **`x` + Enter en la terminal de la captura corta la corrida en curso** (con un recorrido que es un comando): detiene el recorrido, descarta esa traza sin bajarla ni procesarla, cuenta la corrida como inválida con el motivo "cortada a mano" y sigue con la siguiente, con los mismos topes (tres inválidas seguidas, la reserva de intentos). `capturar` lo dice una vez al empezar. Sin una terminal interactiva (un agente, CI) no hace nada.
+- **No choca con `perf.py pausa`:** mientras una pausa del recorrido espera su respuesta, la tecla la atiende la pausa (`x` + Enter descarta la corrida por ese camino); el resto del tiempo la atiende la captura.
+- **Cada corrida inválida dice hasta dónde llegó:** la última marca vista y su momento, y las marcas del plan que no salieron, igual que la corrida de prueba. Así se ve en qué paso se desvió sin abrir la traza. La cortada a mano y la que falla en `preparar` no lo dicen: no tienen una traza que procesar.
+- **Puntos de control en `recorrido.sh`** (opcionales): cortan solos una corrida que salió de la pantalla esperada ([ficha.md](ficha.md) · Puntos de control).
 
 ## Los avisos de la corrida de prueba frenan la medición
 

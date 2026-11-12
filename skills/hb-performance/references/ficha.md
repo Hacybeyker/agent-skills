@@ -65,6 +65,22 @@ Vuelca la pantalla (`uiautomator dump`), busca el nodo por `--texto`, por `--id`
 
 **`preparar` es obligatorio con recorrido automático en un flujo que no es el arranque:** un comando que deja la app en el punto de partida antes de **cada** corrida (y después de fijar la compilación de ART, que puede cerrar la app). Corre **antes de que arranque la traza**, así que lo que haga no entra en las métricas. En una app de una sola actividad, `inicio` no distingue pantallas: sin `preparar`, la segunda corrida tocaría sobre la pantalla donde terminó la primera. Opciones: `adb -s <serial> shell input keyevent KEYCODE_BACK && sleep 1` si el flujo es ida y vuelta; `adb -s <serial> shell am force-stop <paquete> && adb -s <serial> shell am start -n <paquete>/<actividad> && sleep <s>` para arrancar siempre igual; o un flow de Maestro (abajo) cuando hay que atravesar varias pantallas. Si `preparar` falla (código distinto de 0), esa corrida se descarta y se repite; tres fallos seguidos detienen la captura con el motivo. Sin `preparar`, el script avisa y, si la app no está al frente, la relanza.
 
+**Puntos de control (opcionales) en `recorrido.sh`.** Un recorrido que se va a otra pantalla sigue dando sus toques y sus esperas hasta el final, y recién al procesar la traza sale inválido. Un punto de control lo corta antes: comprueba qué ventana está al frente y, si no es la esperada, termina con código 1 (la corrida se descarta y se repite). `nuevo` deja la función comentada en `recorrido.sh`:
+
+```bash
+en_pantalla() {
+  foco="$(adb -s "$SERIAL" shell dumpsys window | grep mCurrentFocus || true)"
+  case "$foco" in *"$1"*) ;; *) echo "punto de control: '$1' no está al frente ($foco)" >&2; exit 1 ;; esac
+}
+adb -s "$SERIAL" shell input tap <x> <y> && sleep 3   # abre el detalle
+en_pantalla "DetalleActivity"
+```
+
+- **Solo con un comando barato** (`dumpsys window`), **nunca `uiautomator`**: un volcado tarda segundos y despierta al sistema de accesibilidad.
+- **Corren dentro de la traza**, así que tienen un costo: una llamada a `adb` y el trabajo de `dumpsys` en el dispositivo mientras se mide. Ponlos después de una espera, no entre el toque y el contenido que se mide, y **déjalos igual en todas las fases**: agregar o quitar uno entre antes y después cambia lo que se compara.
+- **Miran la actividad, no la pantalla:** en una app de una sola actividad solo detectan que el recorrido salió de la app (otra app, el launcher, un diálogo del sistema). Para distinguir pantallas dentro de una actividad sirven las marcas y `invalidar_si`, que no cuestan nada dentro de la traza.
+- Son de quien arma el recorrido: `perf.py` no agrega ninguno. Para cortar a mano una corrida que ves desviarse, `x` + Enter en la terminal de la captura ([medicion.md](medicion.md) · Cortar una corrida desviada).
+
 ### Flujos largos: login y varias pantallas antes de lo que se mide
 
 El caso típico: login, pantallas de primera vez y varias pantallas más antes del tramo que importa (elegir un ítem de una lista, abrir su detalle, abrir una pantalla secundaria), con un backend que a veces falla. Se divide en dos partes y cada una usa la herramienta que le corresponde:

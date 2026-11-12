@@ -36,8 +36,10 @@ import math
 import os
 import pathlib
 import re
+import select
 import shlex
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -1573,7 +1575,10 @@ def preflight(adb, package, force):
         raise Precondicion("la app %s no está instalada en el dispositivo" % package)
     dump = adb.shell("dumpsys package %s" % package).stdout
     flags = re.search(r"flags=\[([^\]]*)\]", dump)
-    if flags and "DEBUGGABLE" in flags.group(1):
+    build = package_build(dump)
+    if flags:  # sin la línea de flags no se sabe: el dato no se guarda (ausente no es "no depurable")
+        build["depurable"] = "DEBUGGABLE" in flags.group(1)
+    if build.get("depurable"):
         warnings.append("el build instalado es debuggable: valen los conteos de red y las fugas, no los tiempos ni los frames")
     thermal = re.search(r"Thermal Status:\s*(\d+)", adb.shell("dumpsys thermalservice").stdout)
     if thermal and int(thermal.group(1)) > 0:
@@ -1586,7 +1591,41 @@ def preflight(adb, package, force):
         warnings.append("batería al %s %%: cárgala sobre 50 %%" % battery.group(1))
     if sdk < 31:
         warnings.append("Android %s no tiene FrameTimeline: los frames salen de gfxinfo (gfx_*)" % sdk)
-    return sdk, warnings, package_build(dump)
+    return sdk, warnings, build
+
+
+def debuggable_stop(folder, phase, flow, build, plan, redo=False):
+    """El motivo para no medir una fase con un build depurable, o None. Detiene si las fases que ese flujo ya tiene
+    medidas usaron un build no depurable, o si el plan instala otra variante (`instalar` con una tarea install<Variante>
+    que no es la de depuración): mezclar los dos builds da tiempos que no se comparan. Un registro sin el dato (de una
+    versión anterior) no cuenta como "no depurable"."""
+    if not build.get("depurable"):
+        return None
+    earlier = None
+    for name, record in read_phases(folder).items():
+        if name not in FASES or not isinstance(record, dict) or (name == phase and redo):
+            continue
+        tracked = record.get("flujos")
+        if flow and tracked and flow not in tracked:
+            continue
+        # El build de ese flujo si el registro lo guarda por flujo; si no, el de la fase.
+        own = (tracked or {}).get(flow) if isinstance(tracked, dict) else None
+        source = own if isinstance(own, dict) and "depurable" in own else record
+        if source.get("depurable") is False:
+            earlier = (name, record)
+            break
+    variant = install_variant((plan or {}).get("instalar"))[1]
+    declared = bool(variant) and "debug" not in variant.lower()
+    if not earlier and not declared:
+        return None
+    installed = "%s, instalado %s" % (build.get("version") or "?", build.get("instalada") or "sin fecha")
+    against = ("la fase %s de este flujo se midió con un build no depurable (%s, instalado %s)"
+               % (earlier[0], earlier[1].get("version") or "?", earlier[1].get("instalada") or "sin fecha")) if earlier \
+        else "el plan mide la variante '%s' (su comando 'instalar')" % variant
+    return ("el build instalado es depurable (%s) y %s: con un build depurable los tiempos y los frames no valen ni se "
+            "comparan con los de otra fase. Causa típica: el botón de ejecutar del IDE instala la variante de depuración, "
+            "sin la propiedad de medición que lleva el comando 'instalar' del plan. Instala de nuevo el build de medición; "
+            "con --forzar se mide igual (solo valen los conteos de red y las fugas)" % (installed, against))
 
 
 def classify_environment(text):
@@ -1948,12 +1987,132 @@ def cmd_pausa(args):
     tty = open_tty()
     if tty is None:
         raise Precondicion("pausa: " + NO_TTY)
+    # Mientras dura la pausa, la terminal es suya: la captura que la llamó deja de leerla (RunCutter) hasta que termina.
+    flag = os.environ.get(PAUSE_FLAG_ENV)
     try:
+        if flag:
+            try:
+                pathlib.Path(flag).write_text(str(os.getpid()), encoding="utf-8")
+            except OSError:
+                pass
         if not human_pause(" ".join(args.mensaje) or "haz el paso que te toca en el dispositivo", tty):
             raise CorridaDescartada("pausa: corrida descartada por la persona")
     finally:
+        if flag:
+            try:
+                os.unlink(flag)
+            except OSError:
+                pass
         for stream in tty:
             stream.close()
+
+
+# ── Cortar una corrida desviada ──────────────────────────────────────────────
+CUT_REASON = "cortada a mano"
+CUT_POLL_S = 0.2
+PAUSE_FLAG_ENV = "HB_PERF_PAUSA_ACTIVA"
+CUT_HINT = ("· Si una corrida se desvía (otra pantalla, un toque que no entró), x + Enter la corta: se descarta sin "
+            "procesar su traza y se repite. Durante una pausa del recorrido, la tecla la atiende la pausa.")
+
+
+class RunCutter:
+    """`x` + Enter en la terminal corta la corrida en curso. Lee la terminal de quien corre la captura sin bloquear y
+    solo mientras ninguna pausa del recorrido (`perf.py pausa`) la está usando: la pausa deja una bandera (un archivo,
+    en PAUSE_FLAG_ENV) mientras espera su respuesta, y con la bandera puesta aquí no se lee nada. Sin una terminal
+    interactiva (un agente, CI, la salida redirigida a un archivo que no es una terminal) no existe: `abrir` da None."""
+
+    def __init__(self, fd):
+        self.fd = fd
+        # La bandera vive en una carpeta propia y privada (no en un nombre predecible del directorio temporal).
+        self.folder = tempfile.mkdtemp(prefix="hbperf-pausa-")
+        self.flag = os.path.join(self.folder, "activa")
+
+    @classmethod
+    def abrir(cls):
+        try:
+            fd = os.open(os.environ.get("HB_PERF_TTY") or "/dev/tty", os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        except (OSError, AttributeError):  # sin terminal, o una plataforma sin esas banderas
+            return None
+        cutter = cls(fd)
+        if not os.isatty(fd) or not cutter.foreground():
+            cutter.cerrar()
+            return None
+        return cutter
+
+    def foreground(self):
+        """True si este proceso está en primer plano en esa terminal: uno en segundo plano que la lee queda detenido."""
+        try:
+            return os.tcgetpgrp(self.fd) == os.getpgrp()
+        except OSError:
+            return False
+
+    def entorno(self):
+        return dict(os.environ, **{PAUSE_FLAG_ENV: self.flag})
+
+    def empezar(self):
+        """Antes de cada recorrido: sin bandera vieja (una pausa que se cortó) y sin lo que se tecleó antes de empezar."""
+        try:
+            os.unlink(self.flag)
+        except OSError:
+            pass
+        try:
+            import termios
+            termios.tcflush(self.fd, termios.TCIFLUSH)
+        except Exception:  # sin termios, o una terminal que no lo admite: solo se pierde el vaciado
+            pass
+
+    def pedido(self):
+        """True si la persona escribió x + Enter desde la última vez que se miró."""
+        if self.fd is None or os.path.exists(self.flag) or not self.foreground():
+            return False
+        try:
+            if not select.select([self.fd], [], [], 0)[0]:
+                return False
+            data = os.read(self.fd, 4096)
+        except (OSError, ValueError):
+            return False
+        return any(line.strip().lower() == "x" for line in data.decode("utf-8", "replace").splitlines())
+
+    def cerrar(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        if self.folder:
+            shutil.rmtree(self.folder, ignore_errors=True)
+            self.folder = None
+
+    def __del__(self):
+        self.cerrar()
+
+
+def kill_tree(pid):
+    """Termina un proceso y sus descendientes (el recorrido y lo que tenga en curso: una espera, un comando de adb),
+    del proceso hacia sus hijos para que no alcance a lanzar el paso siguiente. No cambia el grupo de procesos del
+    recorrido: así Ctrl+C le sigue llegando y `perf.py pausa` puede seguir leyendo la terminal."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        listing = ""
+    children = {}
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    order, queue = [], [pid]
+    while queue:
+        current = queue.pop(0)
+        if current in order:
+            continue
+        order.append(current)
+        queue += children.get(current, [])
+    for target in order:
+        try:
+            os.kill(target, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def uses_pause(command, folder):
@@ -1973,13 +2132,36 @@ def settle(seconds):
         time.sleep(seconds)
 
 
-def drive(recorrido, label):
-    """Recorre el flujo. Devuelve un motivo de invalidez o None."""
+def drive(recorrido, label, cutter=None):
+    """Recorre el flujo. Devuelve un motivo de invalidez o None. Con `cutter` (hay una terminal interactiva), x + Enter
+    corta el recorrido en el momento y el motivo es CUT_REASON."""
     if recorrido == "manual":
         answer = wait_enter("▶ %s: recorre el flujo y presiona Enter (x + Enter para descartarla) " % label)
         return "descartada por el usuario" if answer == "x" else None
-    result = subprocess.run(recorrido, shell=True)
-    return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
+    if cutter is None:
+        result = subprocess.run(recorrido, shell=True)
+        return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
+    cutter.empezar()
+    process = subprocess.Popen(recorrido, shell=True, env=cutter.entorno())
+    try:
+        while True:
+            try:
+                code = process.wait(timeout=CUT_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                if cutter.pedido():
+                    kill_tree(process.pid)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    return CUT_REASON
+    except BaseException:  # Ctrl+C o un fallo: el recorrido no queda corriendo, igual que con subprocess.run
+        process.kill()
+        process.wait()
+        raise
+    return None if code == 0 else "el recorrido terminó con código %d" % code
 
 
 def component_of(package, activity):
@@ -2027,8 +2209,17 @@ def trace_cap_s(config):
     return int(found.group(1)) / 1000 if found else None
 
 
-def record_run(adb, config, recorrido, label, local, startup=None, package=None):
-    """Graba una corrida. Devuelve (motivo de invalidez o None, métricas del recorrido)."""
+def wait_perfetto(adb, pid):
+    """Espera a que Perfetto cierre el archivo: hasta que su proceso ya no esté (30 s como mucho)."""
+    for _ in range(60):
+        if adb.shell("[ -d /proc/%s ]" % pid).returncode != 0:
+            break
+        time.sleep(0.5)
+
+
+def record_run(adb, config, recorrido, label, local, startup=None, package=None, cutter=None):
+    """Graba una corrida. Devuelve (motivo de invalidez o None, métricas del recorrido). Una corrida cortada a mano
+    (CUT_REASON) no baja su traza: se detiene Perfetto y se borra en el dispositivo."""
     if startup:
         adb.shell("am force-stop %s" % package)
         settle(1)
@@ -2042,13 +2233,18 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None)
         if startup:
             reason, extra = launch(adb, package, startup)
         else:
-            reason, extra = drive(recorrido, label), []
+            reason, extra = drive(recorrido, label, cutter), []
     except KeyboardInterrupt:  # Ctrl+C en medio de la corrida: Perfetto no queda grabando en el dispositivo
         try:
             adb.shell("kill -TERM %s; rm -f %s" % (pid, remote), timeout=20)
         except (PerfError, OSError, subprocess.SubprocessError):
             pass
         raise
+    if reason == CUT_REASON:  # la persona la cortó: la traza se descarta sin bajarla ni procesarla
+        adb.shell("kill -TERM %s" % pid, timeout=20)
+        wait_perfetto(adb, pid)  # la corrida siguiente no arranca con este Perfetto todavía cerrando
+        adb.shell("rm -f %s" % remote, timeout=20)
+        return reason, extra
     # Si Perfetto ya no corre, la traza llegó a su tope (duration_ms o el tamaño máximo) antes de que terminara el
     # recorrido: le falta el final. Solo cuenta una respuesta explícita: un adb que no contesta no invalida la corrida.
     # Se mira /proc/<pid>, como hace el script oficial de Perfetto para saber si su proceso sigue: no depende de que el
@@ -2060,15 +2256,34 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None)
                             "contempla las pausas humanas) y repite"
                             % ("%s s" % fmt(cap) if cap else "duration_ms de la configuración de Perfetto"))
     adb.shell("kill -TERM %s" % pid)
-    for _ in range(60):  # espera a que Perfetto cierre el archivo: hasta que su proceso ya no esté
-        if adb.shell("[ -d /proc/%s ]" % pid).returncode != 0:
-            break
-        time.sleep(0.5)
+    wait_perfetto(adb, pid)
     pulled = adb.run("pull", remote, str(local), timeout=600)
     adb.shell("rm -f %s" % remote)
     if pulled.returncode != 0 or not local.is_file() or local.stat().st_size < 1024:
         raise CapturaFallida("no se pudo descargar la traza: %s" % (pulled.stderr or pulled.stdout).strip()[-300:])
     return reason, extra
+
+
+def partial_info(tp, local, queries, hz, flow, known, sdk):
+    """Lo que la traza de una corrida que no valió dice igual (marcas del plan, última marca vista): el `info` de
+    trace_metrics, o {} si la traza no se puede procesar."""
+    try:
+        partial = run_tp_batch(tp, local, queries[:1])["metricas"]
+        return trace_metrics(trace_rows(*partial[-1]), hz, flow, known, sdk)[2] if partial else {}
+    except (PerfError, OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return {}  # una traza cortada puede no procesarse: la corrida se repite igual, sin ese dato
+
+
+def reach_text(info):
+    """Hasta dónde llegó una corrida inválida: la última marca propia que se vio y su momento, como en la corrida de
+    prueba. Sin `info`, lo dice: no saberlo no es lo mismo que no haber llegado a ninguna parte."""
+    if not info:
+        return "no se pudo leer la traza para saberlo"
+    last = info.get("ultima_marca")
+    unseen = [mark for mark, _, seen in info.get("marcas_plan") or [] if not seen]
+    text = "última marca vista: %s a los %s s" % (last[0], fmt(last[1])) if last else \
+        "ninguna marca propia (SCREEN, NAV, MARK) en la traza"
+    return text + (" · marcas del plan que no salieron: %s" % ", ".join(unseen) if unseen else "")
 
 
 def app_died(adb, package):
@@ -2191,6 +2406,8 @@ def write_phase(folder, phase, data, flow=None):
     if flow:
         before_flow = flows.get(flow) or {}
         flows[flow] = merge_run_data(before_flow, data)
+        if "depurable" in data:  # si el build con que se midió este flujo (su última tanda) era depurable
+            flows[flow]["depurable"] = data["depurable"]
         if "skill" in data:
             # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
             flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
@@ -3792,6 +4009,14 @@ def cmd_capturar(args, plan=None):
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
     sdk, warnings, build = preflight(adb, package, args.forzar)
+    if not args.prueba and not args.forzar:
+        # Antes de compilar y de tocar nada: medir una fase con un build depurable cuando lo demás se midió (o se va a
+        # medir) con el de medición hace perder la fase entera.
+        stop = debuggable_stop(folder, phase, flow_name, build, plan, args.rehacer)
+        if stop:
+            raise Precondicion(stop).con(
+                seguir=[("instala el build de medición", install_command(plan, project_root(folder).resolve())),
+                        ("y repite la medición", same_command())])
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
     commit, dirty = git_info()
@@ -3902,6 +4127,10 @@ def cmd_capturar(args, plan=None):
         progress["descartada"] = bool(had_runs)
         guide()
         known = known_metrics(csv_path, flow_name)
+    # x + Enter corta la corrida en curso: solo con un recorrido que es un comando y una terminal interactiva.
+    cutter = RunCutter.abrir() if not startup and recorrido != "manual" else None
+    if cutter is not None:
+        print(CUT_HINT)
     warmups = 0 if args.prueba else args.calentamiento
     for i in range(warmups):
         if recorrido != "manual":
@@ -3918,7 +4147,7 @@ def cmd_capturar(args, plan=None):
                     raise
                 print("⚠ calentamiento: %s" % getattr(error, "corto", error))
                 continue
-            reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups))
+            reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups), cutter)
             # Entre dos corridas pasan varios segundos (cerrar la traza, descargarla, procesarla) antes del 'preparar'
             # siguiente; después del calentamiento no pasaba ninguno, y el primer 'preparar' medido encontraba la app
             # todavía terminando el recorrido. Va fuera de toda traza: no cambia lo que se mide.
@@ -3996,7 +4225,16 @@ def cmd_capturar(args, plan=None):
         # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida nueva
         # del proceso medido dentro de la corrida la invalida.
         exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
-        reason, extra = record_run(adb, config, recorrido, label, local, startup, package)
+        reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter)
+        if reason == CUT_REASON:
+            if args.prueba:
+                raise CorridasInsuficientes("la corrida de prueba se cortó a mano (x + Enter): su traza se descartó sin "
+                                            "procesarla")
+            print("✖ corrida %d inválida: %s (x + Enter): su traza se descartó sin procesarla; se repite" % (n, CUT_REASON))
+            mark_invalid(CUT_REASON)
+            consecutive, last_invalid = consecutive + 1, CUT_REASON
+            n += 1
+            continue
         save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
         died = not invalid and app_died(adb, package)
@@ -4071,11 +4309,7 @@ def cmd_capturar(args, plan=None):
                 print("  " + mapping_hint())
         if invalid and args.prueba:
             if not info:  # el recorrido se cortó (o la app se cayó): la traza igual dice hasta dónde llegó
-                try:
-                    partial = run_tp_batch(tp, local, queries[:1])["metricas"]
-                    info = trace_metrics(trace_rows(*partial[-1]), hz, flow, known, sdk)[2] if partial else {}
-                except PerfError:
-                    info = {}
+                info = partial_info(tp, local, queries, hz, flow, known, sdk)
             print("Secciones propias: %s" % sections_summary(info.get("nombres", {})))
             if info:
                 print("\n".join(marks_report(info)))
@@ -4088,11 +4322,15 @@ def cmd_capturar(args, plan=None):
                     % invalid, [place for mark in unseen for place in find_mark_sources(project_root(folder).resolve(), mark)])])
             raise CorridasInsuficientes("la corrida de prueba fue inválida: %s (traza en %s)" % (invalid, local))
         if invalid:
+            if not info:  # el recorrido terminó mal (o la app se cayó): la traza igual dice hasta dónde llegó
+                info = partial_info(tp, local, queries, hz, flow, known, sdk)
+            reached = reach_text(info)
             target_name = local.with_name("%s_%d_invalida_%s.perfetto-trace" % (flow_name, n, slug(invalid)))
             local.rename(target_name)
             if not args.sin_comprimir:
                 compress(target_name)
             print("✖ corrida %d inválida: %s (traza guardada para auditoría)" % (n, invalid))
+            print("  Hasta dónde llegó: %s" % reached)
             mark_invalid(invalid)
             consecutive, last_invalid = consecutive + 1, invalid
             n += 1
@@ -6079,6 +6317,16 @@ SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
 # si ya estaba cerrado. ESC (keyevent 111) no cierra todos los teclados.
 # teclado="$(adb -s "$SERIAL" shell dumpsys input_method | grep -c 'mInputShown=true' || true)"
 # if [ "$teclado" != "0" ]; then adb -s "$SERIAL" shell input keyevent 4 && sleep 1; fi
+
+# Punto de control (opcional): comprueba qué ventana está al frente con un comando barato y, si no es la esperada,
+# termina con 1: la corrida se descarta y se repite sin esperar al final. Corre DENTRO de la traza: déjalo igual en
+# todas las fases y no uses uiautomator aquí (tarda segundos). Mira la actividad, no la pantalla: en una app de una
+# sola actividad solo detecta que saliste de la app (otra app, el launcher, un diálogo del sistema).
+# en_pantalla() {
+#   foco="$(adb -s "$SERIAL" shell dumpsys window | grep mCurrentFocus || true)"
+#   case "$foco" in *"$1"*) ;; *) echo "punto de control: '$1' no está al frente ($foco)" >&2; exit 1 ;; esac
+# }
+# en_pantalla "<parte del nombre de la actividad>"
 
 # Paso humano (autorizar en otra app, resolver un desafío, elegir con criterio): quita el # de la función y llámala
 # donde la persona tiene que actuar. Muestra el texto en tu terminal, con un pitido, y espera Enter; con x + Enter la
