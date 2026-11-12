@@ -3004,7 +3004,7 @@ class NoImprovementsTest(PerfBase):
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
         self.assertNotIn("sesión 2", out[out.index("Siguiente ·"):])
-        self.assertIn('--costo "<lo que muestre tu herramienta>"', out)
+        self.assertIn('--sesion "2 · diagnóstico" --modelo "Sonnet 5.5" --esfuerzo alto --costo "<costo>"', out)
         write(self.folder / "reporte-final.md", "x")
         self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "investigación cerrada")
 
@@ -7329,3 +7329,320 @@ class CutRunTest(DeviceBase):
         self.assertEqual(result.stdout.count("inválida: el recorrido terminó con código 1"), 3)
         self.assertEqual(result.stdout.count("  Hasta dónde llegó: última marca vista: SCREEN MainActivity onResume"), 3)
         self.assertIn("3 corridas inválidas seguidas (última: el recorrido terminó con código 1)", result.stderr)
+
+
+STATE_COST = ("# Rendimiento · Lista · 2026-11-09\n\n## Siguiente paso\n\n- x\n\n## Cambios temporales por revertir\n\n"
+              "| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n| --- | --- | --- | --- | --- |\n%s\n"
+              "## Hallazgos\n\n| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n\n"
+              "## Consumo\n\n| Sesión | Modelo | Costo o tokens | Pasos |\n| --- | --- | --- | --- |\n")
+
+
+class CostTest(PerfBase):
+    """El costo se anota con un comando ya completo por sesión, acepta AI Credits y tokens, y muestra el total."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                     "mejoras": [{"id": "M1", "titulo": "Una sola carga", "estado": "aplicada", "metrica": "lista_ms"},
+                                 {"id": "M2", "titulo": "Otra", "estado": "pendiente"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_COST % "")
+        write(self.folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in ("antes", "control", "despues")}))
+
+    def state(self):
+        return (self.folder / "estado.md").read_text(encoding="utf-8")
+
+    def test_siguiente_lista_las_sesiones_hechas_sin_fila_con_un_comando_completo_por_cada_una(self):
+        write(self.folder / "reporte-inicial.md", "x")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Costo (opcional): 3 sesiones hechas sin anotar. Un comando por cada una; solo falta el costo", out)
+        self.assertIn("/cost en Claude Code; /usage en GitHub Copilot CLI, que informa AI Credits y tokens", out)
+        commands = [line.strip() for line in out.splitlines() if " consumo --carpeta " in line]
+        self.assertEqual(len(commands), 3, out)
+        for command, rest in zip(commands, ('--sesion "1 · ficha" --modelo "Sonnet 5.5" --esfuerzo medio --costo "<costo>"',
+                                            '--sesion "2 · diagnóstico" --modelo "Sonnet 5.5" --esfuerzo alto --costo "<costo>"',
+                                            '--sesion "3 · M1" --modelo "Sonnet 5.5" --esfuerzo medio --costo "<costo>"')):
+            self.assertTrue(command.startswith("cd ") and command.endswith(rest), command)
+            self.assertEqual(command.count("<"), 1)  # solo queda el costo por llenar
+        state = self.state()
+        self.assertIn("- **Costo (opcional, terminal):** faltan anotar 1 · ficha, 2 · diagnóstico, 3 · M1.", state)
+        self.assertNotIn("<lo que muestre tu herramienta>", state)
+        self.assertIn("**Total de la investigación:** faltan anotar 3 sesiones hechas (1 · ficha, 2 · diagnóstico, 3 · M1): "
+                      "el total es parcial", state)
+        # el comando impreso, con el costo puesto, anota la fila y la sesión deja de listarse
+        ready = commands[1].split(" consumo ")[1].replace('"<costo>"', '"0.80 USD"')
+        self.ok("consumo", *__import__("shlex").split(ready))
+        self.assertIn("| 2 · diagnóstico | Sonnet 5.5 · alto | 0.80 USD | — |", self.state())
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("2 sesiones hechas sin anotar", out)
+        self.assertNotIn('--sesion "2 · diagnóstico"', out)
+
+    def test_nada_se_bloquea_si_no_se_anota_y_tambien_sale_con_la_investigacion_cerrada(self):
+        write(self.folder / "reporte-inicial.md", "x")
+        write(self.folder / "reporte-final-dev.html", "x")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Siguiente · investigación cerrada", out)
+        self.assertIn("4 sesiones hechas sin anotar", out)
+        self.assertIn('--sesion "4 · cierre" --modelo "Haiku 5.5" --esfuerzo bajo --costo "<costo>"', out)
+        for session in ("1 · ficha", "2 · diagnóstico", "3 · M1", "4 · cierre"):
+            self.ok("consumo", "--carpeta", self.folder, "--sesion", session, "--costo", "0.50 USD")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertNotIn("sin anotar", out)
+        self.assertNotIn(" consumo ", out)
+        self.assertIn("**Total de la investigación:** 2.00 USD en 4 sesiones anotadas", self.state())
+        self.assertNotIn("faltan anotar", self.state())
+
+    def test_los_modelos_del_comando_salen_del_plan_y_la_receta_de_arranque_no_tiene_sesion_1(self):
+        self.plan.update(modelos={"economico": "Modelo Chico", "intermedio": "Modelo Medio", "alto": "Modelo Grande"},
+                         flujos={"arranque-frio": {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}},
+                         mejoras=[])
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "reporte-inicial-dev.md", "x")
+        self.assertEqual(perf.missing_costs(self.folder, self.plan), [("2 · diagnóstico", "Modelo Medio", "alto")])
+        (self.folder / "reporte-inicial-dev.md").unlink()
+        self.assertEqual(perf.missing_costs(self.folder, self.plan), [])  # ninguna sesión de IA hecha todavía
+        self.assertEqual(perf.cost_lines(self.folder, self.plan), [])
+
+    def test_consumo_acepta_creditos_y_tokens_y_el_total_los_suma(self):
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "1 · ficha", "--modelo", "Sonnet 5.5", "--esfuerzo",
+                      "medio", "--creditos", "120", "--tokens-entrada", "45k", "--tokens-cache", "1.2M", "--tokens-salida",
+                      "9000", "--pasos", "14")
+        self.assertIn("✔ Consumo: | 1 · ficha | Sonnet 5.5 · medio | 120 AI Credits (1.20 USD) · tokens: 45000 entrada, "
+                      "1200000 caché, 9000 salida | 14 |", out)
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.80 USD")
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "3 · M1", "--costo", "38k tokens")
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "0 · setup", "--costo", "1,05 USD", "--creditos", "200")
+        self.assertIn("| 1,05 USD · 200 AI Credits |", out)  # con un monto en USD escrito, los créditos no se convierten
+        self.assertIn("Total de la investigación: 3.05 USD (3 de 4 sesiones anotadas traen un monto) · tokens: 45 k entrada, "
+                      "1,2 M caché, 9 k salida, 38 k sin desglose (solo 2 de 4 sesiones anotadas los traen)", out)
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "4 · cierre", "--creditos", "0.125")
+        self.assertIn("| 0.125 AI Credits (0.00 USD) |", out)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "4 · cierre", "--creditos", "1.200")
+        self.assertEqual(result.returncode, 2)  # ¿mil doscientos o uno coma dos? No se adivina
+        self.assertIn("puede leerse como miles o como decimales", result.stderr)  # un decimal de tres cifras no se lee como miles
+        tail = self.state()[self.state().index("## Consumo"):]
+        self.assertEqual(tail.count("**Total de la investigación:**"), 1)
+        self.assertLess(tail.index("| 0 · setup |"), tail.index("**Total de la investigación:**"))  # la tabla sigue junta
+        self.assertEqual(perf.AI_CREDIT_USD, 0.01)
+
+    def test_los_reportes_muestran_las_sesiones_anotadas_el_total_y_lo_que_falta(self):
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.80 USD", "--modelo",
+                "Sonnet 5.5")
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [100] * 5)
+              + rows("despues", "lista", "lista_ms", [60] * 5))
+        self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.ok("reporte", "--carpeta", self.folder)
+        for path in sorted(self.folder.glob("reporte-*.md")):
+            text = path.read_text(encoding="utf-8")
+            if "gerencia" in path.name:
+                continue
+            self.assertIn("## Costo de la investigación", text, path.name)
+            self.assertIn("| 2 · diagnóstico | Sonnet 5.5 | 0.80 USD | — |", text, path.name)
+            self.assertIn("**Total:** 0.80 USD en 1 sesión anotada · faltan anotar", text, path.name)
+            self.assertIn("el total es parcial", text, path.name)
+
+    def test_consumo_sin_costo_o_con_una_cantidad_que_no_es_un_numero_lo_dice(self):
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("falta el costo: usa --costo", result.stderr)
+        self.assertIn("Cómo seguir:", result.stderr)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2", "--creditos", "muchos")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'muchos' no es una cantidad", result.stderr)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2", "--costo", "<costo>")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("reemplaza los <...>", result.stderr)
+        self.assertNotIn("| 2", self.state()[self.state().index("## Consumo"):])
+
+    def test_lo_que_se_suma_de_cada_celda_y_lo_que_no(self):
+        self.assertEqual(perf.cost_of("1.05 USD")["usd"], 1.05)
+        self.assertEqual(perf.cost_of("$ 2,50")["usd"], 2.5)
+        self.assertEqual(perf.cost_of("$1.05, 30 pasos")["usd"], 1.05)  # la coma de la frase no es del número
+        self.assertEqual(perf.cost_of("120 AI Credits")["usd"], 1.2)
+        self.assertEqual(perf.cost_of("12.5 AI Credits")["usd"], 0.125)
+        self.assertIsNone(perf.cost_of("120 créditos")["usd"])  # créditos de otra herramienta: sin conversión documentada
+        self.assertIsNone(perf.cost_of("38k tokens")["usd"])  # sin monto: no cuenta como cero
+        self.assertEqual(perf.cost_of("38k tokens")["tokens"], {"sin desglose": 38000})
+        self.assertEqual(perf.cost_of("tokens: 12000 entrada, 300000 caché, 4000 salida")["tokens"],
+                         {"entrada": 12000, "caché": 300000, "salida": 4000})
+        self.assertEqual(perf.cost_of("—"), {"usd": None, "tokens": {}})
+        self.assertEqual(perf.amount("12.000", whole=True), 12000)
+        self.assertEqual(perf.amount("1.234,5"), 1234.5)
+        self.assertIsNone(perf.amount("x"))
+        self.assertEqual(perf.session_key("3 · M1", ["M1", "M10"]), ("3", "M1"))
+        self.assertEqual(perf.session_key("3 · M10", ["M1", "M10"]), ("3", "M10"))
+        self.assertEqual(perf.session_key("M1", ["M1"]), ("", "M1"))  # sin número de sesión no cuenta como la sesión 1
+        self.assertEqual(perf.session_key("2026-11-09", []), ("", ""))
+        self.assertEqual(perf.session_key("Sesión 4 · cierre", []), ("4", ""))
+
+    def test_un_estado_de_una_version_anterior_recibe_el_total_sin_perder_sus_filas(self):
+        old = STATE_COST % "" + "| 2 · diagnóstico | Sonnet 5 | 0.90 USD | 21 |\n"
+        write(self.folder / "estado.md", old)
+        self.ok("siguiente", "--carpeta", self.folder)
+        tail = self.state()[self.state().index("## Consumo"):]
+        self.assertIn("| 2 · diagnóstico | Sonnet 5 | 0.90 USD | 21 |\n\n**Total de la investigación:** 0.90 USD", tail)
+        self.assertIn("faltan anotar 2 sesiones hechas (1 · ficha, 3 · M1)", tail)
+
+
+class SafeRevertTest(PerfBase):
+    """El cierre quita los cambios temporales con un parche guardado antes, nunca con un comando que descarta el archivo."""
+
+    ROW = "| `%s` | app | marca temporal | — | %s |\n"
+
+    def setUp(self):
+        super().setUp()
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "class Lista\n")
+        write(self.dir / "app" / "Detalle.kt", "class Detalle\n")
+        commit_all(self.dir)
+        self.folder = self.dir / "reports" / "perf" / "lista" / "2026-11-09"
+        self.plan = {"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}}, "mejoras": []}
+        self.new_investigation(self.folder, self.ROW % ("app/Lista.kt:12", "no") + self.ROW % ("app/Nuevo.kt", "")
+                               + self.ROW % ("app/Detalle.kt", "sí (2026-11-09)"))
+        write(self.dir / "app" / "Nuevo.kt", "class Nuevo\n")  # un archivo nuevo, que git todavía no sigue
+
+    def new_investigation(self, folder, rows, closed=False):
+        write(folder / "plan.json", json.dumps(self.plan))
+        write(folder / "estado.md", STATE_COST % rows)
+        write(folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in ("antes", "control")}))
+        write(folder / "reporte-inicial.md", "x")
+        if closed:
+            write(folder / "reporte-final-dev.md", "x")
+
+    def notice(self):
+        out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
+        return out
+
+    def test_el_cierre_da_primero_el_parche_y_despues_quitar_con_apply_r(self):
+        out = self.notice()
+        self.assertIn("Cambios temporales por revertir (primero el parche, después quitar):", out)
+        self.assertIn("Sin revertir (2): `app/Lista.kt`, `app/Nuevo.kt`", out)  # el revertido no se lista; sin la línea
+        save = next(line for line in out.splitlines() if "Primero guarda el parche" in line)
+        remove = next(line for line in out.splitlines() if "Después quítalos" in line)
+        self.assertLess(out.index(save), out.index(remove))
+        self.assertIn("git add -N -- app/Nuevo.kt && { [ -s <carpeta-fuera-del-repo>/lista-2026-11-09.patch ] || git diff "
+                      "--binary -- app/Lista.kt app/Nuevo.kt > <carpeta-fuera-del-repo>/lista-2026-11-09.patch; } && git "
+                      "apply --check -R <carpeta-fuera-del-repo>/lista-2026-11-09.patch", save)
+        self.assertIn("git apply -R <carpeta-fuera-del-repo>/lista-2026-11-09.patch && git reset -q -- app/Nuevo.kt", remove)
+        self.assertIn("Nunca quites un cambio temporal con `git checkout`, `git restore`, `git reset --hard` ni `git clean`",
+                      out)
+        for line in out.splitlines():  # ningún comando propuesto descarta un archivo
+            if line.strip().startswith(("Primero", "Después", "cd ")) or "`cd " in line:
+                for command in re.findall(r"`(cd [^`]+)`", line):
+                    self.assertIsNone(re.search(r"git (checkout|restore|clean|reset --hard)", command), command)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("**Cambios temporales por revertir (primero el parche, después quitar):**", state)
+
+    def test_los_comandos_que_entrega_guardan_y_quitan_sin_perder_nada(self):
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca temporal\n", encoding="utf-8")
+        patches = self.dir.parent / (self.dir.name + "-parches")
+        patches.mkdir()
+        out = self.notice().replace("<carpeta-fuera-del-repo>", str(patches))
+        commands = [found for line in out.splitlines() if "guarda el parche" in line or "quítalos" in line
+                    for found in re.findall(r"`(cd [^`]+)`", line)]
+        self.assertEqual(len(commands), 2, out)
+        try:
+            for command in commands:
+                done = subprocess.run(command, shell=True, capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, command + "\n" + done.stderr)
+            self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
+            self.assertFalse((self.dir / "app" / "Nuevo.kt").exists())  # el archivo nuevo salió con el parche
+            patch = patches / "lista-2026-11-09.patch"
+            self.assertIn("marca temporal", patch.read_text(encoding="utf-8"))
+            # repetir el paso de guardar con los cambios ya fuera no vacía el parche, que es la única copia
+            subprocess.run(commands[0], shell=True, capture_output=True, text=True)
+            self.assertIn("marca temporal", patch.read_text(encoding="utf-8"))
+            self.assertIn("lista-2026-11-09.patch", self.notice())  # con el archivo nuevo ya quitado, el mismo parche
+            self.assertNotIn("-1.patch", self.notice())
+            again = subprocess.run(["git", "apply", str(patch)], cwd=str(self.dir), capture_output=True, text=True)
+            self.assertEqual(again.returncode, 0, again.stderr)  # y se puede volver a poner
+            self.assertIn("marca temporal", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))
+            self.assertTrue((self.dir / "app" / "Nuevo.kt").is_file())
+        finally:
+            shutil.rmtree(str(patches), ignore_errors=True)
+
+    def test_un_archivo_que_otra_investigacion_abierta_tambien_declara_va_en_un_parche_aparte(self):
+        other = self.dir / "reports" / "perf" / "detalle" / "2026-11-10"
+        self.new_investigation(other, self.ROW % ("app/Lista.kt", "no"))
+        closed = self.dir / "reports" / "perf" / "pago" / "2026-11-01"
+        self.new_investigation(closed, self.ROW % ("app/Nuevo.kt", "no"), closed=True)  # cerrada: no cuenta
+        out = self.notice()
+        shared = next(line for line in out.splitlines() if "otra investigación abierta" in line)
+        self.assertIn("`app/Lista.kt` también es un cambio temporal de otra investigación abierta "
+                      "(reports/perf/detalle/2026-11-10)", shared)
+        self.assertIn("lista-2026-11-09-compartido-lista-kt.patch", shared)
+        self.assertIn("no lo quites entero", shared)
+        save = next(line for line in out.splitlines() if "Primero guarda el parche" in line)
+        self.assertIn("git diff --binary -- app/Nuevo.kt >", save)  # el parche propio no lleva el archivo compartido
+        self.assertIn("`cd %s && { [ -s" % self.dir.resolve(), shared)
+        self.assertNotIn("Lista.kt", save)
+        self.assertNotIn("pago", out)
+
+    def test_con_carpeta_de_parches_en_agents_md_los_parches_van_ahi(self):
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- setup listo\n- Carpeta de parches: `ia/perf/parches`\n")
+        out = self.notice()
+        self.assertIn("mkdir -p ia/perf/parches && git add -N -- app/Nuevo.kt && { [ -s ia/perf/parches/lista-2026-11-09.patch"
+                      " ] || git diff --binary -- app/Lista.kt app/Nuevo.kt > ia/perf/parches/lista-2026-11-09.patch; }", out)
+        self.assertNotIn("<carpeta-fuera-del-repo>", out)
+        # una carpeta con espacios va entre comillas en todo el comando, y el paso de quitar conserva el git reset
+        # del archivo nuevo aunque el de guardar ya lo haya anotado con git add -N
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- Carpeta de parches: ../mis parches %s\n" % self.dir.name)
+        out = self.notice()
+        commands = [found for line in out.splitlines() if "guarda el parche" in line or "quítalos" in line
+                    for found in re.findall(r"`(cd [^`]+)`", line)]
+        patches = self.dir.parent / ("mis parches %s" % self.dir.name)
+        try:
+            done = subprocess.run(commands[0], shell=True, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, commands[0] + "\n" + done.stderr)
+            self.assertTrue((patches / "lista-2026-11-09.patch").stat().st_size > 0)
+            self.assertIn("git reset -q -- app/Nuevo.kt", self.notice())
+        finally:
+            shutil.rmtree(str(patches), ignore_errors=True)
+
+    def test_antes_de_medir_despues_no_se_propone_quitar_nada(self):
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "estado": "aplicada"}]
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("Siguiente · medición después", out)
+        self.assertNotIn("Cambios temporales por revertir (", out)  # las marcas siguen puestas hasta medir después
+
+    def test_la_raiz_del_proyecto_con_una_carpeta_enlazada_y_con_un_repo_anidado(self):
+        from helpers import init_repo
+        outside = Path(tempfile.mkdtemp())
+        cwd = os.getcwd()
+        try:
+            init_repo(outside)  # la carpeta de contexto compartida es otro repo, fuera del proyecto
+            (outside / "perf" / "investigaciones" / "lista").mkdir(parents=True)
+            os.symlink(str(outside), str(self.dir / "ia"))
+            (self.dir / "sub" / "reports" / "perf" / "x").mkdir(parents=True)
+            nested = init_repo(self.dir / "sub")  # un repo anidado dentro del proyecto
+            os.chdir(str(self.dir))
+            linked = Path("ia/perf/investigaciones/lista")
+            self.assertEqual(perf.project_root(linked).resolve(), self.dir.resolve())  # es del proyecto, no del otro repo
+            self.assertEqual(perf.relative_folder(linked, perf.project_root(linked).resolve()), linked)
+            self.assertEqual(perf.project_root(Path("sub/reports/perf/x")).resolve(), nested.resolve())  # como antes
+            self.assertEqual(perf.project_root(self.folder).resolve(), self.dir.resolve())
+            self.assertEqual(perf.project_root(outside / "perf").resolve(), outside.resolve())  # por fuera: su repo
+        finally:
+            os.chdir(cwd)
+            shutil.rmtree(str(outside), ignore_errors=True)
+
+    def test_sin_cambios_temporales_o_todos_revertidos_no_hay_aviso(self):
+        write(self.folder / "estado.md", STATE_COST % (self.ROW % ("app/Lista.kt", "sí")))
+        self.assertNotIn("Cambios temporales por revertir (", self.notice())
+        template = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        self.assertEqual(perf.temp_changes(template), [])
+        self.assertIsNone(perf.revert_notice(self.dir / "no-existe", self.dir))
+        rows = perf.temp_changes(STATE_COST % (self.ROW % ("app/A.kt", "sin revertir") + self.ROW % ("app/B.kt", "Sí")))
+        self.assertEqual([(row["archivo"], row["revertido"]) for row in rows], [("app/A.kt", False), ("app/B.kt", True)])
+
+    def test_la_plantilla_y_el_cierre_no_proponen_comandos_que_descartan(self):
+        skill = perf.ASSETS.parent
+        for path in [skill / "SKILL.md", perf.ASSETS / "plantillas" / "estado.md"] + sorted((skill / "references").glob("*.md")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                for command in re.findall(r"git (?:checkout|restore|clean|reset --hard)[^`]*", line):
+                    self.assertRegex(line, r"[Nn]unca|[Nn]o (?:uses|propongas)", "%s:%d propone `%s`" % (path.name, number, command))

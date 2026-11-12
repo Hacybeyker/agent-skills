@@ -55,7 +55,7 @@ Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 
 
 ## Medir el costo
 
-1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --costo "1.05 USD" --modelo "Sonnet 5.5" --pasos 30` (lo que muestre su herramienta: `/cost` en Claude Code, créditos en Copilot).
+1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --modelo "Sonnet 5.5" --esfuerzo medio --costo "1.05 USD" --pasos 30`. `siguiente` imprime ese comando ya completo por cada sesión hecha sin anotar; solo falta el costo, que muestra la herramienta: `/cost` en Claude Code; `/usage` en GitHub Copilot CLI, que informa AI Credits y tokens (`--creditos <n>` y `--tokens-entrada`, `--tokens-cache`, `--tokens-salida`). Un AI Credit vale 0,01 USD según la documentación de facturación de GitHub Copilot; `perf.py` lo usa para sumar el total en USD, que queda debajo de la tabla "Consumo" y en los reportes, junto con las sesiones que faltan anotar. Anotar es opcional: nada se bloquea si no se hace.
 2. Para comparar versiones de la skill, repite el mismo caso (mismo alcance y mismos flujos) y separa los efectos: una corrida con el mismo modelo que la anterior (ahorro por diseño) y otra con los modelos de esta tabla (ahorro total).
 3. Repite cada una al menos dos veces: el consumo de un agente varía de una corrida a otra.
 4. Comprueba que las conclusiones y los veredictos se mantengan: ahorrar no puede costar rigor.

@@ -2803,7 +2803,7 @@ def custom_queries(flow, folder, package):
     return queries
 
 
-def project_root(folder):
+def git_toplevel(folder):
     try:
         result = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"], capture_output=True,
                                 text=True, timeout=30)
@@ -2811,7 +2811,48 @@ def project_root(folder):
             return pathlib.Path(result.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
-    return pathlib.Path.cwd()
+    return None
+
+
+def lexical(path):
+    """La ruta absoluta sin resolver enlaces simbólicos: por dónde se llega a la carpeta, no dónde está en el disco."""
+    return pathlib.Path(os.path.abspath(str(path)))
+
+
+def under(path, base):
+    """La ruta relativa de `path` dentro de `base`, o None si no está dentro."""
+    try:
+        return pathlib.Path(path).relative_to(base)
+    except ValueError:
+        return None
+
+
+def project_root(folder):
+    """La raíz del proyecto de una carpeta de investigación. Si se llega a la carpeta por dentro del repo desde el que
+    se corre el comando, vale ese repo aunque la carpeta sea un enlace a otra de fuera (una carpeta de contexto
+    compartida, que puede ser otro repo): la investigación es del proyecto, no de donde se guardan sus archivos. Si
+    no, el repo que contiene la carpeta (también uno anidado dentro del actual); sin git, la carpeta actual."""
+    own = git_toplevel(folder)
+    here = git_toplevel(pathlib.Path.cwd()) if own is not None else None
+    if here is not None and under(own.resolve(), here.resolve()) is None:
+        # La carpeta está en otro repo que no es parte de este (no es un repo anidado): si se llega a ella por dentro
+        # de este, es un enlace a una carpeta de fuera.
+        target = lexical(folder)
+        if any(under(target, base) is not None for base in (here, lexical(here), lexical(pathlib.Path.cwd()))):
+            return here
+    return own or pathlib.Path.cwd()
+
+
+def relative_folder(folder, root):
+    """La carpeta como ruta relativa a la raíz (por donde se llega a ella o, si no, por donde está en el disco); si
+    queda fuera, absoluta."""
+    folder = pathlib.Path(folder)
+    for candidate, base in ((lexical(folder), pathlib.Path(root)), (lexical(folder), lexical(root)),
+                            (folder.resolve(), pathlib.Path(root).resolve())):
+        inside = under(candidate, base)
+        if inside is not None:
+            return inside
+    return lexical(folder)
 
 
 NO_LEER_LINE = re.compile(r"^(?P<indent>[ \t]*)(?P<bullet>(?:[-*][ \t]+)|(?:-(?=\*)))?\**[ \t]*(?:no leer|do not read)[ \t]*\**[ \t]*:"
@@ -2933,18 +2974,26 @@ def chat(text, tier, effort, what, plan):
 
 
 def next_steps(folder, plan, flow=None):
+    """(título, [pasos]) del paso que sigue. En el cierre (y con la investigación cerrada), si quedan cambios
+    temporales sin revertir, agrega cómo quitarlos sin perderlos (revert_notice)."""
+    title, steps = plan_steps(folder, plan, flow)
+    # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos.
+    if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
+        notice = revert_notice(folder, project_root(folder).resolve())
+        if notice:
+            steps = steps + [notice]
+    return title, steps
+
+
+def plan_steps(folder, plan, flow=None):
     """(título, [pasos]) del paso que sigue según fases.json, plan.json y los archivos de la carpeta.
 
     Cada paso es un dict: tipo terminal (comando completo, empieza con cd), chat (texto, modelo y esfuerzo) o archivo.
     Es la única fuente de los comandos de entrega: los agentes la copian en vez de inventarlos.
     """
-    folder = folder.resolve()
     root = project_root(folder).resolve()
-    state = folder / "estado.md"
-    try:  # cada comando empieza con cd a la raíz: dentro de ella, rutas relativas y más cortas
-        folder = folder.relative_to(root)
-    except ValueError:
-        pass
+    state = folder.resolve() / "estado.md"
+    folder = relative_folder(folder, root)  # cada comando empieza con cd a la raíz: dentro de ella, rutas relativas
 
     def command(*parts):
         return "cd %s && python3 -I %s %s" % (root, HERE / "perf.py", " ".join(str(part) for part in parts))
@@ -2993,11 +3042,16 @@ def next_steps(folder, plan, flow=None):
     # Una mejora aplicada después de medir "después" deja esa fase vieja: hay que medirla de nuevo (--rehacer).
     measured = phases.get("despues", {}).get("fecha", "")
     stale = "despues" in phases and any(m.get("estado") == "aplicada" and m.get("aplicada_en", "") > measured for m in mejoras)
-    report = next((state.parent / n for n in ("reporte-final.html", "reporte-final.md", "reporte.html", "reporte.md")
-                   if (state.parent / n).is_file()), state.parent / "reporte-final.md")
-    if report.is_file() and "aprobada" not in estados and not stale:
-        return "investigación cerrada", [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
-    initial = state.parent / ("reporte-inicial.html" if (state.parent / "reporte-inicial.html").is_file() else "reporte-inicial.md")
+    # Los reportes con el nombre de esta versión (reporte-<tipo>-dev y -gerencia) o de las anteriores.
+    report = report_file(state.parent, "final")
+    if report is not None and "aprobada" not in estados and not stale:
+        closed = [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
+        business = audience_file(state.parent, "final", "gerencia")
+        if business is not None:
+            closed.append({"tipo": "archivo", "texto": str(business),
+                           "que": "el mismo reporte para un público no técnico (gerencia)"})
+        return "investigación cerrada", closed
+    initial = report_file(state.parent, "inicial") or state.parent / "reporte-inicial-dev.md"
     if triage and initial.is_file():
         closed = [{"tipo": "archivo", "texto": str(initial),
                    "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después)"}]
@@ -3275,27 +3329,245 @@ def render_steps(steps, markdown):
     return lines
 
 
-def cost_command(folder):
-    """El comando para anotar el costo de un chat, con la carpeta relativa a la raíz del proyecto."""
-    folder = pathlib.Path(folder).resolve()
-    root = project_root(folder).resolve()
+# ── Consumo ──────────────────────────────────────────────────────────────────
+# GitHub Copilot factura el uso en AI Credits: 1 AI Credit = 0,01 USD (documentación de facturación de GitHub Copilot,
+# "Usage-based billing"). Si GitHub cambia el valor, cambia esta constante.
+AI_CREDIT_USD = 0.01
+COST_PLACEHOLDER = "<costo>"
+COST_WHERE = ("lo muestra tu herramienta al cerrar el chat: /cost en Claude Code; /usage en GitHub Copilot CLI, que "
+              "informa AI Credits y tokens (con ellos, --creditos <n> y --tokens-entrada, --tokens-cache, "
+              "--tokens-salida en vez de --costo)")
+# Nivel de modelo y esfuerzo que `siguiente` recomienda para cada sesión: con ellos sale el comando ya completo.
+SESSIONS = {"1": ("1 · ficha", "intermedio", "medio"), "2": ("2 · diagnóstico", "diagnostico", "alto"),
+            "3": ("3 · %s", "intermedio", "medio"), "4": ("4 · cierre", "economico", "bajo")}
+COST_TOTAL = "**Total de la investigación:**"
+USD_AMOUNT = re.compile(r"(?:US\$|USD|\$)[ \t]*(\d[\d.,]*)|(\d[\d.,]*)[ \t]*(?:USD|US\$|\$|dólares|dolares)", re.I)
+# Solo los AI Credits de GitHub Copilot tienen una conversión documentada: "12 créditos" de otra herramienta no se suma.
+CREDIT_AMOUNT = re.compile(r"(\d[\d.,]*)[ \t]*AI[ \t]+(?:credits?|cr[eé]ditos?)", re.I)
+TOKEN_PART = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*(?:tokens[ \t]+)?(?:de[ \t]+)?(entrada|cach[eé]|salida)", re.I)
+TOKEN_TOTAL = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*tokens(?![ \t]+(?:de[ \t]+)?(?:entrada|cach[eé]|salida))", re.I)
+
+
+def amount(text, whole=False):
+    """Un número escrito por una persona: "1.05", "1,05", "38k", "1.2M", "12.000". Con `whole` (tokens, créditos) un
+    separador seguido de tres cifras es de miles; si no, el último separador es el decimal. None si no es un número."""
+    text = (text or "").strip().replace(" ", "").rstrip(".,")  # una coma o un punto de la frase no son del número
+    factor = 1
+    if text[-1:].lower() in ("k", "m"):
+        factor = 1000 if text[-1].lower() == "k" else 1000000
+        text = text[:-1]
+    if not re.fullmatch(r"\d[\d.,]*", text):
+        return None
+    if whole and factor == 1 and re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", text):
+        text = text.replace(".", "").replace(",", "")
+    elif "." in text and "," in text:
+        decimal = max(text.rfind("."), text.rfind(","))
+        text = re.sub(r"[.,]", "", text[:decimal]) + "." + text[decimal + 1:]
+    else:
+        text = text.replace(",", ".")
     try:
-        folder = folder.relative_to(root)
+        return float(text.rstrip(".")) * factor
     except ValueError:
-        pass
-    return ("cd %s && python3 -I %s consumo --carpeta %s --sesion \"<sesión>\" --costo \"<lo que muestre tu "
-            "herramienta>\" --modelo \"<modelo>\"" % (root, HERE / "perf.py", folder))
+        return None
 
 
-def write_next(folder, title, steps):
-    """Reescribe "## Siguiente paso" de estado.md con lo que dice next_steps."""
+def short_count(value):
+    """Una cantidad de tokens para leer: 950, 45 k, 1,2 M."""
+    if value >= 1000000:
+        return ("%.1f" % (value / 1000000)).rstrip("0").rstrip(".").replace(".", ",") + " M"
+    if value >= 1000:
+        return "%d k" % round(value / 1000)
+    return "%d" % value
+
+
+def cost_rows(state_text):
+    """Las filas de la tabla "Consumo" de estado.md: [{"sesion", "modelo", "costo", "pasos"}]."""
+    _, sections = state_sections(state_text)
+    body = next((text for title, text in sections.items() if title.startswith("consumo")), "")
+    out = []
+    for row in parse_table(body)[1]:
+        if not row or not row[0].strip() or any("<" in cell for cell in row):
+            continue
+        cells = [cell.strip() for cell in row] + [""] * 4
+        out.append({"sesion": cells[0], "modelo": cells[1], "costo": cells[2], "pasos": cells[3]})
+    return out
+
+
+def cost_of(cell):
+    """Lo que se puede sumar de una celda "Costo o tokens": {"usd" o None, "tokens": {entrada, caché, salida, sin
+    desglose}}. Un monto en USD escrito vale tal cual; si solo hay AI Credits, se convierten con AI_CREDIT_USD."""
+    usd = None
+    found = USD_AMOUNT.search(cell)
+    if found:
+        usd = amount(found.group(1) or found.group(2))
+    if usd is None:
+        credits = CREDIT_AMOUNT.search(cell)
+        value = amount(credits.group(1)) if credits else None
+        usd = value * AI_CREDIT_USD if value is not None else None
+    tokens = {}
+    for number, kind in TOKEN_PART.findall(cell):
+        value = amount(number, whole=True)
+        if value is not None:
+            key = "caché" if kind.lower().startswith("cach") else kind.lower()
+            tokens[key] = tokens.get(key, 0) + value
+    if not tokens:
+        whole = TOKEN_TOTAL.search(cell)
+        value = amount(whole.group(1), whole=True) if whole else None
+        if value is not None:
+            tokens["sin desglose"] = value
+    return {"usd": usd, "tokens": tokens}
+
+
+def session_key(text, ids=()):
+    """(número de sesión, id de la mejora o '') de una celda "Sesión": "3 · M1" → ("3", "M1")."""
+    number = re.match(r"\s*(?:sesi[oó]n\s+)?(\d+)(?!\d|-)", text or "", re.I)
+    improvement = next((item for item in ids if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(item), text or "")), "")
+    return (number.group(1) if number else ""), improvement
+
+
+def done_sessions(folder, plan):
+    """Las sesiones de IA que esta investigación ya hizo, en orden: [(rótulo, nivel de modelo, esfuerzo)]. Sale de lo
+    que cada una deja: la corrida de prueba o una fase medida (sesión 1, si algún flujo no es la receta de arranque),
+    el reporte inicial o las mejoras del plan (2), cada mejora aplicada (3) y el reporte final (4). La sesión 0 es del
+    proyecto, no de una investigación: no se lista."""
+    folder = pathlib.Path(folder)
+    mejoras = plan.get("mejoras") or []
+    out = []
+    tested = (folder / "prueba").is_dir() and any((folder / "prueba").glob("*.perfetto-trace*"))
+    if any(not startup_spec(flow) for flow in (plan.get("flujos") or {}).values()) and (tested or read_phases(folder)):
+        out.append(SESSIONS["1"])
+    if report_file(folder, "inicial") or mejoras or report_file(folder, "final"):
+        out.append(SESSIONS["2"])
+    for item in mejoras:
+        if item.get("estado") == "aplicada":
+            label, tier, effort = SESSIONS["3"]
+            out.append((label % item["id"], tier, effort))
+    if report_file(folder, "final"):
+        out.append(SESSIONS["4"])
+    return out
+
+
+def missing_costs(folder, plan):
+    """Las sesiones hechas que no tienen fila en "Consumo": [(rótulo, modelo, esfuerzo)], con el nombre del modelo."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    ids = [item["id"] for item in plan.get("mejoras") or []]
+    noted = [session_key(row["sesion"], ids) for row in rows]
+    applied = [item["id"] for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
+    out = []
+    for label, tier, effort in done_sessions(folder, plan):
+        number, improvement = session_key(label, ids)
+        covered = any(n == number and (number != "3" or i == improvement or (not i and len(applied) == 1))
+                      for n, i in noted)
+        if not covered:
+            out.append((label, model_name(plan, tier), effort))
+    return out
+
+
+def cost_command(folder, session=None, model=None, effort=None):
+    """El comando para anotar el costo de una sesión, con la carpeta relativa a la raíz del proyecto. Con la sesión,
+    el modelo y el esfuerzo sale completo: solo queda el costo por llenar."""
+    root = project_root(folder).resolve()
+    folder = relative_folder(folder, root)
+    return "cd %s && python3 -I %s consumo --carpeta %s --sesion \"%s\" --modelo \"%s\"%s --costo \"%s\"" % (
+        root, HERE / "perf.py", folder, session or "<sesión>", model or "<modelo>",
+        " --esfuerzo %s" % effort if effort else "", COST_PLACEHOLDER)
+
+
+def cost_total(folder, plan):
+    """El total de la investigación en una línea: USD y tokens de las filas de "Consumo" que traen el dato, cuántas no
+    lo traen y qué sesiones hechas faltan anotar. Un dato que falta se dice: no cuenta como cero."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        rows = []
+    costs = [cost_of(row["costo"]) for row in rows]
+    priced = [cost["usd"] for cost in costs if cost["usd"] is not None]
+    tokens = {}
+    for cost in costs:
+        for kind, value in cost["tokens"].items():
+            tokens[kind] = tokens.get(kind, 0) + value
+    parts = []
+    if priced:
+        parts.append("%.2f USD (%d de %d sesiones anotadas traen un monto)" % (sum(priced), len(priced), len(rows))
+                     if len(priced) < len(rows) else "%.2f USD en %d %s" % (
+                         sum(priced), len(rows), "sesión anotada" if len(rows) == 1 else "sesiones anotadas"))
+    elif rows:
+        parts.append("sin un monto en USD en las %d sesiones anotadas" % len(rows))
+    if tokens:
+        counted = sum(1 for cost in costs if cost["tokens"])
+        parts.append("tokens: " + ", ".join("%s %s" % (short_count(tokens[kind]), kind)
+                                            for kind in ("entrada", "caché", "salida", "sin desglose") if kind in tokens)
+                     + (" (solo %d de %d sesiones anotadas los traen)" % (counted, len(rows)) if counted < len(rows) else ""))
+    missing = missing_costs(folder, plan) if plan else []
+    if missing:
+        parts.append("faltan anotar %d %s (%s): el total es parcial" % (
+            len(missing), "sesión hecha" if len(missing) == 1 else "sesiones hechas",
+            ", ".join(label for label, _, _ in missing)))
+    if not rows and not missing:
+        return "sin sesiones anotadas"
+    return " · ".join(parts)
+
+
+def update_cost_total(folder, plan):
+    """Deja al día la línea del total debajo de la tabla "Consumo" de estado.md."""
+    state = pathlib.Path(folder) / "estado.md"
+    if not state.is_file():
+        return
+    text = state.read_text(encoding="utf-8")
+    line = "%s %s" % (COST_TOTAL, cost_total(folder, plan))
+
+    def rewrite(match):
+        body = [row for row in match.group(2).rstrip("\n").split("\n") if not row.startswith(COST_TOTAL)]
+        while body and not body[-1].strip():
+            body.pop()
+        return match.group(1) + "\n".join(body + ["", line]) + "\n"
+
+    new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", rewrite, text, count=1, flags=re.S)
+    if count and new != text:
+        state.write_text(new, encoding="utf-8")
+
+
+def cost_md(folder, plan):
+    """La sección "Costo de la investigación" de los reportes: las sesiones anotadas y el total, con lo que falta."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        rows = []
+    intro = ("> Lo que costó cada sesión de IA, según lo anotó quien la corrió (`perf.py consumo`). Las mediciones "
+             "corren en la terminal, sin chat, y no cuestan tokens.\n\n")
+    table = markdown_table(["Sesión", "Modelo", "Costo o tokens", "Pasos"],
+                           [[row["sesion"], row["modelo"] or "—", row["costo"] or "—", row["pasos"] or "—"]
+                            for row in rows]) + "\n\n" if rows else ""
+    return "%s%s**Total:** %s" % (intro, table, cost_total(folder, plan))
+
+
+def cost_lines(folder, plan):
+    """Las líneas con las que `siguiente` lista las sesiones hechas sin fila en "Consumo": un comando listo por cada
+    una. Es informativo: nada se bloquea si no se anota."""
+    missing = missing_costs(folder, plan)
+    if not missing:
+        return []
+    lines = ["Costo (opcional): %s sin anotar. Un comando por cada una; solo falta el costo, que %s:" % (
+        "1 sesión hecha" if len(missing) == 1 else "%d sesiones hechas" % len(missing), COST_WHERE)]
+    return lines + ["  %s" % cost_command(folder, label, model, effort) for label, model, effort in missing]
+
+
+def write_next(folder, title, steps, missing=()):
+    """Reescribe "## Siguiente paso" de estado.md con lo que dice next_steps. `missing`: las sesiones sin anotar."""
     state = pathlib.Path(folder) / "estado.md"
     if not state.is_file():
         return
     body = "\n".join(["- **Paso:** %s" % title, "- **En orden, uno a la vez:**"]
                      + ["  " + line for line in render_steps(steps, markdown=True)]
-                     + ["- **Costo de cada chat** (terminal, al cerrarlo): `%s`" % cost_command(folder),
-                        "- _Lo escribe `perf.py siguiente`: si algo cambió, vuelve a correrlo._", ""])
+                     + (["- **Costo (opcional, terminal):** faltan anotar %s. `perf.py siguiente` imprime un comando "
+                         "listo por cada una; solo falta el costo." % ", ".join(label for label, _, _ in missing)]
+                        if missing else
+                        ["- **Costo de cada chat** (opcional, terminal, al cerrarlo): `perf.py siguiente` imprime el "
+                         "comando `consumo` ya completo de cada sesión hecha; solo falta el costo."])
+                     + ["- _Lo escribe `perf.py siguiente`: si algo cambió, vuelve a correrlo._", ""])
     text = state.read_text(encoding="utf-8")
     new, count = re.subn(r"(## Siguiente paso\n\n).*?(?=\n## )", lambda m: m.group(1) + body, text, count=1, flags=re.S)
     if count:
@@ -3307,10 +3579,11 @@ def print_next(folder, plan, flow=None):
     print("Siguiente · %s (también en estado.md):" % title)
     for line in render_steps(steps, markdown=False):
         print("  " + line)
-    if any(step["tipo"] == "chat" for step in steps):
-        print("  Al cerrar cada chat, anota su costo (terminal): %s" % cost_command(folder))
-    write_next(folder, title, steps)
-    update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder).resolve()).resolve(),
+    for line in cost_lines(folder, plan):
+        print("  " + line)
+    write_next(folder, title, steps, missing_costs(folder, plan))
+    update_cost_total(folder, plan)
+    update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder)).resolve(),
                                                   pathlib.Path(folder)))
     update_warnings(folder, plan)
 
@@ -3323,7 +3596,7 @@ def cmd_siguiente(args):
         # La Ficha se completa en la sesión 1; el Resumen y los Hallazgos, desde que la sesión 2 entrega su reporte.
         # Con mejoras aprobadas o aplicadas (sesión 3 y medición después), el resumen que falta es el del cierre: no
         # se avisa todavía.
-        delivered = any((folder / name).is_file() for name in ("reporte-inicial.md", "reporte-final.md", "reporte.md"))
+        delivered = bool(report_file(folder, "inicial") or report_file(folder, "final"))
         in_progress = any(m.get("estado") in ("aprobada", "aplicada") for m in plan.get("mejoras", []))
         warn_unfilled(folder, state_sections(state.read_text(encoding="utf-8"))[1], findings=delivered and not in_progress)
     for name, flow in plan["flujos"].items():
@@ -3340,18 +3613,53 @@ def cmd_consumo(args):
         raise PerfError("no existe %s" % state)
     text = state.read_text(encoding="utf-8")
     if any("<" in str(v) for v in (args.sesion, args.costo, args.modelo, args.pasos) if v):
-        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo \"1.05 USD\")")
-    row = "| %s | %s | %s | %s |" % (args.sesion, args.modelo or "—", args.costo, args.pasos or "—")
+        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo \"1.05 USD\", o "
+                        "--creditos 120 si tu herramienta informa AI Credits)")
+    tokens = [(label, getattr(args, name, None)) for label, name in (
+        ("entrada", "tokens_entrada"), ("caché", "tokens_cache"), ("salida", "tokens_salida"))]
+    numbers = {}
+    for label, raw in tokens + [("créditos", getattr(args, "creditos", None))]:
+        if raw is None:
+            continue
+        if label == "créditos" and re.fullmatch(r"[1-9]\d{0,2}(?:[.,]\d{3})+", raw.strip()):
+            raise PerfError("'%s' AI Credits puede leerse como miles o como decimales: escríbelo sin separador de miles "
+                            "(1200) o con los decimales que no sean tres cifras (1.2)" % raw)
+        numbers[label] = amount(raw, whole=label != "créditos")  # los créditos pueden traer decimales
+        if numbers[label] is None:
+            raise PerfError("'%s' no es una cantidad: usa un número (120, 45000, 45k, 1.2M)" % raw)
+    if not args.costo and not numbers:
+        raise PerfError("falta el costo: usa --costo \"<lo que muestre tu herramienta>\" (por ejemplo \"1.05 USD\"), "
+                        "--creditos <AI Credits> o --tokens-entrada, --tokens-cache y --tokens-salida")
+    parts = [args.costo] if args.costo else []
+    if "créditos" in numbers:
+        credits = numbers["créditos"]
+        # La conversión solo se anota si el costo escrito no trae ya un monto en USD.
+        usd = "" if args.costo and USD_AMOUNT.search(args.costo) else " (%.2f USD)" % (credits * AI_CREDIT_USD)
+        parts.append("%s AI Credits%s" % (("%.4f" % credits).rstrip("0").rstrip("."), usd))
+    listed = ["%d %s" % (numbers[label], label) for label, _ in tokens if label in numbers]
+    if listed:
+        parts.append("tokens: " + ", ".join(listed))
+    effort = getattr(args, "esfuerzo", None)
+    model = " · ".join(part for part in (args.modelo, effort) if part)
+    row = "| %s | %s | %s | %s |" % (args.sesion, model or "—", " · ".join(parts), args.pasos or "—")
 
     def append(match):
-        body = [line for line in match.group(2).rstrip("\n").split("\n") if line.strip() and "<" not in line]
-        return match.group(1) + "\n".join(body + [row]) + "\n"
+        body = [line for line in match.group(2).rstrip("\n").split("\n")
+                if line.strip() and "<" not in line and not line.startswith(COST_TOTAL)]
+        table = [line for line in body if line.lstrip().startswith("|")]
+        return match.group(1) + "\n".join(table + [row] + [line for line in body if line not in table]) + "\n"
 
     new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S)
     if not count:
         raise PerfError("%s no tiene la sección '## Consumo'" % state)
     state.write_text(new, encoding="utf-8")
     print("✔ Consumo: %s" % row)
+    try:
+        plan = load_plan(folder / "plan.json")
+    except PerfError:
+        plan = {}
+    update_cost_total(folder, plan)
+    print("  Total de la investigación: %s" % cost_total(folder, plan))
 
 
 DECISIONS = (("aprobar", "aprobada", "aprobadas"), ("descartar", "descartada", "descartadas"),
@@ -3408,6 +3716,218 @@ def cmd_decidir(args):
     update_block(folder, "mejoras", plan_table_md(plan, rows))
     print("✔ %s" % line[2:])
     print_next(folder, plan)
+
+
+# ── Carpetas de la investigación y de los parches ────────────────────────────
+# En la sección de rendimiento de AGENTS.md: "Carpeta de investigaciones: <ruta>" y "Carpeta de parches: <ruta>" (con o
+# sin viñeta, negrita o acentos graves; las rutas relativas parten de la raíz del proyecto). Sin esas líneas, las
+# investigaciones van en reports/perf y los parches no tienen una carpeta por defecto.
+DEFAULT_INVESTIGATIONS = "reports/perf"
+FOLDER_KEYS = (("investigaciones", re.compile(r"carpeta\s+de\s+(?:las\s+)?(?:investigaciones|evidencia)|"
+                                              r"(?:investigations|evidence)\s+folder", re.I)),
+               ("parches", re.compile(r"carpeta\s+de\s+(?:los\s+)?parches|patch(?:es)?\s+folder", re.I)))
+FOLDER_LINE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?[*_]*(?P<key>[^:*_`]+?)[*_]*[ \t]*:[*_]*[ \t]*(?P<value>\S.*?)[ \t]*$")
+
+
+def perf_folders(root):
+    """{"investigaciones": ruta o None, "parches": ruta o None} según la sección de rendimiento del AGENTS.md del
+    proyecto. None es "sin configurar", no una ruta por defecto. Las rutas no se resuelven: una carpeta enlazada se
+    usa por su enlace."""
+    out = {"investigaciones": None, "parches": None}
+    agents = read_agents(root)
+    section = performance_section(agents) if agents is not None else None
+    if not section:
+        return out
+    for _, line in prose_lines(agents[section[0]:section[1]]):
+        found = FOLDER_LINE.match(line.rstrip("\r\n"))
+        if not found:
+            continue
+        name = next((name for name, pattern in FOLDER_KEYS if pattern.fullmatch(found.group("key").strip())), None)
+        if not name or out[name] is not None:
+            continue
+        quoted = re.search(r"`([^`]+)`", found.group("value"))
+        value = (quoted.group(1) if quoted else found.group("value")).strip().rstrip(".").strip()
+        if not value or value.startswith("<"):
+            continue
+        path = pathlib.Path(os.path.expanduser(value))
+        out[name] = path if path.is_absolute() else pathlib.Path(root) / path
+    return out
+
+
+def investigations_base(root):
+    """La carpeta donde van las investigaciones del proyecto: la de AGENTS.md o, sin ella, reports/perf."""
+    return perf_folders(root)["investigaciones"] or pathlib.Path(root) / DEFAULT_INVESTIGATIONS
+
+
+def shown_path(path, root):
+    """Una ruta para un comando que empieza con cd a la raíz: relativa si está dentro, absoluta si no."""
+    inside = under(lexical(path), lexical(root)) or under(lexical(path), pathlib.Path(root))
+    return str(inside) if inside is not None else str(path)
+
+
+# ── Cambios temporales: quitar sin perder ────────────────────────────────────
+REVERTED = re.compile(r"^(?:s[ií]|yes|hecho|revertido|✔)(?![a-záéíóúñ])", re.I)
+NEVER_DISCARD = ("Nunca quites un cambio temporal con `git checkout`, `git restore`, `git reset --hard` ni `git clean`: "
+                 "borran el archivo entero sin guardarlo, también lo que no es de esta investigación")
+
+
+def temp_changes(state_text):
+    """Las filas de "Cambios temporales por revertir" de estado.md: [{"archivo", "repo", "que", "revertido"}], sin las
+    que siguen con el relleno de la plantilla."""
+    _, sections = state_sections(state_text)
+    body = next((text for title, text in sections.items() if title.startswith("cambios temporales")), "")
+    headers, rows = parse_table(body)
+    names = [header.strip().lower() for header in headers]
+
+    def column(prefix):
+        return next((index for index, name in enumerate(names) if name.lstrip("¿").startswith(prefix)), None)
+
+    where, repo, what, reverted = column("archivo"), column("repo"), column("qué es"), column("revertido")
+    if where is None:
+        return []
+    out = []
+    for row in rows:
+        def cell(index):
+            return row[index].strip() if index is not None and index < len(row) else ""
+
+        path = re.sub(r":\d+(?:-\d+)?$", "", cell(where).strip("`").strip())
+        if not path or path in ("—", "-") or has_placeholder(cell(where)):
+            continue
+        out.append({"archivo": path, "repo": cell(repo).strip("`").strip(), "que": cell(what),
+                    "revertido": bool(REVERTED.match(cell(reverted)))})
+    return out
+
+
+def final_report(folder):
+    """El reporte final de una investigación (con el nombre de esta versión o de las anteriores), o None."""
+    return report_file(folder, "final")
+
+
+def open_investigations(folder, root):
+    """Las otras investigaciones del mismo proyecto que siguen abiertas (con estado.md y sin reporte final): las que
+    están junto a esta y las de la carpeta de investigaciones del proyecto. Solo busca dentro del proyecto."""
+    folder = pathlib.Path(folder)
+    own = folder.resolve()
+    limits = (lexical(root), pathlib.Path(root).resolve())
+    bases = [lexical(folder).parent, lexical(folder).parent.parent, investigations_base(root)]
+    configured = perf_folders(root)["investigaciones"]
+    seen, out = {own}, []
+    for base in bases:
+        inside = any(under(lexical(base), limit) is not None or under(base.resolve(), limit) is not None for limit in limits)
+        if not inside and base != configured:
+            continue
+        for pattern in ("*/estado.md", "*/*/estado.md"):
+            for state in sorted(base.glob(pattern)):
+                other = state.parent.resolve()
+                if other in seen:
+                    continue
+                seen.add(other)
+                if not final_report(state.parent):
+                    out.append(state.parent)
+    return out
+
+
+def untracked(root, path):
+    """True si el archivo existe en el repo de la raíz y es nuevo para git: todavía no lo sigue, o solo está anotado
+    con `git add -N` (así el paso de quitar sigue trayendo su `git reset` aunque el de guardar ya se haya corrido)."""
+    if not (pathlib.Path(root) / path).is_file():
+        return False
+    try:
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--", path], capture_output=True,
+                                text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return status.returncode == 0 and status.stdout[:2] in ("??", " A")
+
+
+def revert_notice(folder, root):
+    """En el cierre: cómo quitar los cambios temporales que siguen puestos sin perderlos. Primero el parche fuera del
+    repo, comprobado, y después `git apply -R`; nunca un comando que descarte el archivo. Si otra investigación
+    abierta del proyecto declara el mismo archivo, va en un parche aparte y no se quita entero. None si no queda
+    ninguno."""
+    folder = pathlib.Path(folder)
+    try:
+        pending = [change for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8"))
+                   if not change["revertido"]]
+    except OSError:
+        return None
+    if not pending:
+        return None
+    shared = {}
+    mine = {change["archivo"] for change in pending}
+    for other in open_investigations(folder, root):
+        try:
+            theirs = temp_changes((other / "estado.md").read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for change in theirs:
+            if not change["revertido"] and change["archivo"] in mine:
+                shared.setdefault(change["archivo"], []).append(shown_path(other, root))
+    patches = perf_folders(root)["parches"]
+    name = slug("-".join(lexical(folder).parts[-2:]))
+
+    def patch_path(suffix, at_root):
+        """(ruta del parche para el comando, `mkdir` previo): relativa a la raíz si el comando corre ahí; si corre en
+        otro repo, absoluta, para que el parche no quede dentro de ese repo."""
+        if not patches:
+            return "<carpeta-fuera-del-repo>/%s%s.patch" % (name, suffix), ""
+        base = shown_path(patches, root) if at_root else str(lexical(patches))
+        return shlex.quote("%s/%s%s.patch" % (base, name, suffix)), "mkdir -p %s && " % shlex.quote(base)
+
+    names = ["`%s`" % change["archivo"] for change in pending]
+    lines = ["Sin revertir (%d): %s%s" % (len(pending), ", ".join(names[:6]),
+                                         " y %d más (en estado.md)" % (len(names) - 6) if len(names) > 6 else "")]
+    groups = {}
+    for change in pending:
+        if change["archivo"] in shared:
+            continue
+        # En la raíz si el archivo (o su carpeta: un archivo nuevo ya quitado no existe) está en el repo de la raíz.
+        here = (pathlib.Path(root) / change["archivo"]).exists() or (pathlib.Path(root) / change["archivo"]).parent.is_dir()
+        groups.setdefault(str(root) if here else "<repo de %s>" % (change["repo"] or change["archivo"]), []).append(
+            change["archivo"])
+    for index, (repo, files) in enumerate(groups.items(), start=1):
+        patch, ready = patch_path("" if len(groups) == 1 else "-%d" % index, repo == str(root))
+        new = [path for path in files if repo == str(root) and untracked(root, path)]
+        quoted = " ".join(shlex.quote(path) for path in files)
+        added = " ".join(shlex.quote(path) for path in new)
+        # `[ -s parche ] ||`: un parche que ya existe no se pisa. Repetir el paso después de quitar lo dejaría vacío.
+        lines.append("Primero guarda el parche fuera del repo y comprueba que revierte limpio (si el parche ya existe no "
+                     "lo pisa): `cd %s && %s%s{ [ -s %s ] || git diff --binary -- %s > %s; } && git apply --check -R %s`%s"
+                     % (repo, ready, "git add -N -- %s && " % added if new else "", patch, quoted, patch, patch,
+                        "" if new or repo == str(root) else " (un archivo nuevo entra en el parche después de `git add "
+                                                            "-N <archivo>`)"))
+        lines.append("Después quítalos con el parche: `cd %s && git apply -R %s%s`%s" % (
+            repo, patch, " && git reset -q -- %s" % added if new else "",
+            "" if new or repo == str(root) else " (y `git reset -q -- <archivo>` por cada archivo nuevo)"))
+    for path, others in sorted(shared.items()):
+        here = (pathlib.Path(root) / path).exists()
+        patch, ready = patch_path("-compartido-%s" % slug(pathlib.PurePath(path).name), here)
+        lines.append("`%s` también es un cambio temporal de otra investigación abierta (%s): guárdalo en un parche "
+                     "aparte (`cd %s && %s{ [ -s %s ] || git diff --binary -- %s > %s; } && git apply --check -R %s`) y "
+                     "no lo quites entero: quita a mano solo lo de esta investigación, o déjalo hasta que cierre la otra"
+                     % (path, ", ".join(others), root if here else "<su repo>", ready, patch, shlex.quote(path), patch,
+                        patch))
+    lines.append(NEVER_DISCARD)
+    lines.append("Marca cada fila como revertida en estado.md cuando `git status --short` lo confirme")
+    return {"tipo": "avisos", "titulo": "Cambios temporales por revertir (primero el parche, después quitar)",
+            "lineas": lines}
+
+
+def report_file(folder, kind):
+    """El reporte `inicial` o `final` que hay en la carpeta, o None: primero el de desarrollo de esta versión
+    (`reporte-<tipo>-dev`), después los nombres de las versiones anteriores (`reporte-<tipo>` y, para el final,
+    `reporte`). HTML antes que markdown."""
+    folder = pathlib.Path(folder)
+    stems = ["reporte-%s-dev" % kind, "reporte-%s" % kind] + (["reporte"] if kind == "final" else [])
+    return next((folder / (stem + suffix) for stem in stems for suffix in (".html", ".md")
+                 if (folder / (stem + suffix)).is_file()), None)
+
+
+def audience_file(folder, kind, audience):
+    """El reporte `inicial` o `final` para un público (`dev` o `gerencia`), HTML antes que markdown, o None."""
+    folder = pathlib.Path(folder)
+    return next((folder / ("reporte-%s-%s%s" % (kind, audience, suffix)) for suffix in (".html", ".md")
+                 if (folder / ("reporte-%s-%s%s" % (kind, audience, suffix))).is_file()), None)
 
 
 # ── avisos que frenan o acompañan la medición ────────────────────────────────
@@ -6076,6 +6596,7 @@ def cmd_reporte(args):
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
                  ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") if filled("pendientes") else ""),
+                 ("Costo de la investigación", cost_md(folder, plan)),
                  ("Cómo leer este reporte", GLOSSARY)]
         subtitle = "Reporte inicial · %s · hb-performance %s" % (date, VERSION)
         page = render_report(folder, "reporte-inicial", title, subtitle, parts)
@@ -6119,6 +6640,7 @@ def cmd_reporte(args):
              ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
              ("Comparación completa", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
              ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") if filled("pendientes") else ""),
+             ("Costo de la investigación", cost_md(folder, plan)),
              ("Cómo leer este reporte", GLOSSARY)]
     charts = "".join('<figure class="chart"><figcaption>%s · %s <span class="verdict %s">%s</span></figcaption>%s</figure>'
                      % (e(r["metrica"]), e(r["flujo"]), VERDICT_CLASS[r["veredicto"]], e(r["veredicto"]), bars_svg(r))
@@ -7699,8 +8221,15 @@ def main(argv=None):
     p = sub.add_parser("consumo", help="anota el costo de una sesión en la tabla Consumo de estado.md")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--sesion", required=True, help="por ejemplo '0 · setup' o '3 · M1'")
-    p.add_argument("--costo", required=True, help="lo que muestre tu herramienta: '1.05 USD', '38k tokens', '12 créditos'")
+    p.add_argument("--costo", help="lo que muestre tu herramienta: '1.05 USD', '38k tokens' (solo un monto en USD o "
+                                   "los AI Credits entran al total en USD)")
+    p.add_argument("--creditos", help="AI Credits de GitHub Copilot (/usage); se suman al total como USD (1 AI Credit = "
+                                      "%s USD)" % fmt(AI_CREDIT_USD))
+    p.add_argument("--tokens-entrada", dest="tokens_entrada", help="tokens de entrada del chat (45000, 45k)")
+    p.add_argument("--tokens-cache", dest="tokens_cache", help="tokens leídos de caché")
+    p.add_argument("--tokens-salida", dest="tokens_salida", help="tokens de salida")
     p.add_argument("--modelo", help="modelo usado en ese chat")
+    p.add_argument("--esfuerzo", help="esfuerzo de razonamiento del chat (bajo, medio, alto)")
     p.add_argument("--pasos", help="requests o pasos del agente, si tu herramienta los muestra")
     p.set_defaults(func=cmd_consumo)
 

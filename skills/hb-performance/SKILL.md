@@ -54,7 +54,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 | Medición después | Usuario, sin chat | [medicion.md](references/medicion.md) | `instalar` del plan y `perf.py capturar --fase despues` | — | — |
 | 4 · Cierre | Agente | [cierre.md](references/cierre.md) | `perf.py comparar`, lectura, resumen ejecutivo y reporte final | Entrega | 10 |
 
-El costo de cada sesión lo anota el usuario desde la terminal con `perf.py consumo` (el comando sale en "Siguiente paso"; el valor es el que muestre su herramienta); no se lo pidas en el chat.
+El costo de cada sesión lo anota el usuario desde la terminal con `perf.py consumo`, y es opcional: `siguiente` imprime un comando ya completo por cada sesión hecha sin anotar (solo falta el costo: `/cost` en Claude Code, `/usage` en GitHub Copilot CLI) y el total queda en `estado.md` y en los reportes. No se lo pidas en el chat.
 
 - **Primera línea, siempre:** di qué sesión haces y por qué, con el formato `Sesión <n> · <nombre> (<motivo>)`: `Sesión 0 · setup (AGENTS.md no dice "setup listo")`, `Sesión 1 · ficha (setup listo en AGENTS.md)`, `Sesión 2 · diagnóstico (Siguiente paso de estado.md)`. El mismo pedido sirve para empezar la primera vez y las siguientes, porque la sesión la decide el estado del proyecto: el usuario tiene que ver cuál elegiste.
 - **Retomar:** si te pasan un `estado.md`, léelo y sigue la sesión de "Siguiente paso", y solo esa; si no está escrito, `perf.py siguiente --carpeta <carpeta>` lo calcula. Sin `estado.md`: la 0 si `AGENTS.md` no dice que el setup está listo; si no, la 1. "Setup listo" tiene que ser cierto en el código: `perf.py nuevo` y `humo` avisan si no encuentran `PerfHooks.kt` en el repo (un setup guardado como parche se reaplica antes de seguir).

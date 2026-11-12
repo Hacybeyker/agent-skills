@@ -34,7 +34,7 @@ Marcas o código puestos solo para esta investigación (por ejemplo, una marca c
 
 "Altera": las métricas que el cambio afecta si modifica el comportamiento de la app mientras se mide (una espera, una condición, otro orden de llamadas); `—` si solo emite una marca. `perf.py` copia esas filas a "Advertencias para el diagnóstico".
 
-Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera del repo**, uno por repo (`<parche>` es una ruta en una carpeta que ese repo no versiona):
+Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera del repo**, uno por repo (`<parche>` es una ruta en la carpeta de parches de `AGENTS.md` o, si no hay, en una carpeta que ese repo no versiona). **Siempre primero el parche y después quitar; nunca** `git checkout`, `git restore`, `git reset --hard` ni `git clean` sobre estos archivos: borran el archivo entero sin guardarlo. No guardes de nuevo sobre un parche después de quitar: quedaría vacío.
 
 - Guardar, y comprobar que revierte limpio: `cd <repo> && git diff --binary -- <archivos> > <parche> && git apply --check -R <parche>` (un archivo nuevo entra en el parche después de `git add -N <archivo>`)
 - Quitar: `cd <repo> && git apply -R <parche>` (y `git reset -q -- <archivo>` por cada archivo nuevo que se agregó con `git add -N`) · Volver a aplicar: `cd <repo> && git apply <parche>`
@@ -106,3 +106,5 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 | Sesión | Modelo | Costo o tokens | Pasos |
 | --- | --- | --- | --- |
+
+**Total de la investigación:** sin sesiones anotadas
