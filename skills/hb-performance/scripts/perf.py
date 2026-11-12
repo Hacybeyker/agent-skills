@@ -1713,6 +1713,101 @@ def frames_trust(folder):
     return level, motive
 
 
+# Opciones de desarrollador que cambian lo que se mide (Settings.Global): "No conservar actividades" destruye cada
+# actividad al salir de ella y las escalas de animación alargan o acortan las transiciones. Sin valor ("null") rige el
+# de fábrica, que es el normal: 0 y 1.
+DEV_SETTINGS = (("always_finish_activities", "No conservar actividades", "0"),
+                ("window_animation_scale", "Escala de animación de ventana", "1"),
+                ("transition_animation_scale", "Escala de transición-animación", "1"),
+                ("animator_duration_scale", "Escala de duración de animador", "1"))
+
+
+# Por la documentación de AOSP, "No conservar actividades" lo aplica el interruptor de Opciones de desarrollador; el
+# sistema puede leer el ajuste escrito con `settings put` recién al reiniciar. Sin dispositivo no se pudo confirmar: el
+# paso lo dice y la corrida de prueba siguiente vuelve a leerlo.
+ALWAYS_FINISH_NOTE = ("si \"No conservar actividades\" estaba activa, desactívala también desde Ajustes > Opciones de "
+                      "desarrollador (o reinicia el dispositivo): el sistema puede no aplicar el cambio hasta entonces")
+DEV_SETTINGS_WHY = ("'No conservar actividades' recrea cada pantalla al volver a ella y las escalas de animación cambian "
+                    "la duración de las transiciones: los tiempos no son los de un usuario")
+
+
+def read_dev_settings(adb):
+    """{ajuste: valor} de las opciones de desarrollador que cambian la medición, en una sola llamada a adb y fuera de
+    toda traza. Un ajuste sin valor queda como "null"; si adb no contesta, {}."""
+    script = "; ".join('echo "%s=$(settings get global %s)"' % (name, name) for name, _, _ in DEV_SETTINGS)
+    try:
+        out = adb.shell(script, timeout=30).stdout or ""
+    except (subprocess.SubprocessError, OSError):
+        return {}
+    return parse_dev_settings(out)
+
+
+def parse_dev_settings(text):
+    known = {name for name, _, _ in DEV_SETTINGS}
+    found = {}
+    for key, value in re.findall(r"^([a-z_]+)=(.*)$", text or "", re.M):
+        if key in known:
+            found[key] = value.strip() or "null"
+    return found
+
+
+def dev_setting_normal(name, value):
+    """True si el ajuste tiene el valor de fábrica (o no tiene valor, que es lo mismo)."""
+    normal = next(default for key, _, default in DEV_SETTINGS if key == name)
+    if value in (None, "", "null"):
+        return True
+    try:
+        return float(value) == float(normal)
+    except ValueError:
+        return False
+
+
+def dev_settings_off(settings):
+    """[(ajuste, rótulo, valor, normal)] de los ajustes que no están en su valor normal."""
+    return [(name, label, settings[name], normal) for name, label, normal in DEV_SETTINGS
+            if name in (settings or {}) and not dev_setting_normal(name, settings[name])]
+
+
+def dev_settings_text(settings):
+    """Los ajustes como texto corto: "No conservar actividades = 1, Escala de animación de ventana = 0.5"."""
+    return ", ".join("%s = %s" % (label, value) for _, label, value, _ in dev_settings_off(settings))
+
+
+def dev_settings_commands(settings, serial, root):
+    """(dejarlos normales, volverlos a como estaban): los dos comandos completos para los ajustes fuera de lo normal."""
+    off = dev_settings_off(settings)
+    target = "adb%s shell" % (" -s %s" % shlex.quote(serial) if serial else "")
+    fix = " && ".join("%s settings put global %s %s" % (target, name, normal) for name, _, _, normal in off)
+    back = " && ".join("%s settings put global %s %s" % (target, name, shlex.quote(value)) for name, _, value, _ in off)
+    where = "cd %s && " % shlex.quote(str(root))
+    return where + fix, where + back
+
+
+def dev_settings_notes(folder):
+    """Para `comparar` y las advertencias: las fases medidas con una opción de desarrollador fuera de lo normal y los
+    ajustes que cambiaron de una fase a otra. Sin el dato (fases de una versión anterior) no dice nada."""
+    phases = read_phases(folder)
+    notes, seen = [], {}
+    for phase in FASES:
+        record = phases.get(phase) if isinstance(phases.get(phase), dict) else None
+        settings = record.get("ajustes") if record else None
+        if not isinstance(settings, dict) or not settings:
+            continue
+        seen[phase] = settings
+        if dev_settings_off(settings):
+            notes.append("%s se midió con opciones de desarrollador fuera de lo normal (%s): 'No conservar actividades' "
+                         "recrea cada pantalla al volver a ella y las escalas de animación cambian la duración de las "
+                         "transiciones" % (phase, dev_settings_text(settings)))
+    changed = [label for name, label, _ in DEV_SETTINGS
+               if len({str(settings.get(name, "null")) if not dev_setting_normal(name, settings.get(name)) else "normal"
+                       for settings in seen.values()}) > 1]
+    if len(seen) > 1 and changed:
+        notes.append("las opciones de desarrollador cambiaron entre fases (%s): %s. Los tiempos de esas fases no se "
+                     "comparan; repite con --rehacer la que no corresponda" % (", ".join(changed), "; ".join(
+                         "%s: %s" % (phase, dev_settings_text(settings) or "normales") for phase, settings in seen.items())))
+    return notes
+
+
 def resumed_activity(adb):
     text = adb.shell("dumpsys activity activities").stdout
     match = re.search(r"(?:topResumedActivity|mResumedActivity|ResumedActivity)[=:]\s*ActivityRecord\{[^}]*?\s(\S+/\S+)", text)
@@ -2422,6 +2517,16 @@ def merge_run_data(previous, data):
     environment = worst_environment([previous.get("entorno"), data.get("entorno")])
     if environment:
         out["entorno"] = environment
+    # Las opciones de desarrollador de la primera tanda que las registró; si otra tanda las trae distintas, lo avisa.
+    settings, later = previous.get("ajustes"), data.get("ajustes")
+    if isinstance(settings, dict) and isinstance(later, dict) and dev_settings_text(settings) != dev_settings_text(later):
+        note = "las opciones de desarrollador cambiaron entre tandas de la fase (antes: %s; ahora: %s)" % (
+            dev_settings_text(settings) or "normales", dev_settings_text(later) or "normales")
+        if note not in warnings:
+            warnings.append(note)
+            out["avisos"] = warnings
+    if isinstance(settings, dict) or isinstance(later, dict):
+        out["ajustes"] = settings if isinstance(settings, dict) else later
     return out
 
 
@@ -2454,7 +2559,7 @@ def write_phase(folder, phase, data, flow=None):
     if pending:
         data["faltan"] = pending
     merged = merge_run_data(previous, data)
-    for key in ("hz_corridas", "avisos", "entorno", "configs"):
+    for key in ("hz_corridas", "avisos", "entorno", "configs", "ajustes"):
         data.pop(key, None)
     data.update(merged)
     data["fecha"] = previous.get("fecha") or data["fecha"]
@@ -2491,7 +2596,7 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("fecha", None)
         complete = set(tracked) == set(others) and all(tracked[name].get("corridas") == len(others[name]) for name in others)
         if complete:  # lo que queda tiene su registro entero: se recalcula sin el flujo que se rehace
-            for key in ("hz_corridas", "avisos", "entorno", "configs"):
+            for key in ("hz_corridas", "avisos", "entorno", "configs", "ajustes"):
                 record.pop(key, None)
             rest = {}
             for data in tracked.values():
@@ -4019,6 +4124,21 @@ def one_line(text):
     return text if len(text) <= NOTE_MAX else text[:NOTE_MAX - 1].rstrip() + "…"
 
 
+def save_dev_restore(folder, settings, command):
+    """Guarda, la primera vez que se ven fuera de lo normal, cómo estaban las opciones de desarrollador y el comando
+    para volverlas a ese estado: queda en "Advertencias para el diagnóstico" aunque después se dejen normales, para
+    devolverlas al terminar. Una vez guardado no se pisa."""
+    try:
+        data = read_notes(folder)
+        if isinstance(data.get("ajustes_originales"), dict):
+            return
+        data["ajustes_originales"] = {"fecha": datetime.date.today().isoformat(), "valores": dev_settings_text(settings),
+                                      "comando": command}
+        save_notes(folder, data)
+    except OSError:
+        pass  # sin carpeta donde guardarlo (un humo sin investigación): el comando ya se imprimió
+
+
 def save_test_warnings(folder, flow, warnings):
     """Guarda los avisos de la corrida de prueba de un flujo; una corrida sin avisos los da por resueltos."""
     data = read_notes(folder)
@@ -4034,7 +4154,8 @@ def save_test_warnings(folder, flow, warnings):
 
 
 def test_warnings(folder, flow):
-    """Los avisos vigentes de la última corrida de prueba del flujo: [{"tipo", "texto", "corto", "donde"}]."""
+    """Los avisos vigentes de la última corrida de prueba del flujo: [{"tipo", "texto", "corto", "donde"}, y
+    "comandos" ([para qué, comando]) si se resuelven en la terminal]."""
     record = (read_notes(folder).get("prueba") or {}).get(flow) or {}
     found = record.get("avisos") if isinstance(record, dict) else None
     return [item for item in found or [] if isinstance(item, dict) and item.get("texto")]
@@ -4105,8 +4226,13 @@ def find_mark_sources(root, mark, patterns=None):
     return out
 
 
-def warning(kind, text, short, where=()):
-    return {"tipo": kind, "texto": one_line(text), "corto": one_line(short), "donde": list(where)[:5]}
+def warning(kind, text, short, where=(), commands=()):
+    """Un aviso de la corrida de prueba. `commands` ([(para qué, comando)]): lo que el usuario corre en su terminal para
+    resolverlo, sin chat (por ejemplo, dejar normales las opciones de desarrollador)."""
+    item = {"tipo": kind, "texto": one_line(text), "corto": one_line(short), "donde": list(where)[:5]}
+    if commands:
+        item["comandos"] = [[what, command] for what, command in commands]
+    return item
 
 
 def at_limit(names):
@@ -4115,11 +4241,23 @@ def at_limit(names):
     return sorted(name for name in names if len(name) >= SECTION_NAME_MAX)
 
 
-def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=False):
+def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=False, settings=None, serial=None):
     """Los avisos de una corrida de prueba válida que conviene corregir antes de medir, como los guarda
-    save_test_warnings: la tasa de refresco, las marcas del plan que no salieron, las métricas que incluyen pasos del
-    recorrido, las marcas repetidas en una carga, la red sin medir y los nombres de sección cortados."""
+    save_test_warnings: las opciones de desarrollador fuera de lo normal, la tasa de refresco, las marcas del plan que
+    no salieron, las métricas que incluyen pasos del recorrido, las marcas repetidas en una carga, la red sin medir y
+    los nombres de sección cortados."""
     out = []
+    if dev_settings_text(settings):
+        fix, back = dev_settings_commands(settings, serial, root)
+        out.append(warning(
+            "ajustes", "opciones de desarrollador fuera de lo normal: %s. %s" % (dev_settings_text(settings), DEV_SETTINGS_WHY),
+            "opciones de desarrollador fuera de lo normal (%s): déjalas normales antes de medir; si quieres medir con "
+            "ellas a propósito, es otra investigación (ficha.md · Opciones de desarrollador)" % dev_settings_text(settings),
+            commands=[("deja normales las opciones de desarrollador (sin chat)%s" % (
+                "; %s" % ALWAYS_FINISH_NOTE if not dev_setting_normal("always_finish_activities",
+                                                                      settings.get("always_finish_activities")) else ""),
+                       fix),
+                      ("al terminar la investigación, si quieres, vuélvelas a como estaban", back)]))
     rate = hz_warning(plan_rate, [info.get("hz_traza")])
     if rate:
         out.append(warning("hz", rate, "la tasa de refresco del plan no es la que midió la traza: corrige 'hz' en plan.json"))
@@ -4159,25 +4297,37 @@ def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=Fals
 
 def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, capture_before, you_run):
     """Los pasos de `siguiente` mientras la última corrida de prueba tenga avisos: no ofrece medir antes como paso
-    normal. Primero los avisos, uno por línea; después el chat que los corrige (sin compilar, instalar ni capturar), los
-    comandos del usuario (instalar y repetir la prueba) y, como opción, medir igual."""
+    normal. Primero los avisos, uno por línea; después lo que corre el usuario en su terminal para los avisos que se
+    resuelven sin código (las opciones de desarrollador), el chat que corrige el resto (sin compilar, instalar ni
+    capturar), instalar y repetir la prueba y, como opción, medir igual."""
+    in_code = [item for item in pending if not item.get("comandos")]
     listed = []
-    for index, item in enumerate(pending, start=1):
+    for index, item in enumerate(in_code, start=1):
         where = " (%s)" % ", ".join(item.get("donde") or []) if item.get("donde") else ""
         listed.append("%d) %s%s" % (index, (item.get("corto") or item["texto"]).rstrip("."), where))
-    prompt = ("%s: corrige los avisos de la corrida de prueba del flujo '%s', sin compilar, instalar ni capturar (eso lo "
-              "hago yo en mi terminal): %s." % (resume, flow, "; ".join(listed)))
-    return [
-        {"tipo": "avisos", "titulo": "Corrige antes de medir",
-         "lineas": [item["texto"] + (" · %s" % ", ".join(item["donde"]) if item.get("donde") else "") for item in pending]},
-        chat(prompt, "intermedio", "medio", "corrige en el código o en plan.json lo que dicen los avisos; no compila, no "
-             "instala y no captura", plan),
-        terminal(install_command(plan, root), "compila e instala el build de profiling con las correcciones",
-                 "espera; si solo cambió plan.json, salta este paso"),
+    lines = []
+    for item in pending:
+        lines.append(item["texto"] + (" · %s" % ", ".join(item["donde"]) if item.get("donde") else ""))
+        commands = [pair for pair in item.get("comandos") or [] if isinstance(pair, list) and len(pair) == 2]
+        lines += ["%s: %s" % (what[0].upper() + what[1:], command) for what, command in commands[1:]]
+    steps = [{"tipo": "avisos", "titulo": "Corrige antes de medir", "lineas": lines}]
+    for item in pending:
+        commands = [pair for pair in item.get("comandos") or [] if isinstance(pair, list) and len(pair) == 2]
+        if commands:
+            steps.append(terminal(commands[0][1], commands[0][0], "córrelo en la terminal donde mides; no cambia el código "
+                                  "ni la app"))
+    if in_code:
+        prompt = ("%s: corrige los avisos de la corrida de prueba del flujo '%s', sin compilar, instalar ni capturar (eso "
+                  "lo hago yo en mi terminal): %s." % (resume, flow, "; ".join(listed)))
+        steps += [chat(prompt, "intermedio", "medio", "corrige en el código o en plan.json lo que dicen los avisos; no "
+                       "compila, no instala y no captura", plan),
+                  terminal(install_command(plan, root), "compila e instala el build de profiling con las correcciones",
+                           "espera; si solo cambió plan.json, salta este paso")]
+    return steps + [
         terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente pasa "
                  "a ser medir antes", "lo mismo que en una corrida, una sola vez"),
         terminal(capture_before, "OPCIÓN, solo si decides medir igual con estos avisos: lo que se mida así puede salir sin "
-                 "red o midiendo el recorrido, y habría que repetirlo con --rehacer", you_run)]
+                 "red, midiendo el recorrido o con otras condiciones, y habría que repetirlo con --rehacer", you_run)]
 
 
 # ── advertencias para el diagnóstico (estado.md) ─────────────────────────────
@@ -4266,6 +4416,12 @@ def warnings_lines(folder, plan):
         bucket = (notes.get(kind) or {}).get(phase) if isinstance(notes.get(kind), dict) else None
         return sorted(bucket.items()) if isinstance(bucket, dict) else []
 
+    original = notes.get("ajustes_originales") if isinstance(notes.get("ajustes_originales"), dict) else {}
+    if original.get("comando"):
+        lines.append(" ".join(("Opciones de desarrollador: el %s estaban fuera de lo normal (%s). Para volverlas a como "
+                              "estaban al terminar la investigación: %s" % (original.get("fecha", "—"),
+                                                                              original.get("valores", "—"),
+                                                                              original["comando"])).split()))
     tests = notes.get("prueba") if isinstance(notes.get("prueba"), dict) else {}
     for flow in sorted(tests):
         for item in test_warnings(folder, flow):
@@ -4573,6 +4729,16 @@ def cmd_capturar(args, plan=None):
                         ("y repite la medición", same_command())])
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
+    # Antes de la traza y de compilar: las opciones de desarrollador que cambian lo que se mide quedan en fases.json.
+    dev_settings = read_dev_settings(adb)
+    if dev_settings_text(dev_settings):
+        fix, back = dev_settings_commands(dev_settings, serial, project_root(folder).resolve())
+        print("⚠ Opciones de desarrollador fuera de lo normal: %s. %s" % (dev_settings_text(dev_settings), DEV_SETTINGS_WHY))
+        print("    Dejarlas normales:            %s" % fix)
+        print("    Volverlas a como estaban:     %s" % back)
+        if not dev_setting_normal("always_finish_activities", dev_settings.get("always_finish_activities")):
+            print("    Además, %s." % ALWAYS_FINISH_NOTE)
+        save_dev_restore(folder, dev_settings, back)
     commit, dirty = git_info()
     build_warnings = []
     if not args.prueba:
@@ -4730,6 +4896,8 @@ def cmd_capturar(args, plan=None):
             print("⚠ " + rate_warning)
         if environment["emulador"] or environment["software"]:
             record["entorno"] = environment
+        if dev_settings:
+            record["ajustes"] = dev_settings
         record.update(build)
         if partial:  # la tanda se cortó: `siguiente` ofrece completar la fase antes de darla por medida
             record["faltan"] = {flow_name: target - valid}
@@ -4940,7 +5108,7 @@ def cmd_capturar(args, plan=None):
                     note = update_agents_state(root, http=state) if state else ""
                     if note:
                         print(note)
-                pending = test_run_warnings(root, hz, info, gap, unwired)
+                pending = test_run_warnings(root, hz, info, gap, unwired, settings=dev_settings, serial=serial)
                 save_test_warnings(folder, flow_name, pending)
                 if pending:
                     print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` los lista con el texto para "
@@ -5912,6 +6080,7 @@ def builds_table(folder):
                      "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
                                                                       after.get("compilacion") or "sin registrar"))
     notes += phase_warnings(folder)
+    notes += dev_settings_notes(folder)
     level, motive = frames_trust(folder)
     if level != "ok":
         notes.append("las fases se midieron en un entorno con frames %s (%s): %s" % (

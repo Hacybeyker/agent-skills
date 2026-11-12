@@ -50,8 +50,9 @@ MS = 1_000_000
 
 
 def without_new(record):
-    """Un registro de fases.json sin los campos opcionales que agrega 0.9.0 (la versión de la skill y la configuración)."""
-    return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable")}
+    """Un registro de fases.json sin los campos opcionales que agregan 0.9.0 y 0.10.0 (la versión de la skill, la
+    configuración, si el build era depurable y las opciones de desarrollador)."""
+    return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes")}
 
 
 class PerfBase(unittest.TestCase):
@@ -481,6 +482,12 @@ elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
 elif cmd.startswith("uiautomator dump") and os.environ.get("FAKE_PULL_FALLA"):
     sys.stderr.write("ERROR: could not get idle state.\n")  # uiautomator falla así, con código 0
+elif cmd.startswith('echo "always_finish_activities='):
+    # las opciones de desarrollador que cambian la medición: FAKE_AJUSTES="always_finish_activities=1,window_animation_scale=0.5"
+    values = dict(pair.split("=", 1) for pair in filter(None, os.environ.get("FAKE_AJUSTES", "").split(",")))
+    for name in ("always_finish_activities", "window_animation_scale", "transition_animation_scale",
+                 "animator_duration_scale"):
+        print("%s=%s" % (name, values.get(name, "null")))
 elif cmd.startswith("settings get system min_refresh_rate"):
     print(os.environ.get("FAKE_MIN_HZ", "null"))
 elif cmd.startswith("settings get system peak_refresh_rate"):
@@ -8004,3 +8011,128 @@ class SingleFolderTest(DeviceBase):
         self.assertFalse((self.dir / "reports").exists())
         self.assertIn("medir abrir la lista de clientes", out)  # el pedido del setup, en la misma carpeta
         self.assertIn("--carpeta ia/perf/investigaciones/arranque-frio/%s" % today, out)
+
+
+class DevSettingsTest(DeviceBase):
+    """T1: las opciones de desarrollador que cambian la medición ("No conservar actividades" y las escalas de
+    animación) se leen fuera de la traza, se guardan en fases.json y se avisan."""
+
+    OFF = "always_finish_activities=1,window_animation_scale=0.5"
+
+    def capture(self, *extra):
+        self.tp_outputs(GOOD)
+        if (self.dir / "tp.count").exists():
+            (self.dir / "tp.count").unlink()
+        return self.ok("capturar", "--plan", self.plan, *extra)
+
+    def test_lee_los_ajustes_en_una_llamada_y_reconoce_lo_normal(self):
+        text = ("always_finish_activities=null\nwindow_animation_scale=1.0\ntransition_animation_scale=1\n"
+                "animator_duration_scale=0.5\nruido=1\n")
+        found = perf.parse_dev_settings(text)
+        self.assertEqual(found, {"always_finish_activities": "null", "window_animation_scale": "1.0",
+                                 "transition_animation_scale": "1", "animator_duration_scale": "0.5"})
+        self.assertEqual(perf.dev_settings_text(found), "Escala de duración de animador = 0.5")
+        self.assertTrue(perf.dev_setting_normal("always_finish_activities", "0"))
+        self.assertFalse(perf.dev_setting_normal("always_finish_activities", "1"))
+        self.assertFalse(perf.dev_setting_normal("window_animation_scale", "raro"))
+        fix, back = perf.dev_settings_commands({"always_finish_activities": "1", "window_animation_scale": "0.5"},
+                                               "emulator-5554", Path("/proyecto con espacios"))
+        self.assertEqual(fix, "cd '/proyecto con espacios' && adb -s emulator-5554 shell settings put global "
+                              "always_finish_activities 0 && adb -s emulator-5554 shell settings put global "
+                              "window_animation_scale 1")
+        self.assertIn("settings put global always_finish_activities 1 && ", back)
+        self.assertIn("settings put global window_animation_scale 0.5", back)
+
+    def test_la_prueba_avisa_frena_la_medicion_y_da_los_dos_comandos(self):
+        self.env["FAKE_AJUSTES"] = self.OFF
+        out = self.capture("--prueba")
+        self.assertIn("⚠ Opciones de desarrollador fuera de lo normal: No conservar actividades = 1, Escala de animación "
+                      "de ventana = 0.5.", out)
+        self.assertIn("Dejarlas normales:", out)
+        self.assertIn("Siguiente · corrige antes de medir (avisos de la corrida de prueba)", out)
+        saved = perf.test_warnings(self.plan.parent, "home")
+        self.assertEqual([item["tipo"] for item in saved], ["ajustes"])
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("Terminal (sin chat) · deja normales las opciones de desarrollador", out)
+        self.assertIn("settings put global always_finish_activities 0", out)
+        self.assertIn("vuélvelas a como estaban: cd ", out)
+        self.assertIn("settings put global always_finish_activities 1", out)
+        self.assertNotIn("Chat nuevo", out)  # solo hay que cambiar el dispositivo: no hace falta un chat
+        self.assertNotIn("compila e instala", out)
+        self.assertIn("OPCIÓN, solo si decides medir igual", out)
+        self.assertIn("desactívala también desde Ajustes > Opciones de desarrollador", out)
+        # el comando para volverlas queda en estado.md aunque después se dejen normales
+        self.env["FAKE_AJUSTES"] = ""
+        self.capture("--prueba")
+        state = (self.plan.parent / "estado.md")
+        write(state, "# x\n\n## Siguiente paso\n\n- x\n\n## Hallazgos\n\n")
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        restore = next(line for line in state.read_text(encoding="utf-8").splitlines() if "Opciones de desarrollador: el " in line)
+        self.assertIn("Para volverlas a como estaban al terminar la investigación: cd ", restore)
+        self.assertIn("settings put global always_finish_activities 1", restore)
+        self.env["FAKE_AJUSTES"] = self.OFF
+        # el ajuste lo lee antes de iniciar la traza
+        log = [json.loads(line) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()]
+        commands = [" ".join(a[3:]) if a[:1] == ["-s"] else " ".join(a[1:]) for a in log]
+        read = next(i for i, c in enumerate(commands) if c.startswith('echo "always_finish_activities='))
+        trace = next(i for i, c in enumerate(commands) if c.startswith("perfetto"))
+        self.assertLess(read, trace)
+        # con los ajustes normales, la prueba sale sin avisos y se puede medir
+        self.env["FAKE_AJUSTES"] = ""
+        out = self.capture("--prueba")
+        self.assertNotIn("Opciones de desarrollador", out)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home"), [])
+
+    def test_se_guardan_por_fase_y_comparar_y_las_advertencias_avisan_si_cambian(self):
+        self.capture("--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.env["FAKE_AJUSTES"] = self.OFF
+        out = self.capture("--fase", "control", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.assertIn("⚠ Opciones de desarrollador fuera de lo normal", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["ajustes"]["always_finish_activities"], "null")
+        self.assertEqual(phases["control"]["ajustes"]["always_finish_activities"], "1")
+        notes = perf.dev_settings_notes(self.plan.parent)
+        self.assertTrue(any(note.startswith("control se midió con opciones de desarrollador fuera de lo normal")
+                            for note in notes), notes)
+        self.assertTrue(any("cambiaron entre fases (No conservar actividades, Escala de animación de ventana)" in note
+                            for note in notes), notes)
+        state = (self.plan.parent / "estado.md")
+        write(state, "# x\n\n## Siguiente paso\n\n- x\n\n## Hallazgos\n\n")
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        text = state.read_text(encoding="utf-8")
+        self.assertIn("control se midió con opciones de desarrollador fuera de lo normal", text)
+        # otra tanda de la misma fase con otros ajustes queda como aviso de la fase
+        self.env["FAKE_AJUSTES"] = ""
+        self.capture("--fase", "control", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertTrue(any("cambiaron entre tandas" in note for note in phases["control"]["avisos"]))
+        out = self.ok("comparar", self.plan.parent / "metricas.csv")
+        self.assertIn("cambiaron entre tandas", out)
+
+    def test_sin_el_dato_una_investigacion_anterior_no_avisa(self):
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {"corridas": 5}, "despues": {"corridas": 5}}))
+        self.assertEqual(perf.dev_settings_notes(self.plan.parent), [])
+        self.assertEqual(perf.parse_dev_settings("error: closed\n"), {})  # adb no contestó: no hay dato, no avisa
+        self.assertEqual(perf.dev_settings_text({}), "")
+
+    def test_comparar_avisa_si_cambiaron_entre_fases(self):
+        write(self.plan.parent / "fases.json", json.dumps({
+            "antes": {"corridas": 1, "ajustes": {"always_finish_activities": "0", "window_animation_scale": "1"}},
+            "despues": {"corridas": 1, "ajustes": {"always_finish_activities": "1", "window_animation_scale": "1"}}}))
+        write(self.plan.parent / "metricas.csv", HEADER + rows("antes", "home", "x_ms", [10]) + rows("despues", "home", "x_ms", [9]))
+        out = self.ok("comparar", self.plan.parent / "metricas.csv")
+        self.assertIn("las opciones de desarrollador cambiaron entre fases (No conservar actividades): antes: normales; "
+                      "despues: No conservar actividades = 1", out)
+
+    def test_con_avisos_de_codigo_y_de_ajustes_el_chat_solo_lleva_los_de_codigo(self):
+        pending = [perf.warning("marca", "la marca 'MARK x' no salió", "la marca 'MARK x' no salió"),
+                   perf.test_run_warnings(self.dir, None, {}, "", [], settings={"window_animation_scale": "0.5"},
+                                          serial="emulator-5554")[0]]
+        steps = perf.test_warning_steps(self.plan.parent, self.dir, {"instalar": "./gradlew installX"}, "home", pending,
+                                        "Sigue", "cd . && capturar --prueba", "cd . && capturar --fase antes", "nada")
+        kinds = [step["tipo"] for step in steps]
+        self.assertEqual(kinds, ["avisos", "terminal", "chat", "terminal", "terminal", "terminal"])
+        self.assertIn("window_animation_scale 1", steps[1]["texto"])
+        self.assertIn("1) la marca 'MARK x' no salió", steps[2]["texto"])
+        self.assertNotIn("animación", steps[2]["texto"])
+        self.assertIn("installX", steps[3]["texto"])
