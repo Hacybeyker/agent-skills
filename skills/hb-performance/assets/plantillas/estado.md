@@ -29,12 +29,14 @@
 
 Marcas o código puestos solo para esta investigación (por ejemplo, una marca con `android.os.Trace` en un módulo que no ve `PerfHooks`) y las ediciones de cableado en código de `main` que no se van a commitear (el gancho de red donde se arma el cliente HTTP, por ejemplo). Se revierten antes de proponer un commit y, a más tardar, en el cierre.
 
-| Archivo | Repo o módulo | Qué es | ¿Revertido? |
-| --- | --- | --- | --- |
+| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |
+| --- | --- | --- | --- | --- |
 
-Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera del repo**, uno por repo (`<parche>` es una ruta en una carpeta que ese repo no versiona):
+"Altera": las métricas que el cambio afecta si modifica el comportamiento de la app mientras se mide (una espera, una condición, otro orden de llamadas); `—` si solo emite una marca. `perf.py` copia esas filas a "Advertencias para el diagnóstico".
 
-- Guardar, y comprobar que revierte limpio: `cd <repo> && git diff --binary -- <archivos> > <parche> && git apply --check -R <parche>` (un archivo nuevo entra en el parche después de `git add -N <archivo>`)
+Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera del repo**, uno por repo (`<parche>` es una ruta en la carpeta de parches de `AGENTS.md` o, si no hay, en una carpeta que ese repo no versiona). **Siempre primero el parche y después quitar; nunca** `git checkout`, `git restore`, `git reset --hard` ni `git clean` sobre estos archivos: borran el archivo entero sin guardarlo. No guardes de nuevo sobre un parche después de quitar: quedaría vacío.
+
+- Guardar, y comprobar que revierte limpio: `cd <repo> && ( set -C && git diff --binary -- <archivos> > <parche> ) && git apply --check -R <parche>` (`set -C`: si `<parche>` ya existe, falla y no lo pisa; usa otro nombre, con fecha y hora. Un archivo nuevo entra en el parche después de `git add -N <archivo>`)
 - Quitar: `cd <repo> && git apply -R <parche>` (y `git reset -q -- <archivo>` por cada archivo nuevo que se agregó con `git add -N`) · Volver a aplicar: `cd <repo> && git apply <parche>`
 
 ## Mapa del alcance
@@ -50,6 +52,14 @@ Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera
 <!-- perf:metricas -->
 (lo escribe perf.py capturar)
 <!-- /perf:metricas -->
+
+## Advertencias para el diagnóstico
+
+Lo que `perf.py` observó en los comandos de la terminal y que la sesión 2 lee antes que las métricas. Si una mejora toca algo que una advertencia menciona, la mejora lo dice. Lo escribe y lo mantiene `perf.py`: no lo edites.
+
+<!-- perf:advertencias -->
+(lo escribe perf.py: avisos de la corrida de prueba, corridas inválidas, avisos de las capturas, lo no medido, el ruido entre antes y control y los cambios temporales que alteran la app)
+<!-- /perf:advertencias -->
 
 ## Hallazgos
 
@@ -88,6 +98,10 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 <3 a 5 líneas. Para el reporte inicial (sesión 2): qué se midió, qué se encontró y qué se propone, o por qué no hay mejoras. Para el final (sesión 4): estado inicial → estado final con las métricas principales, la causa en una frase y qué depende del backend>
 
+## Resumen para gerencia
+
+<3 a 5 líneas para un lector no técnico, sin nombres de métricas ni términos de la traza. Sesión 2: qué notaba el usuario, qué se encontró y qué se propone. Sesión 4: qué cambió para el usuario, en segundos o en lo que se percibe, y qué queda pendiente>
+
 ## Pendientes
 
 - <no son mejoras, sino lo que la investigación no pudo cerrar; uno por línea: H3 · síntoma y qué tan estable es (en cuántas corridas, con qué métrica) · qué falta para cerrarlo · cuánto cuesta (una corrida, una captura con muestreo, una sesión) · acción sugerida; si lo que falta es una captura que se puede correr ya, agrégala como Captura pendiente, con su comando entre acentos graves>
@@ -96,3 +110,5 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 | Sesión | Modelo | Costo o tokens | Pasos |
 | --- | --- | --- | --- |
+
+**Total de la investigación:** sin sesiones anotadas

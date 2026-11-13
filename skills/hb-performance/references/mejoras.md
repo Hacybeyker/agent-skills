@@ -17,7 +17,10 @@ Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazg
   - una vista que se recreaba: el adapter se configura una sola vez por vista;
   - una migración de datos: un test que parte del formato viejo y termina con los datos intactos.
 - **Tests instrumentados solo en un emulador:** `connectedAndroidTest` desinstala la app del dispositivo y se pierden los datos de prueba.
-- **DoD con la salida acotada:** los comandos de `## DoD`, con Gradle en `-q`, primero los tests del módulo afectado y el log completo en `<carpeta>/logs/`. Al chat llegan solo el conteo de tests y los fallos:
+- **Reglas del proyecto durante la investigación:** si la sección de rendimiento de `AGENTS.md` tiene una línea sobre cómo conviven las reglas del proyecto con hb-performance (por ejemplo, "durante una investigación de hb-performance, el reporte de cada cambio es el de la skill"), síguela: la aprobó el usuario en el setup para no duplicar trabajo en cada mejora. Sin esa línea, las reglas del proyecto valen tal cual.
+- **Si `AGENTS.md` no tiene `## DoD`**, no adivines qué validar: `perf.py siguiente` lo avisa e imprime una plantilla mínima (los tests unitarios del módulo que cambie y la compilación de la variante medida). Propónsela al usuario y, con ella aprobada, corre esos comandos.
+- **El DoD son los comandos de `## DoD` de `AGENTS.md`, tal cual y todos:** la suite completa del módulo afectado (no solo la clase de test nueva) y lo demás que pida (la compilación de la variante medida, el formateador). Correr solo el test nuevo no es el DoD: no dice si la mejora rompió otro test del módulo. Si un comando no se puede correr (falta un dispositivo, tarda más que el presupuesto de pasos), dilo en el resumen; no lo des por corrido.
+- **DoD con la salida acotada:** con Gradle en `-q`, primero los tests del módulo afectado y el log completo en `<carpeta>/logs/`. Al chat llegan solo el conteo de tests y los fallos:
   ```bash
   cd <raíz-del-proyecto> && ( ./gradlew -q :<modulo>:testDebugUnitTest > <carpeta>/logs/tests-m1.log 2>&1; code=$?; grep -E "tests completed|FAILED|BUILD" <carpeta>/logs/tests-m1.log | tail -20; echo "exit $code"; exit $code )
   ```
@@ -28,11 +31,11 @@ Aplica **una** mejora aprobada, en su propio chat. Lee de `estado.md` el hallazg
 
 En `estado.md` y `plan.json`:
 
-- **Mejoras aplicadas:** archivos, el test que la fija, el resultado del DoD y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`).
+- **Mejoras aplicadas:** archivos, el test que la fija, **los comandos del DoD que corriste y el resultado de cada uno** (por ejemplo `:lista:testDebugUnitTest`: 212 tests, 0 fallos; `:app:assembleProfiling`: ok) y el commit propuesto con `hb-commit` (por ejemplo `perf(home): evitar la doble carga del historial`).
 - **Pendientes** actualizados.
 - **`instalar` en `plan.json`:** si falta, agrégalo con el comando que compila e instala el build de profiling (el de `AGENTS.md`, por ejemplo `./gradlew :app:installProfiling`), para que la medición después no dependa de recordarlo. Si el plan tiene `serial`, `siguiente` le antepone `ANDROID_SERIAL=<serial>` solo.
-- **Al final**, marca la mejora aplicada; el comando imprime el siguiente paso (la siguiente mejora aprobada en un chat nuevo, o instalar y medir después) y lo deja en `estado.md`:
+- **Al final**, marca la mejora aplicada **con los archivos que cambió** (solo los de la mejora y su test: ni los cambios temporales ni los de otra mejora). `perf.py` guarda su diff contra el último commit en `<carpeta>/cambios/<id>.diff` (también los archivos nuevos, sin tocar el índice) y el reporte final dev lo muestra en "Cambios de código": antes y después, por qué y qué mejoró. Si cambió archivos de otro repo (un módulo incluido desde otra carpeta), repite el comando con `--repo <ruta-del-otro-repo>` y sus archivos. El comando imprime el siguiente paso (la siguiente mejora aprobada en un chat nuevo, o instalar y medir después) y lo deja en `estado.md`:
   ```bash
-  cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --aplicada <id>
+  cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py decidir --carpeta <carpeta> --aplicada <id> --archivos <ruta/Archivo.kt>,<ruta/ArchivoTest.kt>
   ```
-  Pégalos tal cual; si hubo migración de datos, dilo en una línea antes. Detente, sin pedir el costo ni que vuelva a este chat.
+  Pégalos tal cual; antes, en tu resumen final, nombra los comandos del DoD que corriste y su resultado (y cuál no corriste, si hubo alguno), y si hubo migración de datos, dilo en una línea. Detente, sin pedir el costo ni que vuelva a este chat.

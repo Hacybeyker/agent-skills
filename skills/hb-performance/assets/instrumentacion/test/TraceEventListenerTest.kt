@@ -85,6 +85,31 @@ class TraceEventListenerTest {
         assertEquals("/api/v2/lotes/a1b2c3", HttpSectionName.sanitize("/api/v2/lotes/a1b2c3"))
     }
 
+    @Test
+    fun aLongPathIsShortenedFromTheLeftAndFitsInASectionName() {
+        val gateway = "/gateway/" + "segmento-largo/".repeat(12)
+        fun name(path: String) = HttpSectionName.endpoint(Request.Builder().url("https://api.test$path").build())
+        val orders = name(gateway + "clientes/42/pedidos?page=1")
+        assertTrue(orders, "QUEUE $orders".length < MAX_SECTION_NAME)
+        assertTrue(orders, orders.matches(Regex("GET ~[0-9a-f]{4}/.*clientes/\\{id}/pedidos #[0-9a-f]{4}")))
+        // the same beginning and another end: still two endpoints
+        assertNotEquals(orders, name(gateway + "clientes/42/facturas?page=1"))
+        // the same end behind another prefix: the hash of what was removed keeps them apart
+        assertNotEquals(orders, name("/otro" + gateway + "clientes/42/pedidos?page=1"))
+        // the same endpoint with another id keeps its name
+        assertEquals(orders, name(gateway + "clientes/43/pedidos?page=1"))
+    }
+
+    @Test
+    fun aPathThatFitsKeepsItsNameAndAHugeSegmentIsStillCapped() {
+        assertEquals("GET /items/{id} #0000", HttpSectionName.shorten("GET", "/items/{id}", " #0000"))
+        val exact = "/" + "a".repeat(HttpSectionName.MAX_ENDPOINT_NAME - "GET ".length - 1)
+        assertEquals("GET $exact", HttpSectionName.shorten("GET", exact, ""))
+        val huge = HttpSectionName.shorten("GET", "/" + "b".repeat(300), " #1a2b")
+        assertEquals(HttpSectionName.MAX_ENDPOINT_NAME, huge.length)
+        assertTrue(huge, huge.startsWith("GET ~") && huge.endsWith("b #1a2b"))
+    }
+
     private class RecordingTracer : SectionTracer {
         val events = mutableListOf<String>()
 

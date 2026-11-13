@@ -7,8 +7,11 @@ import importlib.util
 import io
 import json
 import os
+import pty
 import re
+import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -47,8 +50,9 @@ MS = 1_000_000
 
 
 def without_new(record):
-    """Un registro de fases.json sin los campos opcionales que agrega 0.9.0 (la versión de la skill y la configuración)."""
-    return {key: value for key, value in record.items() if key not in ("skill", "configs")}
+    """Un registro de fases.json sin los campos opcionales que agregan 0.9.0 y 0.10.0 (la versión de la skill, la
+    configuración, si el build era depurable y las opciones de desarrollador)."""
+    return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes")}
 
 
 class PerfBase(unittest.TestCase):
@@ -61,9 +65,13 @@ class PerfBase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def perf(self, *args, stdin=None):
+    def perf(self, *args, stdin=None, interruptible=False):
+        # interruptible: el proceso recibe SIGINT con su manejo por defecto aunque quien corre los tests lo ignore (un
+        # trabajo en segundo plano, algunos CI); sin eso, Python no levanta KeyboardInterrupt.
+        default_sigint = (lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)) if interruptible else None
         return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(self.dir),
-                              env=self.env, input=stdin, capture_output=True, text=True, encoding="utf-8")
+                              env=self.env, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                              preexec_fn=default_sigint)
 
     def ok(self, *args, stdin=None):
         result = self.perf(*args, stdin=stdin)
@@ -385,8 +393,14 @@ with open(os.environ["FAKE_LOG"], "a") as f:
 if args[:1] == ["-s"]:
     args = args[2:]
 if args == ["devices"]:
+    if os.environ.get("FAKE_LISTA"):  # la lista tal cual, para estados que no son "device" (unauthorized, offline)
+        print("List of devices attached\n" + os.environ["FAKE_LISTA"])
+        sys.exit(0)
     print("List of devices attached\n" + "".join("%s\tdevice\n" % d for d in os.environ.get("FAKE_DEVICES", "emulator-5554").split(",")))
     sys.exit(0)
+if os.environ.get("FAKE_DESCONECTA") and os.environ["FAKE_DESCONECTA"] in " ".join(args):
+    sys.stderr.write("adb: device 'emulator-5554' not found\n")  # el cable se soltó a mitad del comando
+    sys.exit(1)
 if args[0] == "pull":
     if os.environ.get("FAKE_PULL_FALLA"):
         sys.stderr.write("adb: error: failed to stat remote object '%s': No such file or directory\n" % args[1])
@@ -408,8 +422,11 @@ elif cmd.startswith("dumpsys input_method"):
     print("  mShowRequested=true mShowExplicitlyRequested=false mShowForced=false mInputShown="
           + os.environ.get("FAKE_TECLADO", "false"))
 elif cmd.startswith("dumpsys package"):
-    print("    versionCode=7 minSdk=26 targetSdk=36\n    versionName=1.0\n    flags=[ HAS_CODE ALLOW_BACKUP ]\n"
+    print("    versionCode=7 minSdk=26 targetSdk=36\n    versionName=1.0\n    flags=[ "
+          + os.environ.get("FAKE_FLAGS", "HAS_CODE ALLOW_BACKUP") + " ]\n"
           "    lastUpdateTime=" + os.environ.get("FAKE_UPDATED", "2026-11-05 10:00:00"))
+elif cmd.startswith("dumpsys window"):
+    print("  mCurrentFocus=Window{{1 u0 %s}}" % os.environ.get("FAKE_FOCO", "com.ejemplo.app/com.ejemplo.app.MainActivity"))
 elif cmd.startswith("dumpsys thermalservice"):
     print("Thermal Status: " + os.environ.get("FAKE_THERMAL", "0"))
 elif cmd.startswith("dumpsys battery"):
@@ -465,6 +482,12 @@ elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
 elif cmd.startswith("uiautomator dump") and os.environ.get("FAKE_PULL_FALLA"):
     sys.stderr.write("ERROR: could not get idle state.\n")  # uiautomator falla así, con código 0
+elif cmd.startswith('echo "always_finish_activities='):
+    # las opciones de desarrollador que cambian la medición: FAKE_AJUSTES="always_finish_activities=1,window_animation_scale=0.5"
+    values = dict(pair.split("=", 1) for pair in filter(None, os.environ.get("FAKE_AJUSTES", "").split(",")))
+    for name in ("always_finish_activities", "window_animation_scale", "transition_animation_scale",
+                 "animator_duration_scale"):
+        print("%s=%s" % (name, values.get(name, "null")))
 elif cmd.startswith("settings get system min_refresh_rate"):
     print(os.environ.get("FAKE_MIN_HZ", "null"))
 elif cmd.startswith("settings get system peak_refresh_rate"):
@@ -530,7 +553,9 @@ class DeviceBase(PerfBase):
         self.env.update({"PATH": "%s%s%s" % (bin_dir, os.pathsep, os.environ.get("PATH", "")),
                          "FAKE_LOG": str(self.dir / "adb.log"), "FAKE_TP_OUT": str(self.dir / "tp.txt"),
                          "FAKE_TP_COUNTER": str(self.dir / "tp.count"), "FAKE_TP_SQL": str(self.dir / "tp.sql"),
-                         "HB_PERF_ESPERA": "0"})
+                         "HB_PERF_ESPERA": "0",
+                         # sin terminal interactiva, como en CI: quien corre los tests desde una terminal no la presta
+                         "HB_PERF_TTY": str(self.dir / "sin-terminal")})
         self.env.pop("TRACE_PROCESSOR", None)
         self.env.pop("ADB", None)
         self.env.pop("ANDROID_SERIAL", None)
@@ -1122,14 +1147,14 @@ class ReportTest(PerfBase):
               rows("despues", "f", "jank_app_pct", [3] * 5, "%"))
         out = self.ok("reporte", "--carpeta", folder, "--html")
         self.assertIn("no_existe", out)
-        md = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        md = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Métricas principales", md)
         self.assertIn("| Depende de | Antes | Después | Cambio | Veredicto | Qué significa |", md)
-        self.assertIn("| solo la app | 9 % | 3 % | -6 % (-66.67 %) | mejora | funcionó", md)
+        self.assertIn("| solo la app | 9 % | 3 % | −6 % (−67 %) | mejora | Mejora clara · funcionó", md)
         self.assertIn("## Cómo leer este reporte", md)
         self.assertIn("El jank bajó **mucho**.", md)
         self.assertFalse((folder / "reporte.md").exists())
-        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
+        page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn("<title>Rendimiento · &lt;Home&gt; · 2026-01-02</title>", page)
         self.assertIn("Doble &lt;carga&gt;", page)
         self.assertIn("<strong>mucho</strong>", page)
@@ -1149,11 +1174,11 @@ class ReportTest(PerfBase):
         write(folder / "fases.json", json.dumps({"antes": {"entorno": {"emulador": True, "software": True, "frames": "no"}},
                                                   "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
         self.ok("reporte", "--carpeta", folder, "--html")
-        md = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        md = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("| no confiable | no confiable: los frames se midieron con render por software", md)
         self.assertNotIn("| mejora |", md)
         self.assertIn("— sin veredicto", md)  # la mejora no se declara lograda con frames que no valen
-        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
+        page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn('class="verdict v-same">no confiable', page)
 
     def test_reporte_inicial_con_plan_y_final_con_propuesto_contra_logrado(self):
@@ -1169,24 +1194,24 @@ class ReportTest(PerfBase):
                                                              "prioridad": "alta", "estado": "aprobada"}]}))
         write(folder / "metricas.csv", HEADER + rows("antes", "a", "ttid_ms", [400, 410, 405, 395, 402]))
         self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
-        initial = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        initial = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Plan de mejoras", initial)
         self.assertIn("> Lo que se propone cambiar", initial)
         self.assertIn("| M1 | Clave raw | H0 | ttid_ms | 402 ms | -20 % | alta |", initial)
         self.assertIn("| Depende de | Mediana | P90 | Mín – máx | Corridas | Ruido de medición | Avisos |", initial)
-        self.assertIn("| a | ttid_ms | solo la app | 402 ms | 410 ms | 395 – 410 | 5 | — | — |", initial)
+        self.assertIn("| a | ttid_ms | solo la app | 402 ms | 410 ms | 395 ms – 410 ms | 5 | — | — |", initial)
         self.assertIn("## Cómo leer este reporte", initial)
         self.assertIn("Arranque en frío", initial)
         self.assertNotIn("secreto", initial)
         self.assertNotIn("Set fijo", initial)
         self.assertIn("| M1 | Clave raw |", (folder / "estado.md").read_text(encoding="utf-8"))
-        self.assertTrue((folder / "reporte-inicial.html").is_file())
+        self.assertTrue((folder / "reporte-inicial-dev.html").is_file())
         write(folder / "metricas.csv", HEADER + rows("antes", "a", "ttid_ms", [400, 410, 405, 395, 402])
               + rows("despues", "a", "ttid_ms", [300, 310, 305, 295, 302]))
         self.ok("reporte", "--carpeta", folder)
-        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Mejoras: esperado contra logrado", final)
-        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | -24.88 % | mejora | aprobada | — no aplicada |", final)
+        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | −25 % | mejora | aprobada | — no aplicada |", final)
         self.assertIn("## De los hallazgos al resultado", final)
         self.assertIn("1 hallazgos → 1 mejoras propuestas → 0 aplicadas → 0 funcionaron", final)
         self.assertIn("El TTID bajó.", final)
@@ -1194,9 +1219,9 @@ class ReportTest(PerfBase):
         plan["mejoras"][0]["estado"] = "aplicada"
         write(folder / "plan.json", json.dumps(plan))
         self.ok("reporte", "--carpeta", folder, "--html")
-        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
-        self.assertIn("| M1 | Clave raw | H0 | ✔ funcionó | ttid_ms: 402 ms → 302 ms (-24.88 %) · funcionó", final)
-        page = (folder / "reporte-final.html").read_text(encoding="utf-8")
+        final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("| M1 | Clave raw | H0 | ✔ funcionó | ttid_ms: 402 ms → 302 ms (−25 %) · funcionó", final)
+        page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn('<div class="step ok"><b>1</b><span>Funcionaron</span></div>', page)
         self.assertIn('<td class="ok">✔ funcionó</td>', page)
         self.assertIn('<span class="state s-aplicada" title="aplicada · implementada; se mide en la fase después">aplicada</span>', page)
@@ -1216,7 +1241,7 @@ class ReportTest(PerfBase):
                                                              "metrica": "gc_count", "estado": "propuesta"}]}))
         write(folder / "metricas.csv", HEADER + rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131]))
         self.ok("reporte", "--carpeta", folder, "--inicial")
-        initial = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        initial = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué pasa con él |", initial)
         self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | M1 (propuesta) |", initial)
         self.assertIn("| H2 | Jank | 2 % | — | descartado | descartado: se investigó y no es la causa; no hay nada que hacer |", initial)
@@ -1229,7 +1254,7 @@ class ReportTest(PerfBase):
         write(folder / "metricas.csv", HEADER + rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131])
               + rows("despues", "f", "carga_ms", [46, 45, 47, 46, 44]))
         self.ok("reporte", "--carpeta", folder)
-        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Resultado |", final)
         self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | ✔ M1 funcionó: carga_ms |", final)
         self.assertIn("| H4 | GC | 1 | Lista | mejorable | M2: no se aplicó (descartada) |", final)
@@ -2421,7 +2446,7 @@ class TrialImprovementTest(PerfBase):
 
     def test_el_reporte_inicial_la_propone_con_su_hipotesis_y_el_usuario_la_decide_como_cualquier_otra(self):
         self.ok("reporte", "--carpeta", self.folder, "--inicial")
-        initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("| M1 | Caché | H1 | carga_ms | 131 ms |", initial)
         self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | detalle hilo_max_ms | 44 ms | ≤ 16 ms |", initial)
         self.assertIn("| propuesta |\n\n**Mejoras a prueba**", initial)  # con línea en blanco: no es una fila de la tabla
@@ -2448,17 +2473,17 @@ class TrialImprovementTest(PerfBase):
               + rows("despues", "f", "detalle hilo_max_ms", [11, 12, 10, 11, 13])
               + rows("despues", "f", "cierre hilo_max_ms", [37, 38, 36, 37, 38]))
         self.ok("reporte", "--carpeta", self.folder, "--html")
-        final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("| M1 | Caché | H1 | ✔ funcionó | carga_ms: 131 ms → 46 ms", final)
         self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
-                      "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (-75 %)", final)
+                      "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (−75 %)", final)
         self.assertIn("| M3 | Precalcular el layout del texto (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el layout del texto largo · "
                       "cierre hilo_max_ms: 37 ms → 37 ms", final)
         self.assertIn("| sin confirmar | ✔ M2: hipótesis confirmada (detalle hilo_max_ms mejora) |", final)
         self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (cierre hilo_max_ms sin cambio) |", final)
         self.assertIn("3 hallazgos → 3 mejoras propuestas → 3 aplicadas → 2 funcionaron", final)
-        self.assertIn("| ≤ 16 ms | 11 ms | -75 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
-        page = (self.folder / "reporte-final.html").read_text(encoding="utf-8")
+        self.assertIn("| ≤ 16 ms | 11 ms | −75 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
+        page = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn('<td class="ok">✔ hipótesis confirmada</td>', page)
         self.assertIn('<td class="ko">✖ hipótesis refutada</td>', page)
         self.assertIn("Mejora a prueba:", final)  # el glosario la explica
@@ -2692,11 +2717,16 @@ class RedoFlowTest(DeviceBase):
         self.assertEqual(phase["entorno"]["frames"], "no")  # el entorno de 'detalle' no se pierde
         self.assertEqual(len(phase["hz_corridas"]), 4)
         self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2", "3"], ["1"]))
-        kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE)
+        kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE
+                      and not p.name.endswith(perf.TIMELINE_SUFFIX))
         self.assertEqual(kept, ["detalle_1.perfetto-trace.gz", "detalle_2.perfetto-trace.gz", "detalle_3.perfetto-trace.gz",
                                 "home_1.perfetto-trace.gz"])
+        timelines = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name.endswith(perf.TIMELINE_SUFFIX))
+        self.assertEqual(timelines, ["detalle_1.linea.json", "detalle_2.linea.json", "detalle_3.linea.json",
+                                     "home_1.linea.json"])  # la del flujo rehecho es la de la tanda nueva
         discarded = next(p for p in self.folder.iterdir() if p.name.startswith("antes-descartada-"))
-        self.assertEqual(sorted(p.name for p in discarded.iterdir()), ["home_1.perfetto-trace.gz", "home_2.perfetto-trace.gz"])
+        self.assertEqual(sorted(p.name for p in discarded.iterdir()), ["home_1.linea.json", "home_1.perfetto-trace.gz",
+                                                                       "home_2.linea.json", "home_2.perfetto-trace.gz"])
 
     def test_rehacer_despues_con_dos_flujos_renueva_la_fecha_y_siguiente_no_vuelve_a_pedirlo(self):
         self.tp_outputs(GOOD)
@@ -2813,13 +2843,14 @@ class PrepareSecretsTest(DeviceBase):
         self.assertFalse((self.plan.parent / "logs" / "preparar.log").exists())  # si funciona, no queda nada en disco
 
     def test_sin_requiere_env_la_salida_estandar_se_descarta_como_siempre_y_solo_se_lee_la_de_error(self):
-        self.plan_with('echo "Input text clave-sin-declarar"; echo "no aparece Inicio" >&2; exit 1', env=())
+        # lo que el comando escribe ("clave-sin-2") no es el texto del comando, que sí se muestra para correrlo a mano
+        self.plan_with('echo "Input text clave-sin-$((1+1))"; echo "no aparece Inicio" >&2; exit 1', env=())
         self.tp_outputs(GOOD)
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("    no aparece Inicio", result.stdout)
-        self.assertNotIn("clave-sin-declarar", result.stdout + result.stderr)
-        self.assertNotIn("clave-sin-declarar", (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8"))
+        self.assertNotIn("clave-sin-2", result.stdout + result.stderr)
+        self.assertNotIn("clave-sin-2", (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8"))
 
     def test_enmascara_primero_el_valor_mas_largo(self):
         os.environ.update({"HBPERF_T1": "abc", "HBPERF_T2": "abc123"})
@@ -2980,12 +3011,12 @@ class NoImprovementsTest(PerfBase):
         self.assertEqual(title, "sesión 4 · cierre sin mejoras")
         self.assertEqual([s["tipo"] for s in steps], ["chat"])
         self.assertEqual((steps[0]["modelo"], steps[0]["esfuerzo"]), ("Haiku 5.5", "bajo"))
-        self.assertTrue(steps[0]["texto"].endswith("estado.md: cierra la investigación sin fase después"))
+        self.assertTrue(steps[0]["texto"].endswith("estado.md: cierra la investigación sin fase después. No hagas commit ni push."))
         self.assertIn("sesión 4 corta", steps[0]["que"])
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
         self.assertNotIn("sesión 2", out[out.index("Siguiente ·"):])
-        self.assertIn('--costo "<lo que muestre tu herramienta>"', out)
+        self.assertIn('--sesion "2 · diagnóstico" --modelo "Sonnet 5.5" --esfuerzo alto --costo "<costo>"', out)
         write(self.folder / "reporte-final.md", "x")
         self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "investigación cerrada")
 
@@ -3044,8 +3075,8 @@ class SmokeNextStepTest(DeviceBase):
         self.assertIn("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · Chat nuevo · Modelo: Sonnet 5.5 · "
                       "Esfuerzo: medio", out)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista de películas al detalle de la primera, hasta ver el '
-                      'reparto. Dispositivo emulator-5554."', out)
-        self.assertIn("ábrelo en un chat nuevo, no en el del setup", out)
+                      'reparto. Dispositivo emulator-5554. No hagas commit ni push."', out)
+        self.assertIn("es un chat nuevo, no el del setup", out)
         recipe = out.index("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         self.assertLess(out.index("Siguiente · sesión 1"), recipe)
         self.assertIn("nuevo --receta arranque-frio --paquete %s" % PKG, out[recipe:])
@@ -3056,7 +3087,7 @@ class SmokeNextStepTest(DeviceBase):
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
         self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí hay que iniciar sesión, aceptar '
-                      'términos e ir al tab Catálogo. Dispositivo emulator-5554."', out)
+                      'términos e ir al tab Catálogo. Dispositivo emulator-5554. No hagas commit ni push."', out)
         self.assertNotIn("Maestro", out)  # el prompt no fija cómo se recorre: lo pregunta la sesión 1
 
     def test_un_pedido_mal_formado_se_ignora_con_aviso_y_la_ruta_se_puede_cambiar(self):
@@ -3116,7 +3147,8 @@ class RouteFileTest(DeviceBase):
         self.assertIn("**detalle**\n- `preparar` (antes de cada corrida, fuera de la traza): `bash inv/preparar.sh`\n"
                       "- `recorrido` (el tramo medido): `bash inv/recorrido.sh`\n", block)
         self.assertRegex(block, r"- Para verlo correr a mano, sin medir: `cd \S+ && bash inv/preparar\.sh && bash inv/recorrido\.sh`")
-        self.assertIn("- Variables de entorno que necesita (expórtalas antes): `PERF_CLAVE`", block)
+        self.assertIn("- Variables de entorno que necesita: `PERF_CLAVE`. Cárgalas en la terminal donde mides", block)
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", block)
         self.assertIn("**lista**\n- `preparar` (antes de cada corrida, fuera de la traza): no tiene\n- `recorrido`: manual", block)
         self.assertIn("**inicio**", block)
         self.assertIn("arranque en frío", block)
@@ -3157,7 +3189,8 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertNotIn("sin completar", self.ok("siguiente", "--carpeta", folder))
         write(folder / "reporte-inicial.md", "x")
         out = self.ok("siguiente", "--carpeta", folder)
-        self.assertIn("tiene partes sin completar: Resumen ejecutivo (de 3 a 5 líneas); Hallazgos (la tabla está vacía).", out)
+        self.assertIn("tiene partes sin completar: Resumen ejecutivo (de 3 a 5 líneas); Resumen para gerencia (de 3 a 5 líneas, sin "
+                      "términos técnicos); Hallazgos (la tabla está vacía).", out)
         plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
         plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "aprobada"}]
         (folder / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
@@ -3177,13 +3210,14 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertIn("tiene partes sin completar: Ficha (Métricas principales y objetivo, Build y ambiente, Modos); "
                       "Resumen ejecutivo", out)
         self.assertIn("Hallazgos (H1)", out)
-        for name in ("reporte-inicial.md", "reporte-inicial.html"):
+        for name in ("reporte-inicial-dev.md", "reporte-inicial-dev.html", "reporte-inicial-gerencia.md",
+                     "reporte-inicial-gerencia.html"):
             report = (folder / name).read_text(encoding="utf-8")
             self.assertNotIn("3 a 5 líneas", report, name)
             self.assertNotIn("guiado o autónomo", report, name)
             self.assertNotIn("backend real o mocks", report, name)
             self.assertNotIn("qué falta para cerrarlo", report, name)  # el renglón de ejemplo de Pendientes
-        md = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        md = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertNotIn("## Resumen\n", md)  # sin resumen escrito, la sección se omite
         self.assertNotIn("## Pendientes", md)
         self.assertIn("| Síntoma | El detalle tarda |", md)
@@ -3191,7 +3225,7 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertIn("| Build y ambiente | sin completar |", md)
         self.assertIn("| H1 | Frame largo | 48 ms | — | sin confirmar | sin completar |", md)
         self.ok("reporte", "--carpeta", folder)
-        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         for leftover in ("3 a 5 líneas", "qué dice cada métrica principal", "test que la fija", "guiado o autónomo"):
             self.assertNotIn(leftover, final)
         self.assertNotIn("## Resumen ejecutivo", final)
@@ -3204,8 +3238,8 @@ class UnfilledTemplateTest(DeviceBase):
                                     "<carpeta> propia.\n\n## Hallazgos\n\n| # | Síntoma | Tipo |\n| --- | --- | --- |\n"
                                     "| H1 | Doble <carga> en <profileable> | bug |\n")
         out = self.ok("reporte", "--carpeta", folder, "--inicial")
-        self.assertNotIn("sin completar", out)
-        md = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        self.assertNotIn("tiene partes sin completar", out)
+        md = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("La lista usa List<Item> y <carpeta> propia.", md)
         self.assertIn("| H1 | Doble <carga> en <profileable> | bug |", md)
 
@@ -3246,8 +3280,8 @@ class ResultBoxTest(PerfBase):
         write(folder / "plan.json", json.dumps({"paquete": PKG, "principales": ["carga_ms"], "flujos": {"f": {}},
                                                 "mejoras": mejoras}))
         self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
-        return (folder / "reporte-inicial.md").read_text(encoding="utf-8"), \
-            (folder / "reporte-inicial.html").read_text(encoding="utf-8")
+        return (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"), \
+            (folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
 
     def test_sin_mejoras_dice_por_que_con_una_linea_por_hallazgo(self):
         table = "| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué falta para decidir |\n| --- | --- | --- | --- | --- | --- |\n" \
@@ -3326,7 +3360,7 @@ class Compat060Test(PerfBase):
         self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos)", out)  # relleno de 0.6.0
         self.assertNotIn("Resumen ejecutivo", out)  # hay una mejora aplicada: el resumen es del cierre, todavía no toca
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
-        initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("| H2 | Frame largo al entrar | 48 ms en la corrida mediana · `hilo_principal_top` | — | sin veredicto "
                       "estadístico | no se pudo confirmar ni descartar con estos datos; sin acción |", initial)
         self.assertIn("| H3 | Jank en la lista | `jank_app_pct` 2 % | — | descartado | descartado: se investigó y no es la causa", initial)
@@ -3347,7 +3381,7 @@ class Compat060Test(PerfBase):
                       "aplicada | ✔ funcionó |", state)
         self.assertNotIn("Cómo se recorre", state)  # el estado de 0.6.0 no tiene esa sección: no se agrega ni falla
         self.ok("reporte", "--carpeta", self.folder, "--html")
-        final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("3 hallazgos → 1 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
         for filler in ("test que la fija", "qué dice cada métrica principal", "3 a 5 líneas", "backend real o mocks"):
             self.assertNotIn(filler, final)  # el relleno de la plantilla de 0.6.0 tampoco llega al reporte final
@@ -3842,7 +3876,7 @@ class GeneratedFilesTest(PerfBase):
         self.assertNotEqual(perf.fingerprint(text.replace("{6,}", "{8,}")), perf.fingerprint(text))
         # una edición que solo reordena código, o que solo cambia espacios o comas dentro de un literal, también cuenta
         other = text + "// otra versión\n"
-        for before, after in (("padStart(4, '0')", "padStart('0', 4)"), ('" #"', '"#"'), ("{6,}", "{6}"),
+        for before, after in (("padStart(HASH_LENGTH, '0')", "padStart('0', HASH_LENGTH)"), ('" #"', '"#"'), ("{6,}", "{6}"),
                               ('"/{id}"', '"/ {id}"')):
             self.assertIn(before, text)
             self.assertEqual(perf.generated_state(text.replace(before, after), other), "editado", (before, after))
@@ -4626,8 +4660,9 @@ class SegmentNetworkTest(DeviceBase):
         m, _ = self.metrics(network_trace(), network_flow())
         self.assertIn("consulta hilo_max_ms", m)
         self.assertIn("consulta frame_p90_ms", m)
-        self.assertEqual(sorted(k for k in m if k.startswith("pago ")),
-                         ["pago red_llamadas", "pago red_ms", "pago red_repetidas_2s", "pago red_solapadas", "pago red_ttfb_ms"])
+        self.assertEqual(sorted(k for k in m if k.startswith("pago ") and not k.startswith("pago red ")),
+                         ["pago fin_ms", "pago inicio_ms", "pago red_llamadas", "pago red_ms", "pago red_repetidas_2s", "pago red_solapadas",
+                          "pago red_ttfb_ms"])  # inicio y fin del tramo, para la línea de tiempo
         flow = network_flow()
         self.assertEqual(perf.segment_metric_names(flow), ["consulta hilo_max_ms", "consulta frame_p90_ms", "consulta jank_app_pct"])
         self.assertIn("pago red_llamadas", perf.segment_network_names(flow))
@@ -4716,13 +4751,13 @@ class SegmentNetworkTest(DeviceBase):
                 + rows(phase, "pago", "consulta red_solapadas", repeated, "llamadas")
         write(folder / "metricas.csv", HEADER + text)
         self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
-        initial = (folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        initial = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Red por tramo", initial)
         self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamadas | 1 llamadas |", initial)
         self.assertNotIn("| pago | pago |", initial)  # el tramo sin métricas de red medidas no sale
-        self.assertIn("Red por tramo", (folder / "reporte-inicial.html").read_text(encoding="utf-8"))
+        self.assertIn("Red por tramo", (folder / "reporte-inicial-dev.html").read_text(encoding="utf-8"))
         self.ok("reporte", "--carpeta", folder)
-        final = (folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamadas | 1 llamadas |", final)
         self.assertIn("| pago | consulta | despues | 2 llamadas | 500 ms | 150 ms | 0 llamadas | 0 llamadas |", final)
         self.assertIn("**Red por tramo (`<tramo> red_…`):**", final)
@@ -4826,7 +4861,8 @@ class KeyboardTest(DeviceBase):
         state = (folder / "estado.md").read_text(encoding="utf-8")
         section = state[state.index("## Cambios temporales por revertir"):state.index("## Mapa del alcance")]
         self.assertIn("las ediciones de cableado en código de `main`", section)
-        self.assertIn("`cd <repo> && git diff --binary -- <archivos> > <parche> && git apply --check -R <parche>`", section)
+        self.assertIn("`cd <repo> && ( set -C && git diff --binary -- <archivos> > <parche> ) && git apply --check -R "
+                      "<parche>`", section)  # set -C: no pisa un parche que ya existe
         self.assertIn("Quitar: `cd <repo> && git apply -R <parche>`", section)
         self.assertIn("Volver a aplicar: `cd <repo> && git apply <parche>`", section)
         for marker in ("<repo>", "<archivos>", "<parche>"):  # de una sola palabra: no cuentan como relleno de la plantilla
@@ -4867,10 +4903,10 @@ class Compat070Test(PerfBase):
         self.assertNotIn("no declara", out)  # las variables de `preparar` ya están en requiere_env
         self.assertIn("Ficha (Métricas principales y objetivo, Build y ambiente, Modos)", out)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
-        self.assertIn("- Variables de entorno que necesita (expórtalas antes): `PERF_USUARIO`, `PERF_CLAVE`", state)
+        self.assertIn("- Variables de entorno que necesita: `PERF_USUARIO`, `PERF_CLAVE`. Cárgalas", state)
         self.assertNotIn("Paso humano", state)
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
-        initial = (self.folder / "reporte-inicial.md").read_text(encoding="utf-8")
+        initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("| H2 | Frame largo al entrar al detalle, estable en las 5 corridas |", initial)
         self.assertIn("Una captura con muestreo de CPU o probar el cambio", initial)
         self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamadas | 0 llamadas | alta | bajo | bajo | "
@@ -4885,7 +4921,7 @@ class Compat070Test(PerfBase):
                       "-100 % | 0 % | mejora |", out)
         self.assertNotIn("⚠", out)
         self.ok("reporte", "--carpeta", self.folder, "--html")
-        final = (self.folder / "reporte-final.md").read_text(encoding="utf-8")
+        final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("3 hallazgos → 2 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
         self.assertNotIn("## Red por tramo", final)
         self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0], "investigación cerrada")
@@ -4910,10 +4946,11 @@ class Compat070Test(PerfBase):
         self.assertEqual(len(before), 30)
         for name, expected in before.items():
             self.assertEqual(now.get(name), expected, name)
-        # lo único nuevo es la red por tramo, y va después de lo que ya había
+        # lo único nuevo es la red por tramo y, al final, lo de cada servicio; todo va después de lo que ya había
         extra = [m[0] for m in metrics if m[0] not in before]
-        self.assertEqual(extra, ["detalle red_llamadas", "detalle red_ms", "detalle red_ttfb_ms", "detalle red_repetidas_2s",
-                                 "detalle red_solapadas"])
+        self.assertEqual(extra[:5], ["detalle red_llamadas", "detalle red_ms", "detalle red_ttfb_ms",
+                                     "detalle red_repetidas_2s", "detalle red_solapadas"])
+        self.assertTrue(extra[5:] and all(perf.SERVICE_EXTRA.fullmatch(name) for name in extra[5:]), extra[5:])
         self.assertEqual([m[0] for m in metrics][:len(before)], [m[0] for m in data["metricas"]])
 
 
@@ -5517,10 +5554,11 @@ class RealTraceProcessorTest(unittest.TestCase):
 
 
 class CompatVersionsTest(DeviceBase):
-    """Una investigación en curso de 0.6.0, 0.7.0 o 0.8.0 (su plan.json, su fases.json y su estado.md, sin ningún campo
-    de 0.9.0) carga y corre `siguiente`, `diagnostico`, `reporte --inicial` y `comparar` sin errores."""
+    """Una investigación en curso de 0.6.0, 0.7.0, 0.8.0 o 0.9.0 (su plan.json, su fases.json y su estado.md, sin
+    ningún campo posterior) carga y corre `siguiente`, `diagnostico`, `reporte --inicial` y `comparar` sin errores."""
 
-    VERSIONS = ("0.6.0", "0.7.0", "0.8.0")
+    VERSIONS = ("0.6.0", "0.7.0", "0.8.0", "0.9.0")
+    BEFORE_090 = ("0.6.0", "0.7.0", "0.8.0")  # sin la versión de la skill ni la configuración en fases.json
 
     def investigation(self, version):
         fixture = ROOT / "tests" / "fixtures" / ("hb-performance-%s" % version)
@@ -5539,10 +5577,16 @@ class CompatVersionsTest(DeviceBase):
             phases = perf.read_phases(folder)
             self.assertTrue(phases, version)
             for record in phases.values():
-                self.assertNotIn("skill", record, version)
-                self.assertNotIn("configs", record, version)
+                self.assertNotIn("faltan", record, version)
+                if version in self.BEFORE_090:
+                    self.assertNotIn("skill", record, version)
+                    self.assertNotIn("configs", record, version)
+                else:
+                    self.assertEqual((record["skill"], len(record["configs"])), (version, 1), version)
             flow = next(iter(plan["flujos"]))
-            self.assertIsNone(perf.phase_skill(phases.get("antes"), flow), version)
+            self.assertEqual(perf.phase_skill(phases.get("antes"), flow), None if version in self.BEFORE_090 else version)
+            self.assertFalse((folder / perf.NOTES_FILE).exists(), version)
+            self.assertNotIn("perf:advertencias", (folder / "estado.md").read_text(encoding="utf-8"), version)
             self.assertEqual(perf.config_notes(folder, [flow]), [], version)  # sin el dato en ninguna fase, sin aviso
             self.assertEqual(perf.diagnostic_captures(folder), [], version)
 
@@ -5569,32 +5613,54 @@ class CompatVersionsTest(DeviceBase):
                                if r["fase"] == "antes" and r["flujo"] == flow})
                 for run in runs:
                     write(folder / "antes" / ("%s_%s.perfetto-trace.gz" % (flow, run)), "x")
+                if (fixture / "configuracion.json").is_file():  # 0.9.0 ya anota con qué configuración grabó cada traza
+                    write(folder / "antes" / "configuracion.json", (fixture / "configuracion.json").read_text(encoding="utf-8"))
                 self.env["FAKE_TP_OTRA"] = '"a"\n'
                 out = self.ok("diagnostico", "--carpeta", folder)
                 md = (folder / "diagnostico.md").read_text(encoding="utf-8")
-                # trazas de una versión anterior: no se sabe qué capturaron, así que no se afirma ausencia
-                self.assertIn("configuración desconocida", md, version)
-                self.assertNotIn("Medido y sin casos", md, version)
-                self.assertNotIn("no medido:", md, version)
+                if version in self.BEFORE_090:
+                    # trazas de una versión anterior: no se sabe qué capturaron, así que no se afirma ausencia
+                    self.assertIn("configuración desconocida", md, version)
+                    self.assertNotIn("Medido y sin casos", md, version)
+                    self.assertNotIn("no medido:", md, version)
+                else:
+                    self.assertNotIn("configuración desconocida", md, version)
+                    self.assertIn("Medido y sin casos", md, version)  # se sabe qué capturó: la ausencia se puede afirmar
                 self.assertIn("Red por tramo", md, version)
                 (folder / "diagnostico.md").unlink()  # el fixture no lo trae: el paso siguiente no debe cambiar por él
             self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
-            self.assertTrue((folder / "reporte-inicial.md").is_file(), version)
+            self.assertTrue((folder / "reporte-inicial-dev.md").is_file(), version)
             out = self.ok("comparar", folder / "metricas.csv")
             self.assertIn("Veredictos:", out, version)
             self.assertNotIn("configuración de Perfetto", out, version)
             self.assertNotIn("otra versión de hb-performance", out, version)
 
-    def test_las_metricas_que_calculaba_0_8_0_no_cambian_de_nombre_ni_de_valor(self):
-        fixture, folder = self.investigation("0.8.0")
-        data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
-        plan = perf.load_plan(folder / "plan.json")
-        flow = plan["flujos"]["detalle"]
-        self.assertEqual((flow["duracion_max_s"], len(flow["pausas"]), flow["segmentos"][1]["solo_red"]), (1200, 1, True))
-        metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
-        self.assertIsNone(invalid)
-        self.assertEqual([list(m) for m in metrics], data["metricas"])  # las mismas, con el mismo valor y en el mismo orden
-        self.assertEqual(len(data["metricas"]), 35)
+    def test_las_metricas_que_calculaban_0_8_0_y_0_9_0_no_cambian_de_nombre_ni_de_valor(self):
+        for version in ("0.8.0", "0.9.0"):
+            fixture, folder = self.investigation(version)
+            data = json.loads((fixture / "traza.json").read_text(encoding="utf-8"))
+            plan = perf.load_plan(folder / "plan.json")
+            flow = plan["flujos"]["detalle"]
+            self.assertEqual((flow["duracion_max_s"], len(flow["pausas"]), flow["segmentos"][1]["solo_red"]), (1200, 1, True))
+            metrics, invalid, _ = perf.trace_metrics([tuple(row) for row in data["filas"]], 60, flow, set(), 34)
+            self.assertIsNone(invalid, version)
+            known = len(data["metricas"])
+            self.assertEqual([list(m) for m in metrics][:known], data["metricas"], version)  # las mismas, mismo valor y orden
+            # lo nuevo va al final y es solo lo de cada servicio (repetidas, solapadas, conexión y su tramo)
+            self.assertTrue(all(perf.SERVICE_EXTRA.fullmatch(m[0]) for m in metrics[known:]), (version, metrics[known:]))
+            self.assertEqual(len(data["metricas"]), 35, version)
+
+    def test_las_corridas_de_0_9_0_se_completan_sin_repetir_la_fase_y_las_anteriores_no(self):
+        self.assertTrue(perf.same_capture("0.9.0") and perf.same_capture(perf.VERSION))
+        self.assertFalse(perf.same_capture("0.8.0") or perf.same_capture(None))
+        fixture, folder = self.investigation("0.9.0")
+        build = {"version": "1.0 (7)", "instalada": "2026-04-14 09:00:00"}
+        self.assertEqual(perf.check_build(folder, "antes", build, "abc1234", False, "detalle"), [])
+        phases = perf.read_phases(folder)
+        phases["antes"]["skill"] = phases["antes"]["flujos"]["detalle"]["skill"] = "0.8.0"
+        perf.save_phases(folder, phases)
+        self.assertIn("otra versión de hb-performance (0.8.0; esta es %s)" % perf.VERSION,
+                      perf.check_build(folder, "antes", build, "abc1234", False, "detalle")[0])
 
 
 MAPPING = (FIXTURE_TRACES / "mapping.txt")
@@ -6062,3 +6128,2670 @@ class ExitInfoTest(DeviceBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("sin registro de salidas de la app por corrida"), 1)
         self.assertNotIn("inválida", result.stdout)
+
+
+class GuidedFailureTest(DeviceBase):
+    """Todo fallo termina con qué pasó, qué quedó guardado y el comando para seguir, que empieza con cd."""
+
+    def capture(self, *extra, interruptible=False):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", *extra, interruptible=interruptible)
+
+    def update_flow(self, **fields):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"].update(fields)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def assert_guided(self, result, saved, *commands):
+        """La salida de error termina con las tres partes, en orden, y cada comando empieza con cd."""
+        text = result.stderr
+        self.assertIn("✖ ", text)
+        self.assertLess(text.index("✖ "), text.index("  Qué quedó guardado: "), text)
+        self.assertLess(text.index("  Qué quedó guardado: "), text.index("  Cómo seguir:"), text)
+        self.assertIn(saved, text.split("  Qué quedó guardado: ")[1].split("\n")[0])
+        steps = [line.strip() for line in text.split("  Cómo seguir:")[1].splitlines() if line.startswith("     ")]
+        self.assertTrue(steps, text)
+        for line in steps:
+            self.assertTrue(line.startswith("cd "), line)
+        for command in commands:
+            self.assertTrue(any(command in line for line in steps), (command, steps))
+        return steps
+
+    def phases(self):
+        return json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+
+    def test_ctrl_c_dice_cuantas_corridas_quedaron_y_como_completar_la_fase(self):
+        counter = self.dir / "vueltas.txt"
+        # el recorrido interrumpe a perf.py (Ctrl+C) en la tercera corrida
+        self.update_flow(recorrido='n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; [ "$n" -lt 2 ] || kill -INT $PPID; '
+                                   'sleep 0.3' % (counter, counter))
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar",
+                              interruptible=True)
+        self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+        self.assertIn("✖ interrumpido (Ctrl+C)", result.stderr)
+        steps = self.assert_guided(result, "2 de 5 corridas válidas de antes en ", "--corridas 3")
+        self.assertIn("capturar --plan", steps[0])
+        self.assertNotIn("--corridas 5", steps[0])
+        self.assertIn("--rehacer", steps[1])  # la otra salida: repetir la fase entera
+        self.assertEqual(self.phases()["antes"]["corridas"], 2)  # las válidas quedan con su registro
+        self.assertEqual(self.phases()["antes"]["faltan"], {"home": 3})
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)  # la fase no se da por medida a medias
+        self.assertIn("Siguiente · completar la fase antes, que se cortó (sin chat)", out)
+        self.assertIn("--fase antes --corridas 3", out)
+        self.assertNotIn("--fase control", out)
+        self.assertIn("kill -TERM 4242", (self.dir / "adb.log").read_text(encoding="utf-8"))  # Perfetto no queda grabando
+        counter.unlink()
+        self.update_flow(recorrido="true")
+        self.capture("--fase", "antes", "--corridas", "3", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(self.phases()["antes"]["corridas"], 5)
+        self.assertNotIn("faltan", self.phases()["antes"])
+        self.assertNotIn("completar la fase", self.ok("siguiente", "--carpeta", self.plan.parent))
+        self.assertEqual(len({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}), 5)
+
+    def read_csv_at(self, path):
+        with path.open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+    def test_ctrl_c_sin_corridas_validas_no_guarda_nada_y_da_el_mismo_comando(self):
+        self.update_flow(recorrido="kill -INT $PPID; sleep 0.3")
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar",
+                              interruptible=True)
+        self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+        self.assert_guided(result, "ninguna corrida de esta tanda (0 de 5 válidas de antes)", "--corridas 5")
+        self.assertIn("ya tenía sigue igual", result.stderr)
+        self.assertFalse((self.plan.parent / "fases.json").exists())
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar", "--rehacer",
+                              interruptible=True)
+        self.assertIn("sigue igual", result.stderr)  # --rehacer sin nada medido antes: no hubo nada que descartar
+        self.update_flow(recorrido="true")
+        self.capture("--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.update_flow(recorrido="kill -INT $PPID; sleep 0.3")
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar", "--rehacer",
+                              interruptible=True)
+        self.assertIn("ya se descartaron por --rehacer", result.stderr)  # con --rehacer lo anterior ya no está
+        self.assertNotIn("sigue igual", result.stderr)
+
+    def test_lo_que_falta_de_una_tanda_cortada_se_guarda_por_flujo(self):
+        folder = self.dir / "fases"
+        folder.mkdir()
+        base = {"fecha": "2026-11-09T10:00:00", "corridas": 3}
+        perf.write_phase(folder, "antes", dict(base, faltan={"a": 7}), "a")
+        perf.write_phase(folder, "antes", dict(base, corridas=10), "b")  # otro flujo completo: lo de 'a' sigue pendiente
+        self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"a": 7})
+        perf.write_phase(folder, "antes", dict(base, faltan={"b": 2}), "b")
+        self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"a": 7, "b": 2})
+        plan = {"paquete": PKG, "flujos": {"a": {"recorrido": "true"}, "b": {"recorrido": "true"}}}
+        self.assertIn("completar la fase antes", perf.next_steps(folder, plan, "a")[0])
+        self.assertIn("--corridas 2", perf.next_steps(folder, plan, "b")[1][0]["texto"])
+        perf.write_phase(folder, "antes", dict(base, corridas=7), "a")  # 'a' termina: solo queda lo de 'b'
+        self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"b": 2})
+        write(folder / "metricas.csv", HEADER + rows("antes", "a", "m", [1] * 10) + rows("antes", "b", "m", [1] * 8))
+        perf.forget_flow(folder, folder / "metricas.csv", "antes", "b")  # --rehacer de 'b': lo que le faltaba ya no vale
+        self.assertNotIn("faltan", perf.read_phases(folder)["antes"])
+
+    def test_tres_invalidas_seguidas_y_corridas_insuficientes_dan_el_comando_para_completar(self):
+        self.tp_outputs(GOOD, LOGIN, LOGIN, LOGIN)
+        result = self.capture("--fase", "antes", "--corridas", "10", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("3 corridas inválidas seguidas", result.stderr)
+        self.assert_guided(result, "1 de 10 corridas válidas de antes en ", "--corridas 9")
+        self.assertEqual(self.phases()["antes"]["corridas"], 1)
+        notes = perf.read_notes(self.plan.parent)
+        self.assertEqual(notes["invalidas"]["antes"]["home"], {"apareció 'SCREEN LoginActivity onCreate'": 3})
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN)
+        result = self.capture("--fase", "control", "--corridas", "4", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("solo 3 de 4 corridas válidas en 7 intentos", result.stderr)
+        self.assert_guided(result, "3 de 4 corridas válidas de control en ", "--corridas 1")
+
+    def test_variables_faltantes_dan_el_comando_para_cargarlas_y_el_mismo_comando(self):
+        self.update_flow(preparar="true", requiere_env=["PERF_USUARIO", "PERF_CLAVE", "PERF_TOKEN_API"])
+        for name in ("PERF_USUARIO", "PERF_CLAVE", "PERF_TOKEN_API"):
+            self.env.pop(name, None)
+        result = self.capture("--fase", "antes", "--corridas", "5")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        steps = self.assert_guided(result, "nada", "capturar --plan")
+        self.assertIn("printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO", steps[0])  # lectura normal
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", steps[1])  # oculta
+        self.assertIn("read -r -s PERF_TOKEN_API && echo && export PERF_TOKEN_API", steps[2])
+        self.assertIn("--fase antes --corridas 5", steps[3])  # y el mismo comando que se estaba corriendo
+        self.assertIn("lectura oculta", result.stderr)
+
+    def test_el_comando_para_cargar_una_variable_funciona_en_bash_y_en_zsh(self):
+        command = perf.env_steps(["PERF_CLAVE"])[0][1].split(" && ", 1)[1] + ' && printf "%s" "[$PERF_CLAVE]"'
+        for shell in ("bash", "zsh"):
+            if not shutil.which(shell):
+                continue
+            result = subprocess.run([shell, "-c", command], input="secreta\n", capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, shell + result.stderr)
+            self.assertTrue(result.stdout.endswith("[secreta]"), (shell, result.stdout))
+        self.assertEqual([bool(perf.SECRET_NAME.search(name)) for name in
+                          ("PERF_CLAVE", "APP_PASSWORD", "PIN_TARJETA", "API_TOKEN", "CLIENT_SECRET", "API_KEY", "PERF_USUARIO",
+                           "AMBIENTE")], [True, True, True, True, True, True, False, False])
+
+    def test_un_preparar_que_falla_sin_salida_da_el_comando_para_correrlo_a_mano(self):
+        self.update_flow(preparar="exit 1 > /dev/null 2>&1")
+        self.tp_outputs(GOOD)
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("córrelo a mano en tu terminal para ver el error:", result.stdout)
+        self.assertRegex(result.stdout, r"\n    cd \S+ && \( exit 1 > /dev/null 2>&1 \)\n")
+        steps = self.assert_guided(result, "nada", "( exit 1 > /dev/null 2>&1 )", "--prueba")
+        self.assertIn("( exit 1", steps[0])  # primero 'preparar' a mano; después, repetir
+        self.assertIn("no dejó la app en el punto de partida", result.stderr)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home")[0]["tipo"], "preparar")
+
+    def test_preparar_a_mano_lleva_los_valores_enmascarados(self):
+        self.update_flow(preparar="echo clave-de-mentira > /dev/null; exit 3", requiere_env=["PERF_CLAVE"])
+        self.env["PERF_CLAVE"] = "clave-de-mentira"
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "5", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertNotIn("clave-de-mentira", result.stdout + result.stderr)
+        self.assert_guided(result, "ninguna corrida de esta tanda", "( echo *** > /dev/null; exit 3 )", "--corridas 5")
+        # un 'preparar' que falla una vez y después funciona: el corte posterior ya no pide correrlo a mano
+        counter = self.dir / "preparos.txt"
+        self.update_flow(preparar='n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; [ "$n" -gt 0 ]' % (counter, counter))
+        self.tp_outputs(GOOD, LOGIN, LOGIN, LOGIN)
+        (self.dir / "tp.count").unlink() if (self.dir / "tp.count").exists() else None
+        result = self.capture("--fase", "control", "--corridas", "5", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertNotIn("a mano", result.stderr.split("Cómo seguir:")[1])
+        self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"],
+                         {"'preparar' terminó con código 3": 3})
+
+    def test_despues_del_calentamiento_hay_un_respiro_antes_del_primer_preparar(self):
+        self.assertGreaterEqual(perf.WARMUP_SETTLE_S, 1)
+        source = inspect_source()
+        self.assertIn("settle(WARMUP_SETTLE_S)", source.split("def cmd_capturar")[1].split("while valid < target")[0])
+
+    def test_sin_dispositivo_sin_autorizar_o_desconectado_a_mitad_explica_y_da_el_comando(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_LISTA"] = "\n"  # adb devices sin ningún dispositivo
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("no hay ningún dispositivo conectado", result.stderr)
+        self.assert_guided(result, "nada", "--prueba")
+        self.env["FAKE_LISTA"] = "emulator-5554\tunauthorized\n"
+        result = self.capture("--prueba")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("el dispositivo emulator-5554 está conectado pero sin autorizar: acepta en su pantalla", result.stderr)
+        self.assert_guided(result, "nada", "--prueba")
+        self.env["FAKE_LISTA"] = "emulator-5554\toffline\n"
+        self.assertIn("sin responder (offline)", self.capture("--prueba", "--serial", "emulator-5554").stderr)
+        del self.env["FAKE_LISTA"]
+        self.env["FAKE_DESCONECTA"] = "dumpsys activity activities"  # se suelta antes de empezar una prueba
+        self.assertEqual(self.capture("--prueba").returncode, 3)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home"), [])  # no es un aviso de 'preparar' que corregir
+        self.env["FAKE_DESCONECTA"] = "pidof"  # el cable se suelta en medio de la primera corrida
+        result = self.capture("--fase", "control", "--corridas", "3", "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el dispositivo dejó de estar disponible para adb (adb: device 'emulator-5554' not found)", result.stderr)
+        self.assert_guided(result, "ninguna corrida de esta tanda", "--corridas 3")
+
+    def test_una_traza_que_no_se_procesa_dice_lo_guardado_y_como_seguir(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_TP_FALLA"] = "metricas"
+        result = self.capture("--fase", "antes", "--corridas", "2", "--calentamiento", "0", "--sin-compilar")
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_guided(result, "ninguna corrida de esta tanda", "--corridas 2")
+
+    def test_build_repetido_en_despues_da_el_comando_de_instalar_y_el_de_medir(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["instalar"] = "./gradlew :app:installProfiling"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        result = self.capture("--fase", "despues", "--corridas", "5")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el build instalado es el mismo que midió antes", result.stderr)
+        steps = self.assert_guided(result, "ninguna corrida de esta tanda", "./gradlew :app:installProfiling",
+                                   "--fase despues --corridas 5")
+        self.assertIn("installProfiling", steps[0])
+
+    def test_un_plan_invalido_y_un_error_inesperado_tambien_terminan_con_el_comando(self):
+        self.plan.write_text("{no es json", encoding="utf-8")
+        result = self.perf("siguiente", "--carpeta", self.plan.parent)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no se pudo leer", result.stderr)
+        self.assert_guided(result, "nada", "siguiente --carpeta")
+        self.plan.write_text(json.dumps({"paquete": PKG, "flujos": {"home": {"recorrido": "true"}}}), encoding="utf-8")
+        write(self.plan.parent / "fases.json", "[1, 2]")  # un archivo de la carpeta con una forma que perf.py no espera
+        result = self.perf("siguiente", "--carpeta", self.plan.parent)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("✖ error inesperado en perf.py (", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assert_guided(result, "nada", "siguiente --carpeta")
+        self.env["HB_PERF_DEBUG"] = "1"
+        self.assertIn("Traceback", self.perf("siguiente", "--carpeta", self.plan.parent).stderr)
+
+    def test_pausa_no_imprime_la_guia_porque_corre_dentro_de_un_recorrido(self):
+        self.env["HB_PERF_TTY"] = str(self.dir / "no-existe" / "tty")
+        result = self.perf("pausa", "autoriza en la otra app")
+        self.assertEqual(result.returncode, 3)
+        self.assertNotIn("Cómo seguir", result.stderr)
+
+    def test_el_mismo_comando_cambia_corridas_y_quita_rehacer(self):
+        argv = ["capturar", "--plan", "reports/perf/x y/plan.json", "--fase", "antes", "--corridas=10", "--rehacer"]
+        command = perf.same_command(corridas=4, sin=("--rehacer",), argv=argv)
+        self.assertTrue(command.startswith("cd "))
+        self.assertTrue(command.endswith("capturar --plan 'reports/perf/x y/plan.json' --fase antes --corridas 4"), command)
+        self.assertIn("--corridas 10 --rehacer", perf.same_command(argv=["capturar", "--corridas", "10", "--rehacer"]))
+
+
+class TestRunWarningsTest(DeviceBase):
+    """Los avisos de la corrida de prueba se guardan y, mientras sigan vigentes, `siguiente` no ofrece medir antes."""
+
+    REPEATED = GOOD.replace('"seccion",10,5,0,"SCREEN MainActivity onResume"\n', "") + \
+        '"seccion",400000000,0,0,"MARK reparto"\n"seccion",450000000,0,0,"MARK reparto"\n'
+
+    def setUp(self):
+        super().setUp()
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["instalar"] = "./gradlew :app:installProfiling"
+        plan["flujos"]["home"]["metricas_usuario"] = [{"nombre": "reparto_ms", "desde": {"marca": "HTTP GET items/{id}"},
+                                                       "hasta": {"marca": "MARK reparto"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(self.dir / "app/src/main/kotlin/com/example/app/RepartoScreen.kt",
+              "package com.example.app\n\nfun cargado() {\n    PerfHooks.mark(\"reparto\")\n}\n")
+
+    def test_la_prueba_guarda_sus_avisos_y_siguiente_pide_corregir_antes_de_medir(self):
+        self.tp_outputs(self.REPEATED)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("⚠ 'MARK reparto' salió 2 veces en una misma carga", out)
+        self.assertIn("⚠ 1 avisos por corregir antes de medir", out)
+        self.assertIn("Siguiente · corrige antes de medir (avisos de la corrida de prueba)", out)
+        saved = perf.test_warnings(self.plan.parent, "home")
+        self.assertEqual([item["tipo"] for item in saved], ["repetida"])
+        self.assertEqual(saved[0]["donde"], ["app/src/main/kotlin/com/example/app/RepartoScreen.kt:4"])
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        lines = out.splitlines()
+        head = next(i for i, line in enumerate(lines) if line.strip() == "Corrige antes de medir:")
+        self.assertIn("- la marca 'MARK reparto' salió 2 veces en una misma carga", lines[head + 1])
+        self.assertIn("RepartoScreen.kt:4", lines[head + 1])
+        chat = next(line for line in lines if "Texto:" in line)
+        self.assertIn("corrige los avisos de la corrida de prueba del flujo 'home', sin compilar, instalar ni capturar", chat)
+        self.assertIn("1) la marca 'MARK reparto' sale 2 veces por carga", chat)
+        self.assertIn("(app/src/main/kotlin/com/example/app/RepartoScreen.kt:4)", chat)
+        self.assertRegex(out, r"1\. Chat nuevo · Modelo: Sonnet 5\.5 · Esfuerzo: medio")
+        self.assertRegex(out, r"2\. Terminal \(sin chat\) · compila e instala")
+        self.assertIn("./gradlew :app:installProfiling", out)
+        self.assertRegex(out, r"3\. Terminal \(sin chat\) · repite la corrida de prueba")
+        self.assertRegex(out, r"4\. Terminal \(sin chat\) · OPCIÓN, solo si decides medir igual")
+        option = lines[next(i for i, line in enumerate(lines) if "OPCIÓN" in line) + 1]
+        self.assertIn("--fase antes --corridas 10", option)
+        self.assertTrue(option.strip().startswith("cd "))
+        state_title = perf.next_steps(self.plan.parent, perf.load_plan(self.plan))[0]
+        self.assertEqual(state_title, "corrige antes de medir (avisos de la corrida de prueba)")
+
+    def test_una_prueba_sin_avisos_los_da_por_resueltos_y_medir_igual_tambien_sigue(self):
+        self.tp_outputs(self.REPEATED)
+        self.ok("capturar", "--plan", self.plan, "--prueba")
+        clean = GOOD + '"seccion",400000000,0,0,"MARK reparto"\n'
+        self.tp_outputs(clean)
+        (self.dir / "tp.count").unlink()
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertNotIn("avisos por corregir", out)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home"), [])
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertNotIn("Corrige antes de medir", out)
+        self.assertIn("Siguiente · medición antes y control (sin chat)", out)
+        # con avisos vigentes, medir igual es una decisión del usuario: con antes medido, el flujo sigue su curso
+        self.tp_outputs(self.REPEATED)
+        (self.dir / "tp.count").unlink()
+        self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.assertNotIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
+
+    def test_sin_avisos_guardados_siguiente_es_el_de_siempre(self):
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertNotIn("Corrige antes de medir", out)
+        self.assertIn("--prueba", out)
+        self.assertFalse((self.plan.parent / perf.NOTES_FILE).exists())
+
+    def test_cada_tipo_de_aviso_queda_en_una_linea_con_su_texto_corto(self):
+        info = {"hz_traza": 120, "marcas_plan": [("MARK reparto", ["reparto_ms.hasta"], False),
+                                                 ("NAV lista", ["ventana.desde"], True)],
+                "faltantes": ["reparto_ms"], "con_input": {"lista_a_reparto_ms": 2}, "marcas_repetidas": {"MARK lista": 3},
+                "nombres": {"HTTP GET " + "a" * 118: 1, "HTTP GET corta": 2}}
+        found = perf.test_run_warnings(self.dir, 60, info, "RED SIN MEDIR: ...", ["app/Red.kt:10"])
+        self.assertEqual([item["tipo"] for item in found], ["hz", "marca", "input", "repetida", "red", "nombre"])
+        for item in found:
+            self.assertNotIn("\n", item["texto"])
+            self.assertLessEqual(len(item["texto"]), perf.NOTE_MAX)
+            self.assertTrue(item["corto"])
+        self.assertEqual(found[1]["donde"], ["app/src/main/kotlin/com/example/app/RepartoScreen.kt:4"])
+        self.assertEqual(found[4]["donde"], ["app/Red.kt:10"])
+        self.assertIn("127 caracteres", found[5]["texto"])
+        self.assertEqual(perf.test_run_warnings(self.dir, 60, {"hz_traza": 60, "nombres": {"HTTP GET x": 1}}, "", []), [])
+
+    def test_una_prueba_invalida_tambien_frena_la_medicion(self):
+        self.tp_outputs(LOGIN)
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertEqual(result.returncode, 5)
+        saved = perf.test_warnings(self.plan.parent, "home")
+        self.assertEqual(saved[0]["tipo"], "invalida")
+        self.assertIn("apareció 'SCREEN LoginActivity onCreate'", saved[0]["texto"])
+        self.assertIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
+
+    def test_busca_la_marca_en_el_codigo_sin_leer_las_rutas_prohibidas(self):
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK reparto"),
+                         ["app/src/main/kotlin/com/example/app/RepartoScreen.kt:4"])
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK reparto", ["app/src/main/kotlin/com/example/app/Reparto*"]), [])
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK otra"), [])
+        self.assertEqual(perf.find_mark_sources(self.dir, "SCREEN MainActivity onResume"), [])  # no es una marca de código
+        self.assertEqual(perf.find_mark_sources(self.dir, "MARK rep*"), [])  # un patrón no se busca como texto
+
+
+class SummaryWritesTest(PerfBase):
+    def test_resumen_dice_lo_que_escribe_y_solo_imprimir_no_escribe_nada(self):
+        help_text = self.ok("resumen", "--help")
+        self.assertIn("resumen.md", help_text)
+        self.assertIn("estado.md", help_text)
+        self.assertIn("--solo-imprimir", help_text)
+        write(self.csv, HEADER + rows("antes", "f", "jank_app_pct", [9] * 5, "%"))
+        state = "# E\n\n## Métricas\n<!-- perf:metricas -->\nviejo\n<!-- /perf:metricas -->\n"
+        write(self.dir / "estado.md", state)
+        out = self.ok("resumen", self.csv, "--solo-imprimir")
+        self.assertIn("| antes | f | jank_app_pct |", out)
+        self.assertIn("no se escribió resumen.md", out)
+        self.assertFalse((self.dir / "resumen.md").exists())
+        self.assertEqual((self.dir / "estado.md").read_text(encoding="utf-8"), state)
+        out = self.ok("resumen", self.csv)
+        self.assertTrue((self.dir / "resumen.md").is_file())
+        self.assertIn("resumen.md escrito", out)
+        self.assertNotIn("viejo", (self.dir / "estado.md").read_text(encoding="utf-8"))
+
+
+class DiagnosisWarningsTest(DeviceBase):
+    """ "Advertencias para el diagnóstico": perf.py escribe en estado.md lo que observó en los comandos de la terminal."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.plan.parent / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+
+    def block(self, folder=None):
+        text = ((folder or self.plan.parent) / "estado.md").read_text(encoding="utf-8")
+        return text.split("<!-- perf:advertencias -->")[1].split("<!-- /perf:advertencias -->")[0].strip()
+
+    def test_la_plantilla_trae_la_seccion_antes_de_hallazgos_y_sin_advertencias_lo_dice_sin_afirmar_ausencia(self):
+        template = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        self.assertLess(template.index("## Métricas"), template.index("## Advertencias para el diagnóstico"))
+        self.assertLess(template.index("## Advertencias para el diagnóstico"), template.index("## Hallazgos"))
+        self.assertIn("| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |", template)
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertEqual(self.block(), "- " + perf.NO_WARNINGS)
+        self.assertIn("no prueba que no haya nada que advertir", self.block())
+
+    def test_junta_los_avisos_de_la_prueba_las_invalidas_y_los_avisos_de_la_captura_una_por_linea(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["metricas_usuario"] = [{"nombre": "reparto_ms", "desde": {"marca": "HTTP GET items/{id}"},
+                                                       "hasta": {"marca": "MARK reparto"}}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        marks = '"seccion",400000000,0,0,"MARK reparto"\n'
+        self.tp_outputs(GOOD + marks + '"seccion",450000000,0,0,"MARK reparto"\n')
+        self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("- Corrida de prueba (home): la marca 'MARK reparto' salió 2 veces en una misma carga", self.block())
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(LOGIN, GOOD + marks, LOGIN, GOOD + marks)
+        self.env["FAKE_THERMAL"] = "1"
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "2", "--calentamiento", "0", "--sin-compilar")
+        block = self.block()
+        self.assertIn("- Corridas inválidas en antes (home): 2 · 2 × apareció 'SCREEN LoginActivity onCreate'", block)
+        self.assertIn("- Captura de antes (home): el dispositivo está tibio (Thermal Status 1)", block)
+        self.assertIn("- Fase antes: compilación de ART sin fijar (--sin-compilar)", block)
+        self.assertIn("- Ruido de `jank_app_pct` (home): sin fase control, el ruido no está medido.", block)
+        for line in block.splitlines():
+            self.assertTrue(line.startswith("- "), line)  # una línea por advertencia, sin volcar salidas
+            self.assertLessEqual(len(line), perf.NOTE_MAX + 80, line)
+        # --rehacer descarta esas corridas: lo anotado de ellas ya no vale
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(GOOD + marks)
+        del self.env["FAKE_THERMAL"]
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--rehacer")
+        block = self.block()
+        self.assertNotIn("Corridas inválidas", block)
+        self.assertNotIn("tibio", block)
+        self.assertNotIn("sin fijar", block)
+
+    def test_los_fallos_de_preparar_cuentan_como_corridas_invalidas_con_su_motivo(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["preparar"] = "exit 4"
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "5", "--calentamiento", "0",
+                           "--sin-compilar")
+        self.assertEqual(result.returncode, 5)
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("- Corridas inválidas en antes (home): 3 · 3 × 'preparar' terminó con código 4", self.block())
+
+    def test_el_ruido_y_la_mejora_minima_usan_el_criterio_del_veredicto_de_comparar(self):
+        plan = {"principales": ["m", "fps", "frames", "sin_antes"]}
+        content = HEADER + rows("antes", "f", "m", [100, 104, 98, 101, 102]) + rows("control", "f", "m", [104, 106, 105, 104, 107]) \
+            + rows("antes", "f", "fps", [50, 52, 51, 50, 52], "fps", "mayor") \
+            + rows("antes", "f", "frames", [100] * 5, "frames", family="info") + rows("antes", "f", "otra", [1] * 5)
+        write(self.csv, content)
+        lines = perf.noise_lines(perf.read_rows(self.csv), plan)
+        self.assertEqual(len(lines), 3)  # las principales con antes; "otra" no es principal
+        noisy = next(line for line in lines if "`m`" in line)
+        # mediana de antes 101, de control 105: ruido 4; hay que bajar de min(98, 101 - 4) = 97
+        self.assertIn("antes y control difieren en 4 ms (3.96 %) sin ningún cambio", noisy)
+        self.assertIn("la mediana de después tiene que quedar por debajo de 97 ms (más de 4 ms, 3.96 % respecto de la mediana "
+                      "de antes, 101 ms)", noisy)
+        before, control = [100, 104, 98, 101, 102], [104, 106, 105, 104, 107]
+        self.assertEqual(perf.verdict(before, [96.9] * 5, "menor", control), "mejora")  # justo por debajo del límite
+        self.assertNotEqual(perf.verdict(before, [97] * 5, "menor", control), "mejora")  # en el límite todavía no
+        higher = next(line for line in lines if "`fps`" in line)
+        self.assertIn("sin fase control, el ruido no está medido", higher)
+        self.assertIn("por encima de 52 fps", higher)
+        self.assertEqual(perf.verdict([50, 52, 51, 50, 52], [52.1] * 5, "mayor"), "mejora")
+        self.assertNotEqual(perf.verdict([50, 52, 51, 50, 52], [52] * 5, "mayor"), "mejora")
+        self.assertIn("`frames` (f): es informativa", next(line for line in lines if "`frames`" in line))
+        soft = perf.noise_lines(perf.read_rows(self.csv), {"principales": ["jank_app_pct"]}, ("no", "emulador"))
+        self.assertEqual(soft, [])
+        write(self.csv, HEADER + rows("antes", "f", "jank_app_pct", [9] * 5, "%"))
+        self.assertIn("frames no confiables (emulador)",
+                      perf.noise_lines(perf.read_rows(self.csv), {"principales": ["jank_app_pct"]}, ("no", "emulador"))[0])
+
+    def test_copia_los_cambios_temporales_que_alteran_la_app_con_las_metricas_que_afectan(self):
+        state = self.plan.parent / "estado.md"
+        text = state.read_text(encoding="utf-8")
+        head = "| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n| --- | --- | --- | --- | --- |\n"
+        self.assertIn(head, text)
+        state.write_text(text.replace(head, head
+                                      + "| `feature/busqueda/Buscador.kt` | feature/busqueda | espera de 300 ms antes de la "
+                                        "búsqueda medida | `busqueda_ms`, `red_llamadas` | no |\n"
+                                      + "| `feature/detalle/Detalle.kt` | feature/detalle | `MARK detalle` | — | no |\n"),
+                         encoding="utf-8")
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        block = self.block()
+        self.assertIn("- Cambio temporal que altera la app: `feature/busqueda/Buscador.kt` · espera de 300 ms antes de la "
+                      "búsqueda medida → altera `busqueda_ms`, `red_llamadas` (¿revertido?: no)", block)
+        self.assertNotIn("Detalle.kt", block)  # solo emite una marca: no altera nada
+        old = "## Cambios temporales por revertir\n\n| Archivo | Repo o módulo | Qué es | ¿Revertido? |\n| --- | --- | --- | --- |\n" \
+              "| `a/B.kt` | a | una marca | no |\n"
+        self.assertEqual(perf.altering_changes(old), [])  # la tabla de una versión anterior, sin la columna, se sigue leyendo
+
+    def test_lo_que_el_diagnostico_no_midio_queda_como_advertencia_y_no_como_ausencia(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0")
+        self.env["FAKE_TP_OTRA"] = '"a"\n'
+        self.ok("diagnostico", "--carpeta", self.plan.parent)
+        block = self.block()
+        self.assertIn("- Diagnóstico de antes (home): `cpu_por_libreria`: no medido: la configuración base no captura "
+                      "ds:linux.perf (no quiere decir que no ocurra)", block)
+        notes = perf.read_notes(self.plan.parent)
+        self.assertIn("home", notes["diagnostico"]["antes"])
+        # una consulta puntual no reemplaza lo que anotó el diagnóstico entero
+        self.ok("diagnostico", "--carpeta", self.plan.parent, "--consultas", "hilo_principal_top")
+        self.assertEqual(perf.read_notes(self.plan.parent)["diagnostico"], notes["diagnostico"])
+
+    def test_una_investigacion_anterior_sin_la_seccion_la_recibe_antes_de_hallazgos_una_sola_vez(self):
+        for version in ("0.6.0", "0.7.0", "0.8.0"):
+            fixture = ROOT / "tests" / "fixtures" / ("hb-performance-%s" % version)
+            folder = self.dir / version / "reports" / "perf" / "caso"
+            for name in ("plan.json", "estado.md", "metricas.csv", "fases.json"):
+                write(folder / name, (fixture / name).read_text(encoding="utf-8"))
+            for name in ("PERF_USUARIO", "PERF_CLAVE"):
+                self.env.pop(name, None)
+            self.assertNotIn("perf:advertencias", (folder / "estado.md").read_text(encoding="utf-8"), version)
+            self.ok("siguiente", "--carpeta", folder)
+            self.ok("siguiente", "--carpeta", folder)
+            state = (folder / "estado.md").read_text(encoding="utf-8")
+            self.assertEqual(state.count("## Advertencias para el diagnóstico"), 1, version)
+            self.assertLess(state.index("## Advertencias para el diagnóstico"), state.index("## Hallazgos"), version)
+            self.assertIn("- Ruido de `", self.block(folder), version)  # antes y control ya medidos: sale el ruido
+            before = (fixture / "estado.md").read_text(encoding="utf-8")
+            self.assertEqual(before.split("## Hallazgos")[1].split("## Decisiones")[0],
+                             state.split("## Hallazgos")[1].split("## Decisiones")[0], version)  # el resto no se toca
+        bare = self.dir / "sin-secciones"
+        write(bare / "plan.json", self.plan.read_text(encoding="utf-8"))
+        write(bare / "estado.md", "# Rendimiento\n\n## Siguiente paso\n\n- nada\n\n## Ficha\n\ntexto\n")
+        self.ok("siguiente", "--carpeta", bare)
+        self.assertTrue((bare / "estado.md").read_text(encoding="utf-8").rstrip().endswith("<!-- /perf:advertencias -->"))
+
+
+class NoCommitLineTest(DeviceBase):
+    """Todo texto de chat que imprime perf.py termina con "No hagas commit ni push."."""
+
+    LINE = "No hagas commit ni push."
+
+    def test_chat_text_la_pone_al_final_tambien_con_rutas_que_no_se_leen(self):
+        self.assertEqual(perf.chat_text("Sigue hb-performance con /x/estado.md"),
+                         "Sigue hb-performance con /x/estado.md. No hagas commit ni push.")
+        self.assertEqual(perf.chat_text("Listo.", {"no_leer": ["docs/ALCANCE-*", "casos/"]}),
+                         "Listo. No leas ni busques en: docs/ALCANCE-*, casos/. No hagas commit ni push.")
+        self.assertTrue(perf.chat("x", "intermedio", "medio", "y", {})["texto"].endswith(self.LINE))
+
+    def chat_texts(self, out):
+        return re.findall(r'Texto: "(.*)"', out)
+
+    def test_siguiente_decidir_reporte_y_humo_terminan_cada_chat_con_la_linea(self):
+        folder = self.plan.parent
+        write(folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        outputs = {"siguiente (sesión 2)": self.ok("siguiente", "--carpeta", folder)}
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "metrica": "red_solapadas", "esperado": "0"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(folder / "metricas.csv", HEADER + rows("antes", "home", "jank_app_pct", [9] * 5, "%")
+              + rows("control", "home", "jank_app_pct", [9] * 5, "%"))
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5, "skill": perf.VERSION},
+                                                 "control": {"fecha": "2026-11-05T10:20:00", "corridas": 5}}))
+        outputs["decidir (sesión 3)"] = self.ok("decidir", "--carpeta", folder, "--aprobar", "M1")
+        outputs["decidir --aplicada (sesión 4)"] = self.ok("decidir", "--carpeta", folder, "--aplicada", "M1")
+        outputs["reporte --inicial"] = self.ok("reporte", "--carpeta", folder, "--inicial")
+        self.tp_outputs(GOOD)
+        write(self.dir / "reports/perf/setup/pedido.json", json.dumps({"flujo": "de la lista al detalle", "llegar": ""}))
+        outputs["humo con pedido"] = self.ok("humo", "--paquete", PKG)
+        (self.dir / "reports/perf/setup/pedido.json").unlink()
+        outputs["humo sin pedido"] = self.ok("humo", "--paquete", PKG)
+        for name, out in outputs.items():
+            texts = self.chat_texts(out)
+            self.assertTrue(texts, name)
+            for text in texts:
+                self.assertTrue(text.endswith(self.LINE), (name, text))
+                self.assertEqual(text.count(self.LINE), 1, (name, text))
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn(self.LINE, state.split("## Siguiente paso")[1].split("## Ficha")[0])  # también en estado.md
+
+    def test_los_prompts_documentados_tambien_la_llevan(self):
+        for path in (SCRIPT.parent.parent / "references" / "prompts.md", ROOT / "PROMPTS.md"):
+            text = path.read_text(encoding="utf-8")
+            if path.name == "PROMPTS.md":
+                text = text.split("## hb-performance")[1].split("\n## ")[0]
+            blocks = re.findall(r"```text\n(.*?)```", text, re.S)
+            self.assertTrue(blocks, path)
+            for body in blocks:
+                self.assertTrue(body.strip().endswith(self.LINE), (path.name, body))
+
+
+class ProjectAgentsTest(DeviceBase):
+    """El AGENTS.md del proyecto: `siguiente` avisa si falta `## DoD` antes de una sesión 3, y perf.py mantiene un
+    bloque corto con el estado del setup dentro de la sección de rendimiento, sin tocar nada más."""
+
+    AGENTS = ("# Proyecto\n\n## Comandos\n\n- `./gradlew test`\n\n## Rendimiento\n\n- applicationId: `com.ejemplo.app`\n"
+              "- setup listo\n\n## Git\n\n- Conventional Commits\n")
+
+    def approved(self, **extra):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan.update(extra)
+        plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "estado": "aprobada"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5},
+                                                            "control": {"fecha": "2026-11-05T10:20:00", "corridas": 5}}))
+
+    def test_antes_de_la_sesion_3_avisa_si_falta_dod_e_imprime_una_plantilla(self):
+        self.approved(instalar="./gradlew :app:installProfiling")
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("Siguiente · sesión 3 · M1", out)
+        self.assertIn("AGENTS.md no tiene `## DoD`: la sesión 3 corre", out)
+        self.assertIn("\n  ## DoD\n", out)
+        template = "".join(line + "\n" for line in out.splitlines() if line.startswith(("  ## DoD", "  1. `", "  2. `")))
+        write(self.dir / "AGENTS.md", self.AGENTS + "\n" + template)  # pegada tal cual, con su sangría, el aviso se va
+        self.assertNotIn("no tiene `## DoD`", self.ok("siguiente", "--carpeta", self.plan.parent))
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.assertIn("./gradlew :<módulo>:tasks --all | grep UnitTest", out)
+        self.assertIn("`./gradlew -q :app:assembleProfiling`: compila la variante medida", out)  # del 'instalar' del plan
+        for tool in ("ktlint", "detekt", "sonar"):
+            self.assertNotIn(tool, out.lower())  # nunca agrega herramientas
+        self.assertLess(out.index("AGENTS.md no tiene `## DoD`"), out.index("1. Chat nuevo"))  # el aviso va antes del chat
+        self.assertIn("sesión 3, aplica M1", out)
+
+    def test_con_dod_no_avisa_y_sin_agents_lo_dice(self):
+        self.approved()
+        write(self.dir / "AGENTS.md", self.AGENTS + "\n## DoD\n\n1. `./gradlew test`\n")
+        self.assertNotIn("## DoD", self.ok("siguiente", "--carpeta", self.plan.parent))
+        (self.dir / "AGENTS.md").unlink()
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("No hay AGENTS.md en ", out)
+        self.assertIn("./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>", out)  # sin 'instalar', la plantilla genérica
+        self.assertIsNone(perf.dod_notice(self.dir, {}) if (self.dir / "AGENTS.md").exists() else None)
+        for heading in ("## DoD", "### Definition of Done", "## Definición de hecho", "## 5. DoD"):
+            write(self.dir / "AGENTS.md", "# P\n\n%s\n\n- algo\n" % heading)
+            self.assertIsNone(perf.dod_notice(self.dir, {}), heading)
+        write(self.dir / "AGENTS.md", "\ufeff## DoD\n\n- algo\n")  # con BOM, como los demás encabezados
+        self.assertIsNone(perf.dod_notice(self.dir, {}))
+        write(self.dir / "AGENTS.md", "# P\n\n```markdown\n## DoD\n```\n")  # dentro de un bloque de código no cuenta
+        self.assertIsNotNone(perf.dod_notice(self.dir, {}))
+
+    def test_fuera_de_la_sesion_3_no_avisa(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.assertNotIn("## DoD", self.ok("siguiente", "--carpeta", self.plan.parent))
+
+    def test_humo_deja_el_estado_del_setup_en_la_seccion_de_rendimiento_y_nada_mas(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        write(self.dir / "app/src/main/kotlin/PerfHooks.kt", "object PerfHooks\n")
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        today = datetime.date.today().isoformat()
+        self.assertIn("✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento", out)
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        line = ("- Estado del setup (lo mantiene `perf.py`: no lo edites): instrumentación en el repo: sí · prueba de humo: "
+                "pasó el %s · secciones HTTP: sí (prueba de humo, %s) · hb-performance %s" % (today, today, perf.VERSION))
+        self.assertIn("<!-- hb-performance:estado -->\n%s\n<!-- /hb-performance:estado -->\n" % line, text)
+        before, after = self.AGENTS.split("## Git")
+        self.assertTrue(text.startswith(before.rstrip("\n")))  # lo de antes de la sección y la sección misma, intactos
+        self.assertTrue(text.endswith("## Git" + after))  # lo que sigue a la sección, intacto
+        self.assertLess(text.index("hb-performance:estado"), text.index("## Git"))
+        self.ok("humo", "--paquete", PKG)  # otra vez: un solo bloque, el mismo
+        again = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual(again, text)
+        self.assertEqual(again.count("<!-- hb-performance:estado -->"), 1)
+
+    def test_un_humo_que_falla_o_sin_red_no_deja_un_estado_viejo(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.tp_outputs(GOOD)
+        self.ok("humo", "--paquete", PKG)
+        self.tp_outputs(LOGIN.replace('"frame",0,16000000,0,"None"\n', ""))  # una corrida que no vale
+        (self.dir / "tp.count").unlink()
+        result = self.perf("humo", "--paquete", PKG)
+        self.assertNotEqual(result.returncode, 0)
+        today = datetime.date.today().isoformat()
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("prueba de humo: falló el %s" % today, text)
+        self.assertNotIn("pasó el", text)
+        no_http = GOOD.replace('"seccion",0,300000000,0,"HTTP GET items/{id}"\n', "").replace(
+            '"seccion",100000000,300000000,0,"HTTP GET items/{id}"\n', "")
+        self.tp_outputs(no_http)
+        (self.dir / "tp.count").unlink()
+        write(self.dir / "AGENTS.md", self.AGENTS)  # un proyecto donde ninguna corrida vio la red
+        self.ok("humo", "--paquete", PKG, "--sin-red")
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("prueba de humo: pasó el %s · secciones HTTP: no exigidas (humo --sin-red, %s)" % (today, today), text)
+
+    def test_sin_seccion_de_rendimiento_no_la_crea_y_lo_dice(self):
+        original = "# Proyecto\n\n## Comandos\n\n- `./gradlew test`\n"
+        write(self.dir / "AGENTS.md", original)
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn("AGENTS.md no tiene una sección de rendimiento (## Rendimiento o ## Performance): no la creo", out)
+        self.assertEqual((self.dir / "AGENTS.md").read_text(encoding="utf-8"), original)
+        (self.dir / "AGENTS.md").unlink()
+        self.assertIn("No hay AGENTS.md en ", self.ok("humo", "--paquete", PKG))
+        self.assertFalse((self.dir / "AGENTS.md").exists())
+
+    def test_la_corrida_de_prueba_anota_la_red_una_vez_y_conserva_lo_demas_del_bloque(self):
+        english = self.AGENTS.replace("## Rendimiento", "## Performance")
+        write(self.dir / "AGENTS.md", english + "\n")
+        self.assertEqual(perf.update_agents_state(self.dir, humo="pasó el 2026-11-01", http="sin dato"),
+                         "✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento (instrumentación en el repo: "
+                         "no (no encontré PerfHooks.kt) · prueba de humo: pasó el 2026-11-01 · secciones HTTP: sin dato)")
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("✔ AGENTS.md: estado del setup actualizado", out)
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        today = datetime.date.today().isoformat()
+        self.assertIn("prueba de humo: pasó el 2026-11-01 · secciones HTTP: sí (corrida de prueba, %s)" % today, text)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")  # ya dice que sí: no se reescribe en cada prueba
+        self.assertNotIn("AGENTS.md", out)
+        self.assertEqual((self.dir / "AGENTS.md").read_text(encoding="utf-8"), text)
+
+    def test_no_toca_nada_fuera_del_bloque_con_fences_encabezados_ajenos_ni_crlf(self):
+        fenced = ("# P\n\n## Reglas\n\n### No degradar el rendimiento\n\n- regla\n\n## Rendimiento\n\n```bash\n"
+                  "# instala el build\n./gradlew :app:installProfiling\n```\n\n## Git\n\n- c\n")
+        write(self.dir / "AGENTS.md", fenced)
+        self.assertIn("✔", perf.update_agents_state(self.dir, humo="pasó el 2026-11-01"))
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        block_at = text.index("<!-- hb-performance:estado -->")
+        self.assertLess(text.index("```\n\n<!--"), block_at)  # después del bloque de código, no dentro
+        self.assertLess(text.index("## Rendimiento"), block_at)  # en la sección que se llama así, no en la regla que la menciona
+        self.assertLess(block_at, text.index("## Git"))
+        self.assertEqual(text.replace(text[block_at:text.index("## Git")], ""), fenced)  # lo demás, byte por byte
+        self.assertIsNone(perf.performance_section("# P\n\n## Reglas\n\n### No degradar el rendimiento\n\n- regla\n"))
+        crlf = self.AGENTS.replace("\n", "\r\n")
+        with open(str(self.dir / "AGENTS.md"), "w", encoding="utf-8", newline="") as handle:
+            handle.write(crlf)
+        self.assertIn("✔", perf.update_agents_state(self.dir, humo="pasó el 2026-11-01"))
+        with open(str(self.dir / "AGENTS.md"), encoding="utf-8", newline="") as handle:
+            text = handle.read()
+        self.assertNotIn("\n", text.replace("\r\n", ""))  # el archivo sigue entero en CRLF, también el bloque
+        self.assertTrue(text.endswith("## Git\r\n\r\n- Conventional Commits\r\n"))
+        self.assertEqual(perf.update_agents_state(self.dir, humo="pasó el 2026-11-01"), "")  # idempotente
+        loose = "# P\n\n## Rendimiento\n\n- a\n<!-- hb-performance:estado -->\n"  # un marcador de apertura suelto
+        write(self.dir / "AGENTS.md", loose)
+        perf.update_agents_state(self.dir, humo="pasó el 2026-11-01")
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual((text.count("<!-- hb-performance:estado -->"), text.count("<!-- /hb-performance:estado -->")), (1, 1))
+
+    def test_un_agents_que_no_se_puede_escribir_no_rompe_humo_ni_tapa_su_resultado(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        (self.dir / "AGENTS.md").chmod(0o444)
+        if os.access(str(self.dir / "AGENTS.md"), os.W_OK):
+            self.skipTest("este usuario escribe aunque el archivo sea de solo lectura")
+        write(self.dir / "reports/perf/setup/pedido.json", json.dumps({"flujo": "de la lista al detalle", "llegar": ""}))
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        self.assertIn("⚠ No pude escribir ", out)
+        self.assertIn("Usa hb-performance: medir de la lista al detalle", out)  # el paso siguiente sale igual
+        self.assertEqual((self.dir / "AGENTS.md").read_text(encoding="utf-8"), self.AGENTS)
+
+    def test_un_humo_sin_red_no_pisa_la_red_que_ya_vio_otra_corrida_y_una_precondicion_no_es_un_humo_fallido(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        perf.update_agents_state(self.dir, humo="pasó el 2026-11-01", http="sí (corrida de prueba, 2026-11-02)")
+        no_http = GOOD.replace('"seccion",0,300000000,0,"HTTP GET items/{id}"\n', "").replace(
+            '"seccion",100000000,300000000,0,"HTTP GET items/{id}"\n', "")
+        self.tp_outputs(no_http)
+        self.ok("humo", "--paquete", PKG, "--sin-red")
+        self.assertIn("secciones HTTP: sí (corrida de prueba, 2026-11-02)", (self.dir / "AGENTS.md").read_text(encoding="utf-8"))
+        self.env["FAKE_THERMAL"] = "3"  # el dispositivo está caliente: el humo no llegó a correr
+        self.assertEqual(self.perf("humo", "--paquete", PKG).returncode, 3)
+        text = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("prueba de humo: pasó el %s" % datetime.date.today().isoformat(), text)  # lo anotado sigue valiendo
+        self.assertNotIn("falló", text)
+
+    def test_la_seccion_termina_en_el_siguiente_encabezado_de_su_nivel_o_superior(self):
+        text = "# P\n\n## Rendimiento\n\n- a\n\n### Detalle\n\n- b\n\n## Git\n\n- c\n"
+        start, end = perf.performance_section(text)
+        self.assertEqual(text[start:end], "\n- a\n\n### Detalle\n\n- b\n\n")
+        self.assertIsNone(perf.performance_section("# P\n\n## Comandos\n"))
+        last = "# P\n\n## Performance\n\n- a\n"
+        self.assertEqual(perf.performance_section(last), (last.index("\n- a"), len(last)))
+        self.assertEqual(perf.agents_state("x <!-- hb-performance:estado -->\n- Estado: prueba de humo: pasó · secciones HTTP: sí "
+                                           "(x) · hb-performance 0.10.0\n<!-- /hb-performance:estado -->"),
+                         {"prueba de humo": "pasó", "secciones HTTP": "sí (x)"})
+        self.assertIsNone(perf.http_state("sí (prueba de humo, 2026-11-01)", True, "corrida de prueba"))
+        self.assertIsNone(perf.http_state("sí (x)", False, "corrida de prueba"))  # un flujo sin llamadas no lo desmiente
+        self.assertIn("sin medir", perf.http_state("sin dato", False, "corrida de prueba"))
+        nested = "## Rendimiento\n\n````\n```\n# no es un encabezado\n```\n````\n\n~~~\n```\n# tampoco\n~~~\n\n## Git\n"
+        start, end = perf.performance_section(nested)
+        self.assertEqual(nested[end:], "## Git\n")  # los fences anidados o mezclados no cortan la sección
+        self.assertIsNotNone(perf.performance_section("  ## Rendimiento\n\n- a\n"))  # con sangría, como DoD
+        self.assertIn("`./gradlew -q assembleProfiling`", " ".join(perf.dod_notice(self.dir / "no-hay", {
+            "instalar": "./gradlew installProfiling"})["lineas"]))  # sin módulo en 'instalar', la tarea va sin ':' 
+
+
+class LastBeforeTest(unittest.TestCase):
+    """`"cual": "ultima_antes"` en `desde`: la última ocurrencia de la marca antes de la marca `hasta` elegida. Sirve
+    cuando la marca de inicio sale varias veces (cada letra de una búsqueda) y se elige en el plan, sin tocar la app."""
+
+    START = {"marca": "MARK busqueda_inicio", "cual": "ultima_antes"}
+
+    def trace(self):
+        # una búsqueda que carga con cada letra: tres inicios, dos resultados intermedios y el resultado final
+        return [("proceso", 0, 0, 0, PKG), ("limites", 0, 5000 * MS, 0, "")] \
+            + [("frame", i * 20 * MS, 16 * MS, 0, "None") for i in range(150)] \
+            + [("hilo", 2050 * MS, 30 * MS, 0, "Choreographer#doFrame"), ("hilo", 1010 * MS, 80 * MS, 0, "Choreographer#doFrame"),
+               ("seccion", 1000 * MS, 0, 0, "MARK busqueda_inicio"), ("seccion", 1300 * MS, 0, 0, "MARK busqueda_inicio"),
+               ("seccion", 1500 * MS, 0, 0, "MARK resultados"), ("seccion", 2000 * MS, 0, 0, "MARK busqueda_inicio"),
+               ("seccion", 2100 * MS, 0, 0, "MARK resultados"), ("seccion", 2400 * MS, 0, 0, "MARK resultados"),
+               ("seccion", 3000 * MS, 0, 0, "MARK busqueda_inicio"),  # otra búsqueda, después del último resultado
+               ("seccion", 2010 * MS, 200 * MS, 0, "HTTP GET api/v1/clientes"), ("seccion", 1010 * MS, 100 * MS, 0, "HTTP GET api/v1/clientes")]
+
+    def metrics(self, flow):
+        out, invalid, info = perf.trace_metrics(self.trace(), 60, flow, set(), 34)
+        self.assertIsNone(invalid)
+        return {m[0]: m[1] for m in out}, info
+
+    def test_en_una_metrica_de_usuario_elige_el_inicio_que_precede_al_resultado(self):
+        def flow(start, end):
+            return {"metricas_usuario": [{"nombre": "busqueda_ms", "desde": start, "hasta": end}]}
+
+        last = self.metrics(flow(self.START, {"marca": "MARK resultados"}))[0]
+        self.assertEqual(last["busqueda_ms"], 400)  # del inicio de los 2000 ms al último resultado (2400)
+        first = self.metrics(flow(self.START, {"marca": "MARK resultados", "cual": "primera"}))[0]
+        self.assertEqual(first["busqueda_ms"], 200)  # del inicio de los 1300 ms al primer resultado (1500)
+        # lo de siempre no cambia: 'primera' toma el primer inicio y 'ultima', el último de toda la traza
+        self.assertEqual(self.metrics(flow({"marca": "MARK busqueda_inicio"}, {"marca": "MARK resultados"}))[0]["busqueda_ms"],
+                         1400)
+        _, info = self.metrics(flow({"marca": "MARK busqueda_inicio", "cual": "ultima"}, {"marca": "MARK resultados"}))
+        self.assertEqual(info["faltantes"], ["busqueda_ms"])  # el último inicio queda después de todo resultado
+
+    def test_funciona_igual_en_la_ventana_y_en_los_tramos(self):
+        span = {"desde": self.START, "hasta": {"marca": "MARK resultados"}}
+        flow = {"ventana": dict(span), "segmentos": [dict(span, nombre="busqueda")]}
+        out, info = self.metrics(flow)
+        self.assertEqual(info["ventana_ns"], (2000 * MS, 2400 * MS))
+        self.assertEqual(out["ventana_ms"], 400)
+        self.assertEqual(out["hilo_max_ms"], 30)  # el slice de 80 ms es de una búsqueda anterior: queda fuera
+        self.assertEqual(out["busqueda hilo_max_ms"], 30)
+        self.assertEqual(out["busqueda red_llamadas"], 1)  # solo la llamada que empieza en el tramo
+        self.assertEqual(perf.span_bounds(sorted(self.trace(), key=lambda r: r[1]), span), (2000 * MS, 2400 * MS))
+
+    def test_el_nombre_de_la_marca_se_compara_exacto_o_como_patron_y_un_prefijo_no_se_confunde(self):
+        rows = [("seccion", 100 * MS, 0, 0, "MARK busqueda_inicio lista"), ("seccion", 200 * MS, 0, 0, "MARK busqueda_inicio"),
+                ("seccion", 300 * MS, 0, 0, "MARK busqueda_inicio lista"), ("seccion", 500 * MS, 0, 0, "MARK resultados")]
+        exact = {"desde": self.START, "hasta": {"marca": "MARK resultados"}}
+        self.assertEqual(perf.resolve_span(rows, exact), (200 * MS, 500 * MS))  # exacto: el nombre más largo no cuenta
+        pattern = {"desde": {"marca": "MARK busqueda_inicio*", "cual": "ultima_antes"}, "hasta": {"marca": "MARK resultados"}}
+        self.assertEqual(perf.resolve_span(rows, pattern), (300 * MS, 500 * MS))  # con * entran las dos
+        self.assertEqual(perf.resolve_span(rows, {"desde": self.START, "hasta": {"marca": "MARK no_esta"}}), (None, None))
+        early = [("seccion", 100 * MS, 0, 0, "MARK resultados"), ("seccion", 200 * MS, 0, 0, "MARK busqueda_inicio")]
+        self.assertEqual(perf.resolve_span(early, exact), (None, 100 * MS))  # ningún inicio antes del resultado: falta, no se inventa
+
+    def test_una_marca_elegida_con_ultima_antes_no_cuenta_como_marca_repetida(self):
+        rows = [("proceso", 0, 0, 0, PKG), ("frame", 0, 16 * MS, 0, "None")] \
+            + [("seccion", t * MS, 0, 0, "MARK busqueda_inicio") for t in (100, 200, 300)] \
+            + [("seccion", 500 * MS, 0, 0, "MARK resultados"), ("seccion", 600 * MS, 0, 0, "MARK resultados")]
+        flow = {"metricas_usuario": [{"nombre": "busqueda_ms", "desde": self.START, "hasta": {"marca": "MARK resultados"}}]}
+        info = perf.trace_metrics(rows, 60, flow, set(), 34)[2]
+        self.assertEqual(info["marcas_repetidas"], {"MARK resultados": 2})  # la de inicio se repite a propósito
+        plain = {"metricas_usuario": [{"nombre": "busqueda_ms", "desde": {"marca": "MARK busqueda_inicio"},
+                                       "hasta": {"marca": "MARK resultados"}}]}
+        self.assertEqual(perf.trace_metrics(rows, 60, plain, set(), 34)[2]["marcas_repetidas"],
+                         {"MARK busqueda_inicio": 3, "MARK resultados": 2})  # sin ultima_antes, el aviso de siempre
+
+    def test_el_plan_la_acepta_en_desde_y_la_rechaza_en_hasta_y_en_las_pausas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plan.json"
+
+            def load(flow):
+                path.write_text(json.dumps({"paquete": PKG, "flujos": {"f": flow}}), encoding="utf-8")
+                return perf.load_plan(path)
+
+            end = {"marca": "MARK resultados"}
+            load({"metricas_usuario": [{"nombre": "m", "desde": self.START, "hasta": end}],
+                  "segmentos": [{"nombre": "t", "desde": self.START, "hasta": end}],
+                  "ventana": {"desde": self.START, "hasta": end}})
+            for bad in ({"metricas_usuario": [{"nombre": "m", "desde": {"marca": "NAV x"}, "hasta": dict(end, cual="ultima_antes")}]},
+                        {"segmentos": [{"nombre": "t", "desde": {"marca": "NAV x"}, "hasta": dict(end, cual="ultima_antes")}]},
+                        {"ventana": {"desde": {"marca": "NAV x"}, "hasta": dict(end, cual="ultima_antes")}},
+                        {"pausas": [{"desde": self.START, "hasta": end}]}):
+                with self.assertRaises(perf.PerfError, msg=str(bad)):
+                    load(bad)
+            with self.assertRaises(perf.PerfError) as raised:
+                load({"metricas_usuario": [{"nombre": "m", "desde": {"marca": "NAV x", "cual": "penultima"}, "hasta": end}]})
+            self.assertIn("ultima_antes", str(raised.exception))
+
+
+class SectionNameLimitTest(DeviceBase):
+    """Nombres de endpoint largos: la plantilla acorta desde la izquierda y la corrida de prueba avisa de los cortados."""
+
+    @staticmethod
+    def shorten(method, path, tag, limit=120):
+        """La misma regla que HttpSectionName.shorten de la plantilla Kotlin (hashCode de Java), para comprobar sus
+        propiedades sin compilar Kotlin."""
+        def short_hash(text):
+            code = 0
+            for char in text:
+                code = (31 * code + ord(char)) & 0xFFFFFFFF
+            return "%04x" % (code & 0xFFFF)
+
+        room = limit - len(method) - 1 - len(tag)
+        if len(path) <= room:
+            return "%s %s%s" % (method, path, tag)
+        kept = path[len(path) - max(room - 5, 0):] if room - 5 > 0 else ""
+        tail = kept[max(kept.find("/"), 0):]
+        return "%s ~%s%s%s" % (method, short_hash(path[:len(path) - len(tail)]), tail, tag)
+
+    def test_las_dos_plantillas_acortan_desde_la_izquierda_dentro_del_limite(self):
+        base = SCRIPT.parent.parent / "assets" / "instrumentacion"
+        for name in ("HttpSectionName.okhttp.kt", "HttpSectionName.retrofit.kt"):
+            text = (base / name).read_text(encoding="utf-8")
+            self.assertIn("const val MAX_ENDPOINT_NAME = MAX_SECTION_NAME - LONGEST_PREFIX_LENGTH - 1", text, name)
+            self.assertIn("fun shorten(method: String, path: String, tag: String): String", text, name)
+            self.assertIn('return "$method ~${shortHash(path.dropLast(tail.length))}$tail$tag"', text, name)
+            self.assertRegex(text, r"fun endpoint\(request: Request\): String =\s+shorten\(request\.method, ", name)
+            self.assertLessEqual(max(len(line) for line in text.splitlines()), 120, name)  # el estilo que ya cumplen
+        tracer = (base / "SectionTracer.kt").read_text(encoding="utf-8")
+        self.assertIn("const val MAX_SECTION_NAME = %d" % perf.SECTION_NAME_MAX, tracer)  # el mismo límite en los dos lados
+        tests = (base / "test" / "TraceEventListenerTest.kt").read_text(encoding="utf-8")
+        self.assertIn("fun aLongPathIsShortenedFromTheLeftAndFitsInASectionName()", tests)
+        self.assertIn("fun aPathThatFitsKeepsItsNameAndAHugeSegmentIsStillCapped()", tests)
+
+    def test_la_regla_conserva_el_final_de_la_ruta_y_distingue_prefijos(self):
+        gateway = "/gateway/" + "segmento-largo/" * 12
+        orders = self.shorten("GET", gateway + "clientes/{id}/pedidos", " #1a2b")
+        self.assertLess(len("QUEUE " + orders), perf.SECTION_NAME_MAX)  # nunca llega al límite: no dispara el aviso
+        self.assertRegex(orders, r"^GET ~[0-9a-f]{4}/.*clientes/\{id\}/pedidos #1a2b$")
+        self.assertNotEqual(orders, self.shorten("GET", gateway + "clientes/{id}/facturas", " #1a2b"))
+        self.assertNotEqual(orders, self.shorten("GET", "/otro" + gateway + "clientes/{id}/pedidos", " #1a2b"))
+        self.assertEqual(self.shorten("GET", "/items/{id}", ""), "GET /items/{id}")  # un nombre que cabe no cambia
+        self.assertEqual(perf.endpoint_of("HTTP " + orders), orders[:-len(" #1a2b")])  # perf.py lo lee como cualquier otro
+        self.assertEqual(perf.at_limit({"HTTP " + orders: 1, "HTTP GET " + "a" * 118: 2, "MARK x": 1}),
+                         ["HTTP GET " + "a" * 118])
+
+    def test_la_corrida_de_prueba_avisa_si_un_nombre_de_seccion_llega_al_limite(self):
+        long_name = ("HTTP GET /gateway/" + "segmento-largo/" * 10)[:perf.SECTION_NAME_MAX]
+        self.assertEqual(len(long_name), 127)
+        self.tp_outputs(GOOD + '"seccion",200000000,100000000,0,"%s"\n' % long_name)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("⚠ 1 nombres de sección llegan al límite de 127 caracteres de android.os.Trace y están cortados", out)
+        self.assertIn("perf.py instrumentar --actualizar", out)
+        self.assertEqual([item["tipo"] for item in perf.test_warnings(self.plan.parent, "home")], ["nombre"])
+        self.assertIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(GOOD)
+        self.assertNotIn("llegan al límite", self.ok("capturar", "--plan", self.plan, "--prueba"))
+
+
+class WarningShapesTest(PerfBase):
+    def test_formas_inesperadas_en_advertencias_json_no_rompen_ni_se_parten_en_caracteres(self):
+        write(self.dir / "advertencias.json", json.dumps({
+            "prueba": {"home": {"avisos": [{"tipo": "x", "texto": "dos\nlíneas", "donde": "app/Red.kt:10"}]}},
+            "capturar": {"antes": {"home": "un texto suelto"}}, "diagnostico": {"antes": {"home": 5}},
+            "invalidas": {"antes": {"home": {"motivo": "tres"}}}}))
+        lines = perf.warnings_lines(self.dir, {"flujos": {"home": {}}})
+        self.assertEqual(lines, ["Corrida de prueba (home): dos líneas", "Corridas inválidas en antes (home): 0 · 0 × motivo"])
+        write(self.dir / "advertencias.json", json.dumps({"diagnostico": {"antes": {"home": ["`x`: no medido"]}},
+                                                          "invalidas": {"antes": {"home": {"m": 1}}}}))
+        perf.forget_notes(self.dir, "antes", "home")  # --rehacer también olvida lo que el diagnóstico anotó de esas corridas
+        self.assertEqual(perf.warnings_lines(self.dir, {"flujos": {"home": {}}}), [])
+
+
+class DebuggableBuildTest(DeviceBase):
+    """Un build depurable en una fase medida detiene la captura antes de compilar y da el comando para corregirlo."""
+
+    def capture(self, *extra):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", *extra)
+
+    def set_plan(self, **fields):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan.update(fields)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def phases(self):
+        return json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+
+    def compiled(self):
+        return "cmd package compile" in (self.dir / "adb.log").read_text(encoding="utf-8")
+
+    def test_se_detiene_antes_de_compilar_si_las_fases_medidas_usaron_un_build_no_depurable(self):
+        self.set_plan(instalar="./gradlew :app:installProfiling -Pperf", serial="emulator-5554")
+        self.tp_outputs(GOOD)
+        self.assertEqual(self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar").returncode, 0)
+        self.assertIs(self.phases()["antes"]["depurable"], False)
+        self.env.update({"FAKE_FLAGS": "DEBUGGABLE HAS_CODE", "FAKE_UPDATED": "2026-11-06 09:30:00"})
+        result = self.capture("--fase", "control", "--corridas", "2")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("✖ el build instalado es depurable (1.0 (7), instalado 2026-11-06 09:30:00)", result.stderr)
+        self.assertIn("la fase antes de este flujo se midió con un build no depurable (1.0 (7), instalado 2026-11-05 "
+                      "10:00:00)", result.stderr)
+        self.assertIn("el botón de ejecutar del IDE instala la variante de depuración", result.stderr)
+        self.assertIn("Qué quedó guardado: ninguna corrida de esta tanda (0 de 2 válidas de control)", result.stderr)
+        steps = [line.strip() for line in result.stderr.split("  Cómo seguir:")[1].splitlines() if line.startswith("     ")]
+        self.assertEqual(len(steps), 2, steps)
+        self.assertTrue(steps[0].startswith("cd ") and steps[0].endswith(
+            "ANDROID_SERIAL=emulator-5554 ./gradlew :app:installProfiling -Pperf"), steps[0])
+        self.assertTrue(steps[1].startswith("cd ") and "--fase control --corridas 2" in steps[1], steps[1])
+        self.assertFalse(self.compiled())  # se detuvo antes de compilar
+        self.assertNotIn("control", self.phases())
+        result = self.capture("--fase", "control", "--corridas", "1", "--sin-compilar", "--forzar")  # a propósito
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+        self.assertIs(self.phases()["control"]["depurable"], True)
+
+    def test_sin_fases_medidas_decide_el_instalar_del_plan(self):
+        self.env["FAKE_FLAGS"] = "DEBUGGABLE HAS_CODE"
+        self.tp_outputs(GOOD)
+        self.set_plan(instalar="./gradlew :app:installDemoProfiling")
+        result = self.capture("--fase", "antes", "--corridas", "1")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el plan mide la variante 'demoProfiling' (su comando 'instalar')", result.stderr)
+        self.assertIn("./gradlew :app:installDemoProfiling", result.stderr.split("  Cómo seguir:")[1])
+        self.assertFalse(self.compiled())
+        self.set_plan(instalar="./gradlew :app:installDebug")  # el plan mide la variante de depuración: solo avisa
+        result = self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+
+    def test_sin_dato_de_antes_ni_instalar_solo_avisa_como_siempre(self):
+        self.env["FAKE_FLAGS"] = "DEBUGGABLE HAS_CODE"
+        self.tp_outputs(GOOD)
+        # un registro de una versión anterior no dice si el build era depurable: no cuenta como "no depurable"
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {
+            "fecha": "2026-11-05T10:00:00", "corridas": 5, "version": "1.0 (7)", "instalada": "2026-11-05 10:00:00"}}))
+        result = self.capture("--fase", "control", "--corridas", "1", "--sin-compilar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+
+    def test_la_corrida_de_prueba_y_rehacer_la_misma_fase_no_se_detienen(self):
+        self.tp_outputs(GOOD)
+        self.assertEqual(self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar").returncode, 0)
+        self.env["FAKE_FLAGS"] = "DEBUGGABLE HAS_CODE"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("⚠ el build instalado es debuggable", result.stdout)
+        # la única fase medida es la que se rehace: sus corridas se descartan, no hay con qué comparar
+        result = self.capture("--fase", "antes", "--corridas", "1", "--sin-compilar", "--rehacer")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(perf.debuggable_stop(self.plan.parent, "antes", "home", {"depurable": False}, {}), None)
+        stop = perf.debuggable_stop(self.plan.parent, "despues", "otro", {"depurable": True, "version": "1.0 (7)"}, {})
+        self.assertIsNone(stop)  # la fase medida es de otro flujo (el registro lleva los flujos que midió)
+        # con varios flujos, vale el build de cada flujo y no el de la última tanda de la fase
+        folder = self.dir / "varios"
+        folder.mkdir()
+        base = {"fecha": "2026-11-09T10:00:00", "corridas": 5, "version": "1.0 (7)", "instalada": "2026-11-05 10:00:00"}
+        perf.write_phase(folder, "antes", dict(base, depurable=False), "a")
+        perf.write_phase(folder, "antes", dict(base, depurable=True), "b")
+        build = {"depurable": True, "version": "1.0 (7)", "instalada": "2026-11-06 09:00:00"}
+        self.assertIn("la fase antes de este flujo se midió con un build no depurable",
+                      perf.debuggable_stop(folder, "control", "a", build, {}))
+        self.assertIsNone(perf.debuggable_stop(folder, "control", "b", build, {}))
+
+
+class CutRunTest(DeviceBase):
+    """x + Enter corta la corrida en curso; una corrida inválida dice hasta dónde llegó; puntos de control del recorrido."""
+
+    def set_route(self, command):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["recorrido"] = command
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def in_terminal(self, args, react, timeout=90):
+        """Corre perf.py con una terminal de verdad (un pty) como su terminal de control. `react(salida, escribir)` se
+        llama con toda la salida acumulada cada vez que pasa un rato; `escribir` teclea en la terminal. Devuelve (código
+        de salida, salida)."""
+        env = dict(self.env)
+        env.pop("HB_PERF_TTY", None)  # /dev/tty: la terminal de control, como la de quien corre una captura
+        pid, master = pty.fork()
+        if pid == 0:  # el proceso hijo: su terminal de control es el pty
+            try:
+                os.chdir(str(self.dir))
+                os.execve(sys.executable, [sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], env)
+            finally:
+                os._exit(127)
+        output, deadline, alive = b"", time.time() + timeout, True
+        try:
+            while alive and time.time() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:  # en Linux, leer el pty de un proceso que terminó da EIO
+                        chunk = b""
+                    alive = bool(chunk)
+                    output += chunk
+                react(output.decode("utf-8", "replace"), lambda text: os.write(master, text.encode("utf-8")))
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+        finally:
+            _, status = os.waitpid(pid, 0)
+            os.close(master)
+        self.assertFalse(alive, "perf.py no terminó a tiempo:\n" + output.decode("utf-8", "replace"))
+        return os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1, output.decode("utf-8", "replace")
+
+    def test_x_enter_corta_la_corrida_descarta_su_traza_y_sigue_con_la_siguiente(self):
+        counter, child = self.dir / "vueltas.txt", self.dir / "espera.pid"
+        # la primera corrida se queda esperando (se desvió); las siguientes terminan enseguida
+        self.set_route('n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; if [ "$n" -eq 0 ]; then sleep 60 & '
+                       'echo $! > %s; wait $!; fi' % (counter, counter, child))
+        self.tp_outputs(GOOD)
+        sent = []
+
+        def react(output, write_keys):
+            if not sent and child.is_file() and child.read_text().strip():
+                sent.append(True)
+                write_keys("x\n")
+
+        started = time.time()
+        code, out = self.in_terminal(["capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas",
+                                      "2", "--calentamiento", "0", "--sin-compilar"], react)
+        self.assertEqual(code, 0, out)
+        self.assertLess(time.time() - started, 45)  # no esperó los 60 s del recorrido desviado
+        self.assertEqual(out.count("x + Enter la corta"), 1)  # lo dice una vez, al empezar
+        self.assertIn("✖ corrida 1 inválida: cortada a mano (x + Enter): su traza se descartó sin procesarla; se repite", out)
+        self.assertIn("corrida 2/2", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["corridas"], 2)
+        self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"], {"cortada a mano": 1})
+        log = [json.loads(line) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(sum(1 for call in log if "pull" in call), 2)  # la cortada no se bajó
+        self.assertTrue(any(" ".join(call).endswith("rm -f /data/misc/perfetto-traces/hbperf-%s.perfetto-trace" % pid)
+                            for call in log for pid in [call[-1].rsplit("hbperf-", 1)[-1].split(".")[0]]
+                            if "rm -f" in call[-1]))  # ni quedó en el dispositivo
+        self.assertEqual([f.name for f in (self.plan.parent / "antes").glob("*invalida*")], [])
+        waiting = int(child.read_text().strip())
+        for _ in range(50):  # lo que el recorrido tenía en curso también terminó
+            try:
+                os.kill(waiting, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(waiting, signal.SIGKILL)
+            self.fail("el proceso del recorrido cortado siguió corriendo")
+
+    def test_durante_una_pausa_la_tecla_la_atiende_la_pausa_y_no_el_corte(self):
+        script = self.plan.parent / "recorrido.sh"
+        write(script, "#!/usr/bin/env bash\nset -euo pipefail\n"
+                      "pausa() { %s -I \"%s\" pausa \"$1\" || exit $?; }\npausa \"Autoriza la operación\"\n"
+              % (sys.executable, SCRIPT))
+        self.set_route("bash %s" % script)
+        self.tp_outputs(GOOD)
+        answered, flags_before = [], set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*"))
+
+        def react(output, write_keys):
+            shown = output.count("▶ PAUSA")
+            if shown > len(answered):  # la primera pausa se responde con x; la segunda, con Enter
+                answered.append("x\n" if not answered else "\n")
+                write_keys(answered[-1])
+
+        code, out = self.in_terminal(["capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas",
+                                      "1", "--calentamiento", "0", "--sin-compilar"], react)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(answered, ["x\n", "\n"])
+        self.assertIn("✖ corrida 1 inválida: el recorrido terminó con código 1", out)  # la descartó la pausa
+        self.assertNotIn("cortada a mano", out)
+        self.assertIn("corrida 1/1", out)
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*")), flags_before)  # sin bandera vieja
+
+    def test_sin_terminal_interactiva_no_hay_corte_ni_aviso(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertNotIn("x + Enter la corta", out)
+        tty = self.dir / "terminal.txt"  # un archivo no es una terminal interactiva: tampoco
+        write(tty, "x\n")
+        self.env["HB_PERF_TTY"] = str(tty)
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertNotIn("x + Enter la corta", out)
+        self.assertNotIn("cortada a mano", out)
+        self.assertIsNone(perf.drive("true", "corrida"))
+        self.assertEqual(perf.drive("exit 4", "corrida"), "el recorrido terminó con código 4")
+
+    def test_el_corte_solo_se_pide_con_x_y_respeta_la_bandera_de_la_pausa(self):
+        master, slave = pty.openpty()
+        try:
+            cutter = perf.RunCutter(os.open(os.ttyname(slave), os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK))
+            cutter.foreground = lambda: True  # esta terminal no es la de control del proceso de los tests
+
+            def typed(text):
+                os.write(master, text.encode("utf-8"))
+                time.sleep(0.2)
+                return cutter.pedido()
+
+            self.assertFalse(cutter.pedido())  # nada tecleado
+            self.assertFalse(typed("\n"))
+            self.assertFalse(typed("xx\n"))
+            self.assertTrue(typed(" X \n"))
+            write(Path(cutter.flag), "1")  # una pausa del recorrido está esperando su respuesta
+            self.assertFalse(typed("x\n"))
+            self.assertEqual(os.read(slave, 16).strip(), b"x")  # la línea sigue ahí para la pausa
+            cutter.empezar()  # la bandera vieja se quita al empezar el recorrido siguiente
+            self.assertFalse(os.path.exists(cutter.flag))
+            self.assertIn(perf.PAUSE_FLAG_ENV, cutter.entorno())
+            holder = cutter.folder
+            cutter.cerrar()
+            self.assertFalse(cutter.pedido())
+            self.assertFalse(os.path.exists(holder))  # la carpeta de la bandera no queda en el directorio temporal
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_una_corrida_invalida_dice_hasta_donde_llego(self):
+        self.tp_outputs(LOGIN, GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✖ corrida 1 inválida: apareció 'SCREEN LoginActivity onCreate' (traza guardada para auditoría)\n"
+                      "  Hasta dónde llegó: última marca vista: SCREEN LoginActivity onCreate a los 0 s", result.stdout)
+        self.assertEqual(perf.reach_text({}), "no se pudo leer la traza para saberlo")
+        self.assertEqual(perf.reach_text({"ultima_marca": None, "marcas_plan": [("MARK lista", ["ventana.hasta"], False)]}),
+                         "ninguna marca propia (SCREEN, NAV, MARK) en la traza · marcas del plan que no salieron: MARK lista")
+
+    def test_un_punto_de_control_corta_el_recorrido_y_la_corrida_dice_donde_quedo(self):
+        folder = self.dir / "reports" / "perf" / "lista"
+        self.ok("nuevo", "--carpeta", folder, "--paquete", PKG, "--flujo", "lista", "--serial", "emulator-5554")
+        script = folder / "recorrido.sh"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("# en_pantalla() {", text)
+        self.assertIn("no uses uiautomator aquí", text)
+        self.assertNotIn("uiautomator dump", text)
+        self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+        enabled = text.replace("# en_pantalla() {", "en_pantalla() {").replace('#   foco="$(', '  foco="$(') \
+            .replace('#   case "$foco"', '  case "$foco"').replace("# }\n# en_pantalla", "}\n# en_pantalla") \
+            .replace('# en_pantalla "<parte del nombre de la actividad>"', 'en_pantalla "ListaActivity"')
+        script.write_text(enabled, encoding="utf-8")
+        self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["flujos"]["lista"] = {"recorrido": "bash %s" % script, "preparar": "true"}
+        (folder / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        self.env["FAKE_FOCO"] = "com.ejemplo.app/com.ejemplo.app.ListaActivity"  # la pantalla esperada: sigue
+        capture = ("capturar", "--plan", folder / "plan.json", "--fase", "antes", "--calentamiento", "0", "--sin-compilar")
+        self.assertIn("corrida 1/1", self.ok(*capture, "--corridas", "1"))
+        self.env["FAKE_FOCO"] = "com.ejemplo.otra/com.ejemplo.otra.AvisoActivity"  # se fue a otra pantalla
+        result = self.perf(*capture, "--corridas", "2")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("punto de control: 'ListaActivity' no está al frente", result.stderr)
+        self.assertEqual(result.stdout.count("inválida: el recorrido terminó con código 1"), 3)
+        self.assertEqual(result.stdout.count("  Hasta dónde llegó: última marca vista: SCREEN MainActivity onResume"), 3)
+        self.assertIn("3 corridas inválidas seguidas (última: el recorrido terminó con código 1)", result.stderr)
+
+
+STATE_COST = ("# Rendimiento · Lista · 2026-11-09\n\n## Siguiente paso\n\n- x\n\n## Cambios temporales por revertir\n\n"
+              "| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n| --- | --- | --- | --- | --- |\n%s\n"
+              "## Hallazgos\n\n| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n\n"
+              "## Consumo\n\n| Sesión | Modelo | Costo o tokens | Pasos |\n| --- | --- | --- | --- |\n")
+
+
+class CostTest(PerfBase):
+    """El costo se anota con un comando ya completo por sesión, acepta AI Credits y tokens, y muestra el total."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                     "mejoras": [{"id": "M1", "titulo": "Una sola carga", "estado": "aplicada", "metrica": "lista_ms"},
+                                 {"id": "M2", "titulo": "Otra", "estado": "pendiente"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_COST % "")
+        write(self.folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in ("antes", "control", "despues")}))
+
+    def state(self):
+        return (self.folder / "estado.md").read_text(encoding="utf-8")
+
+    def test_siguiente_lista_las_sesiones_hechas_sin_fila_con_un_comando_completo_por_cada_una(self):
+        write(self.folder / "reporte-inicial.md", "x")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Costo (opcional, Terminal): 3 sesiones hechas sin anotar. Un comando por cada una; solo falta el costo", out)
+        self.assertIn("/cost en Claude Code; /usage en GitHub Copilot CLI, que informa AI Credits y tokens", out)
+        commands = [line.strip() for line in out.splitlines() if " consumo --carpeta " in line]
+        self.assertEqual(len(commands), 3, out)
+        for command, rest in zip(commands, ('--sesion "1 · ficha" --modelo "Sonnet 5.5" --esfuerzo medio --costo "<costo>"',
+                                            '--sesion "2 · diagnóstico" --modelo "Sonnet 5.5" --esfuerzo alto --costo "<costo>"',
+                                            '--sesion "3 · M1" --modelo "Sonnet 5.5" --esfuerzo medio --costo "<costo>"')):
+            self.assertTrue(command.startswith("cd ") and command.endswith(rest), command)
+            self.assertEqual(command.count("<"), 1)  # solo queda el costo por llenar
+        state = self.state()
+        self.assertIn("- **Costo (opcional, terminal):** faltan anotar 1 · ficha, 2 · diagnóstico, 3 · M1.", state)
+        self.assertNotIn("<lo que muestre tu herramienta>", state)
+        self.assertIn("**Total de la investigación:** faltan anotar 3 sesiones hechas (1 · ficha, 2 · diagnóstico, 3 · M1): "
+                      "el total es parcial", state)
+        # el comando impreso, con el costo puesto, anota la fila y la sesión deja de listarse
+        ready = commands[1].split(" consumo ")[1].replace('"<costo>"', '"0.80 USD"')
+        self.ok("consumo", *__import__("shlex").split(ready))
+        self.assertIn("| 2 · diagnóstico | Sonnet 5.5 · alto | 0.80 USD | — |", self.state())
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("2 sesiones hechas sin anotar", out)
+        self.assertNotIn('--sesion "2 · diagnóstico"', out)
+
+    def test_nada_se_bloquea_si_no_se_anota_y_tambien_sale_con_la_investigacion_cerrada(self):
+        write(self.folder / "reporte-inicial.md", "x")
+        write(self.folder / "reporte-final-dev.html", "x")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("Siguiente · investigación cerrada", out)
+        self.assertIn("4 sesiones hechas sin anotar", out)
+        self.assertIn('--sesion "4 · cierre" --modelo "Haiku 5.5" --esfuerzo bajo --costo "<costo>"', out)
+        for session in ("1 · ficha", "2 · diagnóstico", "3 · M1", "4 · cierre"):
+            self.ok("consumo", "--carpeta", self.folder, "--sesion", session, "--costo", "0.50 USD")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertNotIn("sin anotar", out)
+        self.assertNotIn(" consumo ", out)
+        self.assertIn("**Total de la investigación:** 2.00 USD en 4 sesiones anotadas", self.state())
+        self.assertNotIn("faltan anotar", self.state())
+
+    def test_los_modelos_del_comando_salen_del_plan_y_la_receta_de_arranque_no_tiene_sesion_1(self):
+        self.plan.update(modelos={"economico": "Modelo Chico", "intermedio": "Modelo Medio", "alto": "Modelo Grande"},
+                         flujos={"arranque-frio": {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}},
+                         mejoras=[], receta="arranque-frio")  # lo que deja `nuevo --receta`
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "reporte-inicial-dev.md", "x")
+        self.assertEqual(perf.missing_costs(self.folder, self.plan), [("2 · diagnóstico", "Modelo Medio", "alto")])
+        (self.folder / "reporte-inicial-dev.md").unlink()
+        self.assertEqual(perf.missing_costs(self.folder, self.plan), [])  # ninguna sesión de IA hecha todavía
+        self.assertEqual(perf.cost_lines(self.folder, self.plan), [])
+
+    def test_consumo_acepta_creditos_y_tokens_y_el_total_los_suma(self):
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "1 · ficha", "--modelo", "Sonnet 5.5", "--esfuerzo",
+                      "medio", "--creditos", "120", "--tokens-entrada", "45k", "--tokens-cache", "1.2M", "--tokens-salida",
+                      "9000", "--pasos", "14")
+        self.assertIn("✔ Consumo: | 1 · ficha | Sonnet 5.5 · medio | 120 AI Credits (1.20 USD) · tokens: 45000 entrada, "
+                      "1200000 caché, 9000 salida | 14 |", out)
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.80 USD")
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "3 · M1", "--costo", "38k tokens")
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "0 · setup", "--costo", "1,05 USD", "--creditos", "200")
+        self.assertIn("| 1,05 USD · 200 AI Credits |", out)  # con un monto en USD escrito, los créditos no se convierten
+        self.assertIn("Total de la investigación: 3.05 USD (3 de 4 sesiones anotadas traen un monto) · tokens: 45 k entrada, "
+                      "1,2 M caché, 9 k salida, 38 k sin desglose (solo 2 de 4 sesiones anotadas los traen)", out)
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "4 · cierre", "--creditos", "0.125")
+        self.assertIn("| 0.125 AI Credits (0.00 USD) |", out)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "4 · cierre", "--creditos", "1.200")
+        self.assertEqual(result.returncode, 2)  # ¿mil doscientos o uno coma dos? No se adivina
+        self.assertIn("puede leerse como miles o como decimales", result.stderr)  # un decimal de tres cifras no se lee como miles
+        tail = self.state()[self.state().index("## Consumo"):]
+        self.assertEqual(tail.count("**Total de la investigación:**"), 1)
+        self.assertLess(tail.index("| 0 · setup |"), tail.index("**Total de la investigación:**"))  # la tabla sigue junta
+        self.assertEqual(perf.AI_CREDIT_USD, 0.01)
+
+    def test_los_reportes_muestran_las_sesiones_anotadas_el_total_y_lo_que_falta(self):
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.80 USD", "--modelo",
+                "Sonnet 5.5")
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [100] * 5)
+              + rows("despues", "lista", "lista_ms", [60] * 5))
+        self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.ok("reporte", "--carpeta", self.folder)
+        for path in sorted(self.folder.glob("reporte-*.md")):
+            text = path.read_text(encoding="utf-8")
+            if "gerencia" in path.name:
+                continue
+            self.assertIn("## Costo de la investigación", text, path.name)
+            self.assertIn("| 2 · diagnóstico | Sonnet 5.5 | 0.80 USD | — |", text, path.name)
+            self.assertIn("**Total:** 0.80 USD en 1 sesión anotada · faltan anotar", text, path.name)
+            self.assertIn("el total es parcial", text, path.name)
+
+    def test_consumo_sin_costo_o_con_una_cantidad_que_no_es_un_numero_lo_dice(self):
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("falta el costo: usa --costo", result.stderr)
+        self.assertIn("Cómo seguir:", result.stderr)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2", "--creditos", "muchos")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'muchos' no es una cantidad", result.stderr)
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2", "--costo", "<costo>")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("reemplaza los <...>", result.stderr)
+        self.assertNotIn("| 2", self.state()[self.state().index("## Consumo"):])
+
+    def test_lo_que_se_suma_de_cada_celda_y_lo_que_no(self):
+        self.assertEqual(perf.cost_of("1.05 USD")["usd"], 1.05)
+        self.assertEqual(perf.cost_of("$ 2,50")["usd"], 2.5)
+        self.assertEqual(perf.cost_of("$1.05, 30 pasos")["usd"], 1.05)  # la coma de la frase no es del número
+        self.assertEqual(perf.cost_of("120 AI Credits")["usd"], 1.2)
+        self.assertEqual(perf.cost_of("12.5 AI Credits")["usd"], 0.125)
+        self.assertIsNone(perf.cost_of("120 créditos")["usd"])  # créditos de otra herramienta: sin conversión documentada
+        self.assertIsNone(perf.cost_of("38k tokens")["usd"])  # sin monto: no cuenta como cero
+        self.assertEqual(perf.cost_of("38k tokens")["tokens"], {"sin desglose": 38000})
+        self.assertEqual(perf.cost_of("tokens: 12000 entrada, 300000 caché, 4000 salida")["tokens"],
+                         {"entrada": 12000, "caché": 300000, "salida": 4000})
+        self.assertEqual(perf.cost_of("—"), {"usd": None, "tokens": {}})
+        self.assertEqual(perf.amount("12.000", whole=True), 12000)
+        self.assertEqual(perf.amount("1.234,5"), 1234.5)
+        self.assertIsNone(perf.amount("x"))
+        self.assertEqual(perf.session_key("3 · M1", ["M1", "M10"]), ("3", "M1"))
+        self.assertEqual(perf.session_key("3 · M10", ["M1", "M10"]), ("3", "M10"))
+        self.assertEqual(perf.session_key("M1", ["M1"]), ("", "M1"))  # sin número de sesión no cuenta como la sesión 1
+        self.assertEqual(perf.session_key("2026-11-09", []), ("", ""))
+        self.assertEqual(perf.session_key("Sesión 4 · cierre", []), ("4", ""))
+
+    def test_un_estado_de_una_version_anterior_recibe_el_total_sin_perder_sus_filas(self):
+        old = STATE_COST % "" + "| 2 · diagnóstico | Sonnet 5 | 0.90 USD | 21 |\n"
+        write(self.folder / "estado.md", old)
+        self.ok("siguiente", "--carpeta", self.folder)
+        tail = self.state()[self.state().index("## Consumo"):]
+        self.assertIn("| 2 · diagnóstico | Sonnet 5 | 0.90 USD | 21 |\n\n**Total de la investigación:** 0.90 USD", tail)
+        self.assertIn("faltan anotar 2 sesiones hechas (1 · ficha, 3 · M1)", tail)
+
+
+class SafeRevertTest(PerfBase):
+    """El cierre quita los cambios temporales con un parche guardado antes, nunca con un comando que descarta el archivo."""
+
+    ROW = "| `%s` | app | marca temporal | — | %s |\n"
+
+    def setUp(self):
+        super().setUp()
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "class Lista\n")
+        write(self.dir / "app" / "Detalle.kt", "class Detalle\n")
+        commit_all(self.dir)
+        self.folder = self.dir / "reports" / "perf" / "lista" / "2026-11-09"
+        self.plan = {"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}}, "mejoras": []}
+        self.new_investigation(self.folder, self.ROW % ("app/Lista.kt:12", "no") + self.ROW % ("app/Nuevo.kt", "")
+                               + self.ROW % ("app/Detalle.kt", "sí (2026-11-09)"))
+        write(self.dir / "app" / "Nuevo.kt", "class Nuevo\n")  # un archivo nuevo, que git todavía no sigue
+
+    def new_investigation(self, folder, rows, closed=False):
+        write(folder / "plan.json", json.dumps(self.plan))
+        write(folder / "estado.md", STATE_COST % rows)
+        write(folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in ("antes", "control")}))
+        write(folder / "reporte-inicial.md", "x")
+        if closed:
+            write(folder / "reporte-final-dev.md", "x")
+
+    def notice(self):
+        out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
+        return out
+
+    def test_el_cierre_da_primero_el_parche_y_despues_quitar_con_apply_r(self):
+        out = self.notice()
+        self.assertIn("Cambios temporales por revertir (primero el parche, después quitar):", out)
+        self.assertIn("Sin revertir (2): `app/Lista.kt`, `app/Nuevo.kt`", out)  # el revertido no se lista; sin la línea
+        save = next(line for line in out.splitlines() if "Primero guarda el parche" in line)
+        remove = next(line for line in out.splitlines() if "Después quítalos" in line)
+        self.assertLess(out.index(save), out.index(remove))
+        self.assertIn("git add -N -- app/Nuevo.kt && { [ -s <carpeta-fuera-del-repo>/lista-2026-11-09.patch ] || git diff "
+                      "--binary -- app/Lista.kt app/Nuevo.kt > <carpeta-fuera-del-repo>/lista-2026-11-09.patch; } && git "
+                      "apply --check -R <carpeta-fuera-del-repo>/lista-2026-11-09.patch", save)
+        self.assertIn("git apply -R <carpeta-fuera-del-repo>/lista-2026-11-09.patch && git reset -q -- app/Nuevo.kt", remove)
+        self.assertIn("Nunca quites un cambio temporal con `git checkout`, `git restore`, `git reset --hard` ni `git clean`",
+                      out)
+        for line in out.splitlines():  # ningún comando propuesto descarta un archivo
+            if line.strip().startswith(("Primero", "Después", "cd ")) or "`cd " in line:
+                for command in re.findall(r"`(cd [^`]+)`", line):
+                    self.assertIsNone(re.search(r"git (checkout|restore|clean|reset --hard)", command), command)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("**Cambios temporales por revertir (primero el parche, después quitar):**", state)
+
+    def test_los_comandos_que_entrega_guardan_y_quitan_sin_perder_nada(self):
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca temporal\n", encoding="utf-8")
+        patches = self.dir.parent / (self.dir.name + "-parches")
+        patches.mkdir()
+        out = self.notice().replace("<carpeta-fuera-del-repo>", str(patches))
+        commands = [found for line in out.splitlines() if "guarda el parche" in line or "quítalos" in line
+                    for found in re.findall(r"`(cd [^`]+)`", line)]
+        self.assertEqual(len(commands), 2, out)
+        try:
+            for command in commands:
+                done = subprocess.run(command, shell=True, capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, command + "\n" + done.stderr)
+            self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
+            self.assertFalse((self.dir / "app" / "Nuevo.kt").exists())  # el archivo nuevo salió con el parche
+            patch = patches / "lista-2026-11-09.patch"
+            self.assertIn("marca temporal", patch.read_text(encoding="utf-8"))
+            # repetir el paso de guardar con los cambios ya fuera no vacía el parche, que es la única copia
+            subprocess.run(commands[0], shell=True, capture_output=True, text=True)
+            self.assertIn("marca temporal", patch.read_text(encoding="utf-8"))
+            self.assertIn("lista-2026-11-09.patch", self.notice())  # con el archivo nuevo ya quitado, el mismo parche
+            self.assertNotIn("-1.patch", self.notice())
+            again = subprocess.run(["git", "apply", str(patch)], cwd=str(self.dir), capture_output=True, text=True)
+            self.assertEqual(again.returncode, 0, again.stderr)  # y se puede volver a poner
+            self.assertIn("marca temporal", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))
+            self.assertTrue((self.dir / "app" / "Nuevo.kt").is_file())
+        finally:
+            shutil.rmtree(str(patches), ignore_errors=True)
+
+    def test_un_archivo_que_otra_investigacion_abierta_tambien_declara_va_en_un_parche_aparte(self):
+        other = self.dir / "reports" / "perf" / "detalle" / "2026-11-10"
+        self.new_investigation(other, self.ROW % ("app/Lista.kt", "no"))
+        closed = self.dir / "reports" / "perf" / "pago" / "2026-11-01"
+        self.new_investigation(closed, self.ROW % ("app/Nuevo.kt", "no"), closed=True)  # cerrada: no cuenta
+        out = self.notice()
+        shared = next(line for line in out.splitlines() if "otra investigación abierta" in line)
+        self.assertIn("`app/Lista.kt` también es un cambio temporal de otra investigación abierta "
+                      "(reports/perf/detalle/2026-11-10)", shared)
+        self.assertIn("lista-2026-11-09-compartido-lista-kt.patch", shared)
+        self.assertIn("no lo quites entero", shared)
+        save = next(line for line in out.splitlines() if "Primero guarda el parche" in line)
+        self.assertIn("git diff --binary -- app/Nuevo.kt >", save)  # el parche propio no lleva el archivo compartido
+        self.assertIn("`cd %s && { [ -s" % self.dir.resolve(), shared)
+        self.assertNotIn("Lista.kt", save)
+        self.assertNotIn("pago", out)
+
+    def test_con_carpeta_de_parches_en_agents_md_los_parches_van_ahi(self):
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- setup listo\n- Carpeta de parches: `ia/perf/parches`\n")
+        out = self.notice()
+        self.assertIn("mkdir -p ia/perf/parches && git add -N -- app/Nuevo.kt && { [ -s ia/perf/parches/lista-2026-11-09.patch"
+                      " ] || git diff --binary -- app/Lista.kt app/Nuevo.kt > ia/perf/parches/lista-2026-11-09.patch; }", out)
+        self.assertNotIn("<carpeta-fuera-del-repo>", out)
+        # una carpeta con espacios va entre comillas en todo el comando, y el paso de quitar conserva el git reset
+        # del archivo nuevo aunque el de guardar ya lo haya anotado con git add -N
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- Carpeta de parches: ../mis parches %s\n" % self.dir.name)
+        out = self.notice()
+        commands = [found for line in out.splitlines() if "guarda el parche" in line or "quítalos" in line
+                    for found in re.findall(r"`(cd [^`]+)`", line)]
+        patches = self.dir.parent / ("mis parches %s" % self.dir.name)
+        try:
+            done = subprocess.run(commands[0], shell=True, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, commands[0] + "\n" + done.stderr)
+            self.assertTrue((patches / "lista-2026-11-09.patch").stat().st_size > 0)
+            self.assertIn("git reset -q -- app/Nuevo.kt", self.notice())
+        finally:
+            shutil.rmtree(str(patches), ignore_errors=True)
+
+    def test_antes_de_medir_despues_no_se_propone_quitar_nada(self):
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "estado": "aplicada"}]
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("Siguiente · medición después", out)
+        self.assertNotIn("Cambios temporales por revertir (", out)  # las marcas siguen puestas hasta medir después
+
+    def test_la_raiz_del_proyecto_con_una_carpeta_enlazada_y_con_un_repo_anidado(self):
+        from helpers import init_repo
+        outside = Path(tempfile.mkdtemp())
+        cwd = os.getcwd()
+        try:
+            init_repo(outside)  # la carpeta de contexto compartida es otro repo, fuera del proyecto
+            (outside / "perf" / "investigaciones" / "lista").mkdir(parents=True)
+            os.symlink(str(outside), str(self.dir / "ia"))
+            (self.dir / "sub" / "reports" / "perf" / "x").mkdir(parents=True)
+            nested = init_repo(self.dir / "sub")  # un repo anidado dentro del proyecto
+            os.chdir(str(self.dir))
+            linked = Path("ia/perf/investigaciones/lista")
+            self.assertEqual(perf.project_root(linked).resolve(), self.dir.resolve())  # es del proyecto, no del otro repo
+            self.assertEqual(perf.relative_folder(linked, perf.project_root(linked).resolve()), linked)
+            self.assertEqual(perf.project_root(Path("sub/reports/perf/x")).resolve(), nested.resolve())  # como antes
+            self.assertEqual(perf.project_root(self.folder).resolve(), self.dir.resolve())
+            self.assertEqual(perf.project_root(outside / "perf").resolve(), outside.resolve())  # por fuera: su repo
+        finally:
+            os.chdir(cwd)
+            shutil.rmtree(str(outside), ignore_errors=True)
+
+    def test_sin_cambios_temporales_o_todos_revertidos_no_hay_aviso(self):
+        write(self.folder / "estado.md", STATE_COST % (self.ROW % ("app/Lista.kt", "sí")))
+        self.assertNotIn("Cambios temporales por revertir (", self.notice())
+        template = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        self.assertEqual(perf.temp_changes(template), [])
+        self.assertIsNone(perf.revert_notice(self.dir / "no-existe", self.dir))
+        rows = perf.temp_changes(STATE_COST % (self.ROW % ("app/A.kt", "sin revertir") + self.ROW % ("app/B.kt", "Sí")))
+        self.assertEqual([(row["archivo"], row["revertido"]) for row in rows], [("app/A.kt", False), ("app/B.kt", True)])
+
+    def test_la_plantilla_y_el_cierre_no_proponen_comandos_que_descartan(self):
+        skill = perf.ASSETS.parent
+        for path in [skill / "SKILL.md", perf.ASSETS / "plantillas" / "estado.md"] + sorted((skill / "references").glob("*.md")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                for command in re.findall(r"git (?:checkout|restore|clean|reset --hard)[^`]*", line):
+                    self.assertRegex(line, r"[Nn]unca|[Nn]o (?:uses|propongas)", "%s:%d propone `%s`" % (path.name, number, command))
+
+
+def service_rows(phase, service, calls, ms, ttfb=None, extra=None, flow="lista"):
+    """Las filas de metricas.csv de un servicio en una fase (5 corridas): llamadas, duración y, si se pasa, lo demás."""
+    out = rows(phase, flow, "red %s llamadas" % service, [calls] * 5, "llamadas") \
+        + rows(phase, flow, "red %s ms" % service, ms, "ms", family="e2e")
+    if ttfb is not None:
+        out += rows(phase, flow, "red %s ttfb_ms" % service, [ttfb] * 5, "ms", family="e2e")
+    for name, (value, unit) in (extra or {}).items():
+        out += rows(phase, flow, "red %s %s" % (service, name), [value] * 5, unit)
+    return out
+
+
+FULL = {"cola_ms": (5, "ms"), "conexion_ms": (20, "ms"), "cliente_ms": (15, "ms"), "repetidas_2s": (1, "llamadas"),
+        "solapadas": (0, "llamadas")}
+STATE_REPORT = ("# Rendimiento · Lista de clientes · 2026-11-09\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n"
+                "| Síntoma | La lista tarda en aparecer |\n\n## Hallazgos\n\n"
+                "| # | Síntoma | Evidencia (métrica + consulta + archivo:línea) | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n"
+                "| H1 | La lista tarda | `lista_ms` 1800 ms · `app/Lista.kt:40` | Pide los clientes dos veces | bug |\n"
+                "| H2 | Tirón al entrar | `hilo_max_ms` | No se pudo probar | sin confirmar |\n"
+                "| H3 | Imagen pesada | consulta | No es la causa | descartado |\n\n"
+                "## Resumen ejecutivo\n\nResumen técnico con `lista_ms`.\n\n%s"
+                "## Pendientes\n\n- H2 · tirón estable · falta una captura con muestreo\n\n"
+                "## Consumo\n\n| Sesión | Modelo | Costo o tokens | Pasos |\n| --- | --- | --- | --- |\n"
+                "| 2 · diagnóstico | Sonnet 5.5 | 0.80 USD | 20 |\n")
+BUSINESS = "## Resumen para gerencia\n\nAl abrir la lista se pedían los datos dos veces. Ahora se piden una y abre antes.\n\n"
+
+
+class ServicesReportTest(PerfBase):
+    """"Servicios del flujo": qué servicios consume el flujo y cuánto tarda cada uno, desde las filas de metricas.csv."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {
+            "recorrido": "true", "segmentos": [{"nombre": "carga", "desde": {"marca": "NAV Lista"},
+                                                "hasta": {"marca": "MARK lista"}}]}}, "mejoras": []}
+        text = HEADER + rows("antes", "lista", "lista_ms", [1800, 1820, 1790, 1810, 1800]) \
+            + rows("antes", "lista", "ventana_ms", [2000] * 5, family="info") \
+            + rows("antes", "lista", "red_llamadas", [9] * 5, "llamadas") \
+            + service_rows("antes", "GET api/v1/clientes", 2, [400, 420, 380, 900, 410], 300, FULL) \
+            + rows("antes", "lista", "carga red GET api/v1/clientes llamadas", [2] * 5, "llamadas", family="info") \
+            + service_rows("antes", "GET api/v1/clientes/{id}", 1, [150] * 5, 100)
+        for index in range(5):  # cinco servicios más, cada vez más cortos: solo tres entran entre los 5 primeros
+            text += service_rows("antes", "GET api/v1/catalogo/%d" % index, 1, [90 - 10 * index] * 5)
+        text += service_rows("antes", "GET api/v1/nunca", 0, [])  # un servicio conocido que esta fase no llama
+        self.before = text
+        write(self.folder / "metricas.csv", text)
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
+
+    def test_todos_los_servicios_con_el_servidor_frente_a_la_app_en_un_desplegable_abierto(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        md = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        section = md[md.index("## Servicios del flujo"):md.index("## Red por tramo") if "## Red por tramo" in md
+                     else md.index("## Hallazgos")]
+        self.assertIn("**Informativa.**", section)
+        self.assertIn("no para decidir una mejora de la app", section)
+        self.assertIn("si se mueve entre fases, es variación del backend, no efecto de la mejora", section)
+        table = [line for line in section.splitlines() if line.startswith("| `")]
+        self.assertEqual(len(table), 7)  # la lista completa: los 7 que se llaman en esta fase
+        self.assertIn("<details open>\n<summary>Los 7 servicios del flujo</summary>", section)
+        self.assertIn("**Tramo `carga`**", section)
+        self.assertIn("**Fuera de los tramos**", section)
+        self.assertIn("| `GET api/v1/clientes` | 2 | sin dato | 410 ms / 900 ms | 300 ms | cola 5 ms · conexión 20 ms · "
+                      "lectura 15 ms | 1 | 0 |", section)
+        # sin TTFB ni desglose en el CSV, lo dice: no es cero
+        self.assertIn("| `GET api/v1/clientes/{id}` | 1 | sin dato | 150 ms / 150 ms | 100 ms | sin dato | sin dato | "
+                      "sin dato |", section)
+        # sin el momento de cada llamada (una versión anterior), el orden es por lo que suman y lo dice
+        self.assertIn("Orden: por el tiempo que suman (estas corridas no traen el momento de cada llamada", section)
+        self.assertIn("**Espera de servicios: 1.32 s de 2 s del flujo (66 %)**, sumando las llamadas", section)
+        self.assertNotIn("nunca", section)  # el que no se llama en esta fase no aparece
+        page = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        self.assertIn("Servicios que más tiempo suman", page)
+        self.assertIn("<details open>", page)
+        self.assertIn("servidor (TTFB)", page)  # la leyenda del gráfico separa servidor y app
+
+    def test_en_el_final_cada_servicio_sale_antes_contra_despues(self):
+        after = service_rows("despues", "GET api/v1/clientes", 1, [400] * 5, 300, FULL) \
+            + service_rows("despues", "GET api/v1/clientes/{id}", 1, [150] * 5, 100) \
+            + rows("despues", "lista", "lista_ms", [1100] * 5) + rows("despues", "lista", "ventana_ms", [1300] * 5, family="info") \
+            + service_rows("despues", "GET api/v1/nuevo", 1, [500] * 5)
+        write(self.folder / "metricas.csv", self.before + after)
+        self.ok("reporte", "--carpeta", self.folder)
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        section = md[md.index("## Servicios del flujo"):]
+        self.assertIn("| `GET api/v1/clientes` | antes | 2 | sin dato | 410 ms / 900 ms |", section)
+        self.assertIn("| `GET api/v1/clientes` | después | 1 | sin dato | 400 ms / 400 ms |", section)
+        self.assertIn("| `GET api/v1/catalogo/0` | después | no se llama |", section)
+        self.assertIn("| `GET api/v1/nuevo` | antes | no se llama |", section)  # uno que solo aparece después no se pierde
+        self.assertIn("| `GET api/v1/nuevo` | después | 1 | sin dato | 500 ms / 500 ms |", section)
+        self.assertIn("- En antes, 7 servicios", section)
+        self.assertIn("- En después, 3 servicios", section)
+        business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
+        # no todos traen el tiempo del servidor: suma la duración de las llamadas y lo dice así
+        self.assertIn("El recorrido llama a 3 servicios (3 llamadas en total). De los 1.3 s del recorrido, las llamadas "
+                      "suman 1.05 s (si van en paralelo, parte se solapa); el más lento es `GET api/v1/nuevo` (0.5 s por "
+                      "llamada). Es orientativo", business)
+        self.assertNotIn("red get", business.lower())  # los tiempos de un servicio no salen como riesgo ni con su métrica
+
+    def test_el_servidor_que_cambia_entre_fases_es_variacion_del_backend(self):
+        after = service_rows("despues", "GET api/v1/clientes", 2, [700] * 5, 600, FULL) \
+            + rows("despues", "lista", "lista_ms", [1700] * 5)
+        write(self.folder / "metricas.csv", self.before + after)
+        self.ok("reporte", "--carpeta", self.folder)
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("El servidor cambió entre fases en `GET api/v1/clientes` (300 ms → 600 ms): es variación del "
+                      "backend o de la red del momento, no efecto de la mejora", md)
+
+    def test_sin_filas_de_red_la_seccion_no_sale_y_gerencia_dice_que_no_se_midio(self):
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
+        self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.assertNotIn("Servicios del flujo", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
+        self.assertIn("No hay datos de las llamadas a servicios (no se midieron).",
+                      (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "red_llamadas", [0] * 5, "llamadas"))
+        self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
+                         "El recorrido no llama a ningún servicio.")
+        # con llamadas pero sin filas por servicio (una versión anterior), no dice que no llama a ninguno
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "red_llamadas", [2] * 5, "llamadas"))
+        self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
+                         "El recorrido hace 2 llamadas a servicios; no hay datos de cada servicio.")
+        self.assertIn("hace 1 llamada a servicios", perf.services_line(
+            perf.read_rows(self.folder / "metricas.csv")[:0] + [dict(row, valor=1.0) for row in
+                                                               perf.read_rows(self.folder / "metricas.csv")], self.plan))
+        # con el tiempo en curso de esta versión: cuánto del recorrido es espera y el más lento
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
+              + service_rows("antes", "GET api/v1/clientes", 2, [400] * 5, 300)
+              + rows("antes", "lista", "red_en_curso_ms", [450] * 5, family="info"))
+        self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
+                         "El recorrido llama a 1 servicio (2 llamadas en total). De los 1.8 s del recorrido, durante "
+                         "0.45 s (25 %) se está esperando a algún servicio; el más lento es `GET api/v1/clientes` (0.4 s "
+                         "por llamada). Es orientativo: depende del servidor y de la red del momento.")
+
+
+    def test_las_filas_por_servicio_salen_de_la_traza_y_van_al_final(self):
+        call = lambda ts, dur, name: ("seccion", ts, dur, 0, name)
+        sections = [call(0, 300 * MS, "HTTP GET api/v1/clientes"), call(10 * MS, 200 * MS, "TTFB GET api/v1/clientes"),
+                    call(0, 8 * MS, "CONN GET api/v1/clientes"),
+                    call(100 * MS, 300 * MS, "HTTP GET api/v1/clientes"), call(110 * MS, 250 * MS, "TTFB GET api/v1/clientes"),
+                    call(5000 * MS, 100 * MS, "HTTP GET api/v1/clientes/{id}")]
+        got = {m[0]: m for m in perf.service_metrics(sections, {"GET api/v1/viejo"}, [
+            {"tramo": "carga", "endpoints": {"GET api/v1/clientes": 2}}])}
+        self.assertEqual(got["red GET api/v1/clientes repetidas_2s"][1:], (1, "llamadas", "app"))
+        self.assertEqual(got["red GET api/v1/clientes solapadas"][1:], (1, "llamadas", "app"))
+        self.assertEqual(got["red GET api/v1/clientes conexion_ms"][1:], (4.0, "ms", "e2e"))  # una conectó y la otra no
+        self.assertEqual(got["red GET api/v1/clientes/{id} repetidas_2s"][1], 0)
+        self.assertNotIn("red GET api/v1/clientes/{id} conexion_ms", got)  # sin TTFB no se sabe: no es 0
+        self.assertEqual(got["red GET api/v1/viejo solapadas"][1], 0)  # un servicio de otra corrida sigue teniendo fila
+        self.assertEqual(got["carga red GET api/v1/clientes llamadas"][1:], (2, "llamadas", "info"))
+        self.assertEqual(perf.service_metrics([], set(), []), [])
+        self.assertTrue(all(perf.SERVICE_EXTRA.fullmatch(name) for name in got))
+
+
+class AudienceReportsTest(PerfBase):
+    """Cada reporte sale para dos públicos (dev y gerencia) con los mismos datos; el de gerencia va en palabras."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms", "jank_app_pct", "hilo_max_ms"],
+                     "flujos": {"lista": {"recorrido": "true"}},
+                     "mejoras": [{"id": "M1", "hallazgo": "H1", "titulo": "Pedir los clientes una sola vez",
+                                  "metrica": "lista_ms", "esperado": "≤ 1200 ms", "riesgo": "bajo", "estado": "aplicada"},
+                                 {"id": "M2", "titulo": "Cargar las imágenes después", "metrica": "hilo_max_ms",
+                                  "riesgo": "medio", "estado": "pendiente"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800, 1820, 1790, 1810, 1800])
+              + rows("despues", "lista", "lista_ms", [1100, 1120, 1090, 1110, 1100])
+              + rows("antes", "lista", "jank_app_pct", [4, 30, 5, 28, 6], "%")
+              + rows("despues", "lista", "jank_app_pct", [1, 1, 1, 1, 1], "%")
+              + rows("antes", "lista", "hilo_max_ms", [40] * 5) + rows("despues", "lista", "hilo_max_ms", [90] * 5)
+              # regresiones que no son principales: un servicio más lento y más memoria
+              + rows("antes", "lista", "red GET api/v1/lento ms", [300] * 5, family="e2e")
+              + rows("despues", "lista", "red GET api/v1/lento ms", [900] * 5, family="e2e")
+              + rows("antes", "lista", "pss_mb", [100] * 5, "MB") + rows("despues", "lista", "pss_mb", [150] * 5, "MB"))
+
+    def read(self, name):
+        return (self.folder / name).read_text(encoding="utf-8")
+
+    def test_salen_las_cuatro_versiones_con_los_nombres_nuevos(self):
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertIn("✔ Reporte inicial (dev): ", out)
+        self.assertIn("✔ Reporte inicial (gerencia): ", out)
+        out = self.ok("reporte", "--carpeta", self.folder, "--html")
+        self.assertIn("✔ Reporte HTML (gerencia): ", out)
+        names = sorted(path.name for path in self.folder.glob("reporte*"))
+        self.assertEqual(names, ["reporte-%s-%s.%s" % (kind, audience, suffix) for kind in ("final", "inicial")
+                                 for audience in ("dev", "gerencia") for suffix in ("html", "md")])
+        self.assertIn("Reporte final para gerencia · ", self.read("reporte-final-gerencia.html"))
+        for name in ("reporte-final-gerencia.html", "reporte-inicial-gerencia.html"):  # tampoco el pie de la página
+            for jargon in ("mediana", "P90", "lista_ms", "jank_app_pct"):
+                self.assertNotIn(jargon, self.read(name), (name, jargon))
+        self.assertIn("Los números son medianas de varias corridas", self.read("reporte-final-dev.html"))
+        self.assertIn("## Comparación completa", self.read("reporte-final-dev.md"))  # el de dev es el de siempre
+
+    def test_el_de_gerencia_va_en_palabras_con_segundos_y_un_veredicto_por_numero(self):
+        self.ok("reporte", "--carpeta", self.folder)
+        text = self.read("reporte-final-gerencia.md")
+        self.assertIn("## En resumen\n\nAl abrir la lista se pedían los datos dos veces.", text)
+        self.assertIn("## Qué notaba el usuario\n\nLa lista tarda en aparecer", text)
+        self.assertIn("## Qué se encontró\n\n- La lista tarda: Pide los clientes dos veces\n\nOtras causas posibles: 1 se "
+                      "investigó y se descartó y 1 quedó sin confirmar.", text)
+        self.assertIn("## Qué se hizo\n\n- Pedir los clientes una sola vez", text)
+        self.assertIn("- **Tiempo de \"lista\":** pasó de 1.8 s a 1.1 s (39 % menos) · mejora clara.", text)
+        self.assertIn("- **Cuadros que se ven trabados:** pasó de 6 % a 1 % (83 % menos) · orientativo: varía mucho entre corridas "
+                      "(mejora clara).", text)
+        self.assertIn("- **Mayor congelamiento de la pantalla:** pasó de 40 milisegundos a 90 milisegundos (125 % más) · empeoró.", text)
+        self.assertIn("## Lo que queda pendiente\n\n- Cargar las imágenes después (para más adelante)\n- 1 punto de la "
+                      "investigación sin cerrar", text)
+        self.assertIn("- Pedir los clientes una sola vez: riesgo bajo.", text)
+        self.assertIn("- Mayor congelamiento de la pantalla: de 40 milisegundos a 90 milisegundos · empeoró.", text)
+        self.assertIn("- Empeoraron 2 medidas que no son principales: el detalle está en el reporte técnico.", text)
+        self.assertNotIn("api/v1/lento", text)
+        self.assertEqual(perf.plain_time(153, "MB"), "153 MB")
+        self.assertIn("## Costo\n\nSesiones de IA: 0.80 USD en 1 sesión anotada · faltan anotar", text)
+        # sin jerga: ni nombres de métricas, ni percentiles, ni variación, ni evidencia técnica
+        for jargon in ("lista_ms", "jank_app_pct", "hilo_max_ms", "P90", "CV", "mediana", "slice", "Lista.kt",
+                       "Resumen técnico"):
+            self.assertNotIn(jargon, text, jargon)
+        page = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
+        self.assertLess(len(page.splitlines()), 60)  # una página corta
+
+    def test_sin_el_resumen_para_gerencia_se_genera_igual_y_lo_marca_sin_completar(self):
+        write(self.folder / "estado.md", STATE_REPORT % "")  # un estado.md de una versión anterior: sin la sección
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.assertIn('no tiene la sección "## Resumen para gerencia"', out)
+        text = self.read("reporte-inicial-gerencia.md")
+        self.assertIn("## En resumen\n\n_Sin completar: el resumen para este público todavía no se escribió.", text)
+        self.assertIn("## Qué se propone\n\n- Pedir los clientes una sola vez\n- Cargar las imágenes después", text)
+        self.assertIn("- **Tiempo de \"lista\":** 1.8 s · estable entre mediciones.", text)
+        self.assertIn("- **Cuadros que se ven trabados:** 6 % · orientativo: varía mucho entre corridas.", text)
+        template = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("## Resumen para gerencia", template)
+        write(self.folder / "estado.md", STATE_REPORT % template[template.index("## Resumen para gerencia"):
+                                                                  template.index("## Pendientes")])
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial")  # con el texto de la plantilla: avisa y no lo publica
+        self.assertIn("Resumen para gerencia (de 3 a 5 líneas, sin términos técnicos)", out)
+        self.assertIn("_Sin completar:", self.read("reporte-inicial-gerencia.md"))
+        self.assertNotIn("lector no técnico", self.read("reporte-inicial-gerencia.md"))
+
+    def test_las_etiquetas_del_plan_nombran_las_metricas_propias(self):
+        self.plan["etiquetas"] = {"lista_ms": "Tiempo en mostrar la lista de clientes"}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        self.ok("reporte", "--carpeta", self.folder)
+        self.assertIn("- **Tiempo en mostrar la lista de clientes:** pasó de 1.8 s a 1.1 s", self.read("reporte-final-gerencia.md"))
+        self.assertEqual(perf.plain_metric("detalle hilo_max_ms", {}), 'Mayor congelamiento de la pantalla, en la parte "detalle"')
+        # una métrica de un servicio elegida como principal también sale en palabras
+        self.assertEqual(perf.plain_metric("red GET api/v1/clientes ms", {}), "Duración del servicio `GET api/v1/clientes`")
+        self.assertEqual(perf.plain_metric("red GET api/v1/clientes llamadas", {}), "Llamadas al servicio `GET api/v1/clientes`")
+        self.assertEqual(perf.plain_metric("carga red GET api/v1/clientes llamadas", {}),
+                         'Llamadas al servicio `GET api/v1/clientes`, en la parte "carga"')
+        self.assertEqual(perf.plain_time(0.2), "menos de 1 milisegundo")
+        self.plan["etiquetas"] = ["lista_ms"]
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        result = self.perf("reporte", "--carpeta", self.folder)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'etiquetas' es un objeto", result.stderr)
+
+    def test_los_nombres_de_antes_se_siguen_aceptando_y_los_nuevos_cierran_la_investigacion(self):
+        for names, expected in ((["reporte-final.html"], 1), (["reporte.md"], 1),
+                                (["reporte-final-dev.html", "reporte-final-gerencia.html"], 2)):
+            for old in self.folder.glob("reporte*"):
+                old.unlink()
+            for name in names:
+                write(self.folder / name, "x")
+            title, steps = perf.next_steps(self.folder, self.plan)
+            self.assertEqual(title, "investigación cerrada", names)
+            files = [step["texto"] for step in steps if step["tipo"] == "archivo"]
+            self.assertEqual([Path(f).name for f in files], names[:expected], names)
+        for old in self.folder.glob("reporte*"):
+            old.unlink()
+        write(self.folder / "reporte-inicial.html", "x")  # una investigación en curso con el nombre de antes
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertIn("reporte-inicial.html es de una versión anterior y no se actualiza", out)
+        self.assertEqual(self.read("reporte-inicial.html"), "x")  # no se toca ni se borra
+
+
+class SingleFolderTest(DeviceBase):
+    """Una sola carpeta para todo lo de rendimiento: la sección de rendimiento de AGENTS.md fija dónde van las
+    investigaciones y los parches; sin esas líneas, todo sigue en reports/perf."""
+
+    AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- applicationId: com.example.app\n- setup listo\n"
+              "- Carpeta de investigaciones: `ia/perf/investigaciones`\n- **Carpeta de parches:** ia/perf/parches.\n\n"
+              "## Otra\n\n- Carpeta de parches: `no/es/de/rendimiento`\n")
+
+    def test_lee_las_dos_carpetas_de_la_seccion_de_rendimiento(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        found = perf.perf_folders(self.dir)
+        self.assertEqual(found, {"investigaciones": self.dir / "ia/perf/investigaciones", "parches": self.dir / "ia/perf/parches"})
+        self.assertEqual(perf.investigations_base(self.dir), self.dir / "ia/perf/investigaciones")
+        write(self.dir / "AGENTS.md", "## Performance\n\nEvidence folder: ~/perf-evidence\nPatches folder: /tmp/perf-patches\n"
+                                      "```\nCarpeta de parches: dentro/de/un/bloque\n```\n")
+        found = perf.perf_folders(self.dir)
+        self.assertEqual(found["investigaciones"], Path(os.path.expanduser("~/perf-evidence")))
+        self.assertEqual(found["parches"], Path("/tmp/perf-patches"))
+        for text in ("## Rendimiento\n\n- setup listo\n", "## Otra\n\n- Carpeta de parches: x\n",
+                     "## Rendimiento\n\n- Carpeta de parches: <ruta>\n"):
+            write(self.dir / "AGENTS.md", text)
+            self.assertEqual(perf.perf_folders(self.dir), {"investigaciones": None, "parches": None}, text)
+        (self.dir / "AGENTS.md").unlink()
+        self.assertEqual(perf.perf_folders(self.dir), {"investigaciones": None, "parches": None})
+        self.assertEqual(perf.investigations_base(self.dir), self.dir / "reports/perf")  # sin configurar, como siempre
+
+    def test_nuevo_sin_carpeta_usa_la_de_agents_md_y_sin_configurar_reports_perf(self):
+        today = datetime.date.today().isoformat()
+        out = self.ok("nuevo", "--paquete", PKG, "--flujo", "Lista de clientes", "--serial", "emulator-5554")
+        self.assertIn("✔ Carpeta de la investigación: reports/perf/lista-de-clientes/%s (por defecto)" % today, out)
+        self.assertTrue((self.dir / "reports/perf/lista-de-clientes" / today / "plan.json").is_file())
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        out = self.ok("nuevo", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "emulator-5554")
+        folder = self.dir / "ia/perf/investigaciones/arranque-frio" / today
+        self.assertIn("✔ Carpeta de la investigación: ia/perf/investigaciones/arranque-frio/%s (la carpeta de "
+                      "investigaciones de AGENTS.md)" % today, out)
+        self.assertTrue((folder / "estado.md").is_file())
+        self.assertIn("capturar --plan ia/perf/investigaciones/arranque-frio/%s/plan.json" % today, out)
+        out = self.ok("nuevo", "--carpeta", "reports/perf/otra", "--paquete", PKG, "--serial", "emulator-5554")
+        self.assertIn("AGENTS.md configura la carpeta de investigaciones en ia/perf/investigaciones: esta investigación "
+                      "queda fuera de ella", out)  # --carpeta se sigue aceptando
+        self.assertTrue((self.dir / "reports/perf/otra/plan.json").is_file())
+        # desde una subcarpeta del repo, la investigación va igual a la carpeta configurada (no a subcarpeta/ia/...)
+        from helpers import init_repo
+        init_repo(self.dir)
+        (self.dir / "app" / "src").mkdir(parents=True)
+        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "nuevo", "--paquete", PKG, "--flujo", "detalle",
+                               "--serial", "emulator-5554"], cwd=str(self.dir / "app" / "src"), env=self.env,
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue((self.dir / "ia/perf/investigaciones/detalle" / today / "plan.json").is_file(), done.stdout)
+        self.assertFalse((self.dir / "app" / "src" / "ia").exists())
+
+    def test_con_la_carpeta_enlazada_a_otra_de_fuera_los_comandos_siguen_siendo_del_proyecto(self):
+        from helpers import commit_all, init_repo
+        outside = Path(tempfile.mkdtemp())
+        try:
+            init_repo(self.dir)
+            write(self.dir / "AGENTS.md", self.AGENTS)
+            write(self.dir / "app" / "Lista.kt", "class Lista\n")
+            commit_all(self.dir)
+            init_repo(outside)  # la carpeta de contexto es otro repo, enlazada dentro del proyecto
+            os.symlink(str(outside), str(self.dir / "ia"))
+            today = datetime.date.today().isoformat()
+            self.ok("nuevo", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "emulator-5554")
+            folder = "ia/perf/investigaciones/arranque-frio/%s" % today
+            self.assertTrue((outside / "perf/investigaciones/arranque-frio" / today / "plan.json").is_file())
+            out = self.ok("siguiente", "--carpeta", folder)
+            command = next(line.strip() for line in out.splitlines() if " capturar --plan " in line)
+            self.assertTrue(command.startswith("cd %s && " % self.dir.resolve()), command)  # la raíz es la del proyecto
+            self.assertIn("capturar --plan %s/plan.json" % folder, command)  # y la carpeta, por su enlace
+            state = self.dir / folder / "estado.md"
+            text = state.read_text(encoding="utf-8")
+            state.write_text(text.replace("| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n| --- | --- | --- | --- | --- |\n",
+                                          "| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n| --- | --- | --- | --- | --- |\n"
+                                          "| `app/Lista.kt` | app | marca | — | no |\n"), encoding="utf-8")
+            write(self.dir / folder / "reporte-final-dev.md", "x")
+            out = self.ok("siguiente", "--carpeta", folder)
+            self.assertIn("mkdir -p ia/perf/parches && { [ -s ia/perf/parches/arranque-frio-%s.patch ]" % today, out)
+        finally:
+            shutil.rmtree(str(outside), ignore_errors=True)
+
+    def test_humo_deja_su_traza_y_propone_la_receta_en_la_carpeta_configurada(self):
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        write(self.dir / "ia/perf/investigaciones/setup/pedido.json", json.dumps({"flujo": "abrir la lista de clientes"}))
+        self.tp_outputs(GOOD.replace('"limites"', '"lanzamiento",0,400000000,0,"launch"\n"limites"'))
+        out = self.ok("humo", "--paquete", PKG, "--serial", "emulator-5554", "--sin-red")
+        today = datetime.date.today().isoformat()
+        self.assertTrue(list((self.dir / "ia/perf/investigaciones/humo/prueba").glob("*.perfetto-trace*")))
+        self.assertFalse((self.dir / "reports").exists())
+        self.assertIn("medir abrir la lista de clientes", out)  # el pedido del setup, en la misma carpeta
+        self.assertIn("--carpeta ia/perf/investigaciones/arranque-frio/%s" % today, out)
+
+
+class DevSettingsTest(DeviceBase):
+    """T1: las opciones de desarrollador que cambian la medición ("No conservar actividades" y las escalas de
+    animación) se leen fuera de la traza, se guardan en fases.json y se avisan."""
+
+    OFF = "always_finish_activities=1,window_animation_scale=0.5"
+
+    def capture(self, *extra):
+        self.tp_outputs(GOOD)
+        if (self.dir / "tp.count").exists():
+            (self.dir / "tp.count").unlink()
+        return self.ok("capturar", "--plan", self.plan, *extra)
+
+    def test_lee_los_ajustes_en_una_llamada_y_reconoce_lo_normal(self):
+        text = ("always_finish_activities=null\nwindow_animation_scale=1.0\ntransition_animation_scale=1\n"
+                "animator_duration_scale=0.5\nruido=1\n")
+        found = perf.parse_dev_settings(text)
+        self.assertEqual(found, {"always_finish_activities": "null", "window_animation_scale": "1.0",
+                                 "transition_animation_scale": "1", "animator_duration_scale": "0.5"})
+        self.assertEqual(perf.dev_settings_text(found), "Escala de duración de animador = 0.5")
+        self.assertTrue(perf.dev_setting_normal("always_finish_activities", "0"))
+        self.assertFalse(perf.dev_setting_normal("always_finish_activities", "1"))
+        self.assertFalse(perf.dev_setting_normal("window_animation_scale", "raro"))
+        fix, back = perf.dev_settings_commands({"always_finish_activities": "1", "window_animation_scale": "0.5"},
+                                               "emulator-5554", Path("/proyecto con espacios"))
+        self.assertEqual(fix, "cd '/proyecto con espacios' && adb -s emulator-5554 shell settings put global "
+                              "always_finish_activities 0 && adb -s emulator-5554 shell settings put global "
+                              "window_animation_scale 1")
+        self.assertIn("settings put global always_finish_activities 1 && ", back)
+        self.assertIn("settings put global window_animation_scale 0.5", back)
+
+    def test_la_prueba_avisa_frena_la_medicion_y_da_los_dos_comandos(self):
+        self.env["FAKE_AJUSTES"] = self.OFF
+        out = self.capture("--prueba")
+        self.assertIn("⚠ Opciones de desarrollador fuera de lo normal: No conservar actividades = 1, Escala de animación "
+                      "de ventana = 0.5.", out)
+        self.assertIn("Dejarlas normales:", out)
+        self.assertIn("Siguiente · corrige antes de medir (avisos de la corrida de prueba)", out)
+        saved = perf.test_warnings(self.plan.parent, "home")
+        self.assertEqual([item["tipo"] for item in saved], ["ajustes"])
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("Terminal (sin chat) · deja normales las opciones de desarrollador", out)
+        self.assertIn("settings put global always_finish_activities 0", out)
+        self.assertIn("vuélvelas a como estaban: cd ", out)
+        self.assertIn("settings put global always_finish_activities 1", out)
+        self.assertNotIn("Chat nuevo", out)  # solo hay que cambiar el dispositivo: no hace falta un chat
+        self.assertNotIn("compila e instala", out)
+        self.assertIn("OPCIÓN, solo si decides medir igual", out)
+        self.assertIn("desactívala también desde Ajustes > Opciones de desarrollador", out)
+        # el comando para volverlas queda en estado.md aunque después se dejen normales
+        self.env["FAKE_AJUSTES"] = ""
+        self.capture("--prueba")
+        state = (self.plan.parent / "estado.md")
+        write(state, "# x\n\n## Siguiente paso\n\n- x\n\n## Hallazgos\n\n")
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        restore = next(line for line in state.read_text(encoding="utf-8").splitlines() if "Opciones de desarrollador: el " in line)
+        self.assertIn("Para volverlas a como estaban al terminar la investigación: cd ", restore)
+        self.assertIn("settings put global always_finish_activities 1", restore)
+        self.env["FAKE_AJUSTES"] = self.OFF
+        # el ajuste lo lee antes de iniciar la traza
+        log = [json.loads(line) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()]
+        commands = [" ".join(a[3:]) if a[:1] == ["-s"] else " ".join(a[1:]) for a in log]
+        read = next(i for i, c in enumerate(commands) if c.startswith('echo "always_finish_activities='))
+        trace = next(i for i, c in enumerate(commands) if c.startswith("perfetto"))
+        self.assertLess(read, trace)
+        # con los ajustes normales, la prueba sale sin avisos y se puede medir
+        self.env["FAKE_AJUSTES"] = ""
+        out = self.capture("--prueba")
+        self.assertNotIn("Opciones de desarrollador", out)
+        self.assertEqual(perf.test_warnings(self.plan.parent, "home"), [])
+
+    def test_se_guardan_por_fase_y_comparar_y_las_advertencias_avisan_si_cambian(self):
+        self.capture("--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.env["FAKE_AJUSTES"] = self.OFF
+        out = self.capture("--fase", "control", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        self.assertIn("⚠ Opciones de desarrollador fuera de lo normal", out)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["ajustes"]["always_finish_activities"], "null")
+        self.assertEqual(phases["control"]["ajustes"]["always_finish_activities"], "1")
+        notes = perf.dev_settings_notes(self.plan.parent)
+        self.assertTrue(any(note.startswith("control se midió con opciones de desarrollador fuera de lo normal")
+                            for note in notes), notes)
+        self.assertTrue(any("cambiaron entre fases (No conservar actividades, Escala de animación de ventana)" in note
+                            for note in notes), notes)
+        state = (self.plan.parent / "estado.md")
+        write(state, "# x\n\n## Siguiente paso\n\n- x\n\n## Hallazgos\n\n")
+        self.ok("siguiente", "--carpeta", self.plan.parent)
+        text = state.read_text(encoding="utf-8")
+        self.assertIn("control se midió con opciones de desarrollador fuera de lo normal", text)
+        # otra tanda de la misma fase con otros ajustes queda como aviso de la fase
+        self.env["FAKE_AJUSTES"] = ""
+        self.capture("--fase", "control", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertTrue(any("cambiaron entre tandas" in note for note in phases["control"]["avisos"]))
+        out = self.ok("comparar", self.plan.parent / "metricas.csv")
+        self.assertIn("cambiaron entre tandas", out)
+
+    def test_sin_el_dato_una_investigacion_anterior_no_avisa(self):
+        write(self.plan.parent / "fases.json", json.dumps({"antes": {"corridas": 5}, "despues": {"corridas": 5}}))
+        self.assertEqual(perf.dev_settings_notes(self.plan.parent), [])
+        self.assertEqual(perf.parse_dev_settings("error: closed\n"), {})  # adb no contestó: no hay dato, no avisa
+        self.assertEqual(perf.dev_settings_text({}), "")
+
+    def test_comparar_avisa_si_cambiaron_entre_fases(self):
+        write(self.plan.parent / "fases.json", json.dumps({
+            "antes": {"corridas": 1, "ajustes": {"always_finish_activities": "0", "window_animation_scale": "1"}},
+            "despues": {"corridas": 1, "ajustes": {"always_finish_activities": "1", "window_animation_scale": "1"}}}))
+        write(self.plan.parent / "metricas.csv", HEADER + rows("antes", "home", "x_ms", [10]) + rows("despues", "home", "x_ms", [9]))
+        out = self.ok("comparar", self.plan.parent / "metricas.csv")
+        self.assertIn("las opciones de desarrollador cambiaron entre fases (No conservar actividades): antes: normales; "
+                      "despues: No conservar actividades = 1", out)
+
+    def test_con_avisos_de_codigo_y_de_ajustes_el_chat_solo_lleva_los_de_codigo(self):
+        pending = [perf.warning("marca", "la marca 'MARK x' no salió", "la marca 'MARK x' no salió"),
+                   perf.test_run_warnings(self.dir, None, {}, "", [], settings={"window_animation_scale": "0.5"},
+                                          serial="emulator-5554")[0]]
+        steps = perf.test_warning_steps(self.plan.parent, self.dir, {"instalar": "./gradlew installX"}, "home", pending,
+                                        "Sigue", "cd . && capturar --prueba", "cd . && capturar --fase antes", "nada")
+        kinds = [step["tipo"] for step in steps]
+        self.assertEqual(kinds, ["avisos", "terminal", "chat", "terminal", "terminal", "terminal"])
+        self.assertIn("window_animation_scale 1", steps[1]["texto"])
+        self.assertIn("1) la marca 'MARK x' no salió", steps[2]["texto"])
+        self.assertNotIn("animación", steps[2]["texto"])
+        self.assertIn("installX", steps[3]["texto"])
+
+
+FIXTURE_090 = ROOT / "tests" / "fixtures" / "hb-performance-0.9.0"
+
+
+def timed_service(phase, service, calls, ms, ttfb, start, segment=None, flow="lista", runs=5):
+    """Las filas de un servicio con el momento de sus llamadas (inicio y fin desde el inicio del flujo), como las deja
+    esta versión al final de cada corrida."""
+    out = service_rows(phase, service, calls, [ms] * runs, ttfb, flow=flow)
+    out += rows(phase, flow, "red %s inicio_ms" % service, [start] * runs, family="info")
+    out += rows(phase, flow, "red %s fin_ms" % service, [start + ms * calls] * runs, family="info")
+    if segment:
+        out += rows(phase, flow, "%s red %s llamadas" % (segment, service), [calls] * runs, "llamadas", family="info")
+    return out
+
+
+class FlowServicesOrderTest(PerfBase):
+    """G4: la lista completa de servicios en el orden en que se invocan, por tramo, con la espera total, la línea de
+    tiempo de la corrida mediana y la variación del backend rotulada como tal."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true", "segmentos": [
+            {"nombre": "carga", "desde": {"marca": "NAV Lista"}, "hasta": {"marca": "MARK lista"}},
+            {"nombre": "detalle", "desde": {"marca": "MARK lista"}, "hasta": {"marca": "MARK detalle"}}]}}, "mejoras": []}
+        text = HEADER + rows("antes", "lista", "lista_ms", [1800, 1850, 1700, 1900, 1750]) \
+            + rows("antes", "lista", "ventana_ms", [2000, 2100, 1900, 2200, 2050], family="info") \
+            + rows("antes", "lista", "red_en_curso_ms", [900] * 5, family="info") \
+            + rows("antes", "lista", "carga inicio_ms", [0] * 5, family="info") \
+            + rows("antes", "lista", "carga fin_ms", [700] * 5, family="info") \
+            + rows("antes", "lista", "detalle inicio_ms", [700] * 5, family="info") \
+            + rows("antes", "lista", "detalle fin_ms", [2000] * 5, family="info")
+        # el más pesado se llama tercero: el orden es el de invocación, no el del tiempo que suman
+        text += timed_service("antes", "GET api/v1/sesion", 1, 100, 80, 0, "carga")
+        text += timed_service("antes", "GET api/v1/catalogo", 1, 150, 100, 120, "carga")
+        text += timed_service("antes", "GET api/v1/clientes", 2, 400, 300, 300, "carga")
+        text += timed_service("antes", "GET api/v1/clientes/{id}", 1, 200, 150, 1100, "detalle")
+        for index in range(3):
+            text += timed_service("antes", "GET api/v1/extra/%d" % index, 1, 40, 20, 1400 + 100 * index, "detalle")
+        self.before = text
+        write(self.folder / "metricas.csv", text)
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
+
+    def test_las_filas_con_el_momento_salen_de_la_traza(self):
+        call = lambda ts, dur, name: ("seccion", ts, dur, 0, name)
+        sections = [call(1000 * MS, 300 * MS, "HTTP GET api/v1/a"), call(1200 * MS, 300 * MS, "HTTP GET api/v1/b"),
+                    call(2000 * MS, 100 * MS, "HTTP GET api/v1/a")]
+        segment = [{"tramo": "carga", "endpoints": {"GET api/v1/a": 1}, "limites": (1000 * MS, 1600 * MS)}]
+        got = {m[0]: m for m in perf.service_metrics(sections, set(), segment, origin=1000 * MS)}
+        self.assertEqual(got["red GET api/v1/a inicio_ms"][1:], (0.0, "ms", "info"))
+        self.assertEqual(got["red GET api/v1/a fin_ms"][1], 1100.0)  # el fin de su última llamada
+        self.assertEqual(got["red GET api/v1/b inicio_ms"][1], 200.0)
+        self.assertEqual(got["red_en_curso_ms"][1], 600.0)  # 1000–1500 y 2000–2100: lo solapado cuenta una vez
+        self.assertEqual(got["carga inicio_ms"][1], 0.0)
+        self.assertEqual(got["carga fin_ms"][1], 600.0)
+        self.assertTrue(all(perf.SERVICE_EXTRA.fullmatch(name) for name in got), got)
+        # sin origen (como antes de esta versión) no salen
+        self.assertNotIn("red_en_curso_ms", {m[0] for m in perf.service_metrics(sections, set(), segment)})
+
+    def test_la_lista_completa_va_en_orden_de_invocacion_y_por_tramo(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        md = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        section = md[md.index("## Servicios del flujo"):md.index("## Red por tramo") if "## Red por tramo" in md
+                     else md.index("## Hallazgos")]
+        names = [line.split("`")[1] for line in section.splitlines() if line.startswith("| `")]
+        self.assertEqual(names, ["GET api/v1/sesion", "GET api/v1/catalogo", "GET api/v1/clientes", "GET api/v1/clientes/{id}",
+                                 "GET api/v1/extra/0", "GET api/v1/extra/1", "GET api/v1/extra/2"])
+        self.assertLess(section.index("**Tramo `carga`**"), section.index("**Tramo `detalle`**"))
+        self.assertIn("<details open>\n<summary>Los 7 servicios del flujo</summary>", section)
+        self.assertIn("En el orden en que se invocan", section)
+        self.assertIn("| `GET api/v1/clientes` | 2 | 300 ms | 400 ms / 400 ms | 300 ms |", section)
+        self.assertIn("**Espera de servicios: 900 ms de 2.05 s del flujo (44 %)**, el tiempo con al menos una llamada en "
+                      "curso", section)
+        page = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        self.assertIn("Línea de tiempo de los servicios", page)
+        self.assertIn("Corrida 5 (la de duración mediana)", page)  # ventana 2050 ms: la mediana de las 5
+        self.assertIn('class="mark"', page)  # dónde empieza cada tramo
+        self.assertIn("podrían ir en paralelo", page)
+        self.assertIn("Servicios que más tiempo suman", page)
+        business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("El recorrido llama a 7 servicios (8 llamadas en total). De los 2.05 s del recorrido, durante 0.9 s "
+                      "(44 %) se está esperando a algún servicio; el más lento es `GET api/v1/clientes` (0.4 s por "
+                      "llamada).", business)
+
+    def test_en_el_final_el_backend_que_se_mueve_es_variacion_del_backend(self):
+        after = rows("despues", "lista", "lista_ms", [1200] * 5) \
+            + timed_service("despues", "GET api/v1/sesion", 1, 100, 80, 0, "carga") \
+            + timed_service("despues", "GET api/v1/clientes", 1, 700, 600, 100, "carga")
+        write(self.folder / "metricas.csv", self.before + after)
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("| `GET api/v1/clientes` | antes | 2 | 300 ms |", md)
+        self.assertIn("| `GET api/v1/clientes` | después | 1 | 100 ms |", md)
+        self.assertIn("El servidor cambió entre fases en `GET api/v1/clientes` (300 ms → 600 ms): es variación del backend",
+                      md)
+        self.assertIn("| `GET api/v1/catalogo` | después | no se llama |", md)
+
+
+TECH_IN_BUSINESS = ("mediana", "P90", "CV", "slices", "TTFB", "jank", "lista_ms", "hilo_max_ms", "ventana_ms")
+
+
+class ReadableReportsTest(PerfBase):
+    """G1: los cuatro reportes se leen solos: secciones, gráficos en línea con su explicación, unidades y, en el de
+    gerencia, nada técnico. Autocontenidos: sin scripts ni recursos externos."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        shutil.copytree(str(FIXTURE_090), str(self.folder))
+
+    def generate(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        return {name: (self.folder / name).read_text(encoding="utf-8") for name in (
+            "reporte-inicial-dev.html", "reporte-inicial-gerencia.html", "reporte-final-dev.html",
+            "reporte-final-gerencia.html", "reporte-final-gerencia.md", "reporte-inicial-gerencia.md",
+            "reporte-final-dev.md", "reporte-inicial-dev.md")}
+
+    def test_los_cuatro_reportes_traen_graficos_explicados_y_son_autocontenidos(self):
+        pages = self.generate()
+        for name, page in pages.items():
+            if not name.endswith(".html"):
+                continue
+            self.assertIn("<svg", page, name)
+            self.assertIn('class="chart-note"', page, name)  # cada gráfico con su frase
+            self.assertNotIn("<script", page.lower(), name)
+            self.assertNotRegex(page, r'(?:src|href)="(?:https?:)?//', name)  # nada que cargar de la red
+            self.assertNotIn("@import", page, name)
+            self.assertIn("@media print", page, name)
+        dev = pages["reporte-final-dev.html"]
+        self.assertIn("Control", dev)
+        self.assertIn('class="noise"', dev)  # el ruido marcado
+        self.assertIn('class="whisker"', dev)  # el rango de las corridas
+        self.assertIn("La barra es la mediana y la línea fina va de la corrida más rápida a la más lenta", dev)
+        self.assertRegex(dev, r'class="axis-label" text-anchor="end">(?:mili)?segundos<')  # eje con unidad
+        self.assertIn("## Cómo leer este reporte", pages["reporte-final-dev.md"])
+        self.assertIn("**Unidades:**", pages["reporte-final-dev.md"])
+        self.assertIn("cada punto es una corrida", pages["reporte-inicial-dev.html"])
+        self.assertIn("| lista_a_detalle_ms | e2e", pages["reporte-final-dev.md"].replace("app + backend", "e2e")
+                      .replace("| detalle | ", "| "))
+        self.assertRegex(pages["reporte-final-dev.md"], r"\d+ ms \| \d+ ms \| −\d+ ms \(−\d+ %\)")
+
+    def test_el_de_gerencia_va_sin_terminos_tecnicos(self):
+        pages = self.generate()
+        for name in ("reporte-final-gerencia.md", "reporte-inicial-gerencia.md"):
+            text = pages[name]
+            visible = re.sub(r"`[^`]+`", "", text)  # el nombre corto de un servicio puede ir entre acentos graves
+            for term in TECH_IN_BUSINESS:
+                self.assertNotRegex(visible, r"(?<![\w-])%s(?![\w-])" % re.escape(term), (name, term))
+            self.assertEqual(perf.TECH_TERMS.findall(visible), [], name)
+        final = pages["reporte-final-gerencia.md"]
+        for section in ("Qué notaba el usuario", "Qué se hizo", "Resultado", "Lo que queda pendiente", "Riesgos", "Costo"):
+            self.assertIn("## %s" % section, final)
+        self.assertRegex(final, r"pasó de [\d.]+ s a [\d.]+ s \(\d+ % menos\) · mejora clara")
+        self.assertIn("Antes", pages["reporte-final-gerencia.html"])
+        self.assertIn("Después", pages["reporte-final-gerencia.html"])
+        self.assertNotIn("Control", pages["reporte-final-gerencia.html"])
+        self.assertIn("Hoy", pages["reporte-inicial-gerencia.html"])
+
+    def test_medidas_en_la_escala_que_se_entiende(self):
+        self.assertEqual(perf.nice(1810, "ms"), "1.81 s")
+        self.assertEqual(perf.nice(12400, "ms"), "12.4 s")
+        self.assertEqual(perf.nice(450.4, "ms"), "450 ms")
+        self.assertEqual(perf.nice(4.24, "ms"), "4.2 ms")
+        self.assertEqual(perf.nice(12.46, "%"), "12.5 %")
+        self.assertEqual(perf.nice(3, "llamadas"), "3 llamadas")
+        self.assertEqual(perf.nice(None, "ms"), "sin dato")
+        self.assertEqual(perf.change_pct(1800, 1100), "−39 %")
+        self.assertEqual(perf.change_pct(100, 105), "+5 %")
+        self.assertEqual(perf.change_pct(0, 5), "")
+        self.assertEqual(perf.nice_signed(-703.5, "ms"), "−704 ms")
+        self.assertEqual(perf.plain_pct(1800, 1100), " (39 % menos)")
+        self.assertEqual(perf.plain_value(34, "slices"), "34 bloqueos")
+        self.assertEqual(perf.plain_value(1800, "ms"), "1.8 s")
+
+
+class BusinessJargonTest(PerfBase):
+    """U4: lo que escribe la IA para gerencia se comprueba contra la lista de términos técnicos; si trae alguno, no se
+    publica: queda "sin completar" y el comando avisa en qué campo está y qué hacer."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "hallazgo": "H1", "titulo": "Sacar `cargarClientes()` del hilo principal",
+                             "metrica": "lista_ms", "estado": "propuesta"},
+                            {"id": "M2", "titulo": "Cargar las imágenes después", "metrica": "lista_ms", "estado": "propuesta"}]}
+        write(self.folder / "plan.json", json.dumps(plan))
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
+
+    def state(self, business, symptom="La lista tarda en aparecer", cause="Pide los clientes dos veces"):
+        write(self.folder / "estado.md", (
+            "# Rendimiento · Lista · 2026-11-09\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n| Síntoma | %s |\n\n"
+            "## Hallazgos\n\n| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n"
+            "| H1 | La lista tarda | `lista_ms` | %s | bug |\n\n## Resumen para gerencia\n\n%s\n\n"
+            "## Consumo\n\n| Sesión | Modelo | Costo o tokens | Pasos |\n| --- | --- | --- | --- |\n") % (symptom, cause, business))
+
+    def test_detecta_terminos_y_formato_de_codigo(self):
+        self.assertEqual(perf.jargon("La lista tarda en aparecer y se congela al escribir."), [])
+        self.assertEqual(perf.jargon("Abrir la lista pasó de unos 2 s a 1 s."), [])
+        found = perf.jargon("El P90 de lista_ms bajó; el jank y el CV del TTFB en ListaScreen y cargar() en Lista.kt")
+        for term in ("P90", "lista_ms", "jank", "CV", "TTFB", "ListaScreen", "cargar()", "Lista.kt"):
+            self.assertIn(term, found)
+        self.assertIn("`x`", perf.jargon("usa `x`"))
+        self.assertIn("slices", perf.jargon("34 slices"))
+        self.assertIn("viewModel.cargar", perf.jargon("en viewModel.cargar"))
+
+    def test_no_publica_lo_tecnico_y_dice_que_campo_reescribir(self):
+        self.state("El P90 de `lista_ms` bajó un 40 %.", symptom="Jank al abrir la lista", cause="Llama a cargar() dos veces")
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertIn('⚠ Gerencia: "Resumen para gerencia" de estado.md tiene términos técnicos (P90, `lista_ms`', out)
+        self.assertIn("⚠ Gerencia: el síntoma de la Ficha de estado.md tiene términos técnicos (Jank)", out)
+        self.assertIn("⚠ Gerencia: la causa de H1 en Hallazgos de estado.md tiene términos técnicos (cargar())", out)
+        self.assertIn("⚠ Gerencia: el título de M1 en plan.json tiene términos técnicos", out)
+        self.assertEqual(out.count("el título de M1 en plan.json"), 1)  # un aviso por campo, aunque salga en varias partes
+        self.assertIn("Qué hacer: reescríbelo en palabras", out)
+        self.assertRegex(out, r"\n    cd .+ reporte --carpeta \S+ --inicial --html\n")  # el mismo comando, para generar de nuevo
+        text = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        for term in ("P90", "lista_ms", "Jank", "cargar()", "cargarClientes"):
+            self.assertNotIn(term, text)
+        self.assertIn("tiene términos técnicos y no se publica", text)
+        self.assertIn("## Qué notaba el usuario\n\n_sin completar_", text)
+        self.assertIn("- La lista tarda: _sin completar_", text)
+        self.assertIn("- Una mejora con el título sin completar\n- Cargar las imágenes después", text)
+        # el reporte técnico no cambia: publica todo
+        self.assertIn("cargarClientes", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
+
+    def test_en_palabras_se_publica_sin_avisos(self):
+        self.state("Al abrir la lista se pedían los datos dos veces.")
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.assertNotIn("⚠ Gerencia: \"Resumen", out)
+        self.assertIn("Al abrir la lista se pedían los datos dos veces.",
+                      (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+
+
+class ChatCommandTest(PerfBase):
+    """G2: cada chat nuevo trae el comando que lo abre con su modelo y su esfuerzo, según la herramienta que anota
+    AGENTS.md (o las dos formas si no la anota), el texto exacto y qué te toca."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "serial": "emulator-5554", "principales": ["ttid_ms"], "flujos": {"arranque-frio": {
+            "recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main", "espera_s": 5}}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
+        write(self.folder / "diagnostico.md", "x")
+
+    def agents(self, *lines):
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n" + "".join("- %s\n" % line for line in lines))
+
+    def chat_lines(self, out):
+        lines = out.splitlines()
+        head = next(i for i, line in enumerate(lines) if "Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: alto" in line)
+        return lines[head:head + 6]
+
+    def test_sin_herramienta_anotada_imprime_las_dos_formas(self):
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        root = shlex_quote(str(self.dir.resolve()))
+        self.assertEqual(block[1].strip(), "Abrir (Terminal, Claude Code): cd %s && claude --model claude-sonnet-5-5 "
+                                           "--effort high" % root)
+        self.assertEqual(block[2].strip(), "Abrir (Terminal, GitHub Copilot CLI): cd %s && copilot --model "
+                                           "claude-sonnet-5.5 --effort high" % root)
+        self.assertTrue(block[3].strip().startswith('Texto: "Sigue hb-performance con '))
+        self.assertTrue(block[3].strip().endswith('No hagas commit ni push."'))
+        self.assertIn("Qué hace: sesión 2", block[4])
+        self.assertIn("Tú: abre el chat con ese comando, pega el texto tal cual", block[5])
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("Abrir (Terminal, Claude Code): `cd %s && claude --model claude-sonnet-5-5 --effort high`" % root, state)
+
+    def test_con_claude_code_o_copilot_solo_la_suya(self):
+        self.agents("Herramienta de IA: Claude Code")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("claude --model claude-sonnet-5-5 --effort high", block[1])
+        self.assertNotIn("copilot", "\n".join(block))
+        self.agents("**Herramienta de IA:** GitHub Copilot CLI")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("Abrir (Terminal, GitHub Copilot CLI):", block[1])
+        self.assertIn("copilot --model claude-sonnet-5.5 --effort high", block[1])
+        self.assertNotIn("claude --model", "\n".join(block))
+        # un comando propio en AGENTS.md (por ejemplo, una versión sin --effort) gana al de fábrica
+        self.agents("Herramienta de IA: GitHub Copilot CLI", "Comando del chat: `copilot --model {modelo}`")
+        block = self.chat_lines(self.ok("siguiente", "--carpeta", "inv"))
+        self.assertIn("copilot --model claude-sonnet-5.5 · elige el esfuerzo high con /model al abrirlo", block[1])
+
+    def test_los_ids_salen_de_modelos_y_se_pueden_cambiar(self):
+        self.assertEqual(perf.cli_model_id({}, "economico", "claude"), "claude-haiku-5-5")
+        self.assertEqual(perf.cli_model_id({}, "alto", "copilot"), "claude-opus-5.5")
+        self.assertEqual(perf.cli_model_id({"modelos": {"intermedio": "GPT 5.3 Codex"}}, "intermedio", "copilot"),
+                         "gpt-5.3-codex")
+        self.assertEqual(perf.cli_model_id({"modelos": {"intermedio": "sonnet"}}, "intermedio", "claude"), "sonnet")
+        plan = {"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-x"}}}
+        self.assertEqual(perf.cli_model_id(plan, "intermedio", "copilot"), "claude-sonnet-x")
+        self.assertEqual(perf.cli_model_id(plan, "diagnostico", "copilot"), "claude-sonnet-x")  # sin el suyo, el intermedio
+        self.assertEqual(perf.cli_model_id(plan, "intermedio", "claude"), "claude-sonnet-5-5")
+        self.assertEqual(perf.ai_tool(self.dir), (None, None, None))
+        self.agents("Herramienta de IA: Cursor")
+        self.assertEqual(perf.ai_tool(self.dir)[:2], ("otra", "Cursor"))
+        self.assertEqual(len(perf.chat_openers({}, self.dir, "intermedio", "medio")), 2)  # no la conoce: las dos formas
+
+    def test_una_raiz_con_espacios_va_entre_comillas(self):
+        root = Path("/proyecto con espacios")
+        commands = [command for _, command, _ in perf.chat_openers({}, root, "intermedio", "medio")]
+        self.assertTrue(all(command.startswith("cd '/proyecto con espacios' && ") for command in commands), commands)
+
+
+def shlex_quote(text):
+    import shlex
+    return shlex.quote(text)
+
+
+class MissingDataFirstTest(PerfBase):
+    """G3: antes de los pasos que capturan, el comando para cargar las variables que el flujo necesita (oculto para
+    las claves), o una línea si ya están cargadas; y, sin serial en el plan, cómo ver los dispositivos."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {
+            "recorrido": "true", "preparar": "true", "requiere_env": ["PERF_USUARIO", "PERF_CLAVE"]}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        for name in ("PERF_USUARIO", "PERF_CLAVE"):
+            self.env.pop(name, None)
+
+    def test_el_primer_paso_carga_las_variables_sin_mostrarlas(self):
+        out = self.ok("siguiente", "--carpeta", "inv")
+        lines = out.splitlines()
+        first = next(i for i, line in enumerate(lines) if line.strip().startswith("1. "))
+        self.assertIn("1. Terminal (sin chat) · carga en esta terminal PERF_USUARIO, PERF_CLAVE", lines[first])
+        command = lines[first + 1].strip()
+        self.assertTrue(command.startswith("cd "), command)
+        self.assertIn("printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO", command)
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", command)
+        self.assertEqual(command.count("cd "), 1)
+        self.assertIn("no queda en el historial ni en ningún archivo", lines[first + 2])
+        self.assertIn("2. Terminal (sin chat) · una corrida de prueba", out)
+        # sin serial en el plan: la primera captura dice cómo ver los dispositivos
+        self.assertIn("con más de un dispositivo conectado, mira cuál es con `cd ", out)
+        self.assertIn("adb devices -l` y agrega --serial <serial> al comando", out)
+        # el comando que carga una clave se puede correr: lee de la entrada, exporta y no imprime el valor
+        part = command[command.index("printf 'PERF_CLAVE"):]
+        done = subprocess.run(["bash", "-c", part + " && printf '[%s]' \"$PERF_CLAVE\""], input="secreto\n",
+                              capture_output=True, text=True)
+        self.assertEqual(done.stdout, "PERF_CLAVE: \n[secreto]")  # pregunta, exporta y no repite lo escrito
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertNotIn("secreto", state)
+        self.assertIn("Cárgalas en la terminal donde mides", state)  # también en "Cómo se recorre"
+
+    def test_si_ya_estan_cargadas_lo_dice_en_una_linea(self):
+        self.env.update({"PERF_USUARIO": "ana", "PERF_CLAVE": "no-se-imprime"})
+        out = self.ok("siguiente", "--carpeta", "inv")
+        self.assertIn("Antes de medir:", out)
+        self.assertIn("PERF_USUARIO, PERF_CLAVE ya están cargadas en esta terminal: mide en esta misma", out)
+        self.assertNotIn("no-se-imprime", out)
+        self.assertNotIn("ana", out.replace("analiza", ""))
+        self.assertNotIn("read -r", out.split("Cómo se recorre")[0] if "Cómo se recorre" in out else out)
+
+    def test_sin_captura_en_los_pasos_no_pide_nada(self):
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
+        write(self.folder / "diagnostico.md", "x")
+        out = self.ok("siguiente", "--carpeta", "inv")
+        self.assertNotIn("carga en esta terminal", out)
+        self.assertNotIn("Antes de medir", out)
+
+
+class SetupCostTest(PerfBase):
+    """U1: la sesión 0 (del proyecto) y una sesión 1 que arma a mano un flujo de arranque también salen en la lista de
+    costos sin anotar, con su comando listo."""
+
+    AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- setup listo\n\n<!-- hb-performance:estado -->\n"
+              "Estado del setup · prueba de humo: pasó el 2026-11-01\n<!-- /hb-performance:estado -->\n")
+
+    def setUp(self):
+        super().setUp()
+        from helpers import init_repo
+        init_repo(self.dir)  # la raíz del proyecto (y de su AGENTS.md) es la del repo
+        self.folder = self.dir / "reports" / "perf" / "lista" / "2026-11-10"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}}, "mejoras": []}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_COST % "")
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}}))
+
+    def labels(self):
+        return [label for label, _, _ in perf.done_sessions(self.folder, self.plan)]
+
+    def test_la_sesion_0_sale_hasta_que_una_investigacion_la_anota(self):
+        self.assertEqual(self.labels(), ["1 · ficha"])  # sin el bloque del setup en AGENTS.md no se sabe
+        write(self.dir / "AGENTS.md", self.AGENTS)
+        self.assertEqual(self.labels(), ["0 · setup", "1 · ficha"])
+        out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn('consumo --carpeta reports/perf/lista/2026-11-10 --sesion "0 · setup" --modelo "Sonnet 5.5" '
+                      '--esfuerzo medio --costo "<costo>"', out)
+        # otra investigación del proyecto ya la anotó: no se pide dos veces
+        other = self.dir / "reports" / "perf" / "otra" / "2026-11-01"
+        write(other / "estado.md", STATE_COST % "" + "| 0 · setup | Sonnet 5.5 | 1.40 USD | 42 |\n")
+        self.assertEqual(self.labels(), ["1 · ficha"])
+
+    def test_un_arranque_armado_a_mano_cuenta_la_sesion_1_y_la_receta_no(self):
+        self.plan["flujos"] = {"arranque-frio": {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.Main"}}}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        self.assertEqual(self.labels(), ["1 · ficha"])  # sin la marca de la receta: lo armó una sesión 1
+        self.plan["receta"] = "arranque-frio"
+        self.assertEqual(self.labels(), [])
+        self.plan.pop("receta")
+        write(self.folder / "estado.md", (STATE_COST % "").replace("## Consumo", "| Síntoma | exploratoria (receta de "
+                                                                                "arranque en frío) |\n\n## Consumo"))
+        self.assertEqual(self.labels(), [])  # una receta de antes, que no guardaba la marca en el plan
+
+
+class QuotedPathsTest(PerfBase):
+    """U3: los comandos que imprime perf.py ponen entre comillas la raíz del proyecto y las rutas con espacios."""
+
+    def test_siguiente_con_espacios_en_la_raiz(self):
+        root = self.dir / "mi proyecto"
+        folder = root / "reports" / "perf" / "lista"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "instalar": "./gradlew installProfiling",
+                "flujos": {"lista": {"recorrido": "true"}}, "mejoras": [
+                    {"id": "M1", "titulo": "Una", "estado": "aplicada", "metrica": "lista_ms"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE_COST % "")
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
+        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "siguiente", "--carpeta", "reports/perf/lista"],
+                              cwd=str(root), env=self.env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        commands = [line.strip() for line in done.stdout.splitlines() if line.strip().startswith("cd ")]
+        self.assertTrue(commands)
+        quoted = "cd %s && " % shlex_quote(str(root.resolve()))
+        self.assertIn("'", quoted)
+        self.assertTrue(all(command.startswith(quoted) for command in commands), commands)
+        install = next(command for command in commands if "installProfiling" in command)
+        # el comando se puede correr tal cual: el cd entra a la carpeta con espacios
+        probe = install.split(" && ", 1)[0] + " && pwd"
+        self.assertEqual(subprocess.run(["bash", "-c", probe], capture_output=True, text=True).stdout.strip(),
+                         str(root.resolve()))
+        self.assertEqual(perf.q("/a b/c"), "'/a b/c'")
+        self.assertEqual(perf.q("reports/perf/x"), "reports/perf/x")
+        self.assertEqual(perf.q_repo("<repo de app>"), "<repo de app>")
+
+
+class CodeChangesTest(PerfBase):
+    """G5: `decidir --aplicada --archivos` guarda el diff de la mejora y el reporte final dev muestra, por mejora, el
+    código antes y después, por qué y qué mejoró; el de gerencia no lleva código."""
+
+    def setUp(self):
+        super().setUp()
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "class Lista {\n    fun cargar() {\n        pedir()\n        pedir()\n    }\n}\n")
+        write(self.dir / "app" / "Otro.kt", "class Otro\n")
+        commit_all(self.dir)
+        self.folder = self.dir / "reports" / "perf" / "lista"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                     "mejoras": [{"id": "M1", "hallazgo": "H1", "titulo": "Pedir la lista una sola vez", "metrica": "lista_ms",
+                                  "estado": "aprobada"},
+                                 {"id": "M2", "hallazgo": "H1", "titulo": "Otra", "metrica": "lista_ms", "estado": "aprobada"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
+              + rows("despues", "lista", "lista_ms", [1100] * 5))
+        # la mejora: una línea menos en un archivo y un archivo nuevo; Otro.kt cambia pero no es de la mejora
+        write(self.dir / "app" / "Lista.kt", "class Lista {\n    fun cargar() {\n        pedir()\n    }\n}\n")
+        write(self.dir / "app" / "ListaTest.kt", "class ListaTest\n")
+        write(self.dir / "app" / "Otro.kt", "class Otro // temporal\n")
+
+    def test_decidir_guarda_el_diff_sin_tocar_el_indice(self):
+        status = subprocess.run(["git", "status", "--short"], cwd=str(self.dir), capture_output=True, text=True).stdout
+        out = self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1", "--archivos",
+                      "app/Lista.kt,app/ListaTest.kt")
+        self.assertIn("✔ Diff de M1 guardado: ", out)
+        self.assertIn("(2 archivos, +1 −1 líneas)", out)
+        diff = (self.folder / "cambios" / "M1.diff").read_text(encoding="utf-8")
+        self.assertIn("-        pedir()", diff)
+        self.assertIn("+class ListaTest", diff)
+        self.assertNotIn("Otro", diff)  # solo los archivos de la mejora
+        self.assertEqual(subprocess.run(["git", "status", "--short"], cwd=str(self.dir), capture_output=True,
+                                        text=True).stdout, status)  # ni el índice ni el árbol cambian
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        entry = plan["mejoras"][0]["cambios"][0]
+        self.assertEqual((entry["diff"], entry["repo"], entry["archivos"]),
+                         ("cambios/M1.diff", ".", ["app/Lista.kt", "app/ListaTest.kt"]))
+        # sin --archivos lo dice; --archivos con dos mejoras no se acepta
+        out = self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M2")
+        self.assertIn("M2 quedó aplicada sin diff guardado", out)
+        result = self.perf("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1,M2", "--archivos", "app/Lista.kt")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("una sola mejora", result.stderr)
+        result = self.perf("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1", "--archivos", "app/NoExiste.kt")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no existe ni está en git", result.stderr)
+
+    def test_el_reporte_dev_muestra_antes_y_despues_y_el_de_gerencia_no(self):
+        self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M1", "--archivos", "app/Lista.kt")
+        self.ok("decidir", "--carpeta", "reports/perf/lista", "--aplicada", "M2")
+        self.ok("reporte", "--carpeta", "reports/perf/lista", "--html")
+        md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("_Reporte final · interno: contiene código · ", md)
+        section = md[md.index("## Cambios de código (interno: contiene código)"):]
+        self.assertIn("### M1 · Pedir la lista una sola vez", section)
+        self.assertIn("- **Por qué:** H1: La lista tarda; Pide los clientes dos veces. Evidencia: `lista_ms` 1800 ms", section)
+        self.assertIn("- **Qué mejoró:** `lista_ms` pasó de 1.8 s a 1.1 s (−39 %): Mejora clara · funcionó", section)
+        self.assertIn("- **Archivos:** `app/Lista.kt` · +0 −1 líneas · diff completo: `cambios/M1.diff`", section)
+        self.assertIn("```diff\n# app/Lista.kt\n@@", section)
+        self.assertIn("-        pedir()", section)
+        self.assertIn("### M2 · Otra", section)
+        self.assertIn("- **Código:** sin diff guardado", section)
+        page = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
+        self.assertIn('<pre class="diff">', page)
+        self.assertIn('<span class="del">-        pedir()</span>', page)
+        for name in ("reporte-final-gerencia.md", "reporte-final-gerencia.html"):
+            text = (self.folder / name).read_text(encoding="utf-8")
+            self.assertNotIn("pedir()", text)
+            self.assertNotIn("Cambios de código", text)
+            self.assertNotIn("interno: contiene código", text)
+
+    def test_un_diff_largo_se_recorta_y_una_investigacion_vieja_dice_sin_diff(self):
+        text = "diff --git a/x b/x\nindex 1..2\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n" + "".join("+l%d\n" % i for i in range(100))
+        excerpt, skipped = perf.diff_excerpt(text, limit=10)
+        self.assertEqual(excerpt.splitlines()[:2], ["# x", "@@ -1 +1 @@"])
+        self.assertEqual(len(excerpt.splitlines()), 10)
+        self.assertEqual(skipped, 92)
+        old = dict(self.plan["mejoras"][0], estado="aplicada")
+        md = perf.changes_md(self.folder, {"mejoras": [old]}, [], "")
+        self.assertIn("sin diff guardado", md)
+        self.assertEqual(perf.changes_md(self.folder, {"mejoras": []}, [], ""), "")
+
+
+class TimelineAndInternalTest(PerfBase):
+    """G4 y G5 tras la revisión: la línea de tiempo dibuja cada llamada y las marcas de pantalla de la corrida mediana;
+    con código en el reporte dev, `siguiente` lo da como interno; repetir `decidir --aplicada --archivos` en el mismo
+    repo no duplica el diff."""
+
+    def test_cada_llamada_y_las_marcas_de_pantalla(self):
+        sections = [("seccion", 1000 * MS, 0, 0, "NAV Lista"), ("seccion", 1050 * MS, 200 * MS, 0, "HTTP GET api/v1/a"),
+                    ("seccion", 1300 * MS, 100 * MS, 0, "HTTP GET api/v1/a"), ("seccion", 1500 * MS, 0, 0, "MARK lista"),
+                    ("seccion", 1600 * MS, 0, 0, "MARK lista")]
+        line = perf.run_timeline(sections, 1000 * MS)
+        self.assertEqual(line["llamadas"], [["GET api/v1/a", 50.0, 250.0], ["GET api/v1/a", 300.0, 400.0]])
+        self.assertEqual(line["marcas"], [["NAV Lista", 0.0], ["MARK lista", 500.0]])  # la primera vez de cada una
+        folder = self.dir / "inv"
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "ventana_ms", [900, 1000, 1100])
+              + service_rows("antes", "GET api/v1/a", 2, [150] * 3))
+        (folder / "antes").mkdir()  # la carpeta de la fase, donde capturar deja las trazas
+        for run in (1, 2, 3):
+            perf.save_timeline(folder / "antes", "lista", run, line)
+        plan = {"paquete": PKG, "flujos": {"lista": {"recorrido": "true"}}}
+        html = perf.timeline_chart(perf.read_rows(folder / "metricas.csv"), plan, "antes", folder)
+        self.assertIn("Corrida 2 (la de duración mediana): cada barra es una llamada", html)
+        self.assertEqual(html.count('class="bar-after"'), 2)  # una barra por llamada
+        self.assertIn("ir a Lista", html)
+        self.assertIn("1 llamada empieza cuando ya terminaron todas las anteriores", html)
+        self.assertIsNone(perf.load_timeline(folder, "antes", "lista", 9))
+
+    def test_el_reporte_con_codigo_es_interno_y_el_diff_no_se_duplica(self):
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "a\n")
+        commit_all(self.dir)
+        write(self.dir / "app" / "Lista.kt", "b\n")
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "Una", "metrica": "lista_ms", "estado": "aprobada"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
+              + rows("despues", "lista", "lista_ms", [1100] * 5))
+        self.ok("decidir", "--carpeta", "inv", "--aplicada", "M1", "--archivos", "app/Lista.kt")
+        self.ok("decidir", "--carpeta", "inv", "--aplicada", "M1", "--archivos", "app/Lista.kt")
+        saved = json.loads((folder / "plan.json").read_text(encoding="utf-8"))["mejoras"][0]["cambios"]
+        self.assertEqual([entry["diff"] for entry in saved], ["cambios/M1.diff"])
+        self.assertEqual(sorted(path.name for path in (folder / "cambios").iterdir()), ["M1.diff"])
+        result = self.perf("decidir", "--carpeta", "inv", "--aplicada", "M1", "--repo", ".")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--repo va con --archivos", result.stderr)
+        out = self.ok("reporte", "--carpeta", "inv", "--html")
+        self.assertIn("reporte final técnico (interno: contiene código; fuera del equipo, comparte el de gerencia)", out)
+
+
+class TimelineCaptureTest(DeviceBase):
+    """capturar deja la línea de tiempo de cada corrida válida junto a su traza (no en metricas.csv)."""
+
+    def test_cada_corrida_deja_su_linea_de_tiempo(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0", "--sin-compilar")
+        data = perf.load_timeline(self.plan.parent, "antes", "home", 1)
+        self.assertIsNotNone(data)
+        self.assertTrue(data["llamadas"])  # GOOD trae secciones HTTP
+        self.assertTrue(all(len(call) == 3 for call in data["llamadas"]))
+        self.assertNotIn("linea", (self.plan.parent / "metricas.csv").read_text(encoding="utf-8"))
+
+
+class BusinessAxisTest(unittest.TestCase):
+    """El gráfico de gerencia usa en el eje la misma unidad que sus valores: segundos desde 100 ms."""
+
+    def test_eje_y_valores_en_segundos(self):
+        svg = perf.range_chart([("Antes", 410, 400, 420, "before"), ("Después", 300, 290, 310, "after")], "ms", "x",
+                               plain=True)
+        self.assertIn(">0.41 s<", svg)
+        self.assertIn('text-anchor="end">segundos<', svg)
+        self.assertNotIn("milisegundos", svg)
+        dev = perf.range_chart([("Antes", 410, 400, 420, "before")], "ms", "x")
+        self.assertIn("410 ms", dev)
+        self.assertIn('text-anchor="end">milisegundos<', dev)
+
+    def test_eje_en_la_unidad_de_los_valores_escritos(self):
+        # mediana bajo 100 ms y la corrida más lenta sobre 100 ms: el valor va en milisegundos y el eje también
+        svg = perf.range_chart([("Hoy", 95, 80, 120, "before")], "ms", "x", plain=True)
+        self.assertIn(">95 milisegundos<", svg)
+        self.assertIn('text-anchor="end">milisegundos<', svg)
+
+
+class BusinessUnfilledTitleTest(PerfBase):
+    """En gerencia, una mejora cuyo título trae términos técnicos se nombra igual en todas las listas, sin líneas a medias."""
+
+    def test_titulo_con_terminos_tecnicos(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "Usar LazyColumn en vez de RecyclerView", "metrica": "lista_ms",
+                             "riesgo": "bajo", "estado": "pendiente"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE_REPORT % BUSINESS)
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
+        self.ok("reporte", "--carpeta", folder, "--inicial")
+        text = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("## Qué se propone\n\n- Una mejora con el título sin completar", text)
+        self.assertIn("- Una mejora con el título sin completar: riesgo bajo.", text)
+        self.assertNotIn("_sin completar_: riesgo", text)
+        self.assertNotIn("LazyColumn", text)

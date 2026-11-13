@@ -36,20 +36,26 @@ import math
 import os
 import pathlib
 import re
+import select
 import shlex
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
 import textwrap
 import time
+import traceback
 import uuid
 import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
+# Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
+# métricas): sus corridas se pueden completar sin repetir la fase.
+SAME_CAPTURE = ("0.9.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -112,7 +118,12 @@ GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rar
 - **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente.
 - **Mejora a prueba:** el síntoma está medido y es estable, pero su causa no se pudo probar. Se aplica el cambio más probable y la medición de después dice si la hipótesis era cierta (`✔ hipótesis confirmada`) o no (`✖ hipótesis refutada`).
 - **Métricas por tramo (`<tramo> …`):** el hilo principal y los frames solo entre dos marcas del flujo (una pantalla, un salto), contando lo que se solapa con ese tramo, para que un pico no se diluya en el recorrido completo.
-- **Red por tramo (`<tramo> red_…`):** las llamadas de red que empiezan dentro de cada tramo: cuántas son, cuánto duran, cuánto tarda el servidor en responder (TTFB) y cuántas se repiten o se solapan."""
+- **Red por tramo (`<tramo> red_…`):** las llamadas de red que empiezan dentro de cada tramo: cuántas son, cuánto duran, cuánto tarda el servidor en responder (TTFB) y cuántas se repiten o se solapan.
+- **Gráficos:** la barra es la mediana y la línea fina va de la corrida más rápida a la más lenta; la franja punteada marca el ruido de medición alrededor de antes. Debajo de cada gráfico, una frase dice qué muestra y qué significa.
+- **Unidades:** los tiempos de un segundo o más van en segundos (`1.81 s`) y los más cortos en milisegundos (`450 ms`); el cambio, en porcentaje respecto de antes (`−39 %` es un 39 % menos).
+- **Espera de servicios:** el tiempo del flujo en que hay al menos una llamada a un servicio en curso (lo que se solapa cuenta una vez). Depende del backend y de la red del momento: es informativa.
+- **Servidor (TTFB) y en la app:** el servidor es la espera hasta el primer byte de la respuesta; en la app, la cola antes de salir, la conexión nueva y la lectura de la respuesta. Una mejora de la app mueve lo segundo, no lo primero.
+- **Línea de tiempo:** una corrida representativa (la de duración mediana), con cada llamada a un servicio como una barra y las marcas de pantalla como líneas verticales; una llamada que empieza cuando terminaron todas las anteriores va en serie."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
@@ -124,10 +135,13 @@ MODELOS = {"economico": "Haiku 5.5", "intermedio": "Sonnet 5.5", "diagnostico": 
 MODEL_FALLBACK = {"diagnostico": "intermedio"}
 SECTION_PREFIXES = ("HTTP", "QUEUE", "CONN", "TTFB", "SCREEN", "NAV", "MARK")
 QUERY_TAG = re.compile(r" #[0-9a-f]{4,8}$")
+# android.os.Trace.beginSection: el nombre de una sección admite hasta 127 unidades de código (documentación de la API).
+SECTION_NAME_MAX = 127
 e = html.escape
 
 
 MAX_CONSECUTIVE_INVALID = 3
+WARMUP_SETTLE_S = 2  # respiro después del calentamiento, antes del primer 'preparar' medido
 
 
 def max_attempts(target):
@@ -138,7 +152,18 @@ def max_attempts(target):
 
 
 class PerfError(Exception):
+    """Un error con salida guiada: el manejador de main() imprime qué pasó (el mensaje), qué quedó guardado y el comando
+    para seguir. `guardado` y `seguir` ([(para qué, comando)]) son opcionales: sin ellos valen los de GUIA."""
     code = 2
+    guardado = None
+    seguir = None
+
+    def con(self, guardado=None, seguir=None):
+        if guardado is not None:
+            self.guardado = guardado
+        if seguir is not None:
+            self.seguir = list(seguir)
+        return self
 
 
 class Precondicion(PerfError):
@@ -156,6 +181,60 @@ class CorridasInsuficientes(PerfError):
 class CorridaDescartada(PerfError):
     """`perf.py pausa`: la persona respondió que la corrida no vale. El recorrido termina con 1 y la corrida se repite."""
     code = 1
+
+
+# ── Salida guiada de los fallos ──────────────────────────────────────────────
+# Todo comando que falla, se detiene o se interrumpe termina con tres cosas, en este orden: qué pasó, qué quedó guardado
+# y el comando exacto para seguir. Se arma en un solo lugar (main), con lo que cada comando va dejando aquí mientras
+# avanza: así ningún camino de error queda sin su comando.
+GUIA = {"argv": [], "guardado": None, "seguir": None, "previos": [], "omitir": False, "al_fallar": None}
+RETRY = "cuando lo corrijas, repite el comando"
+
+
+def reset_guide(argv):
+    GUIA.update({"argv": list(argv), "guardado": None, "seguir": None, "previos": [], "omitir": False, "al_fallar": None})
+
+
+def same_command(corridas=None, sin=(), argv=None):
+    """El comando que se está corriendo, listo para pegar: empieza con cd a la carpeta desde la que se corrió (las rutas
+    relativas de sus argumentos parten de ahí; es la raíz del proyecto en los comandos que entrega la skill). `corridas`
+    cambia --corridas y `sin` quita opciones sin valor (--rehacer)."""
+    args, out, skip = list(GUIA["argv"] if argv is None else argv), [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in sin:
+            continue
+        if corridas is not None and (arg == "--corridas" or arg.startswith("--corridas=")):
+            skip = arg == "--corridas"
+            continue
+        out.append(arg)
+    if corridas is not None:
+        out += ["--corridas", str(corridas)]
+    return "cd %s && python3 -I %s %s" % (shlex.quote(os.getcwd()), shlex.quote(str(HERE / "perf.py")),
+                                          " ".join(shlex.quote(arg) for arg in out))
+
+
+def guide_lines(error=None):
+    """Las líneas que cierran un fallo: qué quedó guardado y cómo seguir. Lo que trae el error gana a lo que dejó el
+    comando en GUIA; sin nada, no quedó nada guardado y se repite el mismo comando. Antes corre lo que el comando dejó
+    para un corte (`al_fallar`: guardar el registro de las corridas válidas), sin que un fallo ahí tape el original."""
+    hook, GUIA["al_fallar"] = GUIA["al_fallar"], None
+    if hook:
+        try:
+            hook()
+        except Exception:  # lo que falle al guardar no puede tapar el fallo original ni dejarlo sin guía
+            pass
+    if GUIA["omitir"]:
+        return []
+    saved = getattr(error, "guardado", None) or GUIA["guardado"] or "nada"
+    steps = getattr(error, "seguir", None) or GUIA["seguir"] or [(RETRY, same_command())]
+    steps = list(GUIA["previos"]) + [step for step in steps if step not in GUIA["previos"]]
+    lines = ["  Qué quedó guardado: %s." % saved.rstrip("."), "  Cómo seguir:"]
+    for index, (what, command) in enumerate(steps, start=1):
+        lines += ["  %d. Terminal · %s:" % (index, what[0].upper() + what[1:]), "     %s" % command]
+    return lines
 
 
 # ── CSV ──────────────────────────────────────────────────────────────────────
@@ -506,9 +585,14 @@ def update_block(folder, name, content):
 
 # ── Plan ─────────────────────────────────────────────────────────────────────
 
-def check_marker(marker):
+LAST_BEFORE = "ultima_antes"  # en `desde`: la última ocurrencia de la marca antes de la marca `hasta` elegida
+
+
+def check_marker(marker, start=False):
+    """True si la marca es válida. `ultima_antes` solo vale en `desde` (start) de una ventana, una métrica de usuario o
+    un tramo: en `hasta` y en las pausas no tiene sentido."""
     return bool(marker.get("marca")) and marker.get("punto", "inicio") in ("inicio", "fin") \
-        and marker.get("cual", "primera") in ("primera", "ultima")
+        and marker.get("cual", "primera") in (("primera", "ultima", LAST_BEFORE) if start else ("primera", "ultima"))
 
 
 def check_margin(spec):
@@ -546,15 +630,17 @@ def load_plan(path):
                     or not isinstance(spec.get("hasta"), dict):
                 raise PerfError("métrica de usuario inválida en '%s': necesita nombre, desde y hasta" % name)
             for side in ("desde", "hasta"):
-                if not check_marker(spec[side]):
-                    raise PerfError("'%s.%s' en '%s': usa marca, punto (inicio|fin) y cual (primera|ultima)"
+                if not check_marker(spec[side], start=side == "desde"):
+                    raise PerfError("'%s.%s' en '%s': usa marca, punto (inicio|fin) y cual (primera|ultima; en 'desde', "
+                                    "también ultima_antes: la última antes de la marca 'hasta')"
                                     % (spec["nombre"], side, name))
         segments = flow.get("segmentos") or []
         seen = set()
         for spec in segments if isinstance(segments, list) else [None]:
             if not isinstance(spec, dict) or not isinstance(spec.get("nombre"), str) \
                     or not SEGMENT_NAME.fullmatch(spec["nombre"]) or spec["nombre"] == "red" or spec["nombre"] in seen \
-                    or not all(isinstance(spec.get(side), dict) and check_marker(spec[side]) for side in ("desde", "hasta")) \
+                    or not all(isinstance(spec.get(side), dict) and check_marker(spec[side], start=side == "desde")
+                               for side in ("desde", "hasta")) \
                     or not check_margin(spec) or not isinstance(spec.get("solo_red", False), bool):
                 raise PerfError("'%s.segmentos' es una lista de tramos: cada uno con 'nombre' (letras, números, _ o -; sin "
                                 "repetir y distinto de 'red'), 'desde' y 'hasta' (marcas, como en metricas_usuario) y, si "
@@ -606,12 +692,23 @@ def load_plan(path):
             raise PerfError("%s: flujos.%s.ventana necesita 'desde' y 'hasta' (marcas, como metricas_usuario)" % (path, name))
         if window is not None and not check_margin(window):
             raise PerfError("%s: flujos.%s.ventana.margen_ms es un número de milisegundos" % (path, name))
+        if window is not None and isinstance(window.get("hasta"), dict) and window["hasta"].get("cual") == LAST_BEFORE:
+            raise PerfError("%s: flujos.%s.ventana.hasta: 'cual': 'ultima_antes' solo vale en 'desde' (la última ocurrencia "
+                            "antes de la marca 'hasta')" % (path, name))
     if plan.get("input_slices") is not None and not (isinstance(plan["input_slices"], str)
                                                      and INPUT_GLOB.fullmatch(plan["input_slices"])):
         raise PerfError("%s: 'input_slices' es un patrón GLOB con el nombre de los slices de input (por defecto %s)"
                         % (path, INPUT_SLICES))
+    labels = plan.get("etiquetas", {})
+    if not isinstance(labels, dict) or any(not isinstance(v, str) or not v.strip() for v in labels.values()):
+        raise PerfError("%s: 'etiquetas' es un objeto {\"<métrica>\": \"<cómo se llama para un lector no técnico>\"}: "
+                        "lo usa el reporte para gerencia en vez del nombre de la métrica" % path)
     if not isinstance(plan.get("modelos", {}), dict):
         raise PerfError("%s: 'modelos' es un objeto con economico, intermedio, alto y, si quieres, diagnostico" % path)
+    cli = plan.get("modelos_cli", {})
+    if not isinstance(cli, dict) or any(not isinstance(ids, dict) for ids in cli.values()):
+        raise PerfError("%s: 'modelos_cli' es un objeto por herramienta (claude, copilot) con el id de cada nivel: "
+                        "{\"copilot\": {\"intermedio\": \"claude-sonnet-5.5\"}}" % path)
     foreign = plan.get("hilos_ajenos", [])
     if not isinstance(foreign, list):
         raise PerfError("%s: 'hilos_ajenos' es una lista de {\"nombre\", \"patron\"}" % path)
@@ -791,7 +888,7 @@ def segment_network(markers, sections, specs, always=False):
         endpoints = {}
         for i in mine:
             endpoints[endpoint_of(calls[i][4])] = endpoints.get(endpoint_of(calls[i][4]), 0) + 1
-        row = {"tramo": name, "llamadas": len(mine), "endpoints": endpoints,
+        row = {"tramo": name, "llamadas": len(mine), "endpoints": endpoints, "limites": limits,
                "ms": statistics.median(durations) if durations else None,
                "ttfb_ms": statistics.median(waits) if waits else None,
                "repetidas": sum(1 for i in mine if flags[i][1]), "solapadas": sum(1 for i in mine if flags[i][0])}
@@ -848,23 +945,134 @@ def network_metrics(sections, known_endpoints, force):
     return out
 
 
-def resolve_marker(sections, marker, default_point, default_which, after=None):
+def service_metrics(sections, known_endpoints, by_segment, origin=None):
+    """Lo que el reporte "Servicios del flujo" necesita de cada servicio y las métricas de red de siempre no traen: sus
+    llamadas repetidas y solapadas (las mismas que cuenta la corrida entera, por endpoint), su conexión nueva y en qué
+    tramo se llama (`<tramo> red <servicio> llamadas`, informativa). Con `origin` (el inicio de la ventana del flujo o,
+    sin ventana, el de la traza, en ns), también cuándo se llama: el inicio de su primera llamada y el fin de la última
+    (`red <servicio> inicio_ms` y `fin_ms`), el tiempo con al menos una llamada en curso (`red_en_curso_ms`) y dónde
+    empieza y termina cada tramo (`<tramo> inicio_ms` y `fin_ms`), para ordenar los servicios por invocación y dibujar
+    la línea de tiempo. Todo es informativo y va al final de las métricas de la corrida: las que ya existían no
+    cambian de nombre, de valor ni de orden."""
+    calls = [s for s in sections if s[4].startswith("HTTP ")]
+    if not calls and not known_endpoints:
+        return []
+    flags = call_flags(calls)
+    connections = [s for s in sections if s[4].startswith("CONN ")]
+    owned = assign(calls, connections)
+    waits = assign(calls, [s for s in sections if s[4].startswith("TTFB ")])
+    by_endpoint = {}
+    for i, call in enumerate(calls):
+        by_endpoint.setdefault(endpoint_of(call[4]), []).append(i)
+    out = []
+    for endpoint in sorted(set(by_endpoint) | set(known_endpoints)):
+        indexes = by_endpoint.get(endpoint, [])
+        out.append(("red %s repetidas_2s" % endpoint, sum(1 for i in indexes if flags[i][1]), "llamadas", "app"))
+        out.append(("red %s solapadas" % endpoint, sum(1 for i in indexes if flags[i][0]), "llamadas", "app"))
+        served = [i for i in indexes if calls[i][2] > 0 and waits[i]]  # las mismas llamadas que miden cola y lectura
+        if connections and served:  # 0 si la llamada reutilizó una conexión
+            out.append(("red %s conexion_ms" % endpoint, statistics.median(owned[i] / 1e6 for i in served), "ms", "e2e"))
+    for row in by_segment:
+        out += [("%s red %s llamadas" % (row["tramo"], endpoint), count, "llamadas", "info")
+                for endpoint, count in sorted(row["endpoints"].items())]
+    if origin is None:
+        return out
+    timed = sorted((call[1], call[1] + call[2]) for call in calls if call[2] > 0)
+    for endpoint in sorted(by_endpoint):
+        spans = [(calls[i][1], calls[i][1] + max(calls[i][2], 0)) for i in by_endpoint[endpoint]]
+        out.append(("red %s inicio_ms" % endpoint, (min(start for start, _ in spans) - origin) / 1e6, "ms", "info"))
+        out.append(("red %s fin_ms" % endpoint, (max(end for _, end in spans) - origin) / 1e6, "ms", "info"))
+    if timed:
+        busy, current = 0, None
+        for start, end in timed:  # la unión de las llamadas: lo que se solapa cuenta una vez
+            if current is None or start > current[1]:
+                busy += (current[1] - current[0]) if current else 0
+                current = [start, end]
+            else:
+                current[1] = max(current[1], end)
+        busy += current[1] - current[0]
+        out.append(("red_en_curso_ms", busy / 1e6, "ms", "info"))
+    for row in by_segment:
+        if row.get("limites"):
+            out += [("%s inicio_ms" % row["tramo"], (row["limites"][0] - origin) / 1e6, "ms", "info"),
+                    ("%s fin_ms" % row["tramo"], (row["limites"][1] - origin) / 1e6, "ms", "info")]
+    return out
+
+
+TIMELINE_CALLS_MAX = 80
+TIMELINE_MARKS_MAX = 25
+TIMELINE_SUFFIX = ".linea.json"
+
+
+def run_timeline(sections, origin):
+    """La línea de tiempo de una corrida para el reporte: cada llamada HTTP (servicio, inicio y fin en ms desde el inicio
+    de la ventana del flujo o, sin ventana, de la traza) y la primera vez que sale cada marca de pantalla (SCREEN, NAV y
+    MARK). Va a un archivo aparte, no a metricas.csv: no es una métrica."""
+    calls = [[endpoint_of(s[4]), round((s[1] - origin) / 1e6, 1), round((s[1] + max(s[2], 0) - origin) / 1e6, 1)]
+             for s in sections if s[4].startswith("HTTP ")]
+    marks, seen = [], set()
+    for s in sections:
+        if s[4].startswith(("SCREEN ", "NAV ", "MARK ")) and s[4] not in seen and s[1] >= origin:
+            seen.add(s[4])
+            marks.append([s[4], round((s[1] - origin) / 1e6, 1)])
+    return {"llamadas": sorted(calls, key=lambda c: c[1])[:TIMELINE_CALLS_MAX], "marcas": marks[:TIMELINE_MARKS_MAX]}
+
+
+def save_timeline(out_dir, flow, run, timeline):
+    """Guarda la línea de tiempo de una corrida junto a su traza (<flujo>_<n>.linea.json). Si falla, no frena la captura."""
+    if not timeline:
+        return
+    try:
+        (pathlib.Path(out_dir) / ("%s_%s%s" % (flow, run, TIMELINE_SUFFIX))).write_text(
+            json.dumps(timeline, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_timeline(folder, phase, flow, run):
+    try:
+        data = json.loads((pathlib.Path(folder) / phase / ("%s_%s%s" % (flow, run, TIMELINE_SUFFIX))).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("llamadas"), list) else None
+
+
+def resolve_marker(sections, marker, default_point, default_which, after=None, before=None):
+    """El momento (ns) de la ocurrencia elegida de una marca, o None si no está. El nombre de la marca se compara con
+    fnmatch (exacto, o un patrón con * y ?, distinguiendo mayúsculas). `after` y `before` acotan las ocurrencias."""
     point = marker.get("punto", default_point)
     which = marker.get("cual", default_which)
     times = [s[1] if point == "inicio" else s[1] + max(s[2], 0) for s in sections
              if fnmatch.fnmatchcase(s[4], marker["marca"])]
     if after is not None:
         times = [t for t in times if t >= after]
+    if before is not None:
+        times = [t for t in times if t <= before]
     if not times:
         return None
     return min(times) if which == "primera" else max(times)
 
 
-def user_metric_bounds(sections, spec):
-    """(inicio, fin) en ns de una métrica de usuario; None en el que no tenga su marca."""
+def resolve_span(sections, spec):
+    """(inicio, fin) en ns de lo que se mide entre dos marcas (una ventana, una métrica de usuario o un tramo); None en
+    el que no tenga su marca. Lo normal: se elige `desde` (por defecto la primera ocurrencia) y `hasta` se busca después
+    de él (por defecto la última). Con `"cual": "ultima_antes"` en `desde` es al revés: primero `hasta`, entre todas sus
+    ocurrencias, y `desde` es la última ocurrencia de su marca que no queda después de ese momento. Sirve cuando la
+    marca de inicio sale varias veces (cada letra de una búsqueda) y la que importa es la que precede al resultado: se
+    elige en el plan, sin tocar la app."""
+    if spec["desde"].get("cual") == LAST_BEFORE:
+        end = resolve_marker(sections, spec["hasta"], "fin", "ultima")
+        start = resolve_marker(sections, spec["desde"], "inicio", LAST_BEFORE, before=end) if end is not None else None
+        return start, end
     start = resolve_marker(sections, spec["desde"], "inicio", "primera")
     end = resolve_marker(sections, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
     return start, end
+
+
+def user_metric_bounds(sections, spec):
+    """(inicio, fin) en ns de una métrica de usuario; None en el que no tenga su marca."""
+    return resolve_span(sections, spec)
 
 
 def metrics_spanning_input(sections, specs, inputs):
@@ -933,8 +1141,7 @@ def resolve_window(markers, spec):
     """(inicio, fin) en ns de la ventana del flujo, o None si falta alguna marca."""
     if not spec:
         return None
-    start = resolve_marker(markers, spec["desde"], "inicio", "primera")
-    end = resolve_marker(markers, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
+    start, end = resolve_span(markers, spec)
     if start is None or end is None or end <= start:
         return None
     return start, end + int(spec.get("margen_ms", 0)) * 1_000_000
@@ -1012,8 +1219,7 @@ def pause_bounds(markers, pause):
 
 def span_bounds(markers, spec):
     """(inicio, fin) en ns de una ventana, una métrica de usuario o un tramo, de marca a marca y sin su `margen_ms`."""
-    start = resolve_marker(markers, spec["desde"], "inicio", "primera")
-    end = resolve_marker(markers, spec["hasta"], "fin", "ultima", after=start) if start is not None else None
+    start, end = resolve_span(markers, spec)
     return (start, end) if start is not None and end is not None and end > start else None
 
 
@@ -1099,8 +1305,11 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     vsync = next((r[2] for r in rows if r[0] == "vsync" and r[2] > 0), 0)
     jit = next((r for r in rows if r[0] == "jit"), None)
     inputs = sorted(r[1] for r in rows if r[0] == "input")
+    # Una marca de inicio que el plan elige con `ultima_antes` sale varias veces a propósito: no es un gancho mal puesto.
+    chosen = [spec["desde"]["marca"] for _, spec in measured_spans(flow_spec) if spec["desde"].get("cual") == LAST_BEFORE]
     info = {"frames": len(frames), "secciones": len(sections), "input": len(inputs),
-            "marcas_repetidas": repeated_marks(sections),
+            "marcas_repetidas": {name: count for name, count in repeated_marks(sections).items()
+                                 if not any(fnmatch.fnmatchcase(name, str(pattern)) for pattern in chosen)},
             "duracion_s": bounds[0][2] / 1e9 if bounds and bounds[0][2] > 0 else None,
             "nombres": {}, "hz_traza": hz_from_vsync(vsync), "arranque": bool(launches)}
     hz = hz or info["hz_traza"] or 60
@@ -1180,6 +1389,9 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     has_network = any(s[4].startswith("HTTP ") for s in sections) or "red_llamadas" in known
     by_segment, info["red_por_tramo"], info["red_fuera"] = segment_network(markers, sections, specs, always=has_network)
     out += by_segment
+    # al final: lo anterior no cambia de orden. El origen de los momentos es el inicio de la ventana o, sin ella, de la traza.
+    out += service_metrics(sections, known_endpoints, info["red_por_tramo"], window[0] if window else origin)
+    info["linea"] = run_timeline(sections, window[0] if window else origin)
     info["faltantes"] = missing + ["tramo %s" % name for name in missing_segments] \
         + (["ventana"] if info.get("ventana_faltante") else [])
     return with_families(out, flow_spec.get("familias")), None, info
@@ -1395,10 +1607,39 @@ class Adb:
         self.base = [adb_binary()] + (["-s", serial] if serial else [])
 
     def run(self, *args, stdin=None, timeout=120):
-        return subprocess.run(self.base + list(args), input=stdin, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(self.base + list(args), input=stdin, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0 and ADB_GONE.search(result.stderr or ""):
+            raise Precondicion(device_gone(result.stderr))
+        return result
 
     def shell(self, command, stdin=None, timeout=120):
         return self.run("shell", command, stdin=stdin, timeout=timeout)
+
+
+# Lo que adb escribe cuando el dispositivo dejó de estar disponible a mitad de un comando.
+ADB_GONE = re.compile(r"device '[^']*' not found|device offline|device unauthorized|no devices/emulators found|"
+                      r"device still authorizing")
+ADB_STATES = {"unauthorized": "sin autorizar: acepta en su pantalla el diálogo \"¿Permitir depuración USB?\" (si no "
+                              "aparece, desconecta y conecta el cable, o revoca las autorizaciones en Opciones de desarrollador)",
+              "offline": "sin responder (offline): desconecta y conecta el cable, o reinicia adb con `adb kill-server`",
+              "authorizing": "esperando la autorización: acepta el diálogo de depuración USB en su pantalla"}
+
+
+def device_gone(stderr):
+    """El mensaje de un dispositivo que dejó de responder a adb en medio de un comando."""
+    detail = (stderr or "").strip().splitlines()[-1][:160] if (stderr or "").strip() else "sin detalle"
+    return ("el dispositivo dejó de estar disponible para adb (%s): se desconectó el cable, se apagó o perdió la "
+            "autorización de depuración USB. Comprueba que `adb devices` lo liste como 'device'" % detail)
+
+
+def unavailable_devices(listing):
+    """{serial: por qué no sirve} de los dispositivos que `adb devices` lista sin estar listos (sin autorizar, offline)."""
+    out = {}
+    for line in listing.splitlines()[1:]:
+        serial, _, state = line.partition("\t")
+        if serial.strip() and state.strip() in ADB_STATES:
+            out[serial.strip()] = ADB_STATES[state.strip()]
+    return out
 
 
 def select_device(serial):
@@ -1406,15 +1647,23 @@ def select_device(serial):
     serial = serial or os.environ.get("ANDROID_SERIAL")
     result = subprocess.run([adb_binary(), "devices"], capture_output=True, text=True, timeout=60)
     devices = [line.split("\t")[0] for line in result.stdout.splitlines()[1:] if line.endswith("\tdevice")]
+    unavailable = unavailable_devices(result.stdout)
     if serial:
+        if serial in unavailable:
+            raise Precondicion("el dispositivo %s está conectado pero %s" % (serial, unavailable[serial]))
         if serial not in devices:
-            raise Precondicion("el dispositivo %s no está conectado (conectados: %s)" % (serial, ", ".join(devices) or "ninguno"))
+            raise Precondicion("el dispositivo %s no está conectado (conectados: %s): revisa el cable y la depuración USB"
+                               % (serial, ", ".join(devices) or "ninguno"))
         return serial
+    if not devices and unavailable:
+        raise Precondicion("; ".join("el dispositivo %s está conectado pero %s" % item for item in unavailable.items()))
     if not devices:
         raise Precondicion("no hay ningún dispositivo conectado con depuración USB autorizada (adb devices)")
     if len(devices) > 1:
         raise Precondicion("hay %d dispositivos conectados (%s): elige uno con --serial, o guárdalo en el plan con "
-                           "'nuevo --serial'" % (len(devices), ", ".join(devices)))
+                           "'nuevo --serial'" % (len(devices), ", ".join(devices))).con(seguir=[
+            ("mira cuál es cuál (el serial es la primera columna)", "cd %s && adb devices -l" % shlex.quote(os.getcwd())),
+            ("repite el comando con el serial que corresponda", same_command() + " --serial <serial>")])
     return devices[0]
 
 
@@ -1437,7 +1686,10 @@ def preflight(adb, package, force):
         raise Precondicion("la app %s no está instalada en el dispositivo" % package)
     dump = adb.shell("dumpsys package %s" % package).stdout
     flags = re.search(r"flags=\[([^\]]*)\]", dump)
-    if flags and "DEBUGGABLE" in flags.group(1):
+    build = package_build(dump)
+    if flags:  # sin la línea de flags no se sabe: el dato no se guarda (ausente no es "no depurable")
+        build["depurable"] = "DEBUGGABLE" in flags.group(1)
+    if build.get("depurable"):
         warnings.append("el build instalado es debuggable: valen los conteos de red y las fugas, no los tiempos ni los frames")
     thermal = re.search(r"Thermal Status:\s*(\d+)", adb.shell("dumpsys thermalservice").stdout)
     if thermal and int(thermal.group(1)) > 0:
@@ -1450,7 +1702,41 @@ def preflight(adb, package, force):
         warnings.append("batería al %s %%: cárgala sobre 50 %%" % battery.group(1))
     if sdk < 31:
         warnings.append("Android %s no tiene FrameTimeline: los frames salen de gfxinfo (gfx_*)" % sdk)
-    return sdk, warnings, package_build(dump)
+    return sdk, warnings, build
+
+
+def debuggable_stop(folder, phase, flow, build, plan, redo=False):
+    """El motivo para no medir una fase con un build depurable, o None. Detiene si las fases que ese flujo ya tiene
+    medidas usaron un build no depurable, o si el plan instala otra variante (`instalar` con una tarea install<Variante>
+    que no es la de depuración): mezclar los dos builds da tiempos que no se comparan. Un registro sin el dato (de una
+    versión anterior) no cuenta como "no depurable"."""
+    if not build.get("depurable"):
+        return None
+    earlier = None
+    for name, record in read_phases(folder).items():
+        if name not in FASES or not isinstance(record, dict) or (name == phase and redo):
+            continue
+        tracked = record.get("flujos")
+        if flow and tracked and flow not in tracked:
+            continue
+        # El build de ese flujo si el registro lo guarda por flujo; si no, el de la fase.
+        own = (tracked or {}).get(flow) if isinstance(tracked, dict) else None
+        source = own if isinstance(own, dict) and "depurable" in own else record
+        if source.get("depurable") is False:
+            earlier = (name, record)
+            break
+    variant = install_variant((plan or {}).get("instalar"))[1]
+    declared = bool(variant) and "debug" not in variant.lower()
+    if not earlier and not declared:
+        return None
+    installed = "%s, instalado %s" % (build.get("version") or "?", build.get("instalada") or "sin fecha")
+    against = ("la fase %s de este flujo se midió con un build no depurable (%s, instalado %s)"
+               % (earlier[0], earlier[1].get("version") or "?", earlier[1].get("instalada") or "sin fecha")) if earlier \
+        else "el plan mide la variante '%s' (su comando 'instalar')" % variant
+    return ("el build instalado es depurable (%s) y %s: con un build depurable los tiempos y los frames no valen ni se "
+            "comparan con los de otra fase. Causa típica: el botón de ejecutar del IDE instala la variante de depuración, "
+            "sin la propiedad de medición que lleva el comando 'instalar' del plan. Instala de nuevo el build de medición; "
+            "con --forzar se mide igual (solo valen los conteos de red y las fugas)" % (installed, against))
 
 
 def classify_environment(text):
@@ -1502,6 +1788,101 @@ def frames_trust(folder):
             motive = ("%srender por software" % ("emulador, " if env.get("emulador") else "") if env.get("software")
                       else "emulador (render: %s)" % (env.get("render") or "sin dato"))
     return level, motive
+
+
+# Opciones de desarrollador que cambian lo que se mide (Settings.Global): "No conservar actividades" destruye cada
+# actividad al salir de ella y las escalas de animación alargan o acortan las transiciones. Sin valor ("null") rige el
+# de fábrica, que es el normal: 0 y 1.
+DEV_SETTINGS = (("always_finish_activities", "No conservar actividades", "0"),
+                ("window_animation_scale", "Escala de animación de ventana", "1"),
+                ("transition_animation_scale", "Escala de transición-animación", "1"),
+                ("animator_duration_scale", "Escala de duración de animador", "1"))
+
+
+# "No conservar actividades" lo aplica el interruptor de Opciones de desarrollador: un valor escrito con `settings put`
+# puede no aplicarse hasta reiniciar, y volver a leerlo con `settings get` no lo detecta. Por eso el paso pide también
+# el interruptor (o reiniciar).
+ALWAYS_FINISH_NOTE = ("si \"No conservar actividades\" estaba activa, desactívala también desde Ajustes > Opciones de "
+                      "desarrollador (o reinicia el dispositivo): el sistema puede no aplicar el cambio hasta entonces")
+DEV_SETTINGS_WHY = ("'No conservar actividades' recrea cada pantalla al volver a ella y las escalas de animación cambian "
+                    "la duración de las transiciones: los tiempos no son los de un usuario")
+
+
+def read_dev_settings(adb):
+    """{ajuste: valor} de las opciones de desarrollador que cambian la medición, en una sola llamada a adb y fuera de
+    toda traza. Un ajuste sin valor queda como "null"; si adb no contesta, {}."""
+    script = "; ".join('echo "%s=$(settings get global %s)"' % (name, name) for name, _, _ in DEV_SETTINGS)
+    try:
+        out = adb.shell(script, timeout=30).stdout or ""
+    except (subprocess.SubprocessError, OSError):
+        return {}
+    return parse_dev_settings(out)
+
+
+def parse_dev_settings(text):
+    known = {name for name, _, _ in DEV_SETTINGS}
+    found = {}
+    for key, value in re.findall(r"^([a-z_]+)=(.*)$", text or "", re.M):
+        if key in known:
+            found[key] = value.strip() or "null"
+    return found
+
+
+def dev_setting_normal(name, value):
+    """True si el ajuste tiene el valor de fábrica (o no tiene valor, que es lo mismo)."""
+    normal = next(default for key, _, default in DEV_SETTINGS if key == name)
+    if value in (None, "", "null"):
+        return True
+    try:
+        return float(value) == float(normal)
+    except ValueError:
+        return False
+
+
+def dev_settings_off(settings):
+    """[(ajuste, rótulo, valor, normal)] de los ajustes que no están en su valor normal."""
+    return [(name, label, settings[name], normal) for name, label, normal in DEV_SETTINGS
+            if name in (settings or {}) and not dev_setting_normal(name, settings[name])]
+
+
+def dev_settings_text(settings):
+    """Los ajustes como texto corto: "No conservar actividades = 1, Escala de animación de ventana = 0.5"."""
+    return ", ".join("%s = %s" % (label, value) for _, label, value, _ in dev_settings_off(settings))
+
+
+def dev_settings_commands(settings, serial, root):
+    """(dejarlos normales, volverlos a como estaban): los dos comandos completos para los ajustes fuera de lo normal."""
+    off = dev_settings_off(settings)
+    target = "adb%s shell" % (" -s %s" % shlex.quote(serial) if serial else "")
+    fix = " && ".join("%s settings put global %s %s" % (target, name, normal) for name, _, _, normal in off)
+    back = " && ".join("%s settings put global %s %s" % (target, name, shlex.quote(value)) for name, _, value, _ in off)
+    where = "cd %s && " % shlex.quote(str(root))
+    return where + fix, where + back
+
+
+def dev_settings_notes(folder):
+    """Para `comparar` y las advertencias: las fases medidas con una opción de desarrollador fuera de lo normal y los
+    ajustes que cambiaron de una fase a otra. Sin el dato (fases de una versión anterior) no dice nada."""
+    phases = read_phases(folder)
+    notes, seen = [], {}
+    for phase in FASES:
+        record = phases.get(phase) if isinstance(phases.get(phase), dict) else None
+        settings = record.get("ajustes") if record else None
+        if not isinstance(settings, dict) or not settings:
+            continue
+        seen[phase] = settings
+        if dev_settings_off(settings):
+            notes.append("%s se midió con opciones de desarrollador fuera de lo normal (%s): 'No conservar actividades' "
+                         "recrea cada pantalla al volver a ella y las escalas de animación cambian la duración de las "
+                         "transiciones" % (phase, dev_settings_text(settings)))
+    changed = [label for name, label, _ in DEV_SETTINGS
+               if len({str(settings.get(name, "null")) if not dev_setting_normal(name, settings.get(name)) else "normal"
+                       for settings in seen.values()}) > 1]
+    if len(seen) > 1 and changed:
+        notes.append("las opciones de desarrollador cambiaron entre fases (%s): %s. Los tiempos de esas fases no se "
+                     "comparan; repite con --rehacer la que no corresponda" % (", ".join(changed), "; ".join(
+                         "%s: %s" % (phase, dev_settings_text(settings) or "normales") for phase, settings in seen.items())))
+    return notes
 
 
 def resumed_activity(adb):
@@ -1808,15 +2189,136 @@ def human_pause(message, tty):
 
 
 def cmd_pausa(args):
+    GUIA["omitir"] = True  # corre dentro de un recorrido: cómo seguir lo dice la captura que lo llama
     tty = open_tty()
     if tty is None:
         raise Precondicion("pausa: " + NO_TTY)
+    # Mientras dura la pausa, la terminal es suya: la captura que la llamó deja de leerla (RunCutter) hasta que termina.
+    flag = os.environ.get(PAUSE_FLAG_ENV)
     try:
+        if flag:
+            try:
+                pathlib.Path(flag).write_text(str(os.getpid()), encoding="utf-8")
+            except OSError:
+                pass
         if not human_pause(" ".join(args.mensaje) or "haz el paso que te toca en el dispositivo", tty):
             raise CorridaDescartada("pausa: corrida descartada por la persona")
     finally:
+        if flag:
+            try:
+                os.unlink(flag)
+            except OSError:
+                pass
         for stream in tty:
             stream.close()
+
+
+# ── Cortar una corrida desviada ──────────────────────────────────────────────
+CUT_REASON = "cortada a mano"
+CUT_POLL_S = 0.2
+PAUSE_FLAG_ENV = "HB_PERF_PAUSA_ACTIVA"
+CUT_HINT = ("· Si una corrida se desvía (otra pantalla, un toque que no entró), x + Enter la corta: se descarta sin "
+            "procesar su traza y se repite. Durante una pausa del recorrido, la tecla la atiende la pausa.")
+
+
+class RunCutter:
+    """`x` + Enter en la terminal corta la corrida en curso. Lee la terminal de quien corre la captura sin bloquear y
+    solo mientras ninguna pausa del recorrido (`perf.py pausa`) la está usando: la pausa deja una bandera (un archivo,
+    en PAUSE_FLAG_ENV) mientras espera su respuesta, y con la bandera puesta aquí no se lee nada. Sin una terminal
+    interactiva (un agente, CI, la salida redirigida a un archivo que no es una terminal) no existe: `abrir` da None."""
+
+    def __init__(self, fd):
+        self.fd = fd
+        # La bandera vive en una carpeta propia y privada (no en un nombre predecible del directorio temporal).
+        self.folder = tempfile.mkdtemp(prefix="hbperf-pausa-")
+        self.flag = os.path.join(self.folder, "activa")
+
+    @classmethod
+    def abrir(cls):
+        try:
+            fd = os.open(os.environ.get("HB_PERF_TTY") or "/dev/tty", os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        except (OSError, AttributeError):  # sin terminal, o una plataforma sin esas banderas
+            return None
+        cutter = cls(fd)
+        if not os.isatty(fd) or not cutter.foreground():
+            cutter.cerrar()
+            return None
+        return cutter
+
+    def foreground(self):
+        """True si este proceso está en primer plano en esa terminal: uno en segundo plano que la lee queda detenido."""
+        try:
+            return os.tcgetpgrp(self.fd) == os.getpgrp()
+        except OSError:
+            return False
+
+    def entorno(self):
+        return dict(os.environ, **{PAUSE_FLAG_ENV: self.flag})
+
+    def empezar(self):
+        """Antes de cada recorrido: sin bandera vieja (una pausa que se cortó) y sin lo que se tecleó antes de empezar."""
+        try:
+            os.unlink(self.flag)
+        except OSError:
+            pass
+        try:
+            import termios
+            termios.tcflush(self.fd, termios.TCIFLUSH)
+        except Exception:  # sin termios, o una terminal que no lo admite: solo se pierde el vaciado
+            pass
+
+    def pedido(self):
+        """True si la persona escribió x + Enter desde la última vez que se miró."""
+        if self.fd is None or os.path.exists(self.flag) or not self.foreground():
+            return False
+        try:
+            if not select.select([self.fd], [], [], 0)[0]:
+                return False
+            data = os.read(self.fd, 4096)
+        except (OSError, ValueError):
+            return False
+        return any(line.strip().lower() == "x" for line in data.decode("utf-8", "replace").splitlines())
+
+    def cerrar(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        if self.folder:
+            shutil.rmtree(self.folder, ignore_errors=True)
+            self.folder = None
+
+    def __del__(self):
+        self.cerrar()
+
+
+def kill_tree(pid):
+    """Termina un proceso y sus descendientes (el recorrido y lo que tenga en curso: una espera, un comando de adb),
+    del proceso hacia sus hijos para que no alcance a lanzar el paso siguiente. No cambia el grupo de procesos del
+    recorrido: así Ctrl+C le sigue llegando y `perf.py pausa` puede seguir leyendo la terminal."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        listing = ""
+    children = {}
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    order, queue = [], [pid]
+    while queue:
+        current = queue.pop(0)
+        if current in order:
+            continue
+        order.append(current)
+        queue += children.get(current, [])
+    for target in order:
+        try:
+            os.kill(target, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def uses_pause(command, folder):
@@ -1836,13 +2338,36 @@ def settle(seconds):
         time.sleep(seconds)
 
 
-def drive(recorrido, label):
-    """Recorre el flujo. Devuelve un motivo de invalidez o None."""
+def drive(recorrido, label, cutter=None):
+    """Recorre el flujo. Devuelve un motivo de invalidez o None. Con `cutter` (hay una terminal interactiva), x + Enter
+    corta el recorrido en el momento y el motivo es CUT_REASON."""
     if recorrido == "manual":
         answer = wait_enter("▶ %s: recorre el flujo y presiona Enter (x + Enter para descartarla) " % label)
         return "descartada por el usuario" if answer == "x" else None
-    result = subprocess.run(recorrido, shell=True)
-    return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
+    if cutter is None:
+        result = subprocess.run(recorrido, shell=True)
+        return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
+    cutter.empezar()
+    process = subprocess.Popen(recorrido, shell=True, env=cutter.entorno())
+    try:
+        while True:
+            try:
+                code = process.wait(timeout=CUT_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                if cutter.pedido():
+                    kill_tree(process.pid)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    return CUT_REASON
+    except BaseException:  # Ctrl+C o un fallo: el recorrido no queda corriendo, igual que con subprocess.run
+        process.kill()
+        process.wait()
+        raise
+    return None if code == 0 else "el recorrido terminó con código %d" % code
 
 
 def component_of(package, activity):
@@ -1890,8 +2415,17 @@ def trace_cap_s(config):
     return int(found.group(1)) / 1000 if found else None
 
 
-def record_run(adb, config, recorrido, label, local, startup=None, package=None):
-    """Graba una corrida. Devuelve (motivo de invalidez o None, métricas del recorrido)."""
+def wait_perfetto(adb, pid):
+    """Espera a que Perfetto cierre el archivo: hasta que su proceso ya no esté (30 s como mucho)."""
+    for _ in range(60):
+        if adb.shell("[ -d /proc/%s ]" % pid).returncode != 0:
+            break
+        time.sleep(0.5)
+
+
+def record_run(adb, config, recorrido, label, local, startup=None, package=None, cutter=None):
+    """Graba una corrida. Devuelve (motivo de invalidez o None, métricas del recorrido). Una corrida cortada a mano
+    (CUT_REASON) no baja su traza: se detiene Perfetto y se borra en el dispositivo."""
     if startup:
         adb.shell("am force-stop %s" % package)
         settle(1)
@@ -1901,10 +2435,22 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None)
     if started.returncode != 0 or not pid:
         raise CapturaFallida("no se pudo iniciar Perfetto: %s" % (started.stderr or started.stdout).strip()[-300:])
     time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1.5")))  # Perfetto tarda en arrancar sus fuentes
-    if startup:
-        reason, extra = launch(adb, package, startup)
-    else:
-        reason, extra = drive(recorrido, label), []
+    try:
+        if startup:
+            reason, extra = launch(adb, package, startup)
+        else:
+            reason, extra = drive(recorrido, label, cutter), []
+    except KeyboardInterrupt:  # Ctrl+C en medio de la corrida: Perfetto no queda grabando en el dispositivo
+        try:
+            adb.shell("kill -TERM %s; rm -f %s" % (pid, remote), timeout=20)
+        except (PerfError, OSError, subprocess.SubprocessError):
+            pass
+        raise
+    if reason == CUT_REASON:  # la persona la cortó: la traza se descarta sin bajarla ni procesarla
+        adb.shell("kill -TERM %s" % pid, timeout=20)
+        wait_perfetto(adb, pid)  # la corrida siguiente no arranca con este Perfetto todavía cerrando
+        adb.shell("rm -f %s" % remote, timeout=20)
+        return reason, extra
     # Si Perfetto ya no corre, la traza llegó a su tope (duration_ms o el tamaño máximo) antes de que terminara el
     # recorrido: le falta el final. Solo cuenta una respuesta explícita: un adb que no contesta no invalida la corrida.
     # Se mira /proc/<pid>, como hace el script oficial de Perfetto para saber si su proceso sigue: no depende de que el
@@ -1916,15 +2462,34 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None)
                             "contempla las pausas humanas) y repite"
                             % ("%s s" % fmt(cap) if cap else "duration_ms de la configuración de Perfetto"))
     adb.shell("kill -TERM %s" % pid)
-    for _ in range(60):  # espera a que Perfetto cierre el archivo: hasta que su proceso ya no esté
-        if adb.shell("[ -d /proc/%s ]" % pid).returncode != 0:
-            break
-        time.sleep(0.5)
+    wait_perfetto(adb, pid)
     pulled = adb.run("pull", remote, str(local), timeout=600)
     adb.shell("rm -f %s" % remote)
     if pulled.returncode != 0 or not local.is_file() or local.stat().st_size < 1024:
         raise CapturaFallida("no se pudo descargar la traza: %s" % (pulled.stderr or pulled.stdout).strip()[-300:])
     return reason, extra
+
+
+def partial_info(tp, local, queries, hz, flow, known, sdk):
+    """Lo que la traza de una corrida que no valió dice igual (marcas del plan, última marca vista): el `info` de
+    trace_metrics, o {} si la traza no se puede procesar."""
+    try:
+        partial = run_tp_batch(tp, local, queries[:1])["metricas"]
+        return trace_metrics(trace_rows(*partial[-1]), hz, flow, known, sdk)[2] if partial else {}
+    except (PerfError, OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return {}  # una traza cortada puede no procesarse: la corrida se repite igual, sin ese dato
+
+
+def reach_text(info):
+    """Hasta dónde llegó una corrida inválida: la última marca propia que se vio y su momento, como en la corrida de
+    prueba. Sin `info`, lo dice: no saberlo no es lo mismo que no haber llegado a ninguna parte."""
+    if not info:
+        return "no se pudo leer la traza para saberlo"
+    last = info.get("ultima_marca")
+    unseen = [mark for mark, _, seen in info.get("marcas_plan") or [] if not seen]
+    text = "última marca vista: %s a los %s s" % (last[0], fmt(last[1])) if last else \
+        "ninguna marca propia (SCREEN, NAV, MARK) en la traza"
+    return text + (" · marcas del plan que no salieron: %s" % ", ".join(unseen) if unseen else "")
 
 
 def app_died(adb, package):
@@ -2029,6 +2594,16 @@ def merge_run_data(previous, data):
     environment = worst_environment([previous.get("entorno"), data.get("entorno")])
     if environment:
         out["entorno"] = environment
+    # Las opciones de desarrollador de la primera tanda que las registró; si otra tanda las trae distintas, lo avisa.
+    settings, later = previous.get("ajustes"), data.get("ajustes")
+    if isinstance(settings, dict) and isinstance(later, dict) and dev_settings_text(settings) != dev_settings_text(later):
+        note = "las opciones de desarrollador cambiaron entre tandas de la fase (primera tanda: %s; esta: %s)" % (
+            dev_settings_text(settings) or "normales", dev_settings_text(later) or "normales")
+        if note not in warnings:
+            warnings.append(note)
+            out["avisos"] = warnings
+    if isinstance(settings, dict) or isinstance(later, dict):
+        out["ajustes"] = settings if isinstance(settings, dict) else later
     return out
 
 
@@ -2047,12 +2622,21 @@ def write_phase(folder, phase, data, flow=None):
     if flow:
         before_flow = flows.get(flow) or {}
         flows[flow] = merge_run_data(before_flow, data)
+        if "depurable" in data:  # si el build con que se midió este flujo (su última tanda) era depurable
+            flows[flow]["depurable"] = data["depurable"]
         if "skill" in data:
             # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
             flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
                 else data["skill"]
+    # `faltan` ({flujo: corridas}): lo que dejó pendiente una tanda cortada. Esta tanda reemplaza lo de su flujo (o lo
+    # quita, si terminó) y conserva lo de los demás.
+    earlier = previous.get("faltan") if isinstance(previous.get("faltan"), dict) else {}
+    pending = {name: count for name, count in earlier.items() if name != flow and to_int(count) > 0}
+    pending.update(data.pop("faltan", None) or {})
+    if pending:
+        data["faltan"] = pending
     merged = merge_run_data(previous, data)
-    for key in ("hz_corridas", "avisos", "entorno", "configs"):
+    for key in ("hz_corridas", "avisos", "entorno", "configs", "ajustes"):
         data.pop(key, None)
     data.update(merged)
     data["fecha"] = previous.get("fecha") or data["fecha"]
@@ -2089,7 +2673,7 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("fecha", None)
         complete = set(tracked) == set(others) and all(tracked[name].get("corridas") == len(others[name]) for name in others)
         if complete:  # lo que queda tiene su registro entero: se recalcula sin el flujo que se rehace
-            for key in ("hz_corridas", "avisos", "entorno", "configs"):
+            for key in ("hz_corridas", "avisos", "entorno", "configs", "ajustes"):
                 record.pop(key, None)
             rest = {}
             for data in tracked.values():
@@ -2098,6 +2682,10 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("flujos", None)
         if tracked:
             record["flujos"] = tracked
+        if isinstance(record.get("faltan"), dict):  # lo que faltaba del flujo que se rehace ya no vale
+            record["faltan"].pop(flow, None)
+            if not record["faltan"]:
+                record.pop("faltan")
     save_phases(folder, phases)
 
 
@@ -2119,7 +2707,7 @@ def check_build(folder, phase, build, commit, force, flow=None, redo=False):
             notes.append("el build instalado (%s, instalado %s) no es el que midió las corridas que 'antes' ya tiene (%s, "
                          "instalado %s): no las completes, repite la fase con --rehacer"
                          % (build.get("version"), build.get("instalada"), before.get("version"), before.get("instalada")))
-        if phase_skill(before, flow) != VERSION:
+        if not same_capture(phase_skill(before, flow)):
             notes.append("las corridas que 'antes' ya tiene se midieron con otra versión de hb-performance (%s; esta es "
                          "%s): la configuración de la traza puede no ser la misma; repite la fase con --rehacer"
                          % (phase_skill(before, flow) or "anterior a 0.9.0", VERSION))
@@ -2267,7 +2855,7 @@ def discard_phase(folder, csv_path, phase, flow):
             writer.writerows(kept)
         print("✔ --rehacer: %d filas de '%s' fuera del CSV" % (dropped, phase))
     old = folder / phase
-    mine = re.compile(r"%s_\d+(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?" % re.escape(flow))
+    mine = re.compile(r"%s_\d+(?:(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?|\.linea\.json)" % re.escape(flow))
     traces = sorted(f for f in old.iterdir() if mine.fullmatch(f.name)) if old.is_dir() else []
     if traces:
         target = folder / ("%s-descartada-%s" % (phase, stamp))
@@ -2431,7 +3019,7 @@ def custom_queries(flow, folder, package):
     return queries
 
 
-def project_root(folder):
+def git_toplevel(folder):
     try:
         result = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"], capture_output=True,
                                 text=True, timeout=30)
@@ -2439,7 +3027,48 @@ def project_root(folder):
             return pathlib.Path(result.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
-    return pathlib.Path.cwd()
+    return None
+
+
+def lexical(path):
+    """La ruta absoluta sin resolver enlaces simbólicos: por dónde se llega a la carpeta, no dónde está en el disco."""
+    return pathlib.Path(os.path.abspath(str(path)))
+
+
+def under(path, base):
+    """La ruta relativa de `path` dentro de `base`, o None si no está dentro."""
+    try:
+        return pathlib.Path(path).relative_to(base)
+    except ValueError:
+        return None
+
+
+def project_root(folder):
+    """La raíz del proyecto de una carpeta de investigación. Si se llega a la carpeta por dentro del repo desde el que
+    se corre el comando, vale ese repo aunque la carpeta sea un enlace a otra de fuera (una carpeta de contexto
+    compartida, que puede ser otro repo): la investigación es del proyecto, no de donde se guardan sus archivos. Si
+    no, el repo que contiene la carpeta (también uno anidado dentro del actual); sin git, la carpeta actual."""
+    own = git_toplevel(folder)
+    here = git_toplevel(pathlib.Path.cwd()) if own is not None else None
+    if here is not None and under(own.resolve(), here.resolve()) is None:
+        # La carpeta está en otro repo que no es parte de este (no es un repo anidado): si se llega a ella por dentro
+        # de este, es un enlace a una carpeta de fuera.
+        target = lexical(folder)
+        if any(under(target, base) is not None for base in (here, lexical(here), lexical(pathlib.Path.cwd()))):
+            return here
+    return own or pathlib.Path.cwd()
+
+
+def relative_folder(folder, root):
+    """La carpeta como ruta relativa a la raíz (por donde se llega a ella o, si no, por donde está en el disco); si
+    queda fuera, absoluta."""
+    folder = pathlib.Path(folder)
+    for candidate, base in ((lexical(folder), pathlib.Path(root)), (lexical(folder), lexical(root)),
+                            (folder.resolve(), pathlib.Path(root).resolve())):
+        inside = under(candidate, base)
+        if inside is not None:
+            return inside
+    return lexical(folder)
 
 
 NO_LEER_LINE = re.compile(r"^(?P<indent>[ \t]*)(?P<bullet>(?:[-*][ \t]+)|(?:-(?=\*)))?\**[ \t]*(?:no leer|do not read)[ \t]*\**[ \t]*:"
@@ -2516,6 +3145,17 @@ def is_denied(path, root, patterns):
     return False
 
 
+def q(path):
+    """Una ruta o un argumento para un comando que se pega en la terminal: entre comillas si tiene espacios o
+    caracteres que el shell interpreta."""
+    return shlex.quote(str(path))
+
+
+def q_repo(repo):
+    """El repo de un comando del cierre: entre comillas si es una ruta; un marcador <…> queda tal cual."""
+    return repo if str(repo).startswith("<") else q(repo)
+
+
 def model_name(plan, tier):
     """El modelo del nivel según plan.json; un nivel sin nombre en el plan toma el de su nivel base (MODEL_FALLBACK) y, si
     tampoco está, el de fábrica."""
@@ -2529,39 +3169,194 @@ def install_command(plan, root):
     """El comando de instalación del plan, con el serial del plan si el comando no lo lleva."""
     install = plan.get("instalar")
     if not install:
-        return "cd %s && <compila e instala el build de profiling; guárdalo como 'instalar' en plan.json>" % root
+        return "cd %s && <compila e instala el build de profiling; guárdalo como 'instalar' en plan.json>" % q(root)
     serial = plan.get("serial")
     if serial and serial not in install and "ANDROID_SERIAL" not in install:
         install = "ANDROID_SERIAL=%s %s" % (serial, install)
-    return "cd %s && %s" % (root, install)
+    return "cd %s && %s" % (q(root), install)
 
 
 def terminal(command, what, you):
     return {"tipo": "terminal", "texto": command, "que": what, "tu": you}
 
 
-def chat(text, tier, effort, what, plan):
-    if plan.get("no_leer"):
+NO_COMMIT = "No hagas commit ni push."
+
+
+def chat_text(text, plan=None):
+    """El texto de un chat tal como se entrega: con las rutas que no se leen y, siempre al final, NO_COMMIT. La skill
+    ya dice que el agente solo propone el commit; la línea explícita evita que una herramienta o un modelo lo haga igual."""
+    text = text.rstrip()
+    if (plan or {}).get("no_leer"):
+        if not text.endswith((".", "!", "?")):
+            text += "."
         text += " No leas ni busques en: %s." % ", ".join(plan["no_leer"])
-    return {"tipo": "chat", "texto": text, "modelo": model_name(plan, tier), "esfuerzo": effort, "que": what}
+    if not text.endswith((".", "!", "?")):
+        text += "."
+    return "%s %s" % (text, NO_COMMIT)
+
+
+def chat(text, tier, effort, what, plan):
+    return {"tipo": "chat", "texto": chat_text(text, plan), "modelo": model_name(plan, tier), "esfuerzo": effort, "que": what,
+            "nivel": tier}
+
+
+# ── Abrir un chat con el modelo y el esfuerzo (modelos.md · Abrir el chat con el modelo y el esfuerzo) ─────────
+# Las herramientas que `siguiente` sabe abrir desde la terminal: (clave, nombre, comando). {modelo} es el id del modelo en
+# esa herramienta y {esfuerzo}, el nivel en inglés. Los flags (--model y --effort, con low, medium, high, xhigh o max) son
+# los de las referencias de la línea de comandos de Claude Code y de GitHub Copilot CLI. Una línea "Comando del chat:" en
+# la sección de rendimiento de AGENTS.md reemplaza el comando de la herramienta del proyecto.
+CHAT_TOOLS = (("claude", "Claude Code", "claude --model {modelo} --effort {esfuerzo}"),
+              ("copilot", "GitHub Copilot CLI", "copilot --model {modelo} --effort {esfuerzo}"))
+EFFORT_CLI = {"bajo": "low", "medio": "medium", "alto": "high"}
+CLAUDE_FAMILIES = ("haiku", "sonnet", "opus", "fable")
+TOOL_KEY = re.compile(r"herramienta(?:\s+de\s+(?:la\s+)?ia)?|ai\s+tool", re.I)
+CHAT_COMMAND_KEY = re.compile(r"comando\s+(?:del|para\s+abrir\s+el)\s+chat|chat\s+command", re.I)
+
+
+def performance_lines(root):
+    """[(clave, valor)] de las líneas "Clave: valor" de la sección de rendimiento del AGENTS.md del proyecto, fuera de
+    los bloques de código. [] sin AGENTS.md o sin sección."""
+    agents = read_agents(root) if root is not None else None
+    section = performance_section(agents) if agents is not None else None
+    if not section:
+        return []
+    out = []
+    for _, line in prose_lines(agents[section[0]:section[1]]):
+        found = FOLDER_LINE.match(line.rstrip("\r\n"))
+        if found:
+            quoted = re.search(r"`([^`]+)`", found.group("value"))
+            value = (quoted.group(1) if quoted else found.group("value")).strip().rstrip(".").strip()
+            out.append((found.group("key").strip(), value))
+    return out
+
+
+def ai_tool(root):
+    """(clave, nombre, comando propio) de la herramienta de IA que anota la sección de rendimiento de AGENTS.md:
+    clave 'claude', 'copilot', 'otra' (una que la skill no conoce) o None (sin anotar). El comando propio sale de la
+    línea "Comando del chat:", o None."""
+    tool = template = None
+    for key, value in performance_lines(root):
+        if tool is None and TOOL_KEY.fullmatch(key) and value and not value.startswith("<"):
+            tool = value
+        elif template is None and CHAT_COMMAND_KEY.fullmatch(key) and "{modelo}" in value:
+            template = value
+    if tool is None:
+        return None, None, template
+    low = tool.lower()
+    found = next(((code, name) for code, name, _ in CHAT_TOOLS if code in low), None)
+    return (found[0], found[1], template) if found else ("otra", tool, template)
+
+
+def cli_model_id(plan, tier, tool):
+    """El id del modelo de un nivel en una herramienta: el de `modelos_cli` del plan o, si no, el que sale del nombre
+    de `modelos` ("Sonnet 5.5" → claude-sonnet-5-5 en Claude Code y claude-sonnet-5.5 en GitHub Copilot CLI). Un nombre
+    que ya es un id (sin espacios ni mayúsculas) va tal cual."""
+    custom = plan.get("modelos_cli") if isinstance(plan.get("modelos_cli"), dict) else {}
+    custom = custom.get(tool) if isinstance(custom.get(tool), dict) else {}
+    if custom.get(tier):
+        return str(custom[tier])
+    if tier in MODEL_FALLBACK and not (plan.get("modelos") or {}).get(tier) and custom.get(MODEL_FALLBACK[tier]):
+        return str(custom[MODEL_FALLBACK[tier]])
+    name = model_name(plan, tier).strip()
+    if re.fullmatch(r"[a-z0-9][\w.:\[\]-]*", name):
+        return name
+    words = name.lower().split()
+    if words and words[0] in CLAUDE_FAMILIES:
+        words = ["claude"] + words
+    text = "-".join(words)
+    return text.replace(".", "-") if tool == "claude" else text
+
+
+def chat_openers(plan, root, tier, effort):
+    """[(herramienta, comando, nota)] para abrir un chat nuevo con el modelo y el esfuerzo del nivel: el de la
+    herramienta de AGENTS.md o, si no está anotada (o es una que la skill no conoce y no trae su comando), los de todas
+    las que conoce. Cada comando empieza con cd a la raíz del proyecto."""
+    tool, name, template = ai_tool(root)
+    level = EFFORT_CLI.get(effort, effort)
+    where = "cd %s && " % shlex.quote(str(root))
+    out = []
+    if tool == "otra" and template:
+        command = template.replace("{modelo}", shlex.quote(model_name(plan, tier))).replace("{esfuerzo}", level)
+        return [(name, where + command, "" if "{esfuerzo}" in template else "elige el esfuerzo %s al abrirlo" % level)]
+    for key, label, default in CHAT_TOOLS:
+        if tool in ("claude", "copilot") and key != tool:
+            continue
+        own = template if template and tool == key else default
+        command = own.replace("{modelo}", shlex.quote(cli_model_id(plan, tier, key))).replace("{esfuerzo}", level)
+        out.append((label, where + command, "" if "{esfuerzo}" in own else "elige el esfuerzo %s con /model al abrirlo"
+                                                                       % level))
+    return out
 
 
 def next_steps(folder, plan, flow=None):
+    """(título, [pasos]) del paso que sigue. En el cierre (y con la investigación cerrada), si quedan cambios
+    temporales sin revertir, agrega cómo quitarlos sin perderlos (revert_notice)."""
+    title, steps = plan_steps(folder, plan, flow)
+    steps = before_capture(folder, plan, flow, steps)
+    # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos.
+    if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
+        notice = revert_notice(folder, project_root(folder).resolve())
+        if notice:
+            steps = steps + [notice]
+    return title, steps
+
+
+def before_capture(folder, plan, flow, steps):
+    """Si los pasos capturan, lo que la captura va a necesitar y la skill no puede deducir va primero: las variables de
+    entorno del flujo (requiere_env y las que usa 'preparar'), con el comando para cargarlas en la misma terminal donde
+    se mide, o una línea si ya están cargadas en esta; y, si el plan no fija el serial, cómo ver los dispositivos. Nunca
+    imprime ni guarda los valores."""
+    captures = [step for step in steps if step["tipo"] == "terminal" and " capturar " in step["texto"]]
+    if not captures:
+        return steps
+    root = project_root(folder).resolve()
+    flows = plan.get("flujos") or {}
+    name = flow if flow in flows else next(iter(flows), None)
+    spec = flows.get(name) or {}
+    prepare = None if startup_spec(spec) else (spec.get("preparar") or "").strip() or None
+    try:
+        names = required_env(spec, prepare, pathlib.Path(folder))[0]
+    except (OSError, ValueError, PerfError):
+        names = list(spec.get("requiere_env") or [])
+    names = [env for env in dict.fromkeys(names) if ENV_NAME.fullmatch(str(env))]
+    missing = [env for env in names if not os.environ.get(env)]
+    notes, first = [], []
+    if names and not missing:
+        notes.append("%s ya %s cargada%s en esta terminal: mide en esta misma (el valor no se muestra)" % (
+            ", ".join(names), "está" if len(names) == 1 else "están", "" if len(names) == 1 else "s"))
+    elif missing:
+        first.append(terminal(
+            " && ".join([env_steps(missing, root)[0][1]] + [command.split(" && ", 1)[1]
+                                                           for _, command in env_steps(missing, root)[1:]]),
+            "carga en esta terminal %s, que el flujo necesita para medir (%s)" % (
+                ", ".join(missing), "lectura oculta para las que parecen claves: lo que escribes no se ve"
+                if any(SECRET_NAME.search(env) for env in missing) else "lectura normal"),
+            "escribe cada valor cuando te lo pida, en la misma terminal donde vas a medir: no queda en el historial ni "
+            "en ningún archivo, y se pierde al cerrarla"))
+    steps = list(steps)
+    if not plan.get("serial"):
+        # Sin el serial en el plan, con más de un dispositivo la captura se detiene: lo dice en la primera, con el comando.
+        index = steps.index(captures[0])
+        steps[index] = dict(captures[0], tu="%s; con más de un dispositivo conectado, mira cuál es con `cd %s && adb "
+                                            "devices -l` y agrega --serial <serial> al comando" % (
+                                                captures[0]["tu"].rstrip("."), shlex.quote(str(root))))
+    lead = [{"tipo": "avisos", "titulo": "Antes de medir", "lineas": notes}] if notes else []
+    return lead + first + steps
+
+
+def plan_steps(folder, plan, flow=None):
     """(título, [pasos]) del paso que sigue según fases.json, plan.json y los archivos de la carpeta.
 
     Cada paso es un dict: tipo terminal (comando completo, empieza con cd), chat (texto, modelo y esfuerzo) o archivo.
     Es la única fuente de los comandos de entrega: los agentes la copian en vez de inventarlos.
     """
-    folder = folder.resolve()
     root = project_root(folder).resolve()
-    state = folder / "estado.md"
-    try:  # cada comando empieza con cd a la raíz: dentro de ella, rutas relativas y más cortas
-        folder = folder.relative_to(root)
-    except ValueError:
-        pass
+    state = folder.resolve() / "estado.md"
+    folder = relative_folder(folder, root)  # cada comando empieza con cd a la raíz: dentro de ella, rutas relativas
 
     def command(*parts):
-        return "cd %s && python3 -I %s %s" % (root, HERE / "perf.py", " ".join(str(part) for part in parts))
+        return "cd %s && python3 -I %s %s" % (q(root), q(HERE / "perf.py"), " ".join(q(part) for part in parts))
 
     def full_command(pending):
         """Una "Captura pendiente" como comando completo: tal cual si ya empieza con cd; con la ruta de este script si
@@ -2569,7 +3364,8 @@ def next_steps(folder, plan, flow=None):
         own = re.search(r"(?:^|\s)(?:\S*perf\.py\s+)?((?:capturar|consulta|diagnostico)\s.*)$", pending)
         if pending.startswith("cd "):
             return pending
-        return command(own.group(1)) if own else "cd %s && %s" % (root, pending)
+        return "cd %s && python3 -I %s %s" % (q(root), q(HERE / "perf.py"), own.group(1)) if own else \
+            "cd %s && %s" % (q(root), pending)
 
     flows = plan["flujos"]
     flow = flow if flow in flows else next(iter(flows))
@@ -2587,6 +3383,18 @@ def next_steps(folder, plan, flow=None):
     phases = read_phases(root / folder)
     mejoras = plan.get("mejoras", [])
     estados = [m.get("estado", "propuesta") for m in mejoras]
+    for phase in FASES:
+        # Una tanda que se cortó (Ctrl+C, inválidas seguidas) dejó sus corridas válidas y cuántas faltan: la fase no se
+        # da por medida hasta completarla.
+        cut = (phases.get(phase) or {}).get("faltan") if isinstance(phases.get(phase), dict) else None
+        if isinstance(cut, dict) and to_int(cut.get(flow)) > 0:
+            missing = to_int(cut[flow])
+            return "completar la fase %s, que se cortó (sin chat)" % phase, [
+                terminal(command(*(capture + ["--fase", phase, "--corridas", missing])),
+                         "completa la fase %s con las %d corridas que faltan: la tanda anterior se cortó y las válidas ya "
+                         "están guardadas" % (phase, missing),
+                         "lo mismo que en la tanda anterior; si cambió el build o las condiciones, agrega --rehacer y pide "
+                         "las corridas completas")]
     resume = "Sigue hb-performance con %s" % state
     session2 = chat(resume, "diagnostico", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
                     "plan de mejoras; termina con el comando para que decidas", plan)
@@ -2595,11 +3403,22 @@ def next_steps(folder, plan, flow=None):
     # Una mejora aplicada después de medir "después" deja esa fase vieja: hay que medirla de nuevo (--rehacer).
     measured = phases.get("despues", {}).get("fecha", "")
     stale = "despues" in phases and any(m.get("estado") == "aplicada" and m.get("aplicada_en", "") > measured for m in mejoras)
-    report = next((state.parent / n for n in ("reporte-final.html", "reporte-final.md", "reporte.html", "reporte.md")
-                   if (state.parent / n).is_file()), state.parent / "reporte-final.md")
-    if report.is_file() and "aprobada" not in estados and not stale:
-        return "investigación cerrada", [{"tipo": "archivo", "texto": str(report), "que": "el reporte final; se puede compartir"}]
-    initial = state.parent / ("reporte-inicial.html" if (state.parent / "reporte-inicial.html").is_file() else "reporte-inicial.md")
+    # Los reportes con el nombre de esta versión (reporte-<tipo>-dev y -gerencia) o de las anteriores.
+    report = report_file(state.parent, "final")
+    if report is not None and "aprobada" not in estados and not stale:
+        try:
+            internal = "interno: contiene código" in report.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            internal = False
+        closed = [{"tipo": "archivo", "texto": str(report), "que": "el reporte final técnico%s" % (
+            " (interno: contiene código; fuera del equipo, comparte el de gerencia)" if internal else
+            "; se puede compartir: lleva solo métricas agregadas")}]
+        business = audience_file(state.parent, "final", "gerencia")
+        if business is not None:
+            closed.append({"tipo": "archivo", "texto": str(business),
+                           "que": "el mismo reporte para un público no técnico (gerencia)"})
+        return "investigación cerrada", closed
+    initial = report_file(state.parent, "inicial") or state.parent / "reporte-inicial-dev.md"
     if triage and initial.is_file():
         closed = [{"tipo": "archivo", "texto": str(initial),
                    "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después)"}]
@@ -2624,7 +3443,7 @@ def next_steps(folder, plan, flow=None):
             # Con otra versión de la skill (o sin el dato: una anterior a 0.9.0) la configuración de la traza pudo
             # cambiar: las corridas que hay no se completan, se repiten.
             measured_with = phase_skill(phases.get("antes"), flow)
-            redo = "antes" in phases and measured_with != VERSION
+            redo = "antes" in phases and not same_capture(measured_with)
             steps = []
             if redo:
                 steps.append(terminal(command(*(capture + ["--fase", "antes", "--corridas", runs, "--rehacer"])),
@@ -2654,11 +3473,13 @@ def next_steps(folder, plan, flow=None):
             return "completar la línea base de riguroso (sin chat)", steps
     if "aprobada" in estados:
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
+        missing_dod = dod_notice(root, plan)  # sin `## DoD` en AGENTS.md, la sesión 3 no sabría qué validar
         return "sesión 3 · %s" % first["id"], [
             chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
-                 "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada" % (
+                 "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada con sus "
+                 "archivos (perf.py guarda el diff para el reporte)" % (
                      first["id"], " (a prueba: la medición de después confirma o refuta su hipótesis)"
-                     if first.get("a_prueba") else ""), plan)]
+                     if first.get("a_prueba") else ""), plan)] + ([missing_dod] if missing_dod else [])
     if "despues" in phases and not stale:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -2704,6 +3525,13 @@ def next_steps(folder, plan, flow=None):
     if triage:
         you_run = you_run.replace(str(runs), "3")
         runs = 3
+    pending = test_warnings(root / folder, flow) if "antes" not in phases else []
+    if pending:
+        # La última corrida de prueba dejó avisos: medir así da un antes sin red o que mide el recorrido. Primero se
+        # corrigen; medir igual queda como opción.
+        return "corrige antes de medir (avisos de la corrida de prueba)", test_warning_steps(
+            root / folder, root, plan, flow, pending, resume, command(*(capture + ["--prueba"])),
+            command(*(capture + ["--fase", "antes", "--corridas", runs])), you_run)
     if "antes" not in phases:
         if not any((state.parent / "prueba").glob("*.perfetto-trace*")):
             steps.append(terminal(command(*(capture + ["--prueba"])),
@@ -2720,6 +3548,11 @@ def next_steps(folder, plan, flow=None):
     return ("medición antes (sin chat)" if triage and "antes" not in phases else
             "medición antes y control (sin chat)" if "antes" not in phases else
             "control y diagnóstico (sin chat)" if "control" not in phases and not triage else "diagnóstico (sin chat)"), steps
+
+
+def same_capture(version):
+    """True si las corridas medidas con esa versión de la skill se pueden mezclar con las de esta."""
+    return version in SAME_CAPTURE
 
 
 def phase_skill(record, flow=None):
@@ -2820,10 +3653,13 @@ def route_block(plan, root, folder=None):
         else:
             lines.append("- `recorrido` (el tramo medido): %s" % code_span(route))
             lines.append("- Para verlo correr a mano, sin medir: %s" % code_span(
-                "cd %s && %s" % (root, " && ".join(part for part in (prepare, route) if part))))
+                "cd %s && %s" % (q(root), " && ".join(part for part in (prepare, route) if part))))
         if flow.get("requiere_env"):
-            lines.append("- Variables de entorno que necesita (expórtalas antes): %s"
-                         % ", ".join("`%s`" % v for v in flow["requiere_env"]))
+            names = [str(v) for v in flow["requiere_env"] if ENV_NAME.fullmatch(str(v))]
+            lines.append("- Variables de entorno que necesita: %s. Cárgalas en la terminal donde mides, antes de medir (las "
+                         "claves, con lectura oculta; el valor no se guarda): %s"
+                         % (", ".join("`%s`" % v for v in flow["requiere_env"]),
+                            "; ".join(code_span(command) for _, command in env_steps(names, root)) or "—"))
         if folder is not None and has_human_pause(flow, folder):
             total, detail = human_runs(plan)
             lines.append("- Paso humano: el recorrido tiene una pausa (`perf.py pausa`), así que cada corrida la atiende una "
@@ -2837,11 +3673,24 @@ def route_block(plan, root, folder=None):
     return "\n".join(lines)
 
 
-def render_steps(steps, markdown):
-    """Los pasos como texto: para la terminal (markdown=False) o para estado.md."""
+CHAT_YOU = ("abre el chat con ese comando, pega el texto tal cual y espera a que termine; al final te da el paso "
+            "siguiente")
+
+
+def render_steps(steps, markdown, root=None, plan=None):
+    """Los pasos como texto: para la terminal (markdown=False) o para estado.md. Cada uno dice dónde va (Terminal o
+    Chat nuevo), el comando completo, qué hace y qué te toca; un chat, con `root` y `plan`, también el comando que lo
+    abre con su modelo y su esfuerzo (chat_openers)."""
     code = (lambda s: "`%s`" % s) if markdown else (lambda s: s)
-    lines = []
-    for i, step in enumerate(steps, start=1):
+    lines, i = [], 0
+    # Los avisos van primero aunque estén al final de la lista: es lo que hay que saber antes de dar los pasos.
+    for step in sorted(steps, key=lambda item: item["tipo"] != "avisos"):
+        if step["tipo"] == "avisos":  # sin número: no es un paso, es lo que hay que saber antes de los pasos
+            lines.append(("**%s:**" if markdown else "%s:") % step["titulo"])
+            # `crudo`: un texto para copiar tal cual (una plantilla), sin viñetas
+            lines += [("%s" if step.get("crudo") else "   - %s") % line for line in step["lineas"]]
+            continue
+        i += 1
         if step["tipo"] == "terminal":
             lines.append("%d. **Terminal** (sin chat) · %s" % (i, step["que"]) if markdown else
                          "%d. Terminal (sin chat) · %s" % (i, step["que"]))
@@ -2850,34 +3699,300 @@ def render_steps(steps, markdown):
         elif step["tipo"] == "chat":
             lines.append("%d. **Chat nuevo** · Modelo: %s · Esfuerzo: %s" % (i, step["modelo"], step["esfuerzo"]) if markdown
                          else "%d. Chat nuevo · Modelo: %s · Esfuerzo: %s" % (i, step["modelo"], step["esfuerzo"]))
+            if root is not None and step.get("nivel"):
+                for tool, command, note in chat_openers(plan or {}, root, step["nivel"], step["esfuerzo"]):
+                    lines.append("   Abrir (Terminal, %s): %s%s" % (tool, code(command), " · %s" % note if note else ""))
             lines.append("   Texto: \"%s\"" % step["texto"])
             lines.append("   Qué hace: %s." % step["que"])
+            lines.append("   Tú: %s." % (step.get("tu") or CHAT_YOU))
         else:
             lines.append("%d. %s: %s" % (i, step["que"][0].upper() + step["que"][1:], step["texto"]))
     return lines
 
 
-def cost_command(folder):
-    """El comando para anotar el costo de un chat, con la carpeta relativa a la raíz del proyecto."""
-    folder = pathlib.Path(folder).resolve()
-    root = project_root(folder).resolve()
+# ── Consumo ──────────────────────────────────────────────────────────────────
+# GitHub Copilot factura el uso en AI Credits: 1 AI Credit = 0,01 USD (documentación de facturación de GitHub Copilot,
+# "Usage-based billing"). Si GitHub cambia el valor, cambia esta constante.
+AI_CREDIT_USD = 0.01
+COST_PLACEHOLDER = "<costo>"
+COST_WHERE = ("lo muestra tu herramienta al cerrar el chat: /cost en Claude Code; /usage en GitHub Copilot CLI, que "
+              "informa AI Credits y tokens (con ellos, --creditos <n> y --tokens-entrada, --tokens-cache, "
+              "--tokens-salida en vez de --costo)")
+# Nivel de modelo y esfuerzo que `siguiente` recomienda para cada sesión: con ellos sale el comando ya completo.
+SESSIONS = {"0": ("0 · setup", "intermedio", "medio"), "1": ("1 · ficha", "intermedio", "medio"), "2": ("2 · diagnóstico", "diagnostico", "alto"),
+            "3": ("3 · %s", "intermedio", "medio"), "4": ("4 · cierre", "economico", "bajo")}
+COST_TOTAL = "**Total de la investigación:**"
+USD_AMOUNT = re.compile(r"(?:US\$|USD|\$)[ \t]*(\d[\d.,]*)|(\d[\d.,]*)[ \t]*(?:USD|US\$|\$|dólares|dolares)", re.I)
+# Solo los AI Credits de GitHub Copilot tienen una conversión documentada: "12 créditos" de otra herramienta no se suma.
+CREDIT_AMOUNT = re.compile(r"(\d[\d.,]*)[ \t]*AI[ \t]+(?:credits?|cr[eé]ditos?)", re.I)
+TOKEN_PART = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*(?:tokens[ \t]+)?(?:de[ \t]+)?(entrada|cach[eé]|salida)", re.I)
+TOKEN_TOTAL = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*tokens(?![ \t]+(?:de[ \t]+)?(?:entrada|cach[eé]|salida))", re.I)
+
+
+def amount(text, whole=False):
+    """Un número escrito por una persona: "1.05", "1,05", "38k", "1.2M", "12.000". Con `whole` (tokens, créditos) un
+    separador seguido de tres cifras es de miles; si no, el último separador es el decimal. None si no es un número."""
+    text = (text or "").strip().replace(" ", "").rstrip(".,")  # una coma o un punto de la frase no son del número
+    factor = 1
+    if text[-1:].lower() in ("k", "m"):
+        factor = 1000 if text[-1].lower() == "k" else 1000000
+        text = text[:-1]
+    if not re.fullmatch(r"\d[\d.,]*", text):
+        return None
+    if whole and factor == 1 and re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", text):
+        text = text.replace(".", "").replace(",", "")
+    elif "." in text and "," in text:
+        decimal = max(text.rfind("."), text.rfind(","))
+        text = re.sub(r"[.,]", "", text[:decimal]) + "." + text[decimal + 1:]
+    else:
+        text = text.replace(",", ".")
     try:
-        folder = folder.relative_to(root)
+        return float(text.rstrip(".")) * factor
     except ValueError:
+        return None
+
+
+def short_count(value):
+    """Una cantidad de tokens para leer: 950, 45 k, 1,2 M."""
+    if value >= 1000000:
+        return ("%.1f" % (value / 1000000)).rstrip("0").rstrip(".").replace(".", ",") + " M"
+    if value >= 1000:
+        return "%d k" % round(value / 1000)
+    return "%d" % value
+
+
+def cost_rows(state_text):
+    """Las filas de la tabla "Consumo" de estado.md: [{"sesion", "modelo", "costo", "pasos"}]."""
+    _, sections = state_sections(state_text)
+    body = next((text for title, text in sections.items() if title.startswith("consumo")), "")
+    out = []
+    for row in parse_table(body)[1]:
+        if not row or not row[0].strip() or any("<" in cell for cell in row):
+            continue
+        cells = [cell.strip() for cell in row] + [""] * 4
+        out.append({"sesion": cells[0], "modelo": cells[1], "costo": cells[2], "pasos": cells[3]})
+    return out
+
+
+def cost_of(cell):
+    """Lo que se puede sumar de una celda "Costo o tokens": {"usd" o None, "tokens": {entrada, caché, salida, sin
+    desglose}}. Un monto en USD escrito vale tal cual; si solo hay AI Credits, se convierten con AI_CREDIT_USD."""
+    usd = None
+    found = USD_AMOUNT.search(cell)
+    if found:
+        usd = amount(found.group(1) or found.group(2))
+    if usd is None:
+        credits = CREDIT_AMOUNT.search(cell)
+        value = amount(credits.group(1)) if credits else None
+        usd = value * AI_CREDIT_USD if value is not None else None
+    tokens = {}
+    for number, kind in TOKEN_PART.findall(cell):
+        value = amount(number, whole=True)
+        if value is not None:
+            key = "caché" if kind.lower().startswith("cach") else kind.lower()
+            tokens[key] = tokens.get(key, 0) + value
+    if not tokens:
+        whole = TOKEN_TOTAL.search(cell)
+        value = amount(whole.group(1), whole=True) if whole else None
+        if value is not None:
+            tokens["sin desglose"] = value
+    return {"usd": usd, "tokens": tokens}
+
+
+def session_key(text, ids=()):
+    """(número de sesión, id de la mejora o '') de una celda "Sesión": "3 · M1" → ("3", "M1")."""
+    number = re.match(r"\s*(?:sesi[oó]n\s+)?(\d+)(?!\d|-)", text or "", re.I)
+    improvement = next((item for item in ids if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(item), text or "")), "")
+    return (number.group(1) if number else ""), improvement
+
+
+RECIPE_MARK = "receta de arranque en frío"
+
+
+def from_recipe(folder, plan):
+    """True si la investigación la armó `nuevo --receta arranque-frio` (sin sesión 1): lo dice el plan (`receta`) o,
+    en una creada antes de que el plan lo guardara, la Ficha que deja la receta."""
+    if plan.get("receta") == "arranque-frio":
+        return True
+    try:
+        return RECIPE_MARK in (pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def setup_session_pending(folder):
+    """True si la sesión 0 (el setup del proyecto) está hecha y ninguna investigación del proyecto anotó su costo:
+    AGENTS.md tiene el bloque de estado del setup y ningún estado.md de la carpeta de investigaciones (ni de esta)
+    tiene una fila de la sesión 0 en "Consumo"."""
+    root = project_root(pathlib.Path(folder)).resolve()
+    agents = read_agents(root)
+    section = performance_section(agents) if agents is not None else None
+    if not section or AGENTS_BLOCK[0] not in agents[section[0]:section[1]]:
+        return False
+    states = [pathlib.Path(folder) / "estado.md"]
+    base = investigations_base(root)
+    try:
+        states += sorted(base.glob("**/estado.md"))[:500] if base.is_dir() else []
+    except OSError:
         pass
-    return ("cd %s && python3 -I %s consumo --carpeta %s --sesion \"<sesión>\" --costo \"<lo que muestre tu "
-            "herramienta>\" --modelo \"<modelo>\"" % (root, HERE / "perf.py", folder))
+    for state in states:
+        try:
+            noted = cost_rows(state.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if any(session_key(row["sesion"])[0] == "0" for row in noted):
+            return False
+    return True
 
 
-def write_next(folder, title, steps):
-    """Reescribe "## Siguiente paso" de estado.md con lo que dice next_steps."""
+def done_sessions(folder, plan):
+    """Las sesiones de IA que esta investigación ya hizo, en orden: [(rótulo, nivel de modelo, esfuerzo)]. Sale de lo
+    que cada una deja: el setup del proyecto (sesión 0, si AGENTS.md lo registra y ninguna investigación del proyecto
+    anotó su costo), la corrida de prueba o una fase medida (sesión 1, salvo en un plan armado por la receta de
+    arranque), el reporte inicial o las mejoras del plan (2), cada mejora aplicada (3) y el reporte final (4)."""
+    folder = pathlib.Path(folder)
+    mejoras = plan.get("mejoras") or []
+    out = []
+    if setup_session_pending(folder):
+        out.append(SESSIONS["0"])
+    tested = (folder / "prueba").is_dir() and any((folder / "prueba").glob("*.perfetto-trace*"))
+    flows = (plan.get("flujos") or {}).values()
+    by_hand = any(not startup_spec(flow) for flow in flows) or (bool(flows) and not from_recipe(folder, plan))
+    if by_hand and (tested or read_phases(folder)):
+        out.append(SESSIONS["1"])
+    if report_file(folder, "inicial") or mejoras or report_file(folder, "final"):
+        out.append(SESSIONS["2"])
+    for item in mejoras:
+        if item.get("estado") == "aplicada":
+            label, tier, effort = SESSIONS["3"]
+            out.append((label % item["id"], tier, effort))
+    if report_file(folder, "final"):
+        out.append(SESSIONS["4"])
+    return out
+
+
+def missing_costs(folder, plan):
+    """Las sesiones hechas que no tienen fila en "Consumo": [(rótulo, modelo, esfuerzo)], con el nombre del modelo."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    ids = [item["id"] for item in plan.get("mejoras") or []]
+    noted = [session_key(row["sesion"], ids) for row in rows]
+    applied = [item["id"] for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
+    out = []
+    for label, tier, effort in done_sessions(folder, plan):
+        number, improvement = session_key(label, ids)
+        covered = any(n == number and (number != "3" or i == improvement or (not i and len(applied) == 1))
+                      for n, i in noted)
+        if not covered:
+            out.append((label, model_name(plan, tier), effort))
+    return out
+
+
+def cost_command(folder, session=None, model=None, effort=None):
+    """El comando para anotar el costo de una sesión, con la carpeta relativa a la raíz del proyecto. Con la sesión,
+    el modelo y el esfuerzo sale completo: solo queda el costo por llenar."""
+    root = project_root(folder).resolve()
+    folder = relative_folder(folder, root)
+    return "cd %s && python3 -I %s consumo --carpeta %s --sesion \"%s\" --modelo \"%s\"%s --costo \"%s\"" % (
+        q(root), q(HERE / "perf.py"), q(folder), session or "<sesión>", model or "<modelo>",
+        " --esfuerzo %s" % effort if effort else "", COST_PLACEHOLDER)
+
+
+def cost_total(folder, plan):
+    """El total de la investigación en una línea: USD y tokens de las filas de "Consumo" que traen el dato, cuántas no
+    lo traen y qué sesiones hechas faltan anotar. Un dato que falta se dice: no cuenta como cero."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        rows = []
+    costs = [cost_of(row["costo"]) for row in rows]
+    priced = [cost["usd"] for cost in costs if cost["usd"] is not None]
+    tokens = {}
+    for cost in costs:
+        for kind, value in cost["tokens"].items():
+            tokens[kind] = tokens.get(kind, 0) + value
+    parts = []
+    if priced:
+        parts.append("%.2f USD (%d de %d sesiones anotadas traen un monto)" % (sum(priced), len(priced), len(rows))
+                     if len(priced) < len(rows) else "%.2f USD en %d %s" % (
+                         sum(priced), len(rows), "sesión anotada" if len(rows) == 1 else "sesiones anotadas"))
+    elif rows:
+        parts.append("sin un monto en USD en las %d sesiones anotadas" % len(rows))
+    if tokens:
+        counted = sum(1 for cost in costs if cost["tokens"])
+        parts.append("tokens: " + ", ".join("%s %s" % (short_count(tokens[kind]), kind)
+                                            for kind in ("entrada", "caché", "salida", "sin desglose") if kind in tokens)
+                     + (" (solo %d de %d sesiones anotadas los traen)" % (counted, len(rows)) if counted < len(rows) else ""))
+    missing = missing_costs(folder, plan) if plan else []
+    if missing:
+        parts.append("faltan anotar %d %s (%s): el total es parcial" % (
+            len(missing), "sesión hecha" if len(missing) == 1 else "sesiones hechas",
+            ", ".join(label for label, _, _ in missing)))
+    if not rows and not missing:
+        return "sin sesiones anotadas"
+    return " · ".join(parts)
+
+
+def update_cost_total(folder, plan):
+    """Deja al día la línea del total debajo de la tabla "Consumo" de estado.md."""
+    state = pathlib.Path(folder) / "estado.md"
+    if not state.is_file():
+        return
+    text = state.read_text(encoding="utf-8")
+    line = "%s %s" % (COST_TOTAL, cost_total(folder, plan))
+
+    def rewrite(match):
+        body = [row for row in match.group(2).rstrip("\n").split("\n") if not row.startswith(COST_TOTAL)]
+        while body and not body[-1].strip():
+            body.pop()
+        return match.group(1) + "\n".join(body + ["", line]) + "\n"
+
+    new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", rewrite, text, count=1, flags=re.S)
+    if count and new != text:
+        state.write_text(new, encoding="utf-8")
+
+
+def cost_md(folder, plan):
+    """La sección "Costo de la investigación" de los reportes: las sesiones anotadas y el total, con lo que falta."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        rows = []
+    intro = ("> Lo que costó cada sesión de IA, según lo anotó quien la corrió (`perf.py consumo`). Las mediciones "
+             "corren en la terminal, sin chat, y no cuestan tokens.\n\n")
+    table = markdown_table(["Sesión", "Modelo", "Costo o tokens", "Pasos"],
+                           [[row["sesion"], row["modelo"] or "—", row["costo"] or "—", row["pasos"] or "—"]
+                            for row in rows]) + "\n\n" if rows else ""
+    return "%s%s**Total:** %s" % (intro, table, cost_total(folder, plan))
+
+
+def cost_lines(folder, plan):
+    """Las líneas con las que `siguiente` lista las sesiones hechas sin fila en "Consumo": un comando listo por cada
+    una. Es informativo: nada se bloquea si no se anota."""
+    missing = missing_costs(folder, plan)
+    if not missing:
+        return []
+    lines = ["Costo (opcional, Terminal): %s sin anotar. Un comando por cada una; solo falta el costo, que %s:" % (
+        "1 sesión hecha" if len(missing) == 1 else "%d sesiones hechas" % len(missing), COST_WHERE)]
+    return lines + ["  %s" % cost_command(folder, label, model, effort) for label, model, effort in missing]
+
+
+def write_next(folder, title, steps, missing=(), plan=None):
+    """Reescribe "## Siguiente paso" de estado.md con lo que dice next_steps. `missing`: las sesiones sin anotar."""
     state = pathlib.Path(folder) / "estado.md"
     if not state.is_file():
         return
     body = "\n".join(["- **Paso:** %s" % title, "- **En orden, uno a la vez:**"]
-                     + ["  " + line for line in render_steps(steps, markdown=True)]
-                     + ["- **Costo de cada chat** (terminal, al cerrarlo): `%s`" % cost_command(folder),
-                        "- _Lo escribe `perf.py siguiente`: si algo cambió, vuelve a correrlo._", ""])
+                     + ["  " + line for line in render_steps(steps, markdown=True, root=project_root(
+                         pathlib.Path(folder)).resolve(), plan=plan)]
+                     + (["- **Costo (opcional, terminal):** faltan anotar %s. `perf.py siguiente` imprime un comando "
+                         "listo por cada una; solo falta el costo." % ", ".join(label for label, _, _ in missing)]
+                        if missing else
+                        ["- **Costo de cada chat** (opcional, terminal, al cerrarlo): `perf.py siguiente` imprime el "
+                         "comando `consumo` ya completo de cada sesión hecha; solo falta el costo."])
+                     + ["- _Lo escribe `perf.py siguiente`: si algo cambió, vuelve a correrlo._", ""])
     text = state.read_text(encoding="utf-8")
     new, count = re.subn(r"(## Siguiente paso\n\n).*?(?=\n## )", lambda m: m.group(1) + body, text, count=1, flags=re.S)
     if count:
@@ -2887,13 +4002,15 @@ def write_next(folder, title, steps):
 def print_next(folder, plan, flow=None):
     title, steps = next_steps(pathlib.Path(folder), plan, flow)
     print("Siguiente · %s (también en estado.md):" % title)
-    for line in render_steps(steps, markdown=False):
+    for line in render_steps(steps, markdown=False, root=project_root(pathlib.Path(folder)).resolve(), plan=plan):
         print("  " + line)
-    if any(step["tipo"] == "chat" for step in steps):
-        print("  Al cerrar cada chat, anota su costo (terminal): %s" % cost_command(folder))
-    write_next(folder, title, steps)
-    update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder).resolve()).resolve(),
+    for line in cost_lines(folder, plan):
+        print("  " + line)
+    write_next(folder, title, steps, missing_costs(folder, plan), plan)
+    update_cost_total(folder, plan)
+    update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder)).resolve(),
                                                   pathlib.Path(folder)))
+    update_warnings(folder, plan)
 
 
 def cmd_siguiente(args):
@@ -2904,7 +4021,7 @@ def cmd_siguiente(args):
         # La Ficha se completa en la sesión 1; el Resumen y los Hallazgos, desde que la sesión 2 entrega su reporte.
         # Con mejoras aprobadas o aplicadas (sesión 3 y medición después), el resumen que falta es el del cierre: no
         # se avisa todavía.
-        delivered = any((folder / name).is_file() for name in ("reporte-inicial.md", "reporte-final.md", "reporte.md"))
+        delivered = bool(report_file(folder, "inicial") or report_file(folder, "final"))
         in_progress = any(m.get("estado") in ("aprobada", "aplicada") for m in plan.get("mejoras", []))
         warn_unfilled(folder, state_sections(state.read_text(encoding="utf-8"))[1], findings=delivered and not in_progress)
     for name, flow in plan["flujos"].items():
@@ -2921,22 +4038,198 @@ def cmd_consumo(args):
         raise PerfError("no existe %s" % state)
     text = state.read_text(encoding="utf-8")
     if any("<" in str(v) for v in (args.sesion, args.costo, args.modelo, args.pasos) if v):
-        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo \"1.05 USD\")")
-    row = "| %s | %s | %s | %s |" % (args.sesion, args.modelo or "—", args.costo, args.pasos or "—")
+        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo \"1.05 USD\", o "
+                        "--creditos 120 si tu herramienta informa AI Credits)")
+    tokens = [(label, getattr(args, name, None)) for label, name in (
+        ("entrada", "tokens_entrada"), ("caché", "tokens_cache"), ("salida", "tokens_salida"))]
+    numbers = {}
+    for label, raw in tokens + [("créditos", getattr(args, "creditos", None))]:
+        if raw is None:
+            continue
+        if label == "créditos" and re.fullmatch(r"[1-9]\d{0,2}(?:[.,]\d{3})+", raw.strip()):
+            raise PerfError("'%s' AI Credits puede leerse como miles o como decimales: escríbelo sin separador de miles "
+                            "(1200) o con los decimales que no sean tres cifras (1.2)" % raw)
+        numbers[label] = amount(raw, whole=label != "créditos")  # los créditos pueden traer decimales
+        if numbers[label] is None:
+            raise PerfError("'%s' no es una cantidad: usa un número (120, 45000, 45k, 1.2M)" % raw)
+    if not args.costo and not numbers:
+        raise PerfError("falta el costo: usa --costo \"<lo que muestre tu herramienta>\" (por ejemplo \"1.05 USD\"), "
+                        "--creditos <AI Credits> o --tokens-entrada, --tokens-cache y --tokens-salida")
+    parts = [args.costo] if args.costo else []
+    if "créditos" in numbers:
+        credits = numbers["créditos"]
+        # La conversión solo se anota si el costo escrito no trae ya un monto en USD.
+        usd = "" if args.costo and USD_AMOUNT.search(args.costo) else " (%.2f USD)" % (credits * AI_CREDIT_USD)
+        parts.append("%s AI Credits%s" % (("%.4f" % credits).rstrip("0").rstrip("."), usd))
+    listed = ["%d %s" % (numbers[label], label) for label, _ in tokens if label in numbers]
+    if listed:
+        parts.append("tokens: " + ", ".join(listed))
+    effort = getattr(args, "esfuerzo", None)
+    model = " · ".join(part for part in (args.modelo, effort) if part)
+    row = "| %s | %s | %s | %s |" % (args.sesion, model or "—", " · ".join(parts), args.pasos or "—")
 
     def append(match):
-        body = [line for line in match.group(2).rstrip("\n").split("\n") if line.strip() and "<" not in line]
-        return match.group(1) + "\n".join(body + [row]) + "\n"
+        body = [line for line in match.group(2).rstrip("\n").split("\n")
+                if line.strip() and "<" not in line and not line.startswith(COST_TOTAL)]
+        table = [line for line in body if line.lstrip().startswith("|")]
+        return match.group(1) + "\n".join(table + [row] + [line for line in body if line not in table]) + "\n"
 
     new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S)
     if not count:
         raise PerfError("%s no tiene la sección '## Consumo'" % state)
     state.write_text(new, encoding="utf-8")
     print("✔ Consumo: %s" % row)
+    try:
+        plan = load_plan(folder / "plan.json")
+    except PerfError:
+        plan = {}
+    update_cost_total(folder, plan)
+    print("  Total de la investigación: %s" % cost_total(folder, plan))
 
 
 DECISIONS = (("aprobar", "aprobada", "aprobadas"), ("descartar", "descartada", "descartadas"),
              ("pendiente", "pendiente", "pendientes"), ("aplicada", "aplicada", "aplicadas"))
+
+
+CHANGES_DIR = "cambios"
+DIFF_EXCERPT_LINES = 60  # lo que el reporte muestra de cada mejora; el diff completo queda en cambios/
+
+
+def save_change_diff(folder, improvement, files, repo=None, index=0):
+    """Guarda en <carpeta>/cambios/<id>.diff (o <id>-<n>.diff para otro repo) el diff de los archivos de una mejora
+    contra HEAD de su repo: el código antes y después, con los archivos nuevos (que git todavía no sigue) completos. No
+    toca el índice ni el árbol de trabajo. Devuelve lo que plan.json guarda de ese diff."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    base = pathlib.Path(os.path.expanduser(repo)) if repo else root
+    base = base if base.is_absolute() else (pathlib.Path.cwd() / base)
+    top = git_toplevel(base)
+    if top is None:
+        raise PerfError("%s no es un repo de git: el diff de la mejora se toma con git (usa --repo con la carpeta del "
+                        "repo donde están los archivos)" % base)
+    chunks = []
+    for name in files:
+        path = (base / name).resolve()
+        inside = under(path, top.resolve())
+        if inside is None:
+            raise PerfError("%s no está dentro del repo %s: pasa --repo con el repo de ese archivo" % (name, top))
+        tracked = subprocess.run(["git", "-C", str(top), "ls-files", "--error-unmatch", "--", str(inside)],
+                                 capture_output=True, text=True).returncode == 0
+        if tracked:
+            done = subprocess.run(["git", "-C", str(top), "diff", "--no-color", "HEAD", "--", str(inside)],
+                                  capture_output=True, text=True)
+        elif path.is_file():
+            done = subprocess.run(["git", "-C", str(top), "diff", "--no-color", "--no-index", "--", "/dev/null",
+                                   str(inside)], capture_output=True, text=True)
+        else:
+            raise PerfError("%s no existe ni está en git: revisa la ruta (es relativa a %s)" % (name, base))
+        if done.returncode not in (0, 1):
+            raise PerfError("git diff falló con %s: %s" % (name, (done.stderr or "").strip()[:200]))
+        chunks.append(done.stdout)
+    text = "".join(chunks)
+    safe = re.sub(r"[^\w.-]+", "-", str(improvement)).strip("-.") or "mejora"
+    target = folder / CHANGES_DIR / ("%s%s.diff" % (safe, "-%d" % (index + 1) if index else ""))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    lines = text.splitlines()
+    return {"diff": "%s/%s" % (CHANGES_DIR, target.name), "repo": shown_path(top, root) if top.resolve() != root else ".",
+            "archivos": list(files), "fecha": datetime.date.today().isoformat(),
+            "agregadas": sum(1 for line in lines if line.startswith("+") and not line.startswith("+++")),
+            "quitadas": sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))}
+
+
+def diff_excerpt(text, limit=DIFF_EXCERPT_LINES):
+    """Lo esencial de un diff para el reporte: por archivo, su nombre y los fragmentos con lo agregado y lo quitado,
+    sin las cabeceras de git; corta en `limit` líneas. (texto, líneas que quedaron fuera)."""
+    out, skipped, header = [], 0, False
+    for line in text.splitlines():
+        if line.startswith("diff --git"):
+            header = True  # hasta el primer @@: cabeceras de git, no código
+            continue
+        if line.startswith("@@"):
+            header = False
+        if header and line.startswith(("index ", "new file mode", "deleted file mode", "similarity", "rename ", "--- ",
+                                       "Binary files")):
+            if line.startswith("Binary files"):
+                out.append("# binario: %s" % line)
+            continue
+        if header and line.startswith("+++ "):
+            name = line[4:].strip()
+            line = "# %s" % (name[2:] if name.startswith(("a/", "b/")) else name)
+        if len(out) >= limit:
+            skipped += 1
+            continue
+        out.append(line)
+    return "\n".join(out), skipped
+
+
+def changes_md(folder, plan, results, findings_text):
+    """La sección "Cambios de código" del reporte final dev: por cada mejora aplicada, por qué se cambió (el hallazgo y
+    su evidencia), qué mejoró (su métrica con el veredicto), los archivos y el código antes y después (un extracto del
+    diff que guardó `decidir --aplicada`; el completo queda en cambios/). '' sin mejoras aplicadas."""
+    folder = pathlib.Path(folder)
+    applied = [m for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada"]
+    if not applied:
+        return ""
+    headers, rows = parse_table(findings_text)
+    lower = [h.lower() for h in headers]
+
+    def column(*prefixes):
+        return next((i for i, h in enumerate(lower) if h.startswith(prefixes)), None)
+
+    symptom_i, cause_i, evidence_i = column("síntoma", "sintoma"), column("causa"), column("evidencia")
+    by_id = {row[0].strip(): row for row in rows if row}
+    by_metric = {r["metrica"]: r for r in results}
+    blocks = ["> **Interno: contiene código.** Lo que cambió cada mejora aplicada, por qué y qué mejoró. El extracto "
+              "muestra lo esencial (en verde lo agregado, en rojo lo quitado); el diff completo queda en la carpeta "
+              "`cambios/` de la investigación. No va en el reporte para gerencia."]
+    for item in applied:
+        lines = ["### %s · %s" % (item["id"], improvement_title(item)), ""]
+        finding = by_id.get(str(item.get("hallazgo") or "").strip())
+
+        def cell(index):
+            value = finding[index].strip() if finding and index is not None and index < len(finding) else ""
+            return "" if has_placeholder(value) or value in ("—", "-") else value
+
+        why = "; ".join(part for part in (cell(symptom_i), cell(cause_i)) if part)
+        lines.append("- **Por qué:** %s%s" % ("%s: %s" % (item["hallazgo"], why) if finding and why else
+                                               "sin hallazgo asociado en estado.md",
+                                               ". Evidencia: %s" % cell(evidence_i) if cell(evidence_i) else ""))
+        if item.get("a_prueba") and item.get("hipotesis"):
+            lines.append("- **Hipótesis que pone a prueba:** %s" % item["hipotesis"])
+        r = by_metric.get(item.get("metrica"))
+        lines.append("- **Qué mejoró:** %s" % (
+            "`%s` pasó de %s a %s (%s): %s" % (r["metrica"], nice(r["antes"]["mediana"], r["unidad"]),
+                                              nice(r["despues"]["mediana"], r["unidad"]),
+                                              change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—",
+                                              verdict_words(r)) if r else
+            "su métrica (`%s`) no tiene antes y después" % item.get("metrica", "—")))
+        entries = [entry for entry in item.get("cambios") or [] if isinstance(entry, dict) and entry.get("diff")]
+        if not entries:
+            lines += ["- **Código:** sin diff guardado (la mejora se marcó aplicada sin `--archivos`, o con una versión "
+                      "anterior de la skill).", ""]
+            blocks.append("\n".join(lines))
+            continue
+        for entry in entries:
+            where = " (repo `%s`)" % entry["repo"] if entry.get("repo") not in (None, ".") else ""
+            lines.append("- **Archivos%s:** %s · +%s −%s líneas · diff completo: `%s`" % (
+                where, ", ".join("`%s`" % name for name in entry.get("archivos") or []), entry.get("agregadas", "—"),
+                entry.get("quitadas", "—"), entry["diff"]))
+            try:
+                text = (folder / entry["diff"]).read_text(encoding="utf-8")
+            except OSError:
+                lines.append("- El diff guardado no está en la carpeta (`%s`): sin diff guardado." % entry["diff"])
+                continue
+            excerpt, skipped = diff_excerpt(text)
+            if not excerpt.strip():
+                lines.append("- El diff está vacío: los archivos no tenían cambios contra el último commit al marcarla.")
+                continue
+            lines += ["", "```diff", excerpt, "```"]
+            if skipped:
+                lines.append("_… y %d líneas más en `%s`._" % (skipped, entry["diff"]))
+        lines.append("")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def cmd_decidir(args):
@@ -2956,11 +4249,33 @@ def cmd_decidir(args):
     unknown = sorted(set(choices) - set(known))
     if unknown:
         raise PerfError("plan.json no tiene las mejoras %s (tiene: %s)" % (", ".join(unknown), ", ".join(known) or "ninguna"))
+    files = [name.strip() for name in (getattr(args, "archivos", None) or "").split(",") if name.strip()]
+    applied = [key for key, estado in choices.items() if estado == "aplicada"]
+    if (files or getattr(args, "repo", None)) and len(applied) != 1:
+        raise PerfError("--archivos y --repo van con --aplicada y una sola mejora: el diff es de esa mejora")
+    if getattr(args, "repo", None) and not files:
+        raise PerfError("--repo va con --archivos: los archivos de la mejora en ese repo")
     for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
             if choices[item["id"]] == "aplicada":
                 item["aplicada_en"] = datetime.datetime.now().isoformat(timespec="seconds")
+                if files:
+                    # Otro repo suma un diff; el mismo repo reemplaza el que tenía (repetir el comando no lo duplica).
+                    before = [entry for entry in item.get("cambios") or [] if isinstance(entry, dict)]
+                    entry = save_change_diff(folder, item["id"], files, getattr(args, "repo", None), len(before))
+                    same = [old for old in before if old.get("repo") == entry["repo"]]
+                    if same:
+                        (folder / entry["diff"]).replace(folder / same[0]["diff"])
+                        entry["diff"] = same[0]["diff"]
+                    item["cambios"] = [old for old in before if old.get("repo") != entry["repo"]] + [entry]
+                    print("✔ Diff de %s guardado: %s (%d %s, +%d −%d líneas)" % (
+                        item["id"], folder / entry["diff"], len(entry["archivos"]),
+                        "archivo" if len(entry["archivos"]) == 1 else "archivos", entry["agregadas"], entry["quitadas"]))
+                elif not item.get("cambios"):
+                    print("· %s quedó aplicada sin diff guardado: el reporte final dirá \"sin diff guardado\" en sus "
+                          "cambios de código. Para guardarlo, repite con --archivos <archivos de la mejora> (y --repo "
+                          "si están en otro repo)." % item["id"])
     parts = []
     if depth and depth != plan.get("profundidad", "riguroso"):
         parts.append("profundidad %s (era %s)" % (depth, plan.get("profundidad", "riguroso")))
@@ -2989,6 +4304,794 @@ def cmd_decidir(args):
     update_block(folder, "mejoras", plan_table_md(plan, rows))
     print("✔ %s" % line[2:])
     print_next(folder, plan)
+
+
+# ── Carpetas de la investigación y de los parches ────────────────────────────
+# En la sección de rendimiento de AGENTS.md: "Carpeta de investigaciones: <ruta>" y "Carpeta de parches: <ruta>" (con o
+# sin viñeta, negrita o acentos graves; las rutas relativas parten de la raíz del proyecto). Sin esas líneas, las
+# investigaciones van en reports/perf y los parches no tienen una carpeta por defecto.
+DEFAULT_INVESTIGATIONS = "reports/perf"
+FOLDER_KEYS = (("investigaciones", re.compile(r"carpeta\s+de\s+(?:las\s+)?(?:investigaciones|evidencia)|"
+                                              r"(?:investigations|evidence)\s+folder", re.I)),
+               ("parches", re.compile(r"carpeta\s+de\s+(?:los\s+)?parches|patch(?:es)?\s+folder", re.I)))
+FOLDER_LINE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?[*_]*(?P<key>[^:*_`]+?)[*_]*[ \t]*:[*_]*[ \t]*(?P<value>\S.*?)[ \t]*$")
+
+
+def perf_folders(root):
+    """{"investigaciones": ruta o None, "parches": ruta o None} según la sección de rendimiento del AGENTS.md del
+    proyecto. None es "sin configurar", no una ruta por defecto. Las rutas no se resuelven: una carpeta enlazada se
+    usa por su enlace."""
+    out = {"investigaciones": None, "parches": None}
+    agents = read_agents(root)
+    section = performance_section(agents) if agents is not None else None
+    if not section:
+        return out
+    for _, line in prose_lines(agents[section[0]:section[1]]):
+        found = FOLDER_LINE.match(line.rstrip("\r\n"))
+        if not found:
+            continue
+        name = next((name for name, pattern in FOLDER_KEYS if pattern.fullmatch(found.group("key").strip())), None)
+        if not name or out[name] is not None:
+            continue
+        quoted = re.search(r"`([^`]+)`", found.group("value"))
+        value = (quoted.group(1) if quoted else found.group("value")).strip().rstrip(".").strip()
+        if not value or value.startswith("<"):
+            continue
+        path = pathlib.Path(os.path.expanduser(value))
+        out[name] = path if path.is_absolute() else pathlib.Path(root) / path
+    return out
+
+
+def investigations_base(root):
+    """La carpeta donde van las investigaciones del proyecto: la de AGENTS.md o, sin ella, reports/perf."""
+    return perf_folders(root)["investigaciones"] or pathlib.Path(root) / DEFAULT_INVESTIGATIONS
+
+
+def shown_path(path, root):
+    """Una ruta para un comando que empieza con cd a la raíz: relativa si está dentro, absoluta si no."""
+    inside = under(lexical(path), lexical(root)) or under(lexical(path), pathlib.Path(root))
+    return str(inside) if inside is not None else str(path)
+
+
+# ── Cambios temporales: quitar sin perder ────────────────────────────────────
+REVERTED = re.compile(r"^(?:s[ií]|yes|hecho|revertido|✔)(?![a-záéíóúñ])", re.I)
+NEVER_DISCARD = ("Nunca quites un cambio temporal con `git checkout`, `git restore`, `git reset --hard` ni `git clean`: "
+                 "borran el archivo entero sin guardarlo, también lo que no es de esta investigación")
+
+
+def temp_changes(state_text):
+    """Las filas de "Cambios temporales por revertir" de estado.md: [{"archivo", "repo", "que", "revertido"}], sin las
+    que siguen con el relleno de la plantilla."""
+    _, sections = state_sections(state_text)
+    body = next((text for title, text in sections.items() if title.startswith("cambios temporales")), "")
+    headers, rows = parse_table(body)
+    names = [header.strip().lower() for header in headers]
+
+    def column(prefix):
+        return next((index for index, name in enumerate(names) if name.lstrip("¿").startswith(prefix)), None)
+
+    where, repo, what, reverted = column("archivo"), column("repo"), column("qué es"), column("revertido")
+    if where is None:
+        return []
+    out = []
+    for row in rows:
+        def cell(index):
+            return row[index].strip() if index is not None and index < len(row) else ""
+
+        path = re.sub(r":\d+(?:-\d+)?$", "", cell(where).strip("`").strip())
+        if not path or path in ("—", "-") or has_placeholder(cell(where)):
+            continue
+        out.append({"archivo": path, "repo": cell(repo).strip("`").strip(), "que": cell(what),
+                    "revertido": bool(REVERTED.match(cell(reverted)))})
+    return out
+
+
+def final_report(folder):
+    """El reporte final de una investigación (con el nombre de esta versión o de las anteriores), o None."""
+    return report_file(folder, "final")
+
+
+def open_investigations(folder, root):
+    """Las otras investigaciones del mismo proyecto que siguen abiertas (con estado.md y sin reporte final): las que
+    están junto a esta y las de la carpeta de investigaciones del proyecto. Solo busca dentro del proyecto."""
+    folder = pathlib.Path(folder)
+    own = folder.resolve()
+    limits = (lexical(root), pathlib.Path(root).resolve())
+    bases = [lexical(folder).parent, lexical(folder).parent.parent, investigations_base(root)]
+    configured = perf_folders(root)["investigaciones"]
+    seen, out = {own}, []
+    for base in bases:
+        inside = any(under(lexical(base), limit) is not None or under(base.resolve(), limit) is not None for limit in limits)
+        if not inside and base != configured:
+            continue
+        for pattern in ("*/estado.md", "*/*/estado.md"):
+            for state in sorted(base.glob(pattern)):
+                other = state.parent.resolve()
+                if other in seen:
+                    continue
+                seen.add(other)
+                if not final_report(state.parent):
+                    out.append(state.parent)
+    return out
+
+
+def untracked(root, path):
+    """True si el archivo existe en el repo de la raíz y es nuevo para git: todavía no lo sigue, o solo está anotado
+    con `git add -N` (así el paso de quitar sigue trayendo su `git reset` aunque el de guardar ya se haya corrido)."""
+    if not (pathlib.Path(root) / path).is_file():
+        return False
+    try:
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--", path], capture_output=True,
+                                text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return status.returncode == 0 and status.stdout[:2] in ("??", " A")
+
+
+def revert_notice(folder, root):
+    """En el cierre: cómo quitar los cambios temporales que siguen puestos sin perderlos. Primero el parche fuera del
+    repo, comprobado, y después `git apply -R`; nunca un comando que descarte el archivo. Si otra investigación
+    abierta del proyecto declara el mismo archivo, va en un parche aparte y no se quita entero. None si no queda
+    ninguno."""
+    folder = pathlib.Path(folder)
+    try:
+        pending = [change for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8"))
+                   if not change["revertido"]]
+    except OSError:
+        return None
+    if not pending:
+        return None
+    shared = {}
+    mine = {change["archivo"] for change in pending}
+    for other in open_investigations(folder, root):
+        try:
+            theirs = temp_changes((other / "estado.md").read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for change in theirs:
+            if not change["revertido"] and change["archivo"] in mine:
+                shared.setdefault(change["archivo"], []).append(shown_path(other, root))
+    patches = perf_folders(root)["parches"]
+    name = slug("-".join(lexical(folder).parts[-2:]))
+
+    def patch_path(suffix, at_root):
+        """(ruta del parche para el comando, `mkdir` previo): relativa a la raíz si el comando corre ahí; si corre en
+        otro repo, absoluta, para que el parche no quede dentro de ese repo."""
+        if not patches:
+            return "<carpeta-fuera-del-repo>/%s%s.patch" % (name, suffix), ""
+        base = shown_path(patches, root) if at_root else str(lexical(patches))
+        return shlex.quote("%s/%s%s.patch" % (base, name, suffix)), "mkdir -p %s && " % shlex.quote(base)
+
+    names = ["`%s`" % change["archivo"] for change in pending]
+    lines = ["Sin revertir (%d): %s%s" % (len(pending), ", ".join(names[:6]),
+                                         " y %d más (en estado.md)" % (len(names) - 6) if len(names) > 6 else "")]
+    groups = {}
+    for change in pending:
+        if change["archivo"] in shared:
+            continue
+        # En la raíz si el archivo (o su carpeta: un archivo nuevo ya quitado no existe) está en el repo de la raíz.
+        here = (pathlib.Path(root) / change["archivo"]).exists() or (pathlib.Path(root) / change["archivo"]).parent.is_dir()
+        groups.setdefault(str(root) if here else "<repo de %s>" % (change["repo"] or change["archivo"]), []).append(
+            change["archivo"])
+    for index, (repo, files) in enumerate(groups.items(), start=1):
+        patch, ready = patch_path("" if len(groups) == 1 else "-%d" % index, repo == str(root))
+        new = [path for path in files if repo == str(root) and untracked(root, path)]
+        quoted = " ".join(shlex.quote(path) for path in files)
+        added = " ".join(shlex.quote(path) for path in new)
+        # `[ -s parche ] ||`: un parche que ya existe no se pisa. Repetir el paso después de quitar lo dejaría vacío.
+        lines.append("Primero guarda el parche fuera del repo y comprueba que revierte limpio (si el parche ya existe no "
+                     "lo pisa): `cd %s && %s%s{ [ -s %s ] || git diff --binary -- %s > %s; } && git apply --check -R %s`%s"
+                     % (q_repo(repo), ready, "git add -N -- %s && " % added if new else "", patch, quoted, patch, patch,
+                        "" if new or repo == str(root) else " (un archivo nuevo entra en el parche después de `git add "
+                                                            "-N <archivo>`)"))
+        lines.append("Después quítalos con el parche: `cd %s && git apply -R %s%s`%s" % (
+            q_repo(repo), patch, " && git reset -q -- %s" % added if new else "",
+            "" if new or repo == str(root) else " (y `git reset -q -- <archivo>` por cada archivo nuevo)"))
+    for path, others in sorted(shared.items()):
+        here = (pathlib.Path(root) / path).exists()
+        patch, ready = patch_path("-compartido-%s" % slug(pathlib.PurePath(path).name), here)
+        lines.append("`%s` también es un cambio temporal de otra investigación abierta (%s): guárdalo en un parche "
+                     "aparte (`cd %s && %s{ [ -s %s ] || git diff --binary -- %s > %s; } && git apply --check -R %s`) y "
+                     "no lo quites entero: quita a mano solo lo de esta investigación, o déjalo hasta que cierre la otra"
+                     % (path, ", ".join(others), q(root) if here else "<su repo>", ready, patch, shlex.quote(path), patch,
+                        patch))
+    lines.append(NEVER_DISCARD)
+    lines.append("Marca cada fila como revertida en estado.md cuando `git status --short` lo confirme")
+    return {"tipo": "avisos", "titulo": "Cambios temporales por revertir (primero el parche, después quitar)",
+            "lineas": lines}
+
+
+def report_file(folder, kind):
+    """El reporte `inicial` o `final` que hay en la carpeta, o None: primero el de desarrollo de esta versión
+    (`reporte-<tipo>-dev`), después los nombres de las versiones anteriores (`reporte-<tipo>` y, para el final,
+    `reporte`). HTML antes que markdown."""
+    folder = pathlib.Path(folder)
+    stems = ["reporte-%s-dev" % kind, "reporte-%s" % kind] + (["reporte"] if kind == "final" else [])
+    return next((folder / (stem + suffix) for stem in stems for suffix in (".html", ".md")
+                 if (folder / (stem + suffix)).is_file()), None)
+
+
+def audience_file(folder, kind, audience):
+    """El reporte `inicial` o `final` para un público (`dev` o `gerencia`), HTML antes que markdown, o None."""
+    folder = pathlib.Path(folder)
+    return next((folder / ("reporte-%s-%s%s" % (kind, audience, suffix)) for suffix in (".html", ".md")
+                 if (folder / ("reporte-%s-%s%s" % (kind, audience, suffix))).is_file()), None)
+
+
+# ── avisos que frenan o acompañan la medición ────────────────────────────────
+
+SECRET_NAME = re.compile(r"CLAVE|PASS|PIN|TOKEN|SECRET|KEY", re.I)
+
+
+def env_steps(names, where=None):
+    """[(para qué, comando)] para cargar en la terminal cada variable de entorno que falta: lectura oculta si el nombre
+    parece un secreto (SECRET_NAME) y normal si no. Usa printf y read sin -p para que sirva igual en bash y en zsh (en
+    zsh, `read -p` no es el texto de la pregunta). Cada comando empieza con cd a `where` (por defecto, la carpeta
+    actual)."""
+    steps = []
+    for name in names:
+        hidden = bool(SECRET_NAME.search(name))
+        steps.append(("carga %s en esta terminal (%s)" % (name, "lectura oculta: lo que escribas no se ve" if hidden
+                                                          else "lectura normal"),
+                      "cd %s && printf '%s: ' && read -r %s%s && export %s"
+                      % (shlex.quote(str(where or os.getcwd())), name, "-s " if hidden else "",
+                         name + (" && echo" if hidden else ""), name)))
+    return steps
+
+
+NOTES_FILE = "advertencias.json"
+NOTE_MAX = 300
+
+
+def read_notes(folder):
+    """Lo que perf.py observó en los comandos de esta investigación y todavía importa (advertencias.json): los avisos
+    de la última corrida de prueba, las corridas inválidas, los avisos de cada captura y lo que el diagnóstico no midió."""
+    try:
+        data = json.loads((pathlib.Path(folder) / NOTES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_notes(folder, data):
+    path = pathlib.Path(folder) / NOTES_FILE
+    data = {key: value for key, value in data.items() if value}
+    if not data and not path.is_file():
+        return
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def note_bucket(data, *keys):
+    """El diccionario anidado data[k1][k2]…, creado si falta (o si lo guardado no tiene esa forma)."""
+    for key in keys:
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+        data = data[key]
+    return data
+
+
+def one_line(text):
+    text = " ".join(str(text).split())
+    return text if len(text) <= NOTE_MAX else text[:NOTE_MAX - 1].rstrip() + "…"
+
+
+def save_dev_restore(folder, settings, command):
+    """Guarda, la primera vez que se ven fuera de lo normal, cómo estaban las opciones de desarrollador y el comando
+    para volverlas a ese estado: queda en "Advertencias para el diagnóstico" aunque después se dejen normales, para
+    devolverlas al terminar. Una vez guardado no se pisa."""
+    try:
+        data = read_notes(folder)
+        if isinstance(data.get("ajustes_originales"), dict):
+            return
+        data["ajustes_originales"] = {"fecha": datetime.date.today().isoformat(), "valores": dev_settings_text(settings),
+                                      "comando": command}
+        save_notes(folder, data)
+    except OSError:
+        pass  # sin carpeta donde guardarlo (un humo sin investigación): el comando ya se imprimió
+
+
+def save_test_warnings(folder, flow, warnings):
+    """Guarda los avisos de la corrida de prueba de un flujo; una corrida sin avisos los da por resueltos."""
+    data = read_notes(folder)
+    tests = note_bucket(data, "prueba")
+    if warnings:
+        tests[flow] = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "skill": VERSION,
+                       "avisos": warnings}
+    elif flow in tests:
+        tests.pop(flow)
+    else:
+        return
+    save_notes(folder, data)
+
+
+def test_warnings(folder, flow):
+    """Los avisos vigentes de la última corrida de prueba del flujo: [{"tipo", "texto", "corto", "donde"}, y
+    "comandos" ([para qué, comando]) si se resuelven en la terminal]."""
+    record = (read_notes(folder).get("prueba") or {}).get(flow) or {}
+    found = record.get("avisos") if isinstance(record, dict) else None
+    return [item for item in found or [] if isinstance(item, dict) and item.get("texto")]
+
+
+def count_invalid(folder, phase, flow, reason):
+    """Suma una corrida inválida (con su motivo) a lo que la sección de advertencias cuenta de esa fase y ese flujo."""
+    data = read_notes(folder)
+    bucket = note_bucket(data, "invalidas", phase, flow)
+    key = one_line(reason)[:160]
+    bucket[key] = to_int(bucket.get(key)) + 1
+    save_notes(folder, data)
+
+
+def save_capture_warnings(folder, phase, flow, warnings):
+    """Los avisos con los que arrancó una captura de esa fase y ese flujo (build depurable, dispositivo tibio, batería,
+    build o versión distintos), sin repetir."""
+    if not warnings:
+        return
+    data = read_notes(folder)
+    bucket = note_bucket(data, "capturar", phase)
+    known = [text for text in bucket.get(flow) or [] if isinstance(text, str)]
+    bucket[flow] = known + [text for text in (one_line(w) for w in warnings) if text not in known]
+    save_notes(folder, data)
+
+
+def forget_notes(folder, phase, flow):
+    """--rehacer: lo que se anotó de las corridas que se descartan ya no vale."""
+    data = read_notes(folder)
+    changed = False
+    for kind in ("invalidas", "capturar", "diagnostico"):
+        bucket = (data.get(kind) or {}).get(phase) if isinstance(data.get(kind), dict) else None
+        if isinstance(bucket, dict) and flow in bucket:
+            bucket.pop(flow)
+            changed = True
+    if changed:
+        save_notes(folder, data)
+
+
+MARK_LITERAL = re.compile(r"MARK ([\w.:-]+)")
+MARK_SOURCES_MAX = 3
+
+
+def find_mark_sources(root, mark, patterns=None):
+    """Dónde emite el código una marca `MARK <nombre>`: los "archivo:línea" (hasta MARK_SOURCES_MAX) donde aparece su
+    nombre como texto entre comillas, en los .kt y .java del proyecto y de los módulos que settings.gradle incluye desde
+    fuera. Es una búsqueda por texto, sin leer las rutas prohibidas; vacío si la marca no es una MARK con nombre fijo."""
+    found = MARK_LITERAL.fullmatch(mark or "")
+    if not found:
+        return []
+    needle, root = '"%s"' % found.group(1), pathlib.Path(root)
+    patterns = read_no_leer(root) if patterns is None else patterns
+    out = []
+    for base in [root] + list(external_roots(root, patterns)[0]):
+        for path in walk_files(base, patterns, (".kt", ".java"), root):
+            try:
+                if path.stat().st_size > SCAN_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            start = text.find(needle)
+            while start != -1 and len(out) < MARK_SOURCES_MAX:
+                out.append("%s:%d" % (relative_to_root(path, root), text.count("\n", 0, start) + 1))
+                start = text.find(needle, start + 1)
+            if len(out) >= MARK_SOURCES_MAX:
+                return out
+    return out
+
+
+def warning(kind, text, short, where=(), commands=()):
+    """Un aviso de la corrida de prueba. `commands` ([(para qué, comando)]): lo que el usuario corre en su terminal para
+    resolverlo, sin chat (por ejemplo, dejar normales las opciones de desarrollador)."""
+    item = {"tipo": kind, "texto": one_line(text), "corto": one_line(short), "donde": list(where)[:5]}
+    if commands:
+        item["comandos"] = [[what, command] for what, command in commands]
+    return item
+
+
+def at_limit(names):
+    """Los nombres de sección que llegan al límite de android.os.Trace (127 caracteres): están cortados, y dos endpoints
+    con el mismo comienzo pueden contar como uno."""
+    return sorted(name for name in names if len(name) >= SECTION_NAME_MAX)
+
+
+def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=False, settings=None, serial=None):
+    """Los avisos de una corrida de prueba válida que conviene corregir antes de medir, como los guarda
+    save_test_warnings: las opciones de desarrollador fuera de lo normal, la tasa de refresco, las marcas del plan que
+    no salieron, las métricas que incluyen pasos del recorrido, las marcas repetidas en una carga, la red sin medir y
+    los nombres de sección cortados."""
+    out = []
+    if dev_settings_text(settings):
+        fix, back = dev_settings_commands(settings, serial, root)
+        out.append(warning(
+            "ajustes", "opciones de desarrollador fuera de lo normal: %s. %s" % (dev_settings_text(settings), DEV_SETTINGS_WHY),
+            "opciones de desarrollador fuera de lo normal (%s): déjalas normales antes de medir; si quieres medir con "
+            "ellas a propósito, es otra investigación (ficha.md · Opciones de desarrollador)" % dev_settings_text(settings),
+            commands=[("deja normales las opciones de desarrollador (sin chat)%s" % (
+                "; %s" % ALWAYS_FINISH_NOTE if not dev_setting_normal("always_finish_activities",
+                                                                      settings.get("always_finish_activities")) else ""),
+                       fix),
+                      ("al terminar la investigación, si quieres, vuélvelas a como estaban", back)]))
+    rate = hz_warning(plan_rate, [info.get("hz_traza")])
+    if rate:
+        out.append(warning("hz", rate, "la tasa de refresco del plan no es la que midió la traza: corrige 'hz' en plan.json"))
+    unseen = [(mark, where) for mark, where, seen in info.get("marcas_plan") or [] if not seen]
+    for mark, where in unseen:
+        out.append(warning("marca", "la marca '%s' del plan (%s) no salió en la traza" % (mark, ", ".join(where)),
+                           "la marca '%s' del plan no salió en la traza: revisa dónde se emite, o el plan" % mark,
+                           find_mark_sources(root, mark)))
+    if info.get("faltantes") and not unseen:
+        out.append(warning("sin_marcas", "sin marcas en orden para: %s" % ", ".join(info["faltantes"]),
+                           "sin marcas en orden para %s: revisa 'desde' y 'hasta' en plan.json" % ", ".join(info["faltantes"])))
+    for name, count in sorted((info.get("con_input") or {}).items()):
+        out.append(warning("input", "la métrica %s incluye pasos del recorrido (%d eventos de input entre sus marcas): "
+                                    "mide el script, no la app" % (name, count),
+                           "la métrica %s incluye pasos del recorrido: acórtala en plan.json a un solo salto, de la marca de "
+                           "la acción a la de su contenido" % name))
+    for name, count in sorted((info.get("marcas_repetidas") or {}).items()):
+        out.append(warning("repetida", "la marca '%s' salió %d veces en una misma carga: el gancho que la emite se llama "
+                                       "más de una vez por carga" % (name, count),
+                           "la marca '%s' sale %d veces por carga: que se emita una sola vez por carga" % (name, count),
+                           find_mark_sources(root, name)))
+    if gap:
+        out.append(warning("red", "red sin medir: la corrida no tiene ninguna sección HTTP y el proyecto o el plan la "
+                                  "esperan", "red sin medir: conecta el gancho de red de PerfHooks en cada "
+                                             "OkHttpClient.Builder (setup.md · Red: conectar cada builder)",
+                           missing_builders))
+    cut = at_limit(info.get("nombres") or {})
+    if cut:
+        out.append(warning("nombre", "%d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están "
+                                     "cortados (por ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno"
+                           % (len(cut), SECTION_NAME_MAX, cut[0][-40:]),
+                           "hay nombres de sección cortados en %d caracteres: actualiza la instrumentación (perf.py "
+                           "instrumentar --actualizar) para que HttpSectionName acorte desde la izquierda"
+                           % SECTION_NAME_MAX))
+    return out
+
+
+def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, capture_before, you_run):
+    """Los pasos de `siguiente` mientras la última corrida de prueba tenga avisos: no ofrece medir antes como paso
+    normal. Primero los avisos, uno por línea; después lo que corre el usuario en su terminal para los avisos que se
+    resuelven sin código (las opciones de desarrollador), el chat que corrige el resto (sin compilar, instalar ni
+    capturar), instalar y repetir la prueba y, como opción, medir igual."""
+    in_code = [item for item in pending if not item.get("comandos")]
+    listed = []
+    for index, item in enumerate(in_code, start=1):
+        where = " (%s)" % ", ".join(item.get("donde") or []) if item.get("donde") else ""
+        listed.append("%d) %s%s" % (index, (item.get("corto") or item["texto"]).rstrip("."), where))
+    lines = []
+    for item in pending:
+        lines.append(item["texto"] + (" · %s" % ", ".join(item["donde"]) if item.get("donde") else ""))
+        commands = [pair for pair in item.get("comandos") or [] if isinstance(pair, list) and len(pair) == 2]
+        lines += ["%s: %s" % (what[0].upper() + what[1:], command) for what, command in commands[1:]]
+    steps = [{"tipo": "avisos", "titulo": "Corrige antes de medir", "lineas": lines}]
+    for item in pending:
+        commands = [pair for pair in item.get("comandos") or [] if isinstance(pair, list) and len(pair) == 2]
+        if commands:
+            steps.append(terminal(commands[0][1], commands[0][0], "córrelo en la terminal donde mides; no cambia el código "
+                                  "ni la app"))
+    if in_code:
+        prompt = ("%s: corrige los avisos de la corrida de prueba del flujo '%s', sin compilar, instalar ni capturar (eso "
+                  "lo hago yo en mi terminal): %s." % (resume, flow, "; ".join(listed)))
+        steps += [chat(prompt, "intermedio", "medio", "corrige en el código o en plan.json lo que dicen los avisos; no "
+                       "compila, no instala y no captura", plan),
+                  terminal(install_command(plan, root), "compila e instala el build de profiling con las correcciones",
+                           "espera; si solo cambió plan.json, salta este paso")]
+    return steps + [
+        terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente pasa "
+                 "a ser medir antes", "lo mismo que en una corrida, una sola vez"),
+        terminal(capture_before, "OPCIÓN, solo si decides medir igual con estos avisos: lo que se mida así puede salir sin "
+                 "red, midiendo el recorrido o con otras condiciones, y habría que repetirlo con --rehacer", you_run)]
+
+
+# ── advertencias para el diagnóstico (estado.md) ─────────────────────────────
+
+WARNINGS_TITLE = "Advertencias para el diagnóstico"
+WARNINGS_INTRO = ("Lo que `perf.py` observó en los comandos de la terminal y que la sesión 2 lee antes que las métricas. Si "
+                  "una mejora toca algo que una advertencia menciona, la mejora lo dice. Lo escribe y lo mantiene `perf.py`: "
+                  "no lo edites.")
+NO_WARNINGS = ("Ninguna registrada hasta ahora. `perf.py` solo ve lo que pasa en sus comandos: que no haya advertencias no "
+               "prueba que no haya nada que advertir.")
+NOT_ALTERING = ("", "—", "-", "no", "nada", "ninguna", "ninguno", "n/a")
+
+
+def altering_changes(state_text):
+    """Las filas de "Cambios temporales por revertir" de estado.md que dicen qué métricas alteran (columna "Altera"):
+    un cambio puesto para la investigación que cambia el comportamiento de la app mientras se mide."""
+    _, sections = state_sections(state_text)
+    body = next((text for title, text in sections.items() if title.startswith("cambios temporales")), "")
+    headers, rows = parse_table(body)
+    names = [header.strip().lower() for header in headers]
+
+    def column(prefix):
+        return next((index for index, name in enumerate(names) if name.lstrip("¿").startswith(prefix)), None)
+
+    altered, where, what, reverted = column("altera"), column("archivo"), column("qué es"), column("revertido")
+    if altered is None:
+        return []
+    out = []
+    for row in rows:
+        def cell(index):
+            return row[index].strip() if index is not None and index < len(row) else ""
+
+        if cell(altered).lower() in NOT_ALTERING or has_placeholder(cell(altered)):
+            continue
+        label = " · ".join(part for part in (cell(where), cell(what)) if part) or "sin detalle"
+        out.append("Cambio temporal que altera la app: %s → altera %s%s" % (
+            label, cell(altered), " (¿revertido?: %s)" % cell(reverted) if cell(reverted) else ""))
+    return out
+
+
+def noise_lines(rows, plan, trust=("ok", "")):
+    """El ruido entre antes y control de cada métrica principal y la mejora mínima que se podría demostrar, con el
+    criterio de `verdict`: la mediana de después tiene que salir del rango de antes y diferir de la de antes más que
+    el ruido."""
+    principales = plan.get("principales") or []
+    out = []
+    for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
+        before, control = entry["fases"].get("antes"), entry["fases"].get("control")
+        if metric not in principales or not before:
+            continue
+        unit, head = entry["unidad"], "Ruido de `%s` (%s)" % (metric, flow)
+        if entry["familia"] == "info":
+            out.append("%s: es informativa, `comparar` no le da veredicto" % head)
+            continue
+        if frame_metric(metric) and trust[0] == "no":
+            out.append("%s: frames no confiables (%s), `comparar` no le da veredicto" % (head, trust[1]))
+            continue
+        middle = statistics.median(before)
+        lower = entry["sentido"] == "menor"
+        noise = abs(statistics.median(control) - middle) if control else None
+        if lower:
+            limit = min(min(before), middle - noise) if control else min(before)
+        else:
+            limit = max(max(before), middle + noise) if control else max(before)
+        gap = abs(middle - limit)
+        need = "la mediana de después tiene que quedar %s %s (más de %s%s respecto de la mediana de antes, %s)" % (
+            "por debajo de" if lower else "por encima de", fmt(limit, unit), fmt(gap, unit),
+            ", %s" % fmt_pct(gap / abs(middle) * 100, signed=False) if middle else "", fmt(middle, unit))
+        if control:
+            out.append("%s: antes y control difieren en %s%s sin ningún cambio. Mejora mínima demostrable: %s" % (
+                head, fmt(noise, unit), " (%s)" % fmt_pct(noise / abs(middle) * 100, signed=False) if middle else "", need))
+        else:
+            out.append("%s: sin fase control, el ruido no está medido. Para que `comparar` diga mejora, %s" % (head, need))
+    return out
+
+
+def warnings_lines(folder, plan):
+    """Las advertencias vigentes de la investigación, una por línea y sin repetir: avisos de la última corrida de
+    prueba, corridas inválidas por fase (con los fallos de 'preparar'), avisos de las capturas, lo que el diagnóstico
+    no midió, el ruido entre antes y control de cada principal y los cambios temporales que alteran la app."""
+    folder = pathlib.Path(folder)
+    notes = read_notes(folder)
+    lines = []
+
+    def by_flow(kind, phase):
+        bucket = (notes.get(kind) or {}).get(phase) if isinstance(notes.get(kind), dict) else None
+        return sorted(bucket.items()) if isinstance(bucket, dict) else []
+
+    original = notes.get("ajustes_originales") if isinstance(notes.get("ajustes_originales"), dict) else {}
+    if original.get("comando"):
+        lines.append(" ".join(("Opciones de desarrollador: el %s, algunas estaban fuera de lo normal (%s). Para volverlas a como "
+                              "estaban al terminar la investigación: %s" % (original.get("fecha", "—"),
+                                                                              original.get("valores", "—"),
+                                                                              original["comando"])).split()))
+    tests = notes.get("prueba") if isinstance(notes.get("prueba"), dict) else {}
+    for flow in sorted(tests):
+        for item in test_warnings(folder, flow):
+            where = item.get("donde") if isinstance(item.get("donde"), list) else []
+            lines.append(one_line("Corrida de prueba (%s): %s%s" % (
+                flow, item["texto"], " · %s" % ", ".join(str(place) for place in where) if where else "")))
+    for phase in FASES:
+        for flow, reasons in by_flow("invalidas", phase):
+            if isinstance(reasons, dict) and reasons:
+                lines.append("Corridas inválidas en %s (%s): %d · %s" % (
+                    phase, flow, sum(to_int(n) for n in reasons.values()),
+                    "; ".join("%d × %s" % (to_int(n), reason) for reason, n in sorted(reasons.items()))))
+    for phase in FASES:
+        for flow, texts in by_flow("capturar", phase):
+            lines += ["Captura de %s (%s): %s" % (phase, flow, one_line(text))
+                      for text in (texts if isinstance(texts, list) else []) if isinstance(text, str)]
+    phases = read_phases(folder)
+    if isinstance(phases, dict):
+        lines += ["Fases: %s" % one_line(note) for note in builds_table(folder)[1]]
+        lines += ["Fase %s: compilación de ART %s, sus tiempos no se comparan con los de otra fase" % (
+            phase, phases[phase]["compilacion"]) for phase in FASES
+            if str((phases.get(phase) or {}).get("compilacion") or "").startswith("sin fijar")]
+        lines += ["Fases: %s" % one_line(note) for note in config_notes(folder, list(plan.get("flujos") or {}))]
+    for phase in FASES:
+        for flow, texts in by_flow("diagnostico", phase):
+            lines += ["Diagnóstico de %s (%s): %s" % (phase, flow, one_line(text))
+                      for text in (texts if isinstance(texts, list) else []) if isinstance(text, str)]
+    try:
+        rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
+    except PerfError:
+        rows = []
+    lines += noise_lines(rows, plan, frames_trust(folder) if isinstance(phases, dict) else ("ok", ""))
+    try:
+        lines += altering_changes((folder / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    out = []
+    for line in lines:
+        if line not in out:
+            out.append(line)
+    return out
+
+
+def update_warnings(folder, plan):
+    """Escribe el bloque "Advertencias para el diagnóstico" de estado.md. Un estado.md de una versión anterior no trae
+    la sección: se agrega antes de "Hallazgos" (o, si no está, antes del plan de mejoras o al final)."""
+    state = pathlib.Path(folder) / "estado.md"
+    if not state.is_file():
+        return False
+    lines = warnings_lines(folder, plan)
+    content = "\n".join("- %s" % line for line in lines) if lines else "- %s" % NO_WARNINGS
+    if update_block(folder, "advertencias", content):
+        return True
+    text = state.read_text(encoding="utf-8")
+    section = "## %s\n\n%s\n\n<!-- perf:advertencias -->\n%s\n<!-- /perf:advertencias -->\n" % (
+        WARNINGS_TITLE, WARNINGS_INTRO, content)
+    for anchor in ("## Hallazgos", "## Plan de mejoras", "## Decisiones"):
+        found = re.search(r"^%s[ \t]*$" % re.escape(anchor), text, re.M)
+        if found:
+            text = text[:found.start()] + section + "\n" + text[found.start():]
+            break
+    else:
+        text = text.rstrip("\n") + "\n\n" + section
+    state.write_text(text, encoding="utf-8")
+    return True
+
+
+# ── AGENTS.md del proyecto: DoD y estado del setup ───────────────────────────
+
+# Encabezados de un AGENTS.md: se aceptan numerados ("## 5. DoD") y con hasta 3 espacios de sangría, como en Markdown.
+DOD_HEADING = re.compile(r"^\ufeff?[ \t]{0,3}#{1,6}[ \t]*(?:\d+[.)][ \t]*)?(?:DoD|Definition of Done|Definición de "
+                         r"(?:hecho|terminado))\b", re.I)
+# La sección de rendimiento es la que se llama así: el título empieza con la palabra, no basta con que la mencione.
+PERF_HEADING = re.compile(r"^\ufeff?[ \t]{0,3}(#{1,6})[ \t]+(?:\d+[.)][ \t]*)?(?:rendimiento|performance)\b", re.I)
+ANY_HEADING = re.compile(r"^\ufeff?[ \t]{0,3}(#{1,6})[ \t]+\S")
+FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+AGENTS_BLOCK = ("<!-- hb-performance:estado -->", "<!-- /hb-performance:estado -->")
+AGENTS_FIELDS = ("instrumentación en el repo", "prueba de humo", "secciones HTTP")
+AGENTS_LEAD = "Estado del setup (lo mantiene `perf.py`: no lo edites)"
+
+
+def read_agents(root):
+    """El AGENTS.md del proyecto con sus saltos de línea tal cual (un archivo con CRLF no se normaliza), o None."""
+    try:
+        with open(str(pathlib.Path(root) / "AGENTS.md"), encoding="utf-8", newline="") as handle:
+            return handle.read()
+    except (OSError, ValueError):
+        return None
+
+
+def prose_lines(text):
+    """(posición, línea) de las líneas que no están dentro de un bloque de código: un `#` de un comando no es un
+    encabezado."""
+    position, fence = 0, None
+    for line in text.splitlines(keepends=True):
+        mark = FENCE.match(line)
+        if fence is None and mark:
+            fence = mark.group(1)  # abre un bloque: lo cierra una línea con el mismo carácter y al menos igual de larga
+        elif fence is not None:
+            if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) \
+                    and not line[mark.end():].strip():
+                fence = None
+        else:
+            yield position, line
+        position += len(line)
+
+
+def has_dod(text):
+    return any(DOD_HEADING.match(line) for _, line in prose_lines(text))
+
+
+def dod_notice(root, plan):
+    """Antes de una sesión 3: None si AGENTS.md tiene `## DoD`; si no, el aviso con una plantilla mínima para
+    completarla con lo que el proyecto ya tiene (los tests unitarios del módulo que cambie y la compilación de la
+    variante medida), sin agregar herramientas."""
+    agents = read_agents(root)
+    if agents is not None and has_dod(agents):
+        return None
+    found = INSTALL_TASK.search(plan.get("instalar") or "")
+    assemble = "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
+    if found:  # del 'instalar' del plan: con su módulo si lo trae; sin módulo, la tarea sin ':' (la busca en todos)
+        assemble = "./gradlew -q %sassemble%s" % (":" + found.group(1) if found.group(1) else "", found.group(2))
+    return {"tipo": "avisos", "crudo": True,
+            "titulo": "%s: la sesión 3 corre \"los comandos de ## DoD\" y sin esa sección tendría que adivinar qué validar. "
+                      "Agrégala a AGENTS.md antes de abrir el chat, con lo que el proyecto ya tiene (sin herramientas "
+                      "nuevas). Plantilla" % ("AGENTS.md no tiene `## DoD`" if agents is not None else
+                                              "No hay AGENTS.md en %s (o no se pudo leer)" % root),
+            "lineas": ["## DoD", "",
+                       "1. `./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests unitarios del módulo que cambie (la "
+                       "tarea real: `./gradlew :<módulo>:tasks --all | grep UnitTest`)",
+                       "2. `%s`: compila la variante medida" % assemble]}
+
+
+def performance_section(text):
+    """(inicio, fin) de la sección de rendimiento de un AGENTS.md: desde la línea que sigue a su encabezado hasta el
+    próximo encabezado de su nivel o superior (o el final), sin contar lo que está dentro de un bloque de código. Si
+    hay más de una, la que ya tiene el bloque de estado; si no, la primera. None si no hay sección."""
+    headings = [(position, line, ANY_HEADING.match(line)) for position, line in prose_lines(text)]
+    headings = [(position, line, found) for position, line, found in headings if found]
+    sections = []
+    for index, (position, line, _) in enumerate(headings):
+        own = PERF_HEADING.match(line)
+        if not own:
+            continue
+        level = len(own.group(1))
+        end = next((later for later, _, found in headings[index + 1:] if len(found.group(1)) <= level), len(text))
+        sections.append((position + len(line), end))
+    if not sections:
+        return None
+    return next((section for section in sections if AGENTS_BLOCK[0] in text[section[0]:section[1]]), sections[0])
+
+
+def agents_state(body):
+    """{campo: valor} del bloque de estado que perf.py mantiene en la sección de rendimiento."""
+    found = re.search(re.escape(AGENTS_BLOCK[0]) + r"(.*?)" + re.escape(AGENTS_BLOCK[1]), body, re.S)
+    inner = " ".join((found.group(1) if found else "").split())
+    fields = {}
+    for key in AGENTS_FIELDS:
+        value = re.search(r"%s: (.*?)(?= · |$)" % re.escape(key), inner)
+        if value and value.group(1).strip():
+            fields[key] = value.group(1).strip()
+    return fields
+
+
+def update_agents_state(root, humo=None, http=None):
+    """Mantiene, dentro de la sección de rendimiento del AGENTS.md del proyecto, un bloque corto entre marcadores con
+    el estado del setup: si la instrumentación está en el repo, cómo salió la prueba de humo, si hay secciones HTTP y
+    con qué versión de la skill. Solo cambia los campos que recibe; no toca nada fuera del bloque ni fuera de la
+    sección, y si no hay sección no la crea. Devuelve la línea que se le dice al usuario ('' si nada cambió)."""
+    path = pathlib.Path(root) / "AGENTS.md"
+    text = read_agents(root)
+    if text is None:
+        return "· No hay AGENTS.md en %s (o no se pudo leer): el estado del setup no queda anotado" % root
+    section = performance_section(text)
+    if section is None:
+        return ("· AGENTS.md no tiene una sección de rendimiento (## Rendimiento o ## Performance): no la creo, así que el "
+                "estado del setup no queda anotado ahí (la escribe la sesión 0: setup.md · Cierre del setup)")
+    start, end = section
+    body = text[start:end]
+    fields = agents_state(body)
+    fields["instrumentación en el repo"] = "sí" if find_instrumentation(root)[1] else "no (no encontré PerfHooks.kt)"
+    if humo:
+        fields["prueba de humo"] = humo
+    if http:
+        fields["secciones HTTP"] = http
+    fields.setdefault("prueba de humo", "sin correr")
+    fields.setdefault("secciones HTTP", "sin dato")
+    line = "- %s: %s · hb-performance %s" % (AGENTS_LEAD, " · ".join("%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS),
+                                             VERSION)
+    eol = "\r\n" if "\r\n" in text else "\n"  # el salto de línea que ya usa el archivo
+    block = eol.join((AGENTS_BLOCK[0], line, AGENTS_BLOCK[1]))
+    pattern = re.compile(re.escape(AGENTS_BLOCK[0]) + r".*?" + re.escape(AGENTS_BLOCK[1]), re.S)
+    if pattern.search(body):
+        new_body = pattern.sub(lambda _: block, body, count=1)
+    elif AGENTS_BLOCK[0] in body:  # un marcador de apertura suelto: el bloque va en su lugar
+        new_body = body.replace(AGENTS_BLOCK[0], block, 1)
+    else:
+        stripped = body.rstrip("\r\n")
+        new_body = (stripped + eol * 2 if stripped.strip() else eol) + block + eol + (eol if end < len(text) else "")
+    if new_body == body:
+        return ""
+    try:
+        with open(str(path), "w", encoding="utf-8", newline="") as handle:
+            handle.write(text[:start] + new_body + text[end:])
+    except OSError as error:  # no poder anotarlo no puede romper la prueba de humo ni la corrida de prueba
+        return "⚠ No pude escribir %s (%s): el estado del setup no quedó anotado ahí" % (path, error.strerror or error)
+    return "✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento (%s)" % " · ".join(
+        "%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS)
+
+
+def http_state(current, seen, source):
+    """El valor de "secciones HTTP" después de una corrida de prueba: None si no hay nada nuevo que anotar. Una
+    corrida que las ve las anota una vez (no cambia la fecha en cada prueba). Una que las esperaba y no las vio lo dice
+    solo si nadie las vio antes: un flujo que no hace llamadas no desmiente la red que ya se comprobó (su aviso queda
+    en advertencias.json)."""
+    today = datetime.date.today().isoformat()
+    if (current or "").startswith("sí"):
+        return None
+    return "sí (%s, %s)" % (source, today) if seen else "sin medir: la %s del %s no trajo ninguna" % (source, today)
 
 
 def cmd_capturar(args, plan=None):
@@ -3028,8 +5131,34 @@ def cmd_capturar(args, plan=None):
             ". Si alguna no hace falta de verdad, dale un valor por defecto en el script (${VAR:-}) o usa --forzar"
         raise Precondicion("faltan variables de entorno que el flujo '%s' necesita (%s): %s. Expórtalas en esta "
                            "terminal antes de correr el comando; si lo corre un agente, antes de abrir el agente (solo ve "
-                           "las de la terminal donde se abrió)%s" % (flow_name, origin, ", ".join(absent), hint))
+                           "las de la terminal donde se abrió)%s" % (flow_name, origin, ", ".join(absent), hint)).con(
+            seguir=env_steps(absent) + [("corre de nuevo el comando, en esta misma terminal", same_command())])
     phase = "antes" if args.prueba else normalize_phase(args.fase)
+    csv_path = folder / "metricas.csv"
+    target = 1 if args.prueba else args.corridas
+    progress = {"validas": 0}
+
+    def guide():
+        """Deja en GUIA qué quedó guardado y el comando para seguir, según las corridas válidas de esta tanda."""
+        if args.prueba:
+            GUIA.update(guardado="nada: la corrida de prueba no guarda métricas", seguir=[(RETRY, same_command())])
+            return
+        done = progress["validas"]
+        if not done:
+            kept = ("las corridas anteriores de %s ya se descartaron por --rehacer (sus trazas quedaron en "
+                    "%s-descartada-<hora>/)" % (phase, phase) if progress.get("descartada")
+                    else "lo que %s ya tenía sigue igual" % csv_path)
+            GUIA.update(guardado="ninguna corrida de esta tanda (0 de %d válidas de %s); %s" % (target, phase, kept),
+                        seguir=[(RETRY, same_command())])
+            return
+        GUIA.update(
+            guardado="%d de %d corridas válidas de %s en %s (y su registro en fases.json)" % (done, target, phase, csv_path),
+            seguir=[("completa la fase con las %d corridas que faltan (las %d guardadas cuentan si nada cambió)"
+                     % (target - done, done), same_command(corridas=target - done, sin=("--rehacer",))),
+                    ("o, si cambió el build o las condiciones, repite la fase entera",
+                     same_command(corridas=target, sin=("--rehacer",)) + " --rehacer")])
+
+    guide()
     package = plan["paquete"]
     hz = args.hz or (plan.get("hz") if isinstance(plan.get("hz"), int) else None)
     route = None if startup else args.recorrido or flow.get("recorrido")
@@ -3041,13 +5170,36 @@ def cmd_capturar(args, plan=None):
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
     sdk, warnings, build = preflight(adb, package, args.forzar)
+    if not args.prueba and not args.forzar:
+        # Antes de compilar y de tocar nada: medir una fase con un build depurable cuando lo demás se midió (o se va a
+        # medir) con el de medición hace perder la fase entera.
+        stop = debuggable_stop(folder, phase, flow_name, build, plan, args.rehacer)
+        if stop:
+            raise Precondicion(stop).con(
+                seguir=[("instala el build de medición", install_command(plan, project_root(folder).resolve())),
+                        ("y repite la medición", same_command())])
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
+    # Antes de la traza y de compilar: las opciones de desarrollador que cambian lo que se mide quedan en fases.json.
+    dev_settings = read_dev_settings(adb)
+    if dev_settings_text(dev_settings):
+        fix, back = dev_settings_commands(dev_settings, serial, project_root(folder).resolve())
+        print("⚠ Opciones de desarrollador fuera de lo normal: %s. %s" % (dev_settings_text(dev_settings), DEV_SETTINGS_WHY))
+        print("    Dejarlas normales:            %s" % fix)
+        print("    Volverlas a como estaban:     %s" % back)
+        if not dev_setting_normal("always_finish_activities", dev_settings.get("always_finish_activities")):
+            print("    Además, %s." % ALWAYS_FINISH_NOTE)
+        save_dev_restore(folder, dev_settings, back)
     commit, dirty = git_info()
+    build_warnings = []
     if not args.prueba:
-        warnings += check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
-    for warning in warnings:
-        print("⚠ " + warning)
+        try:
+            build_warnings = check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
+        except Precondicion as error:
+            raise error.con(seguir=[("instala el build con la mejora", install_command(plan, project_root(folder).resolve())),
+                                    ("y repite la medición", same_command())])
+    for text in warnings + build_warnings:
+        print("⚠ " + text)
     folder.mkdir(parents=True, exist_ok=True)
     free_gb = shutil.disk_usage(str(folder)).free / 1e9
     if free_gb < 3:
@@ -3060,7 +5212,6 @@ def cmd_capturar(args, plan=None):
     queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), package,
                                      {"INPUT_GLOB": input_glob}))]
     queries += custom_queries(flow, folder, package)
-    csv_path = folder / "metricas.csv"
     out_dir = folder / ("prueba" if args.prueba else phase)
     out_dir.mkdir(parents=True, exist_ok=True)
     known = known_metrics(csv_path, flow_name)
@@ -3095,6 +5246,8 @@ def cmd_capturar(args, plan=None):
             print("… dejando la app en el punto de partida ('preparar')", flush=True)
             code, tail, log = run_prepare(prepare_command, folder, mask_names, capture=bool(declared))
             if code != 0:
+                # Entre paréntesis: un `exit` o un `;` del comando no cierran ni desordenan la terminal de quien lo pega.
+                by_hand = "cd %s && ( %s )" % (shlex.quote(os.getcwd()), mask_secrets(prepare_command, mask_names))
                 if not prepare_shown:  # una vez por captura: las corridas siguientes fallan igual
                     prepare_shown.append(True)
                     if tail:
@@ -3104,8 +5257,16 @@ def cmd_capturar(args, plan=None):
                     else:
                         print("✖ 'preparar' falló (código %d) sin dejar salida: si el comando la manda a /dev/null (o el "
                               "flujo no declara requiere_env, y entonces solo se lee su salida de error), córrelo a "
-                              "mano en tu terminal para ver el error" % code)
-                raise Precondicion("'preparar' terminó con código %d" % code)
+                              "mano en tu terminal para ver el error:" % code)
+                        print("    %s" % by_hand)
+                # En cada fallo, no solo en el primero: un 'preparar' intermitente puede volver a fallar después de funcionar.
+                GUIA["previos"] = [("corre 'preparar' a mano para ver por qué falla (si manda su salida a /dev/null, "
+                                    "quítale esa parte para verla)", by_hand)]
+                failure = Precondicion("'preparar' terminó con código %d: no dejó la app en el punto de partida (un "
+                                       "login que no entró, una pantalla que no cargó a tiempo o el backend caído)" % code)
+                failure.corto = "'preparar' terminó con código %d" % code
+                raise failure
+            GUIA["previos"] = []  # este 'preparar' funcionó: un corte posterior ya no pide correrlo a mano
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
             component = launcher_activity(adb, package)
             if component:
@@ -3125,9 +5286,22 @@ def cmd_capturar(args, plan=None):
     elif not args.sin_compilar:
         compilation = fix_compilation(adb, package, args.compilacion or plan.get("compilacion", "completa"), folder, build,
                                       force=getattr(args, "recompilar", False))
+        if prepare_command:
+            # Fijar la compilación deja la app detenida: un respiro antes del primer 'preparar' (el del calentamiento
+            # o, con --calentamiento 0, el de la primera corrida). Fuera de toda traza.
+            settle(WARMUP_SETTLE_S)
     if args.rehacer and not args.prueba:
+        had_runs = measured_runs(folder, read_phases(folder) if isinstance(read_phases(folder), dict) else {}, phase,
+                                 flow_name)
         discard_phase(folder, csv_path, phase, flow_name)
+        forget_notes(folder, phase, flow_name)
+        progress["descartada"] = bool(had_runs)
+        guide()
         known = known_metrics(csv_path, flow_name)
+    # x + Enter corta la corrida en curso: solo con un recorrido que es un comando y una terminal interactiva.
+    cutter = RunCutter.abrir() if not startup and recorrido != "manual" else None
+    if cutter is not None:
+        print(CUT_HINT)
     warmups = 0 if args.prueba else args.calentamiento
     for i in range(warmups):
         if recorrido != "manual":
@@ -3142,34 +5316,77 @@ def cmd_capturar(args, plan=None):
             except Precondicion as error:
                 if not prepare_command:
                     raise
-                print("⚠ calentamiento: %s" % error)
+                print("⚠ calentamiento: %s" % getattr(error, "corto", error))
                 continue
-            reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups))
+            reason = drive(recorrido, "calentamiento %d/%d (no cuenta)" % (i + 1, warmups), cutter)
+            # Entre dos corridas pasan varios segundos (cerrar la traza, descargarla, procesarla) antes del 'preparar'
+            # siguiente; después del calentamiento no pasaba ninguno, y el primer 'preparar' medido encontraba la app
+            # todavía terminando el recorrido. Va fuera de toda traza: no cambia lo que se mide.
+            settle(WARMUP_SETTLE_S)
         if reason:
             print("⚠ calentamiento: %s" % reason)
 
-    target = 1 if args.prueba else args.corridas
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
+    if not args.prueba:
+        save_capture_warnings(folder, phase, flow_name, warnings + build_warnings)
+
+    def save_record(partial=False):
+        """El registro de la fase en fases.json con las corridas válidas de esta tanda. También cuando la tanda se
+        corta (Ctrl+C, inválidas seguidas): lo que ya está en el CSV queda con su build, su commit y su configuración."""
+        seen_hz = {h for h in run_hz if h}
+        record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
+                  "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
+                  "configs": [config_label(used_config)]}
+        if seen_hz:
+            record["hz_corridas"] = run_hz
+        rate_warning = hz_warning(hz, seen_hz)
+        if rate_warning:
+            record["avisos"] = [rate_warning]
+            print("⚠ " + rate_warning)
+        if environment["emulador"] or environment["software"]:
+            record["entorno"] = environment
+        if dev_settings:
+            record["ajustes"] = dev_settings
+        record.update(build)
+        if partial:  # la tanda se cortó: `siguiente` ofrece completar la fase antes de darla por medida
+            record["faltan"] = {flow_name: target - valid}
+        write_phase(folder, phase, record, flow_name)
+
+    def mark_invalid(reason):
+        if not args.prueba:
+            count_invalid(folder, phase, flow_name, reason)
+
+    def on_failure():
+        if valid and not args.prueba:
+            save_record(partial=True)
+
+    GUIA["al_fallar"] = on_failure  # lo llama main() si la tanda se corta: las válidas no quedan sin su registro
     while valid < target:
         if consecutive >= MAX_CONSECUTIVE_INVALID:
             raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
                                         "suerte. Revisa el recorrido, 'preparar' o el backend y vuelve a correr; las "
                                         "%d válidas quedan guardadas" % (consecutive, last_invalid, valid))
         if attempts >= max_attempts(target):
-            raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones"
-                                        % (valid, target, attempts))
+            raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones (el "
+                                        "recorrido, 'preparar', el backend); los motivos de cada corrida inválida están "
+                                        "más arriba" % (valid, target, attempts))
         attempts += 1
         try:
             prepare()
         except Precondicion as error:
             if not prepare_command or args.prueba:
+                if args.prueba and args.plan and prepare_command and hasattr(error, "corto"):
+                    save_test_warnings(folder, flow_name, [warning(
+                        "preparar", "la corrida de prueba no empezó: %s" % error,
+                        "'preparar' falla: corrige el comando o el flow que deja la app en el punto de partida")])
                 raise
             # 'preparar' falló (un login que no entró, un backend caído): la corrida no vale, se repite y cuenta
             # para el tope de inválidas seguidas.
-            consecutive, last_invalid = consecutive + 1, str(error)
-            print("✖ corrida %d inválida: %s (se repite)" % (n, error))
+            consecutive, last_invalid = consecutive + 1, getattr(error, "corto", str(error))
+            mark_invalid(last_invalid)
+            print("✖ corrida %d inválida: %s (se repite)" % (n, last_invalid))
             n += 1
             continue
         if sdk < 31:
@@ -3181,7 +5398,16 @@ def cmd_capturar(args, plan=None):
         # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida nueva
         # del proceso medido dentro de la corrida la invalida.
         exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
-        reason, extra = record_run(adb, config, recorrido, label, local, startup, package)
+        reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter)
+        if reason == CUT_REASON:
+            if args.prueba:
+                raise CorridasInsuficientes("la corrida de prueba se cortó a mano (x + Enter): su traza se descartó sin "
+                                            "procesarla")
+            print("✖ corrida %d inválida: %s (x + Enter): su traza se descartó sin procesarla; se repite" % (n, CUT_REASON))
+            mark_invalid(CUT_REASON)
+            consecutive, last_invalid = consecutive + 1, CUT_REASON
+            n += 1
+            continue
         save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
         died = not invalid and app_died(adb, package)
@@ -3256,21 +5482,29 @@ def cmd_capturar(args, plan=None):
                 print("  " + mapping_hint())
         if invalid and args.prueba:
             if not info:  # el recorrido se cortó (o la app se cayó): la traza igual dice hasta dónde llegó
-                try:
-                    partial = run_tp_batch(tp, local, queries[:1])["metricas"]
-                    info = trace_metrics(trace_rows(*partial[-1]), hz, flow, known, sdk)[2] if partial else {}
-                except PerfError:
-                    info = {}
+                info = partial_info(tp, local, queries, hz, flow, known, sdk)
             print("Secciones propias: %s" % sections_summary(info.get("nombres", {})))
             if info:
                 print("\n".join(marks_report(info)))
+            if args.plan:
+                unseen = [mark for mark, _, seen in info.get("marcas_plan") or [] if not seen]
+                save_test_warnings(folder, flow_name, [warning(
+                    "invalida", "la corrida de prueba fue inválida: %s%s" % (
+                        invalid, " (marcas del plan que no salieron: %s)" % ", ".join(unseen) if unseen else ""),
+                    "la corrida de prueba fue inválida (%s): corrige el recorrido, 'preparar' o las marcas del plan"
+                    % invalid, [place for mark in unseen for place in find_mark_sources(project_root(folder).resolve(), mark)])])
             raise CorridasInsuficientes("la corrida de prueba fue inválida: %s (traza en %s)" % (invalid, local))
         if invalid:
+            if not info:  # el recorrido terminó mal (o la app se cayó): la traza igual dice hasta dónde llegó
+                info = partial_info(tp, local, queries, hz, flow, known, sdk)
+            reached = reach_text(info)
             target_name = local.with_name("%s_%d_invalida_%s.perfetto-trace" % (flow_name, n, slug(invalid)))
             local.rename(target_name)
             if not args.sin_comprimir:
                 compress(target_name)
             print("✖ corrida %d inválida: %s (traza guardada para auditoría)" % (n, invalid))
+            print("  Hasta dónde llegó: %s" % reached)
+            mark_invalid(invalid)
             consecutive, last_invalid = consecutive + 1, invalid
             n += 1
             continue
@@ -3302,10 +5536,34 @@ def cmd_capturar(args, plan=None):
                       "en una vez por carga (setup.md · Contenido visible)" % (name, count))
             if startup and "ttfd_ms" not in {m[0] for m in metrics}:
                 print("⚠ Sin ttfd_ms: la app no llama a reportFullyDrawn() (ver setup.md · Contenido visible)")
-            gap = "" if getattr(args, "sin_red", False) else network_gap(project_root(folder).resolve(), plan, flow,
-                                                                         info["nombres"])
+            root = project_root(folder).resolve()
+            gap, unwired = ("", []) if getattr(args, "sin_red", False) else network_gap(root, plan, flow, info["nombres"],
+                                                                                        detail=True)
             if gap and not getattr(args, "red_obligatoria", False):
                 print("⚠ " + gap)
+            cut = at_limit(info["nombres"])
+            if cut:
+                print("⚠ %d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están cortados (por "
+                      "ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno. Actualiza la "
+                      "instrumentación entre investigaciones (perf.py instrumentar --actualizar): HttpSectionName acorta "
+                      "desde la izquierda y conserva el final de la ruta (setup.md · Nombres de endpoint largos)"
+                      % (len(cut), SECTION_NAME_MAX, cut[0][-40:]))
+            args.resultado = {"http": info.get("http", 0), "sin_red": bool(gap)}  # lo lee humo
+            if args.plan:
+                seen = info.get("http", 0) > 0
+                if seen or gap:  # una prueba que ve la red, o que la esperaba y no la vio, deja el estado al día
+                    agents = read_agents(root)
+                    section = performance_section(agents) if agents is not None else None
+                    current = agents_state(agents[section[0]:section[1]]).get("secciones HTTP") if section else None
+                    state = http_state(current, seen, "corrida de prueba")
+                    note = update_agents_state(root, http=state) if state else ""
+                    if note:
+                        print(note)
+                pending = test_run_warnings(root, hz, info, gap, unwired, settings=dev_settings, serial=serial)
+                save_test_warnings(folder, flow_name, pending)
+                if pending:
+                    print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` los lista con el texto para "
+                          "un chat; una corrida de prueba sin avisos los da por resueltos" % (len(pending), folder / NOTES_FILE))
             print("Traza: %s" % saved)
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
@@ -3313,6 +5571,7 @@ def cmd_capturar(args, plan=None):
                 print_next(folder, plan, flow_name)
             return
         append_rows(csv_path, [metric_row(phase, flow_name, n, m[0], m[1], m[2], m[3]) for m in metrics])
+        save_timeline(out_dir, flow_name, n, info.get("linea"))
         known |= {m[0] for m in metrics}
         print(run_line("%d/%d" % (valid + 1, target), size_mb, metrics))
         if info.get("faltantes"):
@@ -3320,20 +5579,13 @@ def cmd_capturar(args, plan=None):
         run_hz.append(info.get("hz_traza"))
         valid += 1
         n += 1
-    seen_hz = {h for h in run_hz if h}
-    record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
-              "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
-              "configs": [config_label(used_config)]}
-    if seen_hz:
-        record["hz_corridas"] = run_hz
-    rate_warning = hz_warning(hz, seen_hz)
-    if rate_warning:
-        record["avisos"] = [rate_warning]
-        print("⚠ " + rate_warning)
-    if environment["emulador"] or environment["software"]:
-        record["entorno"] = environment
-    record.update(build)
-    write_phase(folder, phase, record, flow_name)
+        progress["validas"] = valid
+        guide()
+    GUIA["al_fallar"] = None
+    save_record()
+    GUIA.update(guardado="las %d corridas válidas de %s en %s y su registro en fases.json" % (valid, phase, csv_path),
+                seguir=[("pide el paso siguiente", "cd %s && python3 -I %s siguiente --carpeta %s"
+                         % (shlex.quote(os.getcwd()), shlex.quote(str(HERE / "perf.py")), shlex.quote(str(folder))))])
     rows = read_rows(csv_path)
     table, hidden = summary_rows(rows, plan, phases=(phase,), flows=(flow_name,), trust=frames_trust(folder))
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
@@ -4184,6 +6436,21 @@ def cmd_diagnostico(args):
                % (BLOCKED_SHARE_MIN * 100, fmt(BLOCKED_D_MIN_MS))]
     target = folder / ("diagnostico.md" if phase == "antes" else "diagnostico-%s.md" % phase)
     target.write_text("\n".join(md) + "\n", encoding="utf-8")
+    if not wanted:  # el diagnóstico entero: lo que no midió va a "Advertencias para el diagnóstico" de estado.md
+        gaps = ["`%s`: %s (no quiere decir que no ocurra)" % (name, not_measured[name]) for name in sorted(not_measured)]
+        if unknown:
+            gaps.append("sin tabla y con configuración desconocida (trazas de una versión anterior: no se afirma que no "
+                        "ocurra): %s" % ", ".join(sorted(set(unknown))))
+        gaps += ["`%s`: no disponible, trace_processor no pudo correr la consulta" % name for name in sorted(failed)]
+        notes = read_notes(folder)
+        bucket = note_bucket(notes, "diagnostico", phase)
+        if gaps:
+            bucket[flow_name] = [one_line(text) for text in gaps]
+        else:
+            bucket.pop(flow_name, None)
+        if not bucket:
+            notes["diagnostico"].pop(phase)
+        save_notes(folder, notes)
     if blocked:
         print("· El hilo principal espera dentro de sus frames más largos (%s %% del tiempo): %s deja una captura pendiente "
               "con --config completa para saber por qué." % (fmt(round(blocked[0] * 100, 1)), target.name))
@@ -4205,7 +6472,11 @@ def cmd_resumen(args):
     if flagged:
         print("⚠ %d con avisos: con 'pocas corridas' suma corridas; con 'inestable' (CV > %s %%) estabiliza las "
               "condiciones antes de comparar." % (len(flagged), fmt(CV_MAX)))
+    if getattr(args, "solo_imprimir", False):
+        print("· --solo-imprimir: no se escribió resumen.md ni la sección Métricas de estado.md")
+        return
     write_summary(args.csv, rows, plan)
+    print("✔ %s escrito" % pathlib.Path(args.csv).with_name("resumen.md"))
 
 
 def definition_notes(results):
@@ -4261,6 +6532,7 @@ def builds_table(folder):
                      "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
                                                                       after.get("compilacion") or "sin registrar"))
     notes += phase_warnings(folder)
+    notes += dev_settings_notes(folder)
     level, motive = frames_trust(folder)
     if level != "ok":
         notes.append("las fases se midieron en un entorno con frames %s (%s): %s" % (
@@ -4270,16 +6542,19 @@ def builds_table(folder):
     return table, notes
 
 
-def logrado_rows(plan, results):
+def logrado_rows(plan, results, readable=False):
     by_metric = {(r["flujo"], r["metrica"]): r for r in results}
     default_flow = next(iter(plan.get("flujos") or {"": None}))
     out = []
     for item in plan.get("mejoras", []):
         r = by_metric.get((item.get("flujo") or default_flow, item.get("metrica")))
         unit = r["unidad"] if r else ""
+        show = nice if readable else fmt  # estado.md conserva el formato de siempre; el reporte, el legible
+        change = "—" if r is None else (change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—") \
+            if readable else fmt_pct(r["delta_pct"])
         out.append([item["id"], improvement_title(item), item.get("metrica", "—"),
-                    fmt(r["antes"]["mediana"], unit) if r else "—", item.get("esperado", "—"),
-                    fmt(r["despues"]["mediana"], unit) if r else "—", fmt_pct(r["delta_pct"]) if r else "—",
+                    show(r["antes"]["mediana"], unit) if r else "—", item.get("esperado", "—"),
+                    show(r["despues"]["mediana"], unit) if r else "—", change if r else "—",
                     r["veredicto"] if r else "—", item.get("estado", "—"), improvement_result(item, r)])
     return out
 
@@ -4535,6 +6810,9 @@ def unfilled_parts(sections, findings=False):
         summary = pick("resumen ejecutivo", "resumen")
         if summary is not None and not without_placeholders(summary):
             out.append("Resumen ejecutivo (de 3 a 5 líneas)")
+        business = pick(MANAGEMENT_SECTION)
+        if business is not None and not without_placeholders(business):
+            out.append("Resumen para gerencia (de 3 a 5 líneas, sin términos técnicos)")
         table = pick("hallazgos")
         if table is not None:
             rows = parse_table(table)[1]
@@ -4596,12 +6874,18 @@ def inline_md(text):
 NUMERIC_CELL = re.compile(r"[-+−]?[\d.,]+ ?[a-zA-Z%]{0,3}( \([-+−]?[\d.,]+ ?%?\))?( ?[–/] ?[-+−]?[\d.,]+ ?[a-zA-Z%]{0,3})?|—")
 
 
+RAW_HTML = re.compile(r"^\s*(?:<details(?: open)?>|</details>|<summary>[^<>]*</summary>)\s*$")
+
+
 def md_to_html(text):
     """Markdown mínimo: títulos, párrafos, listas, tablas y bloques de código."""
     lines, out, i = text.splitlines(), [], 0
     while i < len(lines):
         line = lines[i]
         if not line.strip():
+            i += 1
+        elif RAW_HTML.match(line):  # el bloque desplegable de una tabla larga: HTML sin scripts
+            out.append(line.strip())
             i += 1
         elif line.startswith("```"):
             block = []
@@ -4610,7 +6894,13 @@ def md_to_html(text):
                 block.append(lines[i])
                 i += 1
             i += 1
-            out.append("<pre><code>%s</code></pre>" % e("\n".join(block)))
+            if line.strip() == "```diff":
+                kind = (lambda row: "add" if row.startswith("+") else "del" if row.startswith("-") else
+                        "file" if row.startswith("# ") else "hunk" if row.startswith("@@") else "ctx")
+                out.append('<pre class="diff"><code>%s</code></pre>' % "".join(
+                    '<span class="%s">%s</span>' % (kind(row), e(row) or " ") for row in block))
+            else:
+                out.append("<pre><code>%s</code></pre>" % e("\n".join(block)))
         elif line.startswith(">"):
             quote = []
             while i < len(lines) and lines[i].startswith(">"):
@@ -4644,25 +6934,260 @@ def md_to_html(text):
             out.append("<%s>%s</%s>" % (tag, "".join("<li>%s</li>" % inline_md(it) for it in items), tag))
         else:
             para = []
-            while i < len(lines) and lines[i].strip() and not re.match(r"\s*(#|>|\||```|[-*]\s|\d+\.\s)", lines[i]):
+            while i < len(lines) and lines[i].strip() and not re.match(r"\s*(#|>|\||```|[-*]\s|\d+\.\s)", lines[i]) \
+                    and not RAW_HTML.match(lines[i]):
                 para.append(lines[i].strip())
                 i += 1
             out.append("<p>%s</p>" % inline_md(" ".join(para)))
     return "\n".join(out)
 
 
-def bars_svg(result):
-    unit, before, after = result["unidad"], result["antes"]["mediana"], result["despues"]["mediana"]
-    top = max(abs(before), abs(after)) or 1
-    width, label_w, rows = 360, 70, []
-    for i, (label, value, css) in enumerate((("Antes", before, "bar-before"), ("Después", after, "bar-after"))):
-        y = 6 + i * 26
-        w = max(2, abs(value) / top * (width - label_w - 90))
-        rows.append('<text x="0" y="%d" class="bar-label">%s</text>' % (y + 14, label))
-        rows.append('<rect x="%d" y="%d" width="%.1f" height="18" rx="3" class="%s"/>' % (label_w, y, w, css))
-        rows.append('<text x="%.1f" y="%d" class="bar-value">%s</text>' % (label_w + w + 6, y + 14, e(fmt(value, unit))))
-    return ('<svg viewBox="0 0 %d 60" role="img" aria-label="%s: antes %s, después %s">%s</svg>'
-            % (width, e(result["metrica"]), e(fmt(before, unit)), e(fmt(after, unit)), "".join(rows)))
+# ── Medidas legibles y gráficos en línea (SVG) ───────────────────────────────
+# Los reportes se leen solos: cada número con su unidad y en la escala que se entiende, los gráficos dibujados aquí
+# (sin scripts ni recursos externos: el HTML se abre sin conexión y se adjunta a un correo) y, debajo de cada uno, una
+# frase que dice qué muestra y qué significa. Los gráficos no dependen solo del color: cada barra lleva su rótulo y las
+# series que se comparan tienen trama.
+
+def trim(value, decimals):
+    text = ("%%.%df" % decimals) % value
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def nice(value, unit=""):
+    """Un valor con su unidad, en la escala que se entiende y redondeado con criterio: 1.81 s, 450 ms, 4.2 ms, 12.5 %,
+    3 llamadas. 'sin dato' si no hay valor."""
+    if value is None:
+        return "sin dato"
+    if unit == "ms":
+        size = abs(value)
+        if size >= 10000:
+            return "%s s" % trim(value / 1000, 1)
+        if size >= 1000:
+            return "%s s" % trim(value / 1000, 2)
+        if size >= 10:
+            return "%s ms" % trim(value, 0)
+        return "%s ms" % trim(value, 1)
+    if unit in ("%", "MB"):
+        return "%s %s" % (trim(value, 1), unit)
+    text = trim(value, 0) if float(value).is_integer() or abs(value) >= 100 else trim(value, 1)
+    return "%s %s" % (text, unit) if unit else text
+
+
+def nice_signed(value, unit=""):
+    """Una diferencia legible y con signo: +120 ms, −0.7 s."""
+    if value is None:
+        return "—"
+    return ("+" if value > 0 else "−" if value < 0 else "") + nice(abs(value), unit)
+
+
+def change_pct(before, after):
+    """La variación en porcentaje, con signo ("−39 %"), o '' si no se puede calcular."""
+    if before in (None, 0) or after is None:
+        return ""
+    value = (after - before) / abs(before) * 100
+    return "%s%s %%" % ("+" if value > 0 else "−" if value < 0 else "", trim(abs(value), 0 if abs(value) >= 10 else 1))
+
+
+def axis_scale(top, unit, plain=False, basis=None):
+    """(divisor, unidad del eje, paso) para un eje de 0 a `top`: los tiempos de un segundo o más, en segundos; en el
+    reporte para gerencia, desde 100 ms, igual que sus valores (plain_time). `basis` (opcional) es el valor que decide la
+    unidad: la mediana más alta, para que el eje use la misma unidad que los valores escritos."""
+    basis = top if basis is None else basis
+    divisor, label = (1000.0, "s") if unit == "ms" and basis >= (100 if plain else 1000) else (1.0, unit)
+    span = (top / divisor) or 1
+    raw = span / 4
+    power = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
+    step = next(m * power for m in (1, 2, 2.5, 5, 10) if m * power >= raw)
+    return divisor, label, step
+
+
+def svg_axis(x0, width, y, top, unit, plain=False, unit_top=None):
+    """El eje horizontal con 3 a 6 marcas y la unidad. Devuelve (partes del SVG, función valor → x)."""
+    top = top or 1
+    divisor, label, step = axis_scale(top, unit, plain, unit_top)
+    ticks, value = [], 0.0
+    while value * divisor <= top * 1.0001 and len(ticks) < 8:
+        ticks.append(value)
+        value += step
+    end = max(ticks[-1] + step if ticks[-1] * divisor < top else ticks[-1], step) * divisor
+    scale = (lambda v: x0 + max(0.0, v) / end * width)
+    parts = ['<line x1="%d" y1="%d" x2="%d" y2="%d" class="axis"/>' % (x0, y, x0 + width, y)]
+    for tick in ticks + ([end / divisor] if ticks[-1] * divisor < end else []):
+        x = scale(tick * divisor)
+        parts.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" class="tick"/>' % (x, y, x, y + 4))
+        parts.append('<text x="%.1f" y="%d" class="axis-label" text-anchor="middle">%s</text>'
+                     % (x, y + 16, e(trim(tick, 2))))
+    parts.append('<text x="%d" y="%d" class="axis-label" text-anchor="end">%s</text>' % (x0 + width, y + 30, e(
+        {"s": "segundos", "ms": "milisegundos"}.get(label, (PLAIN_UNITS.get(label, label) if plain else label) or "valor"))))
+    return parts, scale
+
+
+CHART_IDS = {"n": 0}
+
+
+def chart_id():
+    CHART_IDS["n"] += 1
+    return "c%d" % CHART_IDS["n"]
+
+
+def hatch_defs(uid):
+    return ('<defs><pattern id="%s-h" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">'
+            '<rect width="6" height="6" class="hatch-bg"/><line x1="0" y1="0" x2="0" y2="6" class="hatch"/></pattern></defs>'
+            % uid)
+
+
+def range_chart(series, unit, label, noise=None, plain=False):
+    """Barras horizontales, una por serie (Antes, Control, Después u Hoy): el largo es la mediana, la línea fina el
+    rango de las corridas (más rápida a más lenta) y el valor va escrito. `noise` (opcional): el ruido de medición,
+    marcado como una franja alrededor de la mediana de la primera serie. series: [(rótulo, mediana, mín, máx, estilo)],
+    con estilo 'before', 'control' (con trama) o 'after'."""
+    series = [item for item in series if item[1] is not None]
+    if not series:
+        return ""
+    uid = chart_id()
+    top = max(max(item[3] if item[3] is not None else item[1], item[1]) for item in series)
+    x0, width, row = 86, 300, 30
+    pad = 14 if noise else 0  # lugar para el rótulo del ruido, arriba
+    height = 14 + pad + row * len(series) + 36
+    axis, scale = svg_axis(x0, width, 10 + pad + row * len(series), top, unit, plain,
+                           max(item[1] for item in series) if plain else None)
+    show = (lambda value: plain_value(value, unit)) if plain else (lambda value: nice(value, unit))
+    parts = [hatch_defs(uid)]
+    if noise:
+        first = series[0][1]
+        left, right = scale(first - noise), min(scale(first + noise), x0 + width)
+        parts.append('<rect x="%.1f" y="%d" width="%.1f" height="%d" class="noise"><title>ruido de medición</title></rect>'
+                     % (left, pad + 4, max(right - left, 1.5), row * len(series)))
+        parts.append('<text x="%.1f" y="11" class="axis-label" text-anchor="middle">ruido</text>' % ((left + right) / 2))
+    for index, (name, middle, low, high, style) in enumerate(series):
+        y = 8 + pad + index * row
+        fill = 'fill="url(#%s-h)"' % uid if style == "control" else 'class="bar-%s"' % style
+        parts.append('<text x="0" y="%d" class="bar-label">%s</text>' % (y + 13, e(name)))
+        parts.append('<rect x="%d" y="%d" width="%.1f" height="18" rx="3" %s/>' % (
+            x0, y, max(scale(middle) - x0, 2), fill))
+        if low is not None and high is not None and high > low:
+            parts.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" class="whisker"/>' % (scale(low), y + 9, scale(high), y + 9))
+            parts += ['<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" class="whisker"/>' % (scale(v), y + 4, scale(v), y + 14)
+                      for v in (low, high)]
+        parts.append('<text x="%.1f" y="%d" class="bar-value">%s</text>' % (
+            max(scale(middle), scale(high) if high is not None else 0) + 6, y + 13, e(show(middle))))
+    parts += axis
+    text = "%s: %s" % (label, ", ".join("%s %s" % (name, show(middle)) for name, middle, _, _, _ in series))
+    return '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (x0 + width + 80, height, e(text), "".join(parts))
+
+
+def runs_chart(phases, unit, label):
+    """La distribución de las corridas: un punto por corrida y una raya en la mediana, una fila por fase (Antes y,
+    si está, Control). phases: [(rótulo, valores)]."""
+    phases = [(name, values) for name, values in phases if values]
+    if not phases:
+        return ""
+    x0, width, row = 86, 300, 30
+    top = max(max(values) for _, values in phases)
+    axis, scale = svg_axis(x0, width, 10 + row * len(phases), top, unit)
+    parts = []
+    for index, (name, values) in enumerate(phases):
+        y = 8 + index * row + 9
+        parts.append('<text x="0" y="%d" class="bar-label">%s</text>' % (y + 4, e(name)))
+        parts.append('<line x1="%d" y1="%d" x2="%d" y2="%d" class="lane"/>' % (x0, y, x0 + width, y))
+        parts += ['<circle cx="%.1f" cy="%d" r="4" class="%s"/>' % (scale(v), y, "dot-before" if index == 0 else "dot-control")
+                  for v in values]
+        middle = statistics.median(values)
+        parts.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" class="median"/>' % (scale(middle), y - 9, scale(middle), y + 9))
+        parts.append('<text x="%.1f" y="%d" class="bar-value">mediana %s</text>' % (
+            scale(max(values)) + 8, y + 4, e(nice(middle, unit))))
+    parts += axis
+    height = 14 + row * len(phases) + 36
+    text = "%s: %s" % (label, "; ".join("%s, %d corridas, mediana %s" % (name, len(values), nice(statistics.median(values), unit))
+                                        for name, values in phases))
+    return '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (x0 + width + 120, height, e(text), "".join(parts))
+
+
+def figure(svg, caption, title=""):
+    """Un gráfico con su título y, debajo, la frase que explica qué muestra y qué significa."""
+    if not svg:
+        return ""
+    head = "<figcaption>%s</figcaption>" % title if title else ""
+    return '<figure class="chart">%s%s<p class="chart-note">%s</p></figure>' % (head, svg, inline_md(caption))
+
+
+def final_chart(r, plain=False, plan=None):
+    """(svg, frase) de una métrica principal en el reporte final: antes, control y después con su rango y el ruido."""
+    unit = r["unidad"]
+    series = [("Antes", r["antes"]["mediana"], r["antes"]["min"], r["antes"]["max"], "before")]
+    if r.get("control") and not plain:
+        series.append(("Control", r["control"]["mediana"], r["control"]["min"], r["control"]["max"], "control"))
+    series.append(("Después", r["despues"]["mediana"], r["despues"]["min"], r["despues"]["max"], "after"))
+    name = plain_metric(r["metrica"], plan or {}) if plain else "`%s`" % r["metrica"]
+    svg = range_chart(series, unit, plain_metric(r["metrica"], plan or {}) if plain else r["metrica"],
+                      None if plain else r.get("ruido"), plain=plain)
+    pct = plain_pct(r["antes"]["mediana"], r["despues"]["mediana"]).strip()[1:-1] if plain else \
+        change_pct(r["antes"]["mediana"], r["despues"]["mediana"])
+    words = plain_verdict(r)
+    text = "%s pasó de %s a %s%s: %s." % (name, plain_value(r["antes"]["mediana"], unit) if plain else
+                                          nice(r["antes"]["mediana"], unit),
+                                          plain_value(r["despues"]["mediana"], unit) if plain else
+                                          nice(r["despues"]["mediana"], unit),
+                                          " (%s)" % pct if pct else "", words)
+    if not plain:
+        if r.get("control"):
+            text += " El control (medir de nuevo sin cambiar nada) quedó en %s: el ruido de medición es %s%s." % (
+                nice(r["control"]["mediana"], unit), nice(r.get("ruido"), unit),
+                " (%s %%)" % trim(r["ruido_pct"], 1) if r.get("ruido_pct") is not None else "")
+        text += " La barra es la mediana y la línea fina va de la corrida más rápida a la más lenta."
+    return svg, text
+
+
+def initial_chart(flow, metric, entry, plain=False, plan=None):
+    """(svg, frase) de una métrica principal en el reporte inicial: cómo se reparten las corridas de antes (y del
+    control, si está)."""
+    unit = entry["unidad"]
+    before = entry["fases"].get("antes") or []
+    control = entry["fases"].get("control") or []
+    stats = describe(before)
+    if plain:
+        svg = range_chart([("Hoy", stats["mediana"], stats["min"], stats["max"], "before")], unit,
+                          plain_metric(metric, plan or {}), plain=True)
+        text = ("%s: %s en todas las mediciones." % (plain_metric(metric, plan or {}), plain_value(stats["mediana"], unit))
+                if stats["min"] == stats["max"] else
+                "%s: lo habitual es %s; según la medición, entre %s y %s." % (
+                    plain_metric(metric, plan or {}), plain_value(stats["mediana"], unit), plain_value(stats["min"], unit),
+                    plain_value(stats["max"], unit)))
+        return svg, text
+    svg = runs_chart([("Antes", before), ("Control", control)], unit, metric)
+    spread = "varía mucho entre corridas (más de %d %%): tómalo como orientativo" % CV_MAX \
+        if "inestable" in stats["avisos"] else "es estable entre corridas"
+    text = "`%s` (%s): cada punto es una corrida; la raya, la mediana (%s, la que se compara después). Las %d corridas " \
+           "van de %s a %s y %s." % (metric, flow, nice(stats["mediana"], unit), stats["n"], nice(stats["min"], unit),
+                                     nice(stats["max"], unit), spread)
+    if control and stats["mediana"]:
+        noise = abs(statistics.median(control) - stats["mediana"])
+        text += " El control, sin cambiar nada, quedó a %s (%s %%): una mejora tiene que mover la mediana más que eso." % (
+            nice(noise, unit), trim(noise / abs(stats["mediana"]) * 100, 1))
+    return svg, text
+
+
+# Unidades en palabras para un lector no técnico.
+PLAIN_UNITS = {"slices": "bloqueos", "llamadas": "llamadas", "frames": "cuadros", "inflates": "veces",
+               "conexiones": "conexiones"}
+
+
+def plain_pct(before, after):
+    """La variación en palabras para gerencia: " (39 % menos)", " (20 % más)" o '' si no se puede calcular."""
+    if before in (None, 0) or after is None or after == before:
+        return ""
+    value = abs(after - before) / abs(before) * 100
+    return " (%s %% %s)" % (trim(value, 0 if value >= 10 else 1), "menos" if after < before else "más")
+
+
+def plain_value(value, unit="ms"):
+    """Un valor para un lector no técnico: los tiempos en segundos (o milisegundos si son cortos) y las cantidades con
+    su unidad en palabras."""
+    if unit == "ms" or value is None:
+        return plain_time(value, unit)
+    return nice(value, PLAIN_UNITS.get(unit, unit))
 
 
 def initial_md(rows, plan, trust=("ok", "")):
@@ -4677,8 +7202,9 @@ def initial_md(rows, plan, trust=("ok", "")):
         control = entry["fases"].get("control")
         noise = abs(statistics.median(control) - s["mediana"]) / abs(s["mediana"]) * 100 \
             if control and s["mediana"] else None
-        table.append([flow, metric, FAMILY_LABEL.get(entry["familia"], entry["familia"]), fmt(s["mediana"], entry["unidad"]),
-                      fmt(s["p90"], entry["unidad"]), "%s – %s" % (fmt(s["min"]), fmt(s["max"])), s["n"],
+        table.append([flow, metric, FAMILY_LABEL.get(entry["familia"], entry["familia"]), nice(s["mediana"], entry["unidad"]),
+                      nice(s["p90"], entry["unidad"]), "%s – %s" % (nice(s["min"], entry["unidad"]),
+                                                                  nice(s["max"], entry["unidad"])), s["n"],
                       fmt_pct(noise, signed=False),
                       human_warnings(s["avisos"] + ([note] if note and frame_metric(metric) else []), s["cv"], s["n"])])
     if not table:
@@ -4711,6 +7237,696 @@ def segment_network_md(rows, plan, phases=("antes",)):
              "TTFB incluyen el backend; las repetidas y las solapadas son de la app.\n\n")
     return intro + markdown_table(["Flujo", "Tramo", "Fase", "Llamadas", "Duración mediana", "TTFB mediano",
                                    "Repetidas (2 s)", "Solapadas"], table)
+
+
+SERVICE_ROW = re.compile(r"red (.+) llamadas")
+# Las filas que service_metrics agrega al final de cada corrida.
+SERVICE_EXTRA = re.compile(r"red .+ (?:repetidas_2s|solapadas|conexion_ms|inicio_ms|fin_ms)|[A-Za-z][\w-]* red .+ llamadas|"
+                           r"red_en_curso_ms|[A-Za-z][\w-]* (?:inicio_ms|fin_ms)")
+SERVICES_TOP = 5
+SERVICES_NOTE = ("> **Informativa.** Los tiempos de un servicio dependen del backend y de la red del momento y varían "
+                 "entre corridas: sirven para ver qué se llama, en qué orden, cuántas veces y dónde se va el tiempo, y a "
+                 "quién reportarlo, no para decidir una mejora de la app. Un cambio solo de la app no debería mover el "
+                 "tiempo del servidor: si se mueve entre fases, es variación del backend, no efecto de la mejora. "
+                 "Servidor (TTFB) es la espera hasta el primer byte; \"en la app\" es la cola antes de salir, la conexión "
+                 "nueva y la lectura de la respuesta. `sin dato` no es cero: esa parte no se midió (sin esa sección en la "
+                 "traza, o medida con una versión anterior).\n\n")
+# Una diferencia del servidor entre fases que ya no es ruido: más de un 20 % y más de 50 ms.
+BACKEND_SHIFT = (0.2, 50.0)
+
+
+def flow_services(rows, flow, phase):
+    """Los servicios (endpoints) que el flujo consume en una fase, ordenados por el tiempo que suman por corrida:
+    [{"servicio", "llamadas", "ms", "p90", "ttfb", "cola", "conexion", "cliente", "repetidas", "solapadas", "tramos",
+    "por_tramo", "inicio", "fin", "suma"}], con None donde el CSV no trae el dato. Sale de las filas `red <servicio> …`
+    de metricas.csv; `inicio` es la mediana entre corridas del momento en que empieza su primera llamada."""
+    groups = group(rows)
+
+    def values(metric):
+        entry = groups.get((flow, metric))
+        return entry["fases"].get(phase) if entry else None
+
+    def middle(metric):
+        found = values(metric)
+        return statistics.median(found) if found else None
+
+    out = []
+    for (name, metric), entry in groups.items():
+        found = SERVICE_ROW.fullmatch(metric)
+        if name != flow or not found or phase not in entry["fases"]:
+            continue
+        service = found.group(1)
+        calls = statistics.median(entry["fases"][phase])
+        if not calls:
+            continue  # en esta fase el flujo no lo llama
+        durations = values("red %s ms" % service)
+        item = {"servicio": service, "llamadas": calls,
+                "ms": statistics.median(durations) if durations else None,
+                "p90": percentile(durations, 0.9) if durations else None}
+        for key, suffix in (("ttfb", "ttfb_ms"), ("cola", "cola_ms"), ("conexion", "conexion_ms"),
+                            ("cliente", "cliente_ms"), ("repetidas", "repetidas_2s"), ("solapadas", "solapadas"),
+                            ("inicio", "inicio_ms"), ("fin", "fin_ms")):
+            item[key] = middle("red %s %s" % (service, suffix))
+        tail = " red %s llamadas" % service
+        item["por_tramo"] = {other[:-len(tail)]: statistics.median(data["fases"][phase])
+                             for (owner, other), data in groups.items()
+                             if owner == flow and other.endswith(tail) and not other.startswith("red ")
+                             and SEGMENT_NAME.fullmatch(other[:-len(tail)]) and phase in data["fases"]
+                             and statistics.median(data["fases"][phase])}
+        item["tramos"] = sorted(item["por_tramo"])
+        item["suma"] = calls * item["ms"] if item["ms"] is not None else None
+        out.append(item)
+    return sorted(out, key=lambda item: (-(item["suma"] or 0), item["servicio"]))
+
+
+def invocation_order(items):
+    """Los servicios en el orden en que se invocan (la mediana del inicio de su primera llamada); los que no traen el
+    dato (medidos con una versión anterior) van al final, por el tiempo que suman."""
+    return sorted(items, key=lambda item: (item["inicio"] is None, item["inicio"] if item["inicio"] is not None else 0,
+                                           -(item["suma"] or 0), item["servicio"]))
+
+
+def flow_duration(groups, flow, phase, plan):
+    """(métrica, mediana) de lo que dura el flujo en una fase: su ventana, el arranque completo o la primera métrica
+    principal en tiempo. (None, None) si no hay ninguna."""
+    timed = ["ventana_ms", "ttfd_ms"] + [metric for metric in plan.get("principales") or []
+                                         if (flow, metric) in groups and groups[(flow, metric)]["unidad"] == "ms"
+                                         and not metric.startswith("red ") and " red" not in metric]
+    return next(((metric, statistics.median(groups[(flow, metric)]["fases"][phase])) for metric in timed
+                 if (flow, metric) in groups and groups[(flow, metric)]["fases"].get(phase)), (None, None))
+
+
+def services_wait(rows, flow, phase, plan, items):
+    """(espera, duración del flujo, cómo se midió la espera): el tiempo con al menos una llamada en curso
+    (`red_en_curso_ms`) o, sin ese dato, la suma de las llamadas (que pueden solaparse)."""
+    groups = group(rows)
+    _, total = flow_duration(groups, flow, phase, plan)
+    busy = groups.get((flow, "red_en_curso_ms"))
+    if busy and busy["fases"].get(phase):
+        return statistics.median(busy["fases"][phase]), total, "en_curso"
+    sums = [item["suma"] for item in items if item["suma"] is not None]
+    return (sum(sums) if sums else None), total, "suma"
+
+
+def service_cells(item, has_segments, phase_label=None, count=None):
+    def cell(key, unit="ms"):
+        return "sin dato" if item[key] is None else nice(item[key], unit)
+
+    app = "sin dato" if all(item[key] is None for key in ("cola", "conexion", "cliente")) else \
+        "cola %s · conexión %s · lectura %s" % (cell("cola"), cell("conexion"), cell("cliente"))
+    return ["`%s`" % item["servicio"]] + ([phase_label] if phase_label else []) + [
+        nice(item["llamadas"] if count is None else count), cell("inicio"),
+        "sin dato" if item["ms"] is None else "%s / %s" % (nice(item["ms"], "ms"), nice(item["p90"], "ms")),
+        cell("ttfb"), app, cell("repetidas", ""), cell("solapadas", "")]
+
+
+PHASE_WORDS = {"despues": "después"}
+SERVICE_HEADERS = ["Servicio", "Veces por corrida", "Empieza (desde el inicio del flujo)", "Duración (mediana / P90)",
+                   "Servidor (TTFB)", "En la app", "Repetidas (2 s)", "Solapadas"]
+
+
+def services_md(rows, plan, phases=("antes",)):
+    """La sección "Servicios del flujo" del reporte: todos los servicios que el flujo llama, en el orden en que se
+    invocan y agrupados por tramo si el plan los tiene, con sus veces por corrida, su duración (mediana y P90), el
+    servidor frente a la app y las repetidas y solapadas; el total de espera de servicios y qué parte del flujo es; y,
+    con dos fases, antes contra después y si el servidor cambió (variación del backend). Con muchos servicios, la tabla
+    va en un bloque desplegable abierto. '' si el CSV no trae red por servicio."""
+    blocks = []
+    flows = list((plan.get("flujos") or {}))
+    flows += sorted({row["flujo"] for row in rows} - set(flows))
+    for flow in flows:
+        by_phase = {phase: flow_services(rows, flow, phase) for phase in phases}
+        if not any(by_phase.values()):
+            continue
+        main = by_phase[phases[0]] or by_phase[phases[-1]]
+        known = {item["servicio"] for items in by_phase.values() for item in items}
+        order = [item["servicio"] for item in invocation_order(main)]
+        order += [item["servicio"] for phase in phases for item in invocation_order(by_phase[phase])
+                  if item["servicio"] not in order]
+        order = list(dict.fromkeys(order))
+        segments = [spec["nombre"] for spec in (plan.get("flujos") or {}).get(flow, {}).get("segmentos") or []]
+        lines = ["**%s**" % flow] if len(flows) > 1 else []
+        for phase in phases:
+            wait, total, how = services_wait(rows, flow, phase, plan, by_phase[phase])
+            calls = sum(item["llamadas"] for item in by_phase[phase])
+            head = "en %s, " % PHASE_WORDS.get(phase, phase) if len(phases) > 1 else ""
+            if wait is None:
+                lines.append("- %s%d servicios y %s por corrida, sin datos de duración." % (
+                    head.capitalize(), len(by_phase[phase]), nice(calls, "llamadas")))
+                continue
+            share = " de %s del flujo (%s %%)" % (nice(total, "ms"), trim(wait / total * 100, 0)) if total else ""
+            lines.append("- %s%d servicios y %s por corrida. **Espera de servicios: %s%s**, %s." % (
+                head.capitalize(), len(by_phase[phase]), nice(calls, "llamadas"), nice(wait, "ms"), share,
+                "el tiempo con al menos una llamada en curso" if how == "en_curso" else
+                "sumando las llamadas (si van en paralelo, se solapan: la espera real es menor)"))
+        if all(item["inicio"] is None for item in main):
+            lines.append("- Orden: por el tiempo que suman (estas corridas no traen el momento de cada llamada: se "
+                         "midieron con una versión anterior).")
+        else:
+            lines.append("- En el orden en que se invocan (la mediana del momento en que empieza la primera llamada de "
+                         "cada servicio)%s." % (", agrupados por tramo" if segments else ""))
+        headers = SERVICE_HEADERS[:1] + (["Fase"] if len(phases) > 1 else []) + SERVICE_HEADERS[1:]
+        groups_by = [(None, order)]
+        if segments:
+            groups_by = []
+            for segment in segments:
+                mine = [svc for svc in order if any(segment in item["por_tramo"] for item in
+                                                    (next((x for x in by_phase[phase] if x["servicio"] == svc), None)
+                                                     for phase in phases) if item)]
+                if mine:
+                    groups_by.append((segment, mine))
+            rest = [svc for svc in order if not any(svc in mine for _, mine in groups_by)]
+            if rest:
+                groups_by.append(("fuera de los tramos", rest))
+        tables = []
+        for segment, services in groups_by:
+            table = []
+            for service in services:
+                for phase in phases:
+                    item = next((found for found in by_phase[phase] if found["servicio"] == service), None)
+                    label = PHASE_WORDS.get(phase, phase) if len(phases) > 1 else None
+                    if item is None:
+                        measured = any(row["flujo"] == flow and row["fase"] == phase for row in rows)
+                        table.append(["`%s`" % service] + ([label] if label else []) +
+                                     ["no se llama" if measured else "sin dato"] + ["—"] * 7)
+                        continue
+                    count = item["por_tramo"].get(segment) if segment in segments else None
+                    table.append(service_cells(item, bool(segments), label, count))
+            title = "" if segment is None else "**Tramo `%s`**\n\n" % segment if segment in segments else \
+                "**Fuera de los tramos**\n\n"
+            tables.append(title + markdown_table(headers, table))
+        body = "\n\n".join(tables)
+        if len(order) > SERVICES_TOP:
+            body = "<details open>\n<summary>Los %d servicios del flujo</summary>\n\n%s\n\n</details>" % (len(order), body)
+        lines.append("")
+        lines.append(body)
+        if len(phases) > 1:
+            shifts = []
+            for service in order:
+                found = [next((x for x in by_phase[phase] if x["servicio"] == service), None) for phase in phases]
+                if any(item is None or item["ttfb"] is None for item in found):
+                    continue
+                first, last = found[0]["ttfb"], found[-1]["ttfb"]
+                if abs(last - first) > max(BACKEND_SHIFT[0] * abs(first), BACKEND_SHIFT[1]):
+                    shifts.append("`%s` (%s → %s)" % (service, nice(first, "ms"), nice(last, "ms")))
+            if shifts:
+                lines.append("")
+                lines.append("El servidor cambió entre fases en %s: es variación del backend o de la red del momento, no "
+                             "efecto de la mejora (un cambio solo de la app no mueve el tiempo del servidor)."
+                             % ", ".join(shifts))
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return ""
+    return SERVICES_NOTE + "\n\n".join(blocks)
+
+
+def services_chart(rows, plan, phase="antes"):
+    """El gráfico de "Servicios del flujo": los que más tiempo suman por corrida, separados en servidor (TTFB) y app
+    (el resto de la duración, con trama), con el valor escrito. Devuelve el HTML de las figuras ('' sin datos)."""
+    out = []
+    flows = list((plan.get("flujos") or {}))
+    flows += sorted({row["flujo"] for row in rows} - set(flows))
+    for flow in flows:
+        items = [item for item in flow_services(rows, flow, phase) if item["suma"] is not None][:SERVICES_TOP]
+        if not items:
+            continue
+        uid = chart_id()
+        x0, width, row = 190, 260, 28
+        top = max(item["suma"] for item in items)
+        axis, scale = svg_axis(x0, width, 8 + row * len(items) + 4, top, "ms")
+        parts = [hatch_defs(uid)]
+        for index, item in enumerate(items):
+            y = 8 + index * row
+            server = item["llamadas"] * item["ttfb"] if item["ttfb"] is not None else None
+            parts.append('<text x="0" y="%d" class="bar-label">%s</text>' % (
+                y + 13, e(short_name(item["servicio"], 30) + (" ×%s" % trim(item["llamadas"], 1) if item["llamadas"] != 1 else ""))))
+            if server is not None:
+                parts.append('<rect x="%d" y="%d" width="%.1f" height="18" class="bar-server"><title>servidor</title></rect>'
+                             % (x0, y, max(scale(min(server, item["suma"])) - x0, 1)))
+                parts.append('<rect x="%.1f" y="%d" width="%.1f" height="18" fill="url(#%s-h)"><title>app</title></rect>'
+                             % (scale(min(server, item["suma"])), y, max(scale(item["suma"]) - scale(min(server, item["suma"])), 0), uid))
+                detail = "%s (servidor %s · app %s)" % (nice(item["suma"], "ms"), nice(server, "ms"),
+                                                        nice(max(item["suma"] - server, 0), "ms"))
+            else:
+                parts.append('<rect x="%d" y="%d" width="%.1f" height="18" class="bar-before"><title>sin desglose</title></rect>'
+                             % (x0, y, max(scale(item["suma"]) - x0, 1)))
+                detail = "%s (sin desglose)" % nice(item["suma"], "ms")
+            parts.append('<text x="%.1f" y="%d" class="bar-value">%s</text>' % (scale(item["suma"]) + 6, y + 13, e(detail)))
+        parts += axis
+        legend_y = 8 + row * len(items) + 48
+        parts.append('<rect x="0" y="%d" width="12" height="12" class="bar-server"/><text x="18" y="%d" class="axis-label">'
+                     'servidor (TTFB)</text>' % (legend_y - 10, legend_y))
+        parts.append('<rect x="130" y="%d" width="12" height="12" fill="url(#%s-h)"/><text x="148" y="%d" class="axis-label">'
+                     'app (cola, conexión y lectura)</text>' % (legend_y - 10, uid, legend_y))
+        svg = '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (
+            x0 + width + 210, legend_y + 8, e("Servicios que más tiempo suman en %s: %s" % (flow, ", ".join(
+                "%s %s" % (item["servicio"], nice(item["suma"], "ms")) for item in items))), "".join(parts))
+        lead = items[0]
+        caption = ("Tiempo por corrida de los %d servicios que más suman%s (veces × duración mediana). `%s` es el que más "
+                   "pesa: %s por corrida%s. Es informativo: el servidor depende del backend y de la red." % (
+                       len(items), " en %s" % flow if len(flows) > 1 else "", lead["servicio"], nice(lead["suma"], "ms"),
+                       ", %s de espera del servidor" % nice(lead["llamadas"] * lead["ttfb"], "ms")
+                       if lead["ttfb"] is not None else ""))
+        out.append(figure(svg, caption, "Servicios que más tiempo suman" + (" · %s" % e(flow) if len(flows) > 1 else "")))
+    return "".join(out)
+
+
+def short_name(text, size):
+    """Un nombre largo acortado desde la izquierda (el final de una ruta es lo que la distingue)."""
+    return text if len(text) <= size else "…" + text[-(size - 1):]
+
+
+def representative_run(rows, flow, phase, plan, folder=None):
+    """La corrida representativa de una fase: la de la duración del flujo más cercana a la mediana, entre las que traen
+    el momento de sus llamadas (su línea de tiempo junto a la traza o, si no, las filas `inicio_ms`). None si ninguna
+    lo trae."""
+    groups = group(rows)
+    metric, middle = flow_duration(groups, flow, phase, plan)
+    runs = {row["corrida"] for row in rows if row["flujo"] == flow and row["fase"] == phase}
+    timed = {run for run in runs if folder is not None and load_timeline(folder, phase, flow, run)}
+    if not timed:
+        timed = {row["corrida"] for row in rows if row["flujo"] == flow and row["fase"] == phase
+                 and row["metrica"].startswith("red ") and row["metrica"].endswith(" inicio_ms")}
+    if not timed:
+        return None
+    if metric is None:
+        return sorted(timed, key=lambda run: to_int(run))[len(timed) // 2]
+    values = {row["corrida"]: row["valor"] for row in rows if row["flujo"] == flow and row["fase"] == phase
+              and row["metrica"] == metric and row["corrida"] in timed}
+    if not values:
+        return sorted(timed, key=lambda run: to_int(run))[len(timed) // 2]
+    return min(values, key=lambda run: (abs(values[run] - middle), to_int(run)))
+
+
+def mark_label(name):
+    """El nombre de una marca para la línea de tiempo: sin el prefijo MARK y con SCREEN o NAV abreviados."""
+    head, _, rest = name.partition(" ")
+    return {"MARK": rest, "SCREEN": "pantalla " + rest, "NAV": "ir a " + rest}.get(head, name)
+
+
+def timeline_chart(rows, plan, phase="antes", folder=None):
+    """La línea de tiempo de una corrida representativa (la de duración mediana): cada llamada como una barra sobre el
+    eje del flujo, en la fila de su servicio, con las marcas de pantalla (SCREEN, NAV, MARK) como líneas verticales.
+    Sirve para ver qué se llama, cuándo y si hay llamadas en serie que podrían ir en paralelo. Con una corrida medida
+    antes de esta versión (sin su línea de tiempo), una barra por servicio y el inicio de cada tramo. '' sin el dato."""
+    out = []
+    flows = list((plan.get("flujos") or {}))
+    flows += sorted({row["flujo"] for row in rows} - set(flows))
+    for flow in flows:
+        run = representative_run(rows, flow, phase, plan, folder)
+        if run is None:
+            continue
+        mine = {row["metrica"]: row["valor"] for row in rows
+                if row["flujo"] == flow and row["fase"] == phase and row["corrida"] == run}
+        data = load_timeline(folder, phase, flow, run) if folder is not None else None
+        if data:
+            calls = [(float(c[1]), float(c[2]), str(c[0])) for c in data["llamadas"]
+                     if isinstance(c, list) and len(c) == 3]
+            marks = [(mark_label(str(m[0])), float(m[1])) for m in data.get("marcas") or []
+                     if isinstance(m, list) and len(m) == 2]
+            per_call = True
+        else:
+            calls = []
+            for metric, value in mine.items():
+                found = re.fullmatch(r"red (.+) inicio_ms", metric)
+                if found and mine.get("red %s llamadas" % found.group(1)):
+                    calls.append((value, mine.get("red %s fin_ms" % found.group(1), value), found.group(1)))
+            marks = [(spec["nombre"], mine["%s inicio_ms" % spec["nombre"]])
+                     for spec in (plan.get("flujos") or {}).get(flow, {}).get("segmentos") or []
+                     if mine.get("%s inicio_ms" % spec["nombre"]) is not None]
+            per_call = False
+        if not calls:
+            continue
+        calls.sort()
+        lanes = list(dict.fromkeys(name for _, _, name in calls))
+        total = mine.get("ventana_ms")
+        top = max([end for _, end, _ in calls] + [total or 0] + [at for _, at in marks])
+        uid = chart_id()
+        x0, width, row = 190, 330, 22
+        top_pad = 14 * min(len(marks), 6) + 6
+        height = top_pad + row * len(lanes) + 44
+        axis, scale = svg_axis(x0, width, top_pad + 4 + row * len(lanes), top, "ms")
+        parts = [hatch_defs(uid)]
+        for index, (name, at) in enumerate(marks):
+            x = scale(at)
+            y = 10 + 14 * (index % 6)
+            parts.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" class="mark"><title>%s</title></line>' % (
+                x, y + 2, x, top_pad + 4 + row * len(lanes), e(name)))
+            parts.append('<text x="%.1f" y="%d" class="axis-label">%s</text>' % (x + 2, y, e(short_name(name, 22))))
+        for lane, service in enumerate(lanes):
+            y = top_pad + lane * row
+            mine_calls = [(a, b) for a, b, name in calls if name == service]
+            parts.append('<text x="0" y="%d" class="bar-label">%s</text>' % (y + 11, e(short_name(service, 30))))
+            for start, end in mine_calls:
+                parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="bar-after"><title>%s · %s</title>'
+                             '</rect>' % (scale(start), y, max(scale(end) - scale(start), 2), e(service), e(nice(end - start, "ms"))))
+            label = nice(mine_calls[0][1] - mine_calls[0][0], "ms") if len(mine_calls) == 1 or not per_call else \
+                "%d llamadas" % len(mine_calls)
+            if not per_call and mine.get("red %s llamadas" % service, 1) > 1:
+                label += " · %s llamadas" % trim(mine["red %s llamadas" % service], 0)
+            parts.append('<text x="%.1f" y="%d" class="bar-value">%s</text>' % (
+                scale(max(end for _, end in mine_calls)) + 5, y + 11, e(label)))
+        parts += axis
+        # En serie: una llamada que empieza cuando ya terminaron todas las anteriores (con al menos una antes).
+        serial, finished = 0, None
+        for start, end, _ in calls:
+            if finished is not None and start >= finished - 1:
+                serial += 1
+            finished = end if finished is None else max(finished, end)
+        svg = '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (
+            x0 + width + 140, height, e("Línea de tiempo de la corrida %s de %s en %s" % (run, flow, phase)), "".join(parts))
+        what = ("cada barra es una llamada, en la fila de su servicio, y las líneas verticales son las marcas de pantalla"
+                if per_call else "medida con una versión anterior: cada barra va desde la primera llamada de un servicio "
+                "hasta que termina la última%s" % ("; las líneas verticales marcan dónde empieza cada tramo" if marks else ""))
+        caption = "Corrida %s (la de duración mediana): %s. %s" % (
+            run, what, "%d %s empieza%s cuando ya terminaron todas las anteriores: si no dependen de ellas, podrían ir en "
+            "paralelo." % (serial, "llamada" if serial == 1 else "llamadas", "" if serial == 1 else "n")
+            if serial else "Las llamadas se solapan: no hay una cadena en serie evidente.")
+        out.append(figure(svg, caption, "Línea de tiempo de los servicios" + (" · %s" % e(flow) if len(flows) > 1 else "")))
+    return "".join(out)
+
+
+def plain_time(value, unit="ms"):
+    """Un valor para un lector no técnico: los tiempos en segundos (o en milisegundos si son muy cortos)."""
+    if value is None:
+        return "sin dato"
+    if unit != "ms":
+        return fmt(value, unit)
+    if 0 < abs(value) < 1:
+        return "menos de 1 milisegundo"
+    return "%s s" % fmt(value / 1000) if abs(value) >= 100 else "%s milisegundos" % fmt(round(value))
+
+
+def services_line(rows, plan, phase="antes"):
+    """Para gerencia, una o dos frases por flujo: cuántos servicios llama, cuánto del recorrido es espera de servicios y
+    cuál es el más lento. Dice si no hay datos de red: no medirla no es lo mismo que no llamar a ningún servicio."""
+    groups = group(rows)
+    lines = []
+    flows = list((plan.get("flujos") or {}))
+    flows += sorted({row["flujo"] for row in rows} - set(flows))
+    for flow in flows:
+        services = flow_services(rows, flow, phase)
+        lead = "**%s:** " % flow if len(flows) > 1 else ""
+        if not services:
+            counted = groups[(flow, "red_llamadas")]["fases"].get(phase) if (flow, "red_llamadas") in groups else None
+            calls = statistics.median(counted) if counted else None
+            lines.append(lead + ("No hay datos de las llamadas a servicios (no se midieron)." if calls is None else
+                                 "El recorrido no llama a ningún servicio." if not calls else
+                                 "El recorrido hace %s a servicios; no hay datos de cada servicio."
+                                 % ("1 llamada" if calls == 1 else "%s llamadas" % fmt(calls))))
+            continue
+        calls = sum(item["llamadas"] for item in services)
+        count = "El recorrido llama a %s (%s en total)." % (
+            "1 servicio" if len(services) == 1 else "%d servicios" % len(services),
+            "1 llamada" if calls == 1 else "%s llamadas" % trim(calls, 1))
+        timed = [item for item in services if item["ms"] is not None]
+        wait, total, how = services_wait(rows, flow, phase, plan, services)
+        slow = max(timed, key=lambda item: item["ms"], default=None)
+        if wait is not None:
+            if how == "en_curso":
+                text = ("%s De los %s del recorrido, durante %s (%s %%) se está esperando a algún servicio" % (
+                    count, plain_time(total), plain_time(wait), trim(wait / total * 100, 0)) if total else
+                    "%s Se espera a algún servicio durante %s por recorrido" % (count, plain_time(wait)))
+            else:
+                text = ("%s De los %s del recorrido, las llamadas suman %s (si van en paralelo, parte se solapa)" % (
+                    count, plain_time(total), plain_time(wait)) if total else
+                    "%s Las llamadas suman %s por recorrido (si van en paralelo, parte se solapa)" % (count, plain_time(wait)))
+            if len(timed) < len(services):
+                text += " (sin contar %d sin dato de duración)" % (len(services) - len(timed))
+        else:
+            text = "%s No hay datos de cuánto tardan" % count
+        if slow is not None:
+            text += "; el más lento es `%s` (%s por llamada)" % (slow["servicio"], plain_time(slow["ms"]))
+        lines.append(lead + text + ". Es orientativo: depende del servidor y de la red del momento.")
+    return "\n\n".join(lines)
+
+
+# Los reportes para gerencia no nombran métricas: cada una lleva un rótulo en palabras. `etiquetas` del plan lo cambia.
+PLAIN_METRIC = {"ttid_ms": "Tiempo hasta que aparece la primera pantalla",
+                "ttfd_ms": "Tiempo hasta que la pantalla queda completa",
+                "ventana_ms": "Duración del recorrido", "hilo_max_ms": "Mayor congelamiento de la pantalla",
+                "hilo_slices_100ms": "Congelamientos que se notan", "hilo_slices_sobre_presupuesto": "Tirones breves",
+                "jank_app_pct": "Cuadros que se ven trabados", "jank_total_pct": "Cuadros trabados, contando los del sistema",
+                "frame_p50_ms": "Fluidez habitual", "frame_p90_ms": "Fluidez en los momentos más lentos",
+                "frame_p99_ms": "Fluidez en los peores momentos", "red_llamadas": "Llamadas a servicios",
+                "red_repetidas_2s": "Llamadas a servicios repetidas", "red_solapadas": "Llamadas a servicios duplicadas",
+                "red_ms": "Duración de las llamadas a servicios", "red_ttfb_ms": "Espera de los servicios",
+                "inflate_cantidad": "Pantallas que se arman de nuevo", "inflate_ms": "Tiempo armando la pantalla",
+                "pss_mb": "Memoria que usa la app", "java_heap_mb": "Memoria de la app (objetos)",
+                "native_heap_mb": "Memoria de la app (nativa)", "gfx_jank_pct": "Cuadros que se ven trabados",
+                "gfx_p90_ms": "Fluidez en los momentos más lentos", "bind_application_ms": "Tiempo de inicio de la app",
+                "red_conexiones": "Conexiones nuevas a servicios", "red_conexion_ms": "Tiempo conectando con los servicios"}
+# Una métrica de un servicio (`red <servicio> ms`, `<tramo> red <servicio> llamadas`) en palabras.
+SERVICE_WORDS = {"llamadas": "Llamadas al servicio", "ms": "Duración del servicio", "ttfb_ms": "Espera del servicio",
+                 "cola_ms": "Espera en la app antes de llamar al servicio", "cliente_ms": "Lectura de la respuesta del servicio",
+                 "conexion_ms": "Conexión con el servicio", "repetidas_2s": "Llamadas repetidas al servicio",
+                 "solapadas": "Llamadas duplicadas al servicio"}
+PLAIN_SERVICE = re.compile(r"(?:(?P<tramo>[A-Za-z][\w-]*) )?red (?P<servicio>.+) (?P<que>%s)" % "|".join(SERVICE_WORDS))
+PLAIN_VERDICT = {"mejora": "mejora clara", "regresión": "empeoró", "sin cambio": "sin cambio",
+                 "dentro del ruido": "sin cambio: la diferencia es menor que la variación normal entre mediciones",
+                 "no comparable": "no se puede comparar: se midió otra cosa antes y después",
+                 "no confiable": "no confiable: el dispositivo de medición no representa uno real",
+                 "informativa": "solo informativo"}
+MANAGEMENT_SECTION = "resumen para gerencia"
+MANAGEMENT_MISSING = ("_Sin completar: el resumen para este público todavía no se escribió. Lo que sigue sale de los "
+                      "datos de la investigación._")
+
+
+def plain_metric(metric, plan):
+    """El rótulo de una métrica para un lector no técnico: el de `etiquetas` del plan, el de las métricas que la skill
+    conoce o, para una métrica propia del proyecto, su nombre en palabras."""
+    labels = plan.get("etiquetas") if isinstance(plan.get("etiquetas"), dict) else {}
+    if labels.get(metric):
+        return str(labels[metric])
+    if metric in PLAIN_METRIC:
+        return PLAIN_METRIC[metric]
+    service = PLAIN_SERVICE.fullmatch(metric)
+    if service:
+        text = "%s `%s`" % (SERVICE_WORDS[service.group("que")], service.group("servicio"))
+        return text + (", en la parte \"%s\"" % service.group("tramo").replace("_", " ").replace("-", " ")
+                       if service.group("tramo") else "")
+    head, _, rest = metric.partition(" ")
+    if rest in PLAIN_METRIC:
+        return "%s, en la parte \"%s\"" % (PLAIN_METRIC[rest], head.replace("_", " ").replace("-", " "))
+    words = re.sub(r"_(?:ms|pct|mb)$", "", metric).replace("_", " ").replace("-", " ").strip()
+    return "Tiempo de \"%s\"" % words if metric.endswith("_ms") else "\"%s\"" % words
+
+
+def plain_verdict(result):
+    """El veredicto de una comparación en palabras, con su confianza."""
+    text = PLAIN_VERDICT.get(result["veredicto"], result["veredicto"])
+    if result["veredicto"] in ("mejora", "regresión"):
+        if "inestable" in result["avisos"]:
+            return "orientativo: varía mucho entre corridas (%s)" % text
+        if "pocas corridas" in result["avisos"]:
+            return "orientativo: pocas mediciones (%s)" % text
+        if result["familia"] == "e2e":
+            return "%s (orientativo: depende también del servidor)" % text
+    return text
+
+
+def ficha_value(ficha, *names):
+    """El valor de una fila de la Ficha de estado.md, o '' si falta o sigue con el texto de la plantilla."""
+    for row in parse_table(ficha)[1]:
+        if len(row) > 1 and row[0].strip().lower().startswith(names) and not has_placeholder(" | ".join(row[1:])):
+            return row[1].strip()
+    return ""
+
+
+# Lo que un lector no técnico no entiende: el reporte de gerencia no publica un texto escrito por la IA (el resumen para
+# gerencia, el síntoma de la ficha, el síntoma y la causa de los hallazgos y el título de las mejoras) que lo traiga.
+# Es la única lista: la documentan diagnostico.md y cierre.md.
+TECH_TERMS = re.compile(
+    r"(?<![\w-])(?:slices?|CV|P\d{2}|percentil(?:es)?|TTFB|TTID|TTFD|jank|doFrame|Choreographer|RenderThread|Perfetto|"
+    r"trace_processor|traza|ANR|GC|heap|OkHttp|Retrofit|corrutinas?|coroutines?|Dispatchers|Compose|LazyColumn|"
+    r"RecyclerView|ViewModel|StateFlow|recomposici[oó]n(?:es)?|endpoints?|backend|frames?|hilo principal|main thread|"
+    r"ms|mediana)(?![\w-])", re.I)
+# Nombres con forma de código: entre acentos graves, con guion bajo (lista_ms), en CamelCase (ListaScreen), una llamada
+# (cargar()), un nombre con punto (viewModel.cargar) o un archivo de código (Lista.kt).
+CODE_TERMS = re.compile(r"`[^`]+`|\b\w+\.(?:kt|java|xml|gradle|kts)\b|\b\w+(?:\.\w+)*\(\)|\b[a-z]\w*\.[a-z]\w*\b|"
+                        r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+\b|\b[a-z]\w*[A-Z]\w*\b")
+
+
+def jargon(text):
+    """Los términos técnicos de un texto para gerencia (TECH_TERMS y CODE_TERMS), sin repetir y en orden."""
+    found = [m.group(0) for m in TECH_TERMS.finditer(text or "")] + [m.group(0) for m in CODE_TERMS.finditer(text or "")]
+    return list(dict.fromkeys(found))
+
+
+def plain_or_unfilled(text, field, problems):
+    """El texto si no trae términos técnicos; si los trae, "sin completar" y el aviso en `problems`."""
+    found = jargon(text)
+    if not found:
+        return text
+    problems.append((field, found))
+    return "_%s_" % UNFILLED
+
+
+def management_parts(folder, plan, rows, sections, results=None, problems=None):
+    """Las secciones del reporte para gerencia (inicial si `results` es None; si no, final): una página corta, en
+    palabras, sin nombres de métricas, percentiles ni términos de la traza. Todo sale de los mismos datos que el
+    reporte técnico; lo único que escribe el modelo es el "Resumen para gerencia" de estado.md. Lo que la IA escribió
+    con términos técnicos (TECH_TERMS, CODE_TERMS) no se publica: queda "sin completar" y va a `problems` como
+    (campo, términos)."""
+    final = results is not None
+    principales = plan.get("principales") or []
+    mejoras = plan.get("mejoras") or []
+    problems = [] if problems is None else problems
+
+    def pick(*names):
+        return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
+
+    def title(item):
+        return plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id", "una mejora"),
+                                 problems)
+
+    def named(item):
+        """El título para una lista; si no se publica, dice que es una mejora con el título sin completar."""
+        text = title(item)
+        return "Una mejora con el título sin completar" if text.startswith("_") else text
+
+    summary = without_placeholders(pick(MANAGEMENT_SECTION))
+    if summary:
+        summary = plain_or_unfilled(summary, "\"Resumen para gerencia\" de estado.md", problems)
+        if summary.startswith("_"):
+            summary = MANAGEMENT_MISSING.replace("todavía no se escribió", "tiene términos técnicos y no se publica")
+    symptom = ficha_value(pick("ficha"), "síntoma", "sintoma")
+    if symptom:
+        symptom = plain_or_unfilled(symptom, "el síntoma de la Ficha de estado.md", problems)
+    headers, findings = parse_table(pick("hallazgos"))
+    lower = [h.lower() for h in headers]
+
+    def column(*prefixes):
+        return next((i for i, h in enumerate(lower) if h.startswith(prefixes)), None)
+
+    tipo_i, symptom_i, cause_i = column("tipo"), column("síntoma", "sintoma"), column("causa")
+
+    def cell(row, index):
+        value = row[index].strip() if index is not None and index < len(row) else ""
+        return "" if value in ("", "—", "-") or has_placeholder(value) else value
+
+    findings = [row for row in findings if row and row[0].strip()]
+    kinds = [finding_kind(cell(row, tipo_i)) for row in findings]
+    confirmed = [row for row, kind in zip(findings, kinds) if kind in ("bug", "mejorable")]
+    found = ["- %s" % ": ".join(plain_or_unfilled(part, "%s de %s en Hallazgos de estado.md" % (what, row[0].strip()),
+                                                  problems)
+                                for what, part in (("el síntoma", cell(row, symptom_i)), ("la causa", cell(row, cause_i)))
+                                if part)
+             for row in confirmed if cell(row, symptom_i) or cell(row, cause_i)]
+    other = [(one if count == 1 else many % count) for one, many, count in (
+        ("1 se investigó y se descartó", "%d se investigaron y se descartaron", kinds.count("descartado")),
+        ("1 quedó sin confirmar", "%d quedaron sin confirmar", kinds.count("sin confirmar"))) if count]
+    found_md = "\n".join(found) if found else "Ningún problema confirmado." if findings else \
+        "El diagnóstico no dejó hallazgos registrados."
+    if other:
+        found_md += "\n\nOtras causas posibles: %s." % " y ".join(other)
+
+    applied = [m for m in mejoras if m.get("estado") == "aplicada"]
+    if final:
+        done_md = "\n".join("- %s" % named(m) for m in applied) if applied else "No se aplicó ningún cambio."
+    else:
+        done_md = "\n".join("- %s" % named(m) for m in mejoras) + \
+            "\n\nQué se aplica lo decides tú; lo aprobado se implementa y se vuelve a medir." if mejoras else \
+            "No se propone ningún cambio."
+
+    lines = []
+    many = len(plan.get("flujos") or {}) > 1
+
+    def label(metric, flow):
+        return plain_metric(metric, plan) + (" (%s)" % flow if many else "")
+
+    main_results = sorted([r for r in results if r["metrica"] in principales],
+                          key=lambda r: (principales.index(r["metrica"]), r["flujo"])) if final else []
+    if final:
+        for metric in principales:
+            found = [r for r in main_results if r["metrica"] == metric]
+            if not found:
+                lines.append("- **%s:** sin medición de antes y después." % plain_metric(metric, plan))
+            lines += ["- **%s:** pasó de %s a %s%s · %s." % (
+                label(metric, r["flujo"]), plain_value(r["antes"]["mediana"], r["unidad"]),
+                plain_value(r["despues"]["mediana"], r["unidad"]), plain_pct(r["antes"]["mediana"], r["despues"]["mediana"]),
+                plain_verdict(r)) for r in found]
+    else:
+        groups = group(rows)
+        for metric in principales:
+            found = sorted((flow, data) for (flow, name), data in groups.items() if name == metric and "antes" in data["fases"])
+            if not found:
+                lines.append("- **%s:** sin medir todavía." % plain_metric(metric, plan))
+            for flow, entry in found:
+                stats = describe(entry["fases"]["antes"])
+                trust = "orientativo: varía mucho entre corridas" if "inestable" in stats["avisos"] else \
+                    "orientativo: pocas mediciones" if "pocas corridas" in stats["avisos"] else "estable entre mediciones"
+                lines.append("- **%s:** %s · %s." % (label(metric, flow), plain_value(stats["mediana"], entry["unidad"]), trust))
+    result_md = "\n".join(lines) if lines else "No se fijó ninguna medida principal para este recorrido."
+
+    waiting = [m for m in mejoras if m.get("estado", "propuesta") != "aplicada"] if final else []
+    state_words = {"propuesta": "sin decidir", "aprobada": "aprobado, sin aplicar", "descartada": "descartado",
+                   "pendiente": "para más adelante"}
+    pending = ["- %s (%s)" % (named(m), state_words.get(m.get("estado", "propuesta"), m.get("estado")))
+               for m in waiting]
+    open_points = [line for line in without_placeholders(pick("pendientes")).splitlines() if line.strip().startswith(("-", "*"))]
+    if open_points:
+        pending.append("- %d %s de la investigación sin cerrar; el detalle está en el reporte técnico." % (
+            len(open_points), "punto" if len(open_points) == 1 else "puntos"))
+    pending_md = "\n".join(pending) if pending else "Nada pendiente."
+
+    risks = ["- %s: riesgo %s." % (named(m), m["riesgo"]) for m in (applied if final else mejoras)
+             if str(m.get("riesgo") or "").strip() not in ("", "—", "-")]
+    if final:
+        # Solo las medidas principales: las demás (también los tiempos de cada servicio, que son orientativos) están
+        # en el reporte técnico, con su nombre.
+        risks += ["- %s: de %s a %s · %s." % (label(r["metrica"], r["flujo"]),
+                                            plain_value(r["antes"]["mediana"], r["unidad"]),
+                                            plain_value(r["despues"]["mediana"], r["unidad"]), plain_verdict(r))
+                  for r in main_results if r["veredicto"] == "regresión"]
+        others = sum(1 for r in results if r["veredicto"] == "regresión" and r["metrica"] not in principales)
+        if others:
+            risks.append("- %s que no %s: el detalle está en el reporte técnico." % (
+                "Empeoró 1 medida" if others == 1 else "Empeoraron %d medidas" % others,
+                "es principal" if others == 1 else "son principales"))
+        by_metric = {r["metrica"]: r for r in results}
+        risks += ["- %s: el cambio no dio el resultado esperado." % title(m) for m in applied
+                  if improvement_result(m, by_metric.get(m.get("metrica"))).startswith("✖")]
+    level, _ = frames_trust(folder)
+    if level != "ok":
+        risks.append("- La fluidez se midió en un dispositivo que no representa uno real: esos valores son %s."
+                     % ("no confiables" if level == "no" else "orientativos"))
+    risks_md = "\n".join(risks) if risks else "Sin riesgos señalados."
+
+    services = services_line(rows, plan, "despues" if final and any(r["fase"] == "despues" for r in rows) else "antes")
+    cost = "Sesiones de IA: %s. Las mediciones corren sin IA y no tienen costo de uso." % cost_total(folder, plan)
+    kind = "final" if final else "inicial"
+    return [("En resumen", summary or MANAGEMENT_MISSING),
+            ("Qué notaba el usuario", symptom or "_%s_" % UNFILLED),
+            ("Qué se encontró", found_md),
+            ("Qué se hizo" if final else "Qué se propone", done_md),
+            ("Resultado" if final else "Cómo está hoy", result_md),
+            ("Servicios", services),
+            ("Lo que queda pendiente", pending_md),
+            ("Riesgos", risks_md),
+            ("Costo", cost),
+            ("Más detalle", "El reporte técnico, con las mediciones completas y cómo leerlas: `reporte-%s-dev`." % kind)]
+
+
+def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
+                  dev_note=""):
+    """Escribe las dos versiones de un reporte (`reporte-<tipo>-dev` y `reporte-<tipo>-gerencia`), en markdown y, con
+    `html_too`, en HTML. Las dos salen de los mismos datos; cada una con sus gráficos (`extras`, `business_extras`)."""
+    label = "inicial" if kind == "inicial" else "final"
+    for audience, sections, text in (("dev", parts, "Reporte %s%s" % (label, dev_note)),
+                                     ("gerencia", business, "Reporte %s para gerencia" % label)):
+        name = "reporte-%s-%s" % (kind, audience)
+        page = render_report(folder, name, title, "%s · %s · hb-performance %s" % (text, date, VERSION), sections,
+                             charts if audience == "dev" else "", extras if audience == "dev" else business_extras,
+                             plain=audience != "dev")
+        print("✔ Reporte %s (%s): %s" % (label, audience, folder / ("%s.md" % name)))
+        if html_too:
+            (folder / ("%s.html" % name)).write_text(page, encoding="utf-8")
+            print("✔ Reporte HTML (%s): %s" % (audience, folder / ("%s.html" % name)))
+    old = [name for name in ("reporte-%s.html" % kind, "reporte-%s.md" % kind) if (folder / name).is_file()]
+    if old:
+        print("· %s %s de una versión anterior y no se actualiza: los reportes de ahora son reporte-%s-dev y "
+              "reporte-%s-gerencia." % (", ".join(old), "es" if len(old) == 1 else "son", kind, kind))
 
 
 def plan_rows(plan, rows):
@@ -4883,8 +8099,9 @@ def improvements_summary(plan, results, n_findings=None):
         elif r is None:
             why = "su métrica no tiene antes y después"
         else:
-            why = "%s: %s → %s (%s) · %s" % (m.get("metrica"), fmt(r["antes"]["mediana"], r["unidad"]),
-                                            fmt(r["despues"]["mediana"], r["unidad"]), fmt_pct(r["delta_pct"]),
+            why = "%s: %s → %s (%s) · %s" % (m.get("metrica"), nice(r["antes"]["mediana"], r["unidad"]),
+                                            nice(r["despues"]["mediana"], r["unidad"]),
+                                            change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—",
                                             VERDICT_TEXT.get(r["veredicto"], r["veredicto"]))
         if m.get("a_prueba"):
             why = "hipótesis: %s · %s" % (m["hipotesis"], why)
@@ -4917,7 +8134,11 @@ def flow_html(counts):
         '<div class="step%s"><b>%d</b><span>%s</span></div>' % (css, n, e(label)) for label, n, css in steps)
 
 
-def render_report(folder, name, title, subtitle, parts, charts="", extras=None):
+TECH_FOOTER = "Los números son medianas de varias corridas; el detalle está en"
+PLAIN_FOOTER = "Cada valor resume varias mediciones del mismo recorrido; el detalle técnico está en"
+
+
+def render_report(folder, name, title, subtitle, parts, charts="", extras=None, plain=False):
     """Escribe <name>.md y devuelve el HTML. `extras`: HTML propio por sección (gráficos, franjas) que va antes del texto."""
     md = "# %s\n\n_%s_\n" % (title, subtitle)
     md += "".join("\n## %s\n\n%s\n" % (section, body) for section, body in parts if body)
@@ -4941,7 +8162,34 @@ def render_report(folder, name, title, subtitle, parts, charts="", extras=None):
     body = re.sub(r"<td>(✔[^<]*)</td>", r'<td class="ok">\1</td>', body)
     body = re.sub(r"<td>(✖[^<]*)</td>", r'<td class="ko">\1</td>', body)
     page = (ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+    if plain:  # el reporte para gerencia no habla de medianas
+        page = page.replace(TECH_FOOTER, PLAIN_FOOTER)
     return page.replace("{{TITLE}}", e(title)).replace("{{SUBTITLE}}", e(subtitle)).replace("{{BODY}}", body)
+
+
+def verdict_words(r):
+    """El veredicto en palabras para la tabla técnica: cuánto vale ("mejora clara", "orientativo: varía mucho entre
+    corridas") y qué significa."""
+    meaning = VERDICT_TEXT.get(r["veredicto"], "")
+    if r["veredicto"] in ("no comparable", "no confiable", "informativa"):
+        return meaning
+    words = plain_verdict(r)
+    return "%s · %s" % (words[0].upper() + words[1:], meaning)
+
+
+def warn_jargon(problems):
+    """Los textos que el reporte de gerencia no publicó por traer términos técnicos: qué pasó y qué hacer, uno por
+    campo, con el comando para generar de nuevo."""
+    seen = []
+    for field, terms in problems:
+        if field in [item[0] for item in seen]:
+            continue
+        seen.append((field, terms))
+    for field, terms in seen:
+        print("⚠ Gerencia: %s tiene términos técnicos (%s) y no se publicó: el reporte de gerencia dice \"%s\" en ese "
+              "punto. Qué hacer: reescríbelo en palabras, sin nombres de métricas, de código ni términos de la traza (la "
+              "lista está en cierre.md · Reporte), y genera de nuevo:" % (field, ", ".join(terms[:6]), UNFILLED))
+        print("    %s" % same_command())
 
 
 def cmd_reporte(args):
@@ -4962,6 +8210,10 @@ def cmd_reporte(args):
         return without_placeholders(pick(*names))
 
     warn_unfilled(folder, sections, findings=True)
+    if not any(key.startswith(MANAGEMENT_SECTION) for key in sections):
+        print("· %s no tiene la sección \"## Resumen para gerencia\" (es de una versión anterior): el reporte para "
+              "gerencia sale igual, con esa parte \"%s\". Para completarla, agrega la sección con 3 a 5 líneas sin "
+              "términos técnicos y vuelve a generar." % (state_path, UNFILLED))
     pending_intro = ("> No son mejoras ni tareas obligatorias: es lo que esta investigación no pudo cerrar. De cada uno "
                      "importa el síntoma y qué tan estable es, qué falta para cerrarlo, cuánto cuesta y la acción "
                      "sugerida.\n\n")
@@ -4970,22 +8222,36 @@ def cmd_reporte(args):
         if plan_md and update_block(folder, "mejoras", plan_md):
             print("✔ estado.md actualizado (Plan de mejoras)")
         plan_intro = ("> Lo que se propone cambiar, una mejora por hallazgo. **Tú decides** cuáles se aplican "
-                      "(`perf.py decidir`); las aprobadas se implementan en la fase siguiente y se vuelven a medir.\n\n")
+                      "en la terminal, con el comando `decidir` que imprime `perf.py siguiente` (sin chat); las aprobadas se "
+                      "implementan en la fase siguiente y se vuelven a medir.\n\n")
         parts = [("Resultado", result_md(pick("hallazgos"), plan)),
                  ("Resumen", filled("resumen ejecutivo", "resumen")),
                  ("Estado inicial", initial_md(rows, plan, frames_trust(folder))),
+                 ("Servicios del flujo", services_md(rows, plan)),
                  ("Red por tramo", segment_network_md(rows, plan)),
                  ("Hallazgos", findings_md(pick("hallazgos"), plan)),
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
                  ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") if filled("pendientes") else ""),
+                 ("Costo de la investigación", cost_md(folder, plan)),
                  ("Cómo leer este reporte", GLOSSARY)]
-        subtitle = "Reporte inicial · %s · hb-performance %s" % (date, VERSION)
-        page = render_report(folder, "reporte-inicial", title, subtitle, parts)
-        print("✔ Reporte inicial: %s" % (folder / "reporte-inicial.md"))
-        if args.html:
-            (folder / "reporte-inicial.html").write_text(page, encoding="utf-8")
-            print("✔ Reporte HTML: %s" % (folder / "reporte-inicial.html"))
+        problems = []
+        business = management_parts(folder, plan, rows, sections, problems=problems)
+        groups = group(rows)
+        principal = [(flow, metric, entry) for (flow, metric), entry in sorted(
+            groups.items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan)))
+            if metric in (plan.get("principales") or []) and entry["fases"].get("antes")]
+        figures = "".join(figure(*initial_chart(flow, metric, entry)) for flow, metric, entry in principal)
+        extras = {"Estado inicial": '<div class="charts">%s</div>' % figures} if figures else {}
+        services_html = services_chart(rows, plan) + timeline_chart(rows, plan, folder=folder)
+        if services_html:
+            extras["Servicios del flujo"] = services_html
+        plain_figures = "".join(figure(*initial_chart(flow, metric, entry, plain=True, plan=plan))
+                                for flow, metric, entry in principal[:3])
+        write_reports(folder, "inicial", title, date, parts, business, args.html, extras=extras,
+                      business_extras={"Cómo está hoy": '<div class="charts">%s</div>' % plain_figures}
+                      if plain_figures else None)
+        warn_jargon(problems)
         if not plan.get("mejoras"):
             print("⚠ plan.json no tiene 'mejoras': el reporte sale sin el plan de mejoras.")
         if plan:
@@ -5001,13 +8267,14 @@ def cmd_reporte(args):
                      "veredicto lo calcula el script comparando con el rango de antes y con el ruido de medición.\n\n")
     primary_md = primary_intro + markdown_table(["Flujo", "Métrica", "Depende de", "Antes", "Después", "Cambio", "Veredicto",
                                                  "Qué significa"], [
-        [r["flujo"], r["metrica"], FAMILY_LABEL.get(r["familia"], r["familia"]), fmt(r["antes"]["mediana"], r["unidad"]),
-         fmt(r["despues"]["mediana"], r["unidad"]), "%s (%s)" % (fmt_signed(r["delta"], r["unidad"]), fmt_pct(r["delta_pct"])),
-         r["veredicto"], VERDICT_TEXT.get(r["veredicto"], "") + (" · depende del backend" if r["familia"] == "e2e" else "")]
+        [r["flujo"], r["metrica"], FAMILY_LABEL.get(r["familia"], r["familia"]), nice(r["antes"]["mediana"], r["unidad"]),
+         nice(r["despues"]["mediana"], r["unidad"]), "%s (%s)" % (nice_signed(r["delta"], r["unidad"]),
+                                                                 change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—"),
+         r["veredicto"], verdict_words(r) + (" · depende del backend" if r["familia"] == "e2e" else "")]
         for r in primary]) if primary else ""
     results_by_metric = {r["metrica"]: r for r in results}
     n_findings = len(parse_table(pick("hallazgos"))[1])
-    logrado_md = markdown_table(LOGRADO_HEADERS, logrado_rows(plan, results)) if plan.get("mejoras") else ""
+    logrado_md = markdown_table(LOGRADO_HEADERS, logrado_rows(plan, results, readable=True)) if plan.get("mejoras") else ""
     comparison_md = ("> La tabla técnica, igual a `comparacion.md`: todas las métricas medidas, con mediana y P90 por fase. "
                      "Familia `app` = solo la app, `e2e` = app + backend; Ruido (A/A) = antes contra control.\n\n"
                      + markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen])) if chosen else \
@@ -5015,25 +8282,34 @@ def cmd_reporte(args):
     parts = [("Resumen ejecutivo", filled("resumen ejecutivo")),
              ("De los hallazgos al resultado", improvements_summary(plan, results, n_findings)),
              ("Métricas principales", primary_md),
+             ("Servicios del flujo", services_md(rows, plan, ("antes", "despues") if any(
+                 row["fase"] == "despues" for row in rows) else ("antes",))),
              ("Red por tramo", segment_network_md(rows, plan, ("antes", "despues"))),
              ("Mejoras: esperado contra logrado", logrado_md),
              ("Hallazgos", findings_md(pick("hallazgos"), plan, results_by_metric)),
              ("Mejoras aplicadas", filled("mejoras aplicadas")),
+             ("Cambios de código (interno: contiene código)", changes_md(folder, plan, results, pick("hallazgos"))),
              ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
              ("Comparación completa", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
              ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") if filled("pendientes") else ""),
+             ("Costo de la investigación", cost_md(folder, plan)),
              ("Cómo leer este reporte", GLOSSARY)]
-    charts = "".join('<figure class="chart"><figcaption>%s · %s <span class="verdict %s">%s</span></figcaption>%s</figure>'
-                     % (e(r["metrica"]), e(r["flujo"]), VERDICT_CLASS[r["veredicto"]], e(r["veredicto"]), bars_svg(r))
-                     for r in primary)
-    subtitle = "Reporte final · %s · hb-performance %s" % (date, VERSION)
+    charts = "".join(figure(*final_chart(r, plan=plan), title='%s · %s <span class="verdict %s">%s</span>' % (
+        e(r["metrica"]), e(r["flujo"]), VERDICT_CLASS[r["veredicto"]], e(r["veredicto"]))) for r in primary)
     summary_rows = parse_table(improvements_summary(plan, results, n_findings))[1]
     extras = {"De los hallazgos al resultado": flow_html(flow_counts(plan, summary_rows, n_findings))} if summary_rows else {}
-    page = render_report(folder, "reporte-final", title, subtitle, parts, charts, extras)
-    print("✔ Reporte final: %s" % (folder / "reporte-final.md"))
-    if args.html:
-        (folder / "reporte-final.html").write_text(page, encoding="utf-8")
-        print("✔ Reporte HTML: %s" % (folder / "reporte-final.html"))
+    last = "despues" if any(row["fase"] == "despues" for row in rows) else "antes"
+    services_html = services_chart(rows, plan, last) + timeline_chart(rows, plan, last, folder)
+    if services_html:
+        extras["Servicios del flujo"] = services_html
+    problems = []
+    business = management_parts(folder, plan, rows, sections, results, problems=problems)
+    plain_figures = "".join(figure(*final_chart(r, plain=True, plan=plan)) for r in primary[:3])
+    internal = any(name.startswith("Cambios de código") and body for name, body in parts)
+    write_reports(folder, "final", title, date, parts, business, args.html, charts, extras,
+                  {"Resultado": '<div class="charts">%s</div>' % plain_figures} if plain_figures else None,
+                  " · interno: contiene código" if internal else "")
+    warn_jargon(problems)
     for m in missing:
         print("⚠ La métrica principal '%s' no tiene antes y después en el CSV." % m)
     if unmatched:
@@ -5221,6 +8497,16 @@ SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
 # teclado="$(adb -s "$SERIAL" shell dumpsys input_method | grep -c 'mInputShown=true' || true)"
 # if [ "$teclado" != "0" ]; then adb -s "$SERIAL" shell input keyevent 4 && sleep 1; fi
 
+# Punto de control (opcional): comprueba qué ventana está al frente con un comando barato y, si no es la esperada,
+# termina con 1: la corrida se descarta y se repite sin esperar al final. Corre DENTRO de la traza: déjalo igual en
+# todas las fases y no uses uiautomator aquí (tarda segundos). Mira la actividad, no la pantalla: en una app de una
+# sola actividad solo detecta que saliste de la app (otra app, el launcher, un diálogo del sistema).
+# en_pantalla() {
+#   foco="$(adb -s "$SERIAL" shell dumpsys window | grep mCurrentFocus || true)"
+#   case "$foco" in *"$1"*) ;; *) echo "punto de control: '$1' no está al frente ($foco)" >&2; exit 1 ;; esac
+# }
+# en_pantalla "<parte del nombre de la actividad>"
+
 # Paso humano (autorizar en otra app, resolver un desafío, elegir con criterio): quita el # de la función y llámala
 # donde la persona tiene que actuar. Muestra el texto en tu terminal, con un pitido, y espera Enter; con x + Enter la
 # corrida se descarta y se repite. Sin una terminal (un agente) la captura se detiene enseguida, sin quedarse esperando.
@@ -5329,13 +8615,18 @@ def session1_prompt(request, serial):
     reach = (request.get("llegar") or "").strip().rstrip(".")
     if reach:
         # No fija cómo se recorre (adb, Maestro en preparar, deep link o manual): esa pregunta es de la sesión 1.
-        return "Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial)
-    return "Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial)
+        return chat_text("Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial))
+    return chat_text("Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial))
 
 
 def cmd_humo(args):
     """Prueba de humo del setup: una corrida de arranque en frío, sin crear una investigación."""
-    folder = pathlib.Path(args.carpeta)
+    folder = pathlib.Path(args.carpeta) if args.carpeta else default_folder("humo")[0]
+    if not args.pedido:
+        # El pedido del setup: en la carpeta de investigaciones del proyecto o, si se guardó antes de configurarla, en
+        # la de siempre.
+        candidates = [default_folder("setup")[0] / "pedido.json", pathlib.Path(DEFAULT_INVESTIGATIONS) / "setup" / "pedido.json"]
+        args.pedido = str(next((path for path in candidates if path.is_file()), candidates[0]))
     serial = select_device(args.serial)
     adb = Adb(serial)
     activity = args.actividad or launcher_activity(adb, args.paquete)
@@ -5354,34 +8645,93 @@ def cmd_humo(args):
                                  hz=args.hz, recorrido=None, tp=args.tp, serial=serial, forzar=args.forzar, config=None,
                                  memoria=False, sin_compilar=False, compilacion=None, rehacer=False, calentamiento=0, preparar=None,
                                  corridas=1, sin_comprimir=False, red_obligatoria=True, sin_red=args.sin_red)
-    cmd_capturar(capture, plan)
     root = project_root(folder).resolve()
+    today = datetime.date.today().isoformat()
+    try:
+        cmd_capturar(capture, plan)
+    except PerfError as error:
+        # El bloque de AGENTS.md no puede seguir diciendo que el humo pasó (o que hay red) si esta corrida lo desmiente.
+        # Una precondición que no es del setup (sin dispositivo, el dispositivo caliente) no es un humo fallido: no
+        # llegó a correr, y lo anotado antes sigue valiendo.
+        no_network = "RED SIN MEDIR" in str(error)
+        note = ""
+        if no_network or not isinstance(error, Precondicion):
+            note = update_agents_state(root, humo="falló el %s" % today,
+                                       http="sin medir: la prueba de humo del %s no trajo ninguna" % today if no_network
+                                       else None)
+        if note:
+            print(note)
+        raise
+    result = getattr(capture, "resultado", None) or {}
+    # Un humo que no vio la red (--sin-red, o sin instrumentación de red) no pisa un "sí" que ya anotó otra corrida.
+    agents = read_agents(root)
+    section = performance_section(agents) if agents is not None else None
+    known = (agents_state(agents[section[0]:section[1]]).get("secciones HTTP") or "") if section else ""
+    http = ("sí (prueba de humo, %s)" % today if result.get("http") else None if known.startswith("sí") else
+            "no exigidas (humo --sin-red, %s)" % today if args.sin_red else None)
+    note = update_agents_state(root, humo="pasó el %s" % today, http=http)
+    if note:
+        print(note)
     nuevo = ["nuevo", "--receta", "arranque-frio", "--paquete", args.paquete, "--serial", serial, "--carpeta",
-             "reports/perf/arranque-frio/%s" % datetime.date.today().isoformat()]
+             shlex.quote(shown_path(investigations_base(root) / "arranque-frio" / datetime.date.today().isoformat(),
+                                    root))]
     if args.instalar:
         nuevo += ["--instalar", json.dumps(args.instalar, ensure_ascii=False)]
-    recipe = "cd %s && python3 -I %s %s%s" % (root, HERE / "perf.py", " ".join(nuevo),
+    recipe = "cd %s && python3 -I %s %s%s" % (q(root), q(HERE / "perf.py"), " ".join(nuevo),
                                               " [--red si la primera pantalla carga de la red]")
     request = read_request(args.pedido)
     chat_line = "Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio")
+    openers = ["Abrir (Terminal, %s): %s%s" % (tool, command, " · %s" % note if note else "")
+               for tool, command, note in chat_openers(plan, root, "intermedio", "medio")]
     if missing_setup:
         print("⚠ Antes de seguir: %s" % missing_setup)
     if request:
         print("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · %s" % chat_line)
+        for line in openers:
+            print("  " + line)
         print("  Texto: \"%s\"" % session1_prompt(request, serial))
-        print("  (el flujo sale de %s; ábrelo en un chat nuevo, no en el del setup)" % args.pedido)
+        print("  Tú: %s (el flujo sale de %s; es un chat nuevo, no el del setup)." % (CHAT_YOU, args.pedido))
         print("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         print("  %s" % recipe)
+        print("  Tú: nada más; arma el plan e imprime los comandos para medir.")
     else:
         print("Siguiente, según lo que se va a investigar:")
         print("  · Una pantalla o un flujo · %s" % chat_line)
+        for line in openers:
+            print("    " + line)
         print("    Texto: \"%s\"" % session1_prompt({"flujo": "<flujo: de dónde a dónde y qué debe verse al final>"}, serial))
+        print("    Tú: completa el flujo entre <> y %s." % CHAT_YOU)
         print("  · Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         print("    %s" % recipe)
+        print("    Tú: nada más; arma el plan e imprime los comandos para medir.")
+
+
+def default_folder(name):
+    """(carpeta, de dónde sale) de una investigación sin --carpeta: `<carpeta de investigaciones>/<nombre>/<fecha>`,
+    con la carpeta de investigaciones de AGENTS.md o, sin ella, reports/perf. Relativa a la carpeta actual si se puede."""
+    root = project_root(pathlib.Path.cwd()).resolve()
+    configured = perf_folders(root)["investigaciones"]
+    folder = (configured or root / DEFAULT_INVESTIGATIONS) / name
+    inside = under(lexical(folder), lexical(pathlib.Path.cwd()))
+    if inside is None:
+        inside = under(lexical(folder), pathlib.Path.cwd().resolve())
+    return (inside if inside is not None else folder), \
+        "la carpeta de investigaciones de AGENTS.md" if configured else "por defecto"
 
 
 def cmd_nuevo(args):
-    folder = pathlib.Path(args.carpeta)
+    if args.carpeta:
+        folder = pathlib.Path(args.carpeta)
+        root = project_root(folder).resolve()
+        configured = perf_folders(root)["investigaciones"]
+        if configured and under(lexical(folder), lexical(configured)) is None \
+                and under(folder.resolve(), configured.resolve()) is None:
+            print("· AGENTS.md configura la carpeta de investigaciones en %s: esta investigación queda fuera de ella "
+                  "(sin --carpeta, `nuevo` la crea ahí)" % shown_path(configured, root))
+    else:
+        folder, origin = default_folder(pathlib.Path(
+            "arranque-frio" if args.receta == "arranque-frio" else slug(args.flujo)) / datetime.date.today().isoformat())
+        print("✔ Carpeta de la investigación: %s (%s)" % (folder, origin))
     if (folder / "plan.json").exists() or (folder / "estado.md").exists():
         raise PerfError("%s ya tiene una investigación: usa otra carpeta" % folder)
     if not re.fullmatch(r"[A-Za-z]\w*(\.[A-Za-z]\w*)+", args.paquete):
@@ -5418,7 +8768,7 @@ def cmd_nuevo(args):
         if not activity:
             print("⚠ No encontré la actividad de inicio (¿sin dispositivo?): completa recorrido.actividad en plan.json")
         plan.update({"principales": ["ttid_ms", "ttfd_ms", "hilo_max_ms"], "flujos": {"arranque-frio": flow},
-                     "mejoras": []})
+                     "mejoras": [], "receta": "arranque-frio"})
         scope = args.alcance or "arranque en frío hasta el contenido visible"
     else:
         plan.update({"principales": [], "flujos": {args.flujo: {
@@ -6209,14 +9559,15 @@ def plan_expects_network(plan, flow):
                for spec in specs if isinstance(spec, dict) for side in ("desde", "hasta"))
 
 
-def network_gap(root, plan, flow, names):
+def network_gap(root, plan, flow, names, detail=False):
     """El aviso de "red sin medir": la corrida no trajo ninguna sección HTTP aunque el proyecto tiene la instrumentación
-    de red generada o el plan declara la red. Dice la causa probable y qué builders no llaman al gancho. '' si no aplica."""
+    de red generada o el plan declara la red. Dice la causa probable y qué builders no llaman al gancho. '' si no aplica.
+    Con `detail`, (aviso, builders sin conectar como "archivo:línea")."""
     if any(name.startswith("HTTP ") for name in names):
-        return ""
+        return ("", []) if detail else ""
     generated = find_generated(root, "TraceEventListener.kt")
     if not generated and not plan_expects_network(plan, flow):
-        return ""
+        return ("", []) if detail else ""
     missing, derived = wiring_report(root)
     why = "el proyecto tiene la instrumentación de red generada" if generated else "el plan usa métricas o marcas de red"
     text = ("RED SIN MEDIR: la corrida no tiene ninguna sección HTTP y %s. Causa probable: el listener no está conectado a "
@@ -6231,7 +9582,7 @@ def network_gap(root, plan, flow, names):
     if derived:
         text += " Clientes derivados con .newBuilder() por revisar (heredan el listener de su cliente base): %s%s." % (
             ", ".join(derived[:5]), " …" if len(derived) > 5 else "")
-    return text
+    return (text, missing) if detail else text
 
 
 REAPPLY_HINT = re.compile(r"git apply|parche|\.patch\b", re.I)
@@ -6524,7 +9875,8 @@ def main(argv=None):
     sub.required = True
 
     p = sub.add_parser("nuevo", help="crea la carpeta de una investigación con plan.json y estado.md")
-    p.add_argument("--carpeta", required=True, help="por ejemplo reports/perf/arranque-frio/AAAA-MM-DD")
+    p.add_argument("--carpeta", help="por ejemplo reports/perf/arranque-frio/AAAA-MM-DD; sin ella, <carpeta de "
+                                     "investigaciones de AGENTS.md, o reports/perf>/<flujo>/<fecha>")
     p.add_argument("--paquete", required=True, help="applicationId instalado")
     p.add_argument("--receta", choices=["arranque-frio", "flujo"], default="flujo")
     p.add_argument("--flujo", default="flujo", help="nombre del flujo (receta flujo)")
@@ -6544,11 +9896,12 @@ def main(argv=None):
     p = sub.add_parser("humo", help="prueba de humo del setup: una corrida de arranque que imprime métricas y marcas")
     p.add_argument("--paquete", required=True, help="applicationId del build de profiling instalado")
     p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
-    p.add_argument("--carpeta", default="reports/perf/humo", help="dónde queda la traza de prueba")
+    p.add_argument("--carpeta", help="dónde queda la traza de prueba (por defecto, humo/ en la carpeta de "
+                                     "investigaciones de AGENTS.md, o reports/perf/humo)")
     p.add_argument("--actividad", help="actividad de inicio (paquete/.Actividad); si no, la del launcher")
     p.add_argument("--espera", type=float, default=5)
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (se repite en el paso siguiente)")
-    p.add_argument("--pedido", default="reports/perf/setup/pedido.json",
+    p.add_argument("--pedido",
                    help="el flujo que se pidió en el setup ({\"flujo\", \"llegar\"}): con él, el paso siguiente es el chat "
                         "de la sesión 1 ya escrito")
     p.add_argument("--hz", type=int)
@@ -6566,8 +9919,15 @@ def main(argv=None):
     p = sub.add_parser("consumo", help="anota el costo de una sesión en la tabla Consumo de estado.md")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--sesion", required=True, help="por ejemplo '0 · setup' o '3 · M1'")
-    p.add_argument("--costo", required=True, help="lo que muestre tu herramienta: '1.05 USD', '38k tokens', '12 créditos'")
+    p.add_argument("--costo", help="lo que muestre tu herramienta: '1.05 USD', '38k tokens' (solo un monto en USD o "
+                                   "los AI Credits entran al total en USD)")
+    p.add_argument("--creditos", help="AI Credits de GitHub Copilot (/usage); se suman al total como USD (1 AI Credit = "
+                                      "%s USD)" % fmt(AI_CREDIT_USD))
+    p.add_argument("--tokens-entrada", dest="tokens_entrada", help="tokens de entrada del chat (45000, 45k)")
+    p.add_argument("--tokens-cache", dest="tokens_cache", help="tokens leídos de caché")
+    p.add_argument("--tokens-salida", dest="tokens_salida", help="tokens de salida")
     p.add_argument("--modelo", help="modelo usado en ese chat")
+    p.add_argument("--esfuerzo", help="esfuerzo de razonamiento del chat (bajo, medio, alto)")
     p.add_argument("--pasos", help="requests o pasos del agente, si tu herramienta los muestra")
     p.set_defaults(func=cmd_consumo)
 
@@ -6577,6 +9937,10 @@ def main(argv=None):
     p.add_argument("--descartar", help="ids separados por coma (- es ninguno)")
     p.add_argument("--pendiente", help="ids separados por coma (- es ninguno)")
     p.add_argument("--aplicada", help="ids que la sesión 3 ya aplicó (la usa el agente al terminar la mejora)")
+    p.add_argument("--archivos", help="con --aplicada (un solo id): los archivos que cambió la mejora, separados por coma "
+                                      "y relativos a --repo; perf.py guarda su diff en <carpeta>/cambios/ para el reporte")
+    p.add_argument("--repo", help="con --archivos: el repo donde están esos archivos (por defecto, la raíz del proyecto); "
+                                  "con varios repos, un --aplicada por repo")
     p.add_argument("--profundidad", choices=["riguroso", "triage"],
                    help="cambia la profundidad del plan sin editar plan.json: de triage a riguroso para aplicar una mejora "
                         "(el paso siguiente pide completar antes y medir control)")
@@ -6648,9 +10012,15 @@ def main(argv=None):
     p.add_argument("--mapping", help=MAPPING_HELP)
     p.set_defaults(func=cmd_salidas)
 
-    p = sub.add_parser("resumen", help="estadísticas por fase y avisos")
-    p.add_argument("csv")
+    p = sub.add_parser("resumen", help="estadísticas por fase y avisos; escribe resumen.md y la sección Métricas de "
+                                       "estado.md en la carpeta del CSV",
+                       description="Imprime las estadísticas por fase y los avisos de estabilidad. Además ESCRIBE dos "
+                                   "archivos en la carpeta del CSV: resumen.md (todas las métricas) y, si hay un estado.md "
+                                   "con su bloque, la sección Métricas de estado.md. Con --solo-imprimir no escribe nada.")
+    p.add_argument("csv", help="metricas.csv de la investigación; resumen.md y estado.md se escriben en su misma carpeta")
     p.add_argument("--todo", action="store_true", help="todas las métricas, no solo las principales")
+    p.add_argument("--solo-imprimir", dest="solo_imprimir", action="store_true",
+                   help="solo imprime la tabla: no escribe resumen.md ni toca estado.md")
     p.set_defaults(func=cmd_resumen)
 
     p = sub.add_parser("comparar", help="antes contra después, con veredicto")
@@ -6718,14 +10088,31 @@ def main(argv=None):
     p.set_defaults(func=cmd_instrumentar)
 
     args = parser.parse_args(argv)
+    reset_guide(sys.argv[1:] if argv is None else argv)
+    # El único lugar que cierra un fallo: qué pasó, qué quedó guardado y el comando para seguir (guide_lines).
     try:
         args.func(args)
     except PerfError as error:
-        print("✖ %s" % error, file=sys.stderr)
+        print("\n".join(["✖ %s" % error] + guide_lines(error)), file=sys.stderr)
         return error.code
     except KeyboardInterrupt:
-        print("\n✖ interrumpido", file=sys.stderr)
+        print("\n".join(["", "✖ interrumpido (Ctrl+C): el comando no terminó; lo que estaba a medias (una corrida, una "
+                             "traza) no cuenta"] + guide_lines()), file=sys.stderr)
         return 130
+    except subprocess.TimeoutExpired as error:
+        tool = pathlib.Path(str(error.cmd[0] if isinstance(error.cmd, (list, tuple)) else error.cmd).split(" ")[0]).name
+        print("\n".join(["✖ %s no respondió en %d s: si es adb, el dispositivo se desconectó, se bloqueó o quedó sin "
+                         "responder. Revisa el cable y que `adb devices` lo liste como 'device'"
+                         % (tool, error.timeout)] + guide_lines()), file=sys.stderr)
+        return Precondicion.code
+    except Exception as error:  # un fallo que perf.py no esperaba: igual termina con cómo seguir
+        if os.environ.get("HB_PERF_DEBUG"):
+            raise
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        print("\n".join(["✖ error inesperado en perf.py (%s: %s; línea %d). Suele ser un archivo de la carpeta con un "
+                         "formato que no esperaba; con HB_PERF_DEBUG=1 delante del comando sale la traza completa"
+                         % (type(error).__name__, error, frame.lineno)] + guide_lines()), file=sys.stderr)
+        return 1
     return 0
 
 

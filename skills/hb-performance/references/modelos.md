@@ -1,8 +1,21 @@
 # Modelo, razonamiento y costo por sesión
 
-La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `diagnostico`, `alto`; por defecto Haiku 5.5, Sonnet 5.5, Sonnet 5.5 y Opus 5.5). Con otra herramienta (Copilot, Cursor), cambia esos nombres una vez en el plan.
+La skill no puede elegir el modelo: lo recomienda en "Siguiente paso" de `estado.md`, con el nombre exacto que haya en `modelos` de `plan.json` (`economico`, `intermedio`, `diagnostico`, `alto`; por defecto Haiku 5.5, Sonnet 5.5, Sonnet 5.5 y Opus 5.5), y el comando para abrir el chat con ese modelo y su esfuerzo (abajo). Con otra herramienta, cambia esos nombres una vez en el plan.
 
 `diagnostico` es el modelo de la sesión 2 y es opcional: un plan sin `diagnostico` (por ejemplo, uno creado antes de que existiera) usa su `intermedio`, así que nada cambia si no lo tocas. Sirve para bajar el modelo de lo mecánico (setup, ficha y mejoras usan `intermedio`) sin bajar el del diagnóstico, o para subir solo el diagnóstico.
+
+## Abrir el chat con el modelo y el esfuerzo
+
+Este es el único lugar donde se definen. `perf.py siguiente` (y `humo`, `decidir`, `reporte`) imprime cada chat nuevo con el comando que lo abre en la terminal, desde la raíz del proyecto, y el texto exacto para pegar. La herramienta sale de la línea `Herramienta de IA:` de la sección de rendimiento de `AGENTS.md` (la anota la sesión 0); sin esa línea, imprime las dos formas.
+
+| Herramienta | Comando | Modelo (`modelos` → id) | Esfuerzo |
+| --- | --- | --- | --- |
+| Claude Code | `cd <raíz> && claude --model <id> --effort <nivel>` | "Sonnet 5.5" → `claude-sonnet-5-5` | `bajo` → `low`, `medio` → `medium`, `alto` → `high` |
+| GitHub Copilot CLI | `cd <raíz> && copilot --model <id> --effort <nivel>` | "Sonnet 5.5" → `claude-sonnet-5.5`; un nombre de otro proveedor va en minúsculas y con guiones ("GPT 5.3 Codex" → `gpt-5.3-codex`) | igual que en Claude Code |
+
+- Los flags son los de las referencias de la línea de comandos de cada herramienta: `--model` (en Claude Code, el nombre completo o un alias) y `--effort` (`low`, `medium`, `high`, `xhigh` o `max`; en GitHub Copilot CLI también se llama `--reasoning-effort`). Dentro de la sesión, `/model` cambia el modelo y el esfuerzo en las dos.
+- **Si tu herramienta usa otros ids**, ponlos una vez en `plan.json`, por herramienta y por nivel: `"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-5.5"}}`. Lo que no esté ahí sale de `modelos`.
+- **Si tu versión usa otro comando** (por ejemplo, una versión anterior de Copilot CLI sin `--effort`), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo}`: `perf.py` reemplaza `{modelo}` por el id y, si el comando lleva `{esfuerzo}`, lo reemplaza por `low`, `medium` o `high`; si no lo lleva, el paso pide elegir el esfuerzo con `/model` al abrir el chat.
 
 ## Por qué se encarece
 
@@ -55,7 +68,7 @@ Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 
 
 ## Medir el costo
 
-1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --costo "1.05 USD" --modelo "Sonnet 5.5" --pasos 30` (lo que muestre su herramienta: `/cost` en Claude Code, créditos en Copilot).
+1. Al cerrar cada chat, el usuario anota el costo desde la terminal, sin volver al chat: `perf.py consumo --carpeta <carpeta> --sesion "3 · M1" --modelo "Sonnet 5.5" --esfuerzo medio --costo "1.05 USD" --pasos 30`. `siguiente` imprime ese comando ya completo por cada sesión hecha sin anotar; solo falta el costo, que muestra la herramienta: `/cost` en Claude Code; `/usage` en GitHub Copilot CLI, que informa AI Credits y tokens (`--creditos <n>` y `--tokens-entrada`, `--tokens-cache`, `--tokens-salida`). Un AI Credit vale 0,01 USD según la documentación de facturación de GitHub Copilot; `perf.py` lo usa para sumar el total en USD, que queda debajo de la tabla "Consumo" y en los reportes, junto con las sesiones que faltan anotar. Anotar es opcional: nada se bloquea si no se hace.
 2. Para comparar versiones de la skill, repite el mismo caso (mismo alcance y mismos flujos) y separa los efectos: una corrida con el mismo modelo que la anterior (ahorro por diseño) y otra con los modelos de esta tabla (ahorro total).
 3. Repite cada una al menos dos veces: el consumo de un agente varía de una corrida a otra.
 4. Comprueba que las conclusiones y los veredictos se mantengan: ahorrar no puede costar rigor.

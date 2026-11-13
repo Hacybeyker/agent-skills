@@ -16,22 +16,45 @@ import retrofit2.http.PUT
 // comes from the Retrofit annotation; without Retrofit (or with @Url), path segments that look like ids are normalized:
 // a number, a UUID, a long hex string or any segment with 6 or more digits (a document or account number, also with
 // dots, hyphens or letters); short ones such as v3.7 or page-12 stay.
+// android.os.Trace cuts a section name at MAX_SECTION_NAME: a long path (a gateway with several prefixes) is shortened
+// from the left, "GET ~1a2b/customers/{id}/orders". The method, the query hash and the last segments stay, and "~"
+// plus a short hash of the removed prefix keeps apart two paths that only differ there.
 object HttpSectionName {
     private val ID_SEGMENT = Regex(
         "/(\\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" +
             "|[0-9a-fA-F]{16,}|(?:[^/\\d]*\\d){6,}[^/]*)(?=/|$)"
     )
 
-    fun endpoint(request: Request): String = "${request.method} ${template(request)}${queryTag(request)}"
+    // The longest section prefix is "QUEUE ": what follows it has to fit in a section name, with one character to spare
+    // so that a name of exactly MAX_SECTION_NAME characters always means "cut by the platform".
+    private const val LONGEST_PREFIX_LENGTH = 6
+    const val MAX_ENDPOINT_NAME = MAX_SECTION_NAME - LONGEST_PREFIX_LENGTH - 1
+    private const val HASH_MASK = 0xFFFF
+    private const val HASH_LENGTH = 4
+
+    fun endpoint(request: Request): String = shorten(request.method, template(request), queryTag(request))
 
     // " #1a2b": a short hash of the query, so loads of the same endpoint with other parameters (another page or
     // filter) do not count as duplicates. perf.py drops it from the per-endpoint metrics; the values never show up.
     fun queryTag(request: Request): String {
         val query = request.url.encodedQuery ?: return ""
-        return " #" + Integer.toHexString(query.hashCode() and 0xFFFF).padStart(4, '0')
+        return " #" + shortHash(query)
     }
 
     fun sanitize(path: String): String = path.replace(ID_SEGMENT, "/{id}")
+
+    // "<method> <path><tag>" within MAX_ENDPOINT_NAME. A path that does not fit loses its left part: the last whole
+    // segments stay, after "~" and a short hash of what was removed.
+    fun shorten(method: String, path: String, tag: String): String {
+        val room = MAX_ENDPOINT_NAME - method.length - 1 - tag.length
+        if (path.length <= room) return "$method $path$tag"
+        val kept = path.takeLast((room - HASH_LENGTH - 1).coerceAtLeast(0))
+        val tail = kept.substring(kept.indexOf('/').coerceAtLeast(0))
+        return "$method ~${shortHash(path.dropLast(tail.length))}$tail$tag"
+    }
+
+    private fun shortHash(text: String): String =
+        Integer.toHexString(text.hashCode() and HASH_MASK).padStart(HASH_LENGTH, '0')
 
     private fun template(request: Request): String {
         val method = request.tag(Invocation::class.java)?.method()
