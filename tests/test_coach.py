@@ -308,6 +308,41 @@ class CoachTest(unittest.TestCase):
         self.init_topic()
         self.assertIn("La lección 9.9 no existe", self.fails("completar", "sql", "9.9").stderr)
 
+    def test_nota_reemplaza_varias_secciones_en_una_llamada(self):
+        self.init_topic()
+        self.ok("leccion", "sql", "1.1")
+        out = self.ok("nota", "sql", "1.1", stdin="## Objetivos\n\n- Elegir columnas.\n\n" + BLOCK).stdout
+        self.assertIn("sección «Objetivos» reemplazada", out)
+        self.ok("nota", "sql", "1.1", stdin="## Resumen con tus palabras\n\n«Columnas.»\n\n## Fuentes\n\n- [SQLite](https://sqlite.org)")
+        text = self.note_path("1.1").read_text(encoding="utf-8")
+        self.assertEqual(text.count("## Objetivos"), 1)
+        self.assertEqual(text.count("## Fuentes"), 1)
+        self.assertNotIn("COMPLETAR", text)
+        self.assertLess(text.index("## Objetivos"), text.index("## 📖 Teoría"))
+        self.assertLess(text.index("## 📖 Teoría"), text.index("## Resumen con tus palabras"))
+        self.ok("completar", "sql", "1.1")
+
+    def test_completar_no_marca_en_curso_la_siguiente(self):
+        self.init_topic()
+        self.ok("completar", "sql", "1.1", "--convalidada")
+        estado = self.estado()
+        self.assertEqual(estado["actual"]["id"], "1.2")
+        self.assertEqual(estado["actual"]["estado"], "pendiente")
+
+    def test_metodo_antes_de_init_crea_la_carpeta(self):
+        self.ok("metodo", "--ritmo", "2 x 45 min")
+        self.assertIn("| Ritmo | 2 x 45 min |", self.read("METODO.md"))
+        self.assertIn("/aprendizaje/", (self.project / ".git/info/exclude").read_text(encoding="utf-8"))
+        self.ok("init", "sql", "--tema", "SQL")
+        self.assertIn("| Ritmo | 2 x 45 min |", self.read("METODO.md"))
+
+    def test_el_ultimo_modulo_experto_no_necesita_examen(self):
+        self.init_topic()
+        text = self.plan.read_text(encoding="utf-8").replace("Módulo 3 · Proyecto final", "Módulo 3 · Simulacros")
+        self.plan.write_text(text, encoding="utf-8")
+        self.assertEqual(self.estado()["modulos"][-1]["proyecto"], True)
+        self.assertNotIn("sin línea de examen: 2, 3", self.ok("check", "sql").stdout)
+
     # ---------------------------------------------------------------- glosario y dudas
 
     def test_glosario_inserta_en_orden_y_actualiza(self):
@@ -340,14 +375,15 @@ class CoachTest(unittest.TestCase):
         self.init_topic()
         self.ok("hueco", "sql", "Confunde FROM con WHERE", "--leccion", "1.1")
         gap = self.estado()["huecos"][0]
-        self.assertEqual((gap["id"], gap["proximo_repaso"], gap["estado"]), ("H1", "2026-11-14", "abierto"))
+        self.assertEqual((gap["id"], gap["proximo_repaso"], gap["estado"], gap["intentos"]),
+                         ("H1", "2026-11-14", "abierto", "2"))
         self.day = DAY0 + timedelta(days=1)
         self.ok("hueco", "sql", "H1", "--bien")
         gap = self.estado()["huecos"][0]
         self.assertEqual((gap["proximo_repaso"], gap["racha"]), ("2026-11-17", 1))
         self.ok("hueco", "sql", "H1", "--mal")
         gap = self.estado()["huecos"][0]
-        self.assertEqual((gap["proximo_repaso"], gap["racha"], gap["intentos"]), ("2026-11-15", 0, "2"))
+        self.assertEqual((gap["proximo_repaso"], gap["racha"], gap["intentos"]), ("2026-11-15", 0, "3"))
         self.ok("hueco", "sql", "H1", "--cerrar")
         self.assertEqual(self.estado()["huecos_abiertos"], [])
         self.assertIn("Indica uno", self.fails("hueco", "sql", "H1", "--bien", "--mal").stderr)
@@ -438,7 +474,7 @@ class CoachTest(unittest.TestCase):
         self.assertIn("Siguiente paso: Empezar la lección 1.1", out)
         last = [l for l in self.plan.read_text(encoding="utf-8").splitlines() if l.startswith("| 2026-")][-1]
         self.assertEqual(last, "| 2026-11-13 | 1.1 | Primeras consultas | Empezar la lección 1.1 · Primera. |")
-        self.assertEqual(self.estado()["sesiones"], 2)
+        self.assertEqual(self.estado()["sesiones"], 1)
 
     # ---------------------------------------------------------------- estado, build y check
 

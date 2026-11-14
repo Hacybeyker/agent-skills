@@ -1209,6 +1209,7 @@ details.solution > summary { color: var(--accent); }
       lessons.push(lesson);
       lastLesson = lesson;
     }
+    if (modules.length && modules[modules.length - 1].nivel === "experto") modules[modules.length - 1].proyecto = true;
     var bit = tables.bitacora;
     return { fm: fmParts.fm, body: fmParts.body, modules: modules, lessons: lessons, bitacora: bit.length ? bit.slice(1) : [],
       bitacoraHead: bit[0] || null, gaps: parseGaps(tables.huecos.slice(1)) };
@@ -1283,7 +1284,7 @@ details.solution > summary { color: var(--accent); }
       var note = notes[l.id];
       var ns = note ? normState(fmStr(note.fm, "estado")) : "";
       if (l.hecha) l.estado = l.convalidada ? "convalidada" : "completada";
-      else if (l.id === actualId || ns === "en-curso") l.estado = "en-curso";
+      else if (ns === "en-curso") l.estado = "en-curso";
       else l.estado = "pendiente";
       l.note = note || null;
     });

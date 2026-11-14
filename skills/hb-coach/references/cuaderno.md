@@ -48,13 +48,13 @@ Ejecuta `python3 <skill>/scripts/coach.py <comando>` desde la raíz del proyecto
 |---|---|
 | `siguiente [slug] [--json]` | Decide el paso: método pendiente → plan sin terminar → repasos vencidos → examen que toca → lección actual → proyecto final. Imprime la meta de hoy, los comandos exactos (con `--root` si hace falta) y qué leer. |
 | `init <slug> --tema "…" [--area A] [--nivel-objetivo N] [--playground URL] [--mapa]` | Crea el tema desde las plantillas, `README.md` y `METODO.md` si faltan, y excluye la carpeta de git (`--versionar` no la excluye; `--gitignore` usa `.gitignore`; `--force` reemplaza un PLAN.md). |
-| `metodo [--<clave> "valor" …] [--motivo "…"]` | Sin claves, muestra el acuerdo. Con claves (`orden`, `pasos`, `preguntas`, `correccion`, `mensajes`, `ejemplos`, `practica`, `verificacion`, `ritmo`, `profundidad`, `calentamiento`, `repasos`, `idioma`), actualiza las filas y anota el cambio con su fecha. |
+| `metodo [--<clave> "valor" …] [--motivo "…"]` | Funciona antes de `init` (crea la carpeta y `METODO.md`, y la excluye de git). Sin claves, muestra el acuerdo. Con claves (`orden`, `pasos`, `preguntas`, `correccion`, `mensajes`, `ejemplos`, `practica`, `verificacion`, `ritmo`, `profundidad`, `calentamiento`, `repasos`, `idioma`), actualiza las filas y anota el cambio con su fecha. |
 | `leccion <slug> <id>` | Crea `lecciones/<id>-<título>.md`, fija `leccion_actual` y pone la nota en `en-curso`. Se niega si la ruta aún tiene marcadores. Si la lección estaba hecha, la abre como repaso. |
-| `nota <slug> <id\|Mn> …` | Sin `--seccion`, inserta el Markdown (stdin o `--desde`) antes del cierre de la nota (Resumen con tus palabras, Fuentes, Historial; en un examen, antes de Tarea práctica). Con `--seccion objetivos\|resumen\|fuentes\|tarea`, reemplaza esa sección. `--historial "texto"` añade una fila fechada. Avisa al momento de líneas de código largas y etiquetas Mermaid ilegibles. |
+| `nota <slug> <id\|Mn> …` | Inserta el Markdown (stdin o `--desde`) antes del cierre de la nota (Resumen con tus palabras, Fuentes, Historial; en un examen, antes de Tarea práctica). Las partes que empiezan por `## Objetivos`, `## Resumen con tus palabras`, `## Fuentes`, `## Tarea práctica` o `## Resultado` reemplazan esa sección. Con `--seccion objetivos\|resumen\|fuentes\|tarea`, el texto (sin encabezado) reemplaza esa sección. `--historial "texto"` añade una fila fechada. Avisa al momento de líneas de código largas y etiquetas Mermaid ilegibles. |
 | `glosario <slug> "T" "Def" […] [--leccion id]` | Inserta cada término en orden alfabético (o actualiza su definición) con enlace a la nota de la lección (por defecto, la actual). |
 | `duda <slug> "Pregunta" --respuesta "…" [--contexto] [--explicacion] [--leccion] [--fuente]` | Añade la duda arriba de `DUDAS.md`. |
-| `hueco <slug> "Descripción" [--leccion id]` | Abre un hueco (`H1`, `H2`…) con su primer repaso mañana. |
-| `hueco <slug> Hn --bien\|--mal\|--cerrar` | Reprograma el hueco según el calendario o lo cierra. |
+| `hueco <slug> "Descripción" [--leccion id] [--intentos n]` | Abre un hueco (`H1`, `H2`…) con su primer repaso mañana. `Intentos` empieza en 2 (se abre tras el segundo fallo); usa `--intentos 1` si viene del diagnóstico o de un examen. |
+| `hueco <slug> Hn --bien\|--mal\|--cerrar` | Reprograma el hueco según el calendario o lo cierra (`repaso <slug> Hn` hace lo mismo con `--bien` o `--mal`). |
 | `completar <slug> <id> [--convalidada] [--forzar]` | Marca `[x]`, avanza `leccion_actual`, pone `estado`, `fin` y el primer repaso en la nota, y avisa si toca examen. Se niega si la nota tiene `[[COMPLETAR]]` o le faltan «Resumen con tus palabras» o «Fuentes» (`--forzar` lo salta). |
 | `reabrir <slug> <id>` | Vuelve a `[ ]`, quita `(convalidada)` y anula el repaso programado. |
 | `repaso <slug> [--json]` | Lo que vence hoy (huecos primero, luego lecciones, hasta 6), mezclado entre módulos, con las preguntas de cada nota. |
@@ -67,7 +67,7 @@ Ejecuta `python3 <skill>/scripts/coach.py <comando>` desde la raíz del proyecto
 
 Los comandos que cambian algo regeneran el cuaderno (salvo con `--no-build`). Códigos de salida: 0 bien, 1 `check`/`vendor`/`sesion` con errores, 2 uso incorrecto (el mensaje dice cómo seguir).
 
-**Contenido por stdin.** `nota` lee el Markdown de un heredoc (`<<'EOF'` … `EOF`, con comillas para que la shell no expanda nada) o de un archivo con `--desde`. Agrupa en una llamada lo que das en un mensaje.
+**Contenido por stdin.** `nota` lee el Markdown de un heredoc (`<<'EOF'` … `EOF`, con comillas para que la shell no expanda nada) o de un archivo con `--desde`. Una llamada por bloque: la primera puede llevar `## Objetivos` y el primer bloque; la de cierre, `## Resumen con tus palabras` y `## Fuentes`. Los comandos de un mismo momento se encadenan con `&&`.
 
 ## 3. Nota de lección
 
@@ -137,7 +137,8 @@ SELECT title, year FROM videojuegos;
 **Tu intento:** `SELECT title, year FROM videojuegos;` · **Veredicto:** ✔ resuelto sin pistas
 ````
 
-- Las pistas se escriben de antemano, de menos a más. La **Solución** se añade cuando el estudiante ya lo intentó (o cuando lo pide tras varios intentos).
+- El reto va a la nota cuando termina, en una sola llamada: enunciado, resultado esperado, las pistas (escritas de antemano, de menos a más), la **Solución** (solo porque ya lo intentó) y su intento con el veredicto. Si se aplaza, sin solución.
+- Un reto de refuerzo tras un segundo fallo puede ir dentro del bloque ❓ en curso.
 - **Veredicto:** ✔ resuelto (en qué pista) o ✘ con la idea que falló. Sin veredicto, el reto cuenta como «sin resolver».
 - Fuera del software, el resultado esperado es lo observable: una cifra, una frase correcta, una decisión justificada, los puntos de una rúbrica.
 
@@ -187,7 +188,7 @@ Reglas para que renderice a la primera y se lea bien:
 
 ## 7. Código, avisos y tablas
 
-**Código**: siempre con lenguaje (`kotlin`, `swift`, `sql`, `python`, `bash`, `json`, `text`…), líneas de menos de 80 caracteres, un bloque por archivo con su ruta en la primera línea, ejemplos probados y `diff` para cambios sobre código existente. Nunca secretos ni datos personales reales.
+**Código**: los mensajes de error exactos que no quepan en 80 caracteres se parten en varias líneas y se dice («una sola línea de la consola, repartida aquí para que quepa»). Siempre con lenguaje (`kotlin`, `swift`, `sql`, `python`, `bash`, `json`, `text`…), líneas de menos de 80 caracteres, un bloque por archivo con su ruta en la primera línea, ejemplos probados y `diff` para cambios sobre código existente. Nunca secretos ni datos personales reales.
 
 **Avisos** (estilo GitHub; el cuaderno los muestra con color e icono): `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`.
 
@@ -222,7 +223,7 @@ Reglas para que renderice a la primera y se lea bien:
 | `quedan N marcador(es) [[COMPLETAR]]` | Rellénalos o borra la sección. |
 | `la nota está completada pero le faltan secciones` | Completa «Resumen con tus palabras» y «Fuentes». |
 | `«Reto …» no tiene **Resultado esperado**` / `no registra el intento ni el veredicto` | Añade lo que falta al reto. |
-| `módulo(s) sin línea de examen` | `coach examen <slug> <n>` la añade (solo en planes de formato 2). |
+| `módulo(s) sin línea de examen` | `coach examen <slug> <n>` la añade (solo en planes de formato 2; el último módulo 🔴 o «Proyecto…» no la necesita). |
 | `hueco Hn con «Próximo repaso» sin fecha` | Repásalo con `coach hueco <slug> Hn --bien\|--mal`. |
 | `cuaderno.html desactualizado` | `coach build`. |
 
@@ -244,7 +245,7 @@ Si el entorno no permite ejecutar comandos, mantén los mismos archivos a mano:
 - **Bloques, glosario, dudas**: edita los archivos con los formatos de este documento.
 - **Completar**: `- [ ]` → `- [x]` (y ` (convalidada)` si corresponde), `leccion_actual` a la siguiente pendiente; en la nota, `estado: completada`, `fin: <hoy>`, `repaso: <hoy + 3 días>` y `repasos: 0`.
 - **Repasos**: lección bien → `repasos + 1` y `repaso` = hoy + 7, 14, 30 o 60 días (según el nuevo `repasos`: 1, 2, 3, 4); al quinto, `repaso: ""`. Mal → `repasos: 0` y `repaso` = mañana.
-- **Huecos**: nuevo → fila con `Intentos` 1, `Próximo repaso` mañana y `Estado` `abierto`. Bien → añade una ✔ al estado y fija el repaso a hoy + 3, 7, 14 o 30 días según las ✔. Mal → `abierto` sin ✔, `Intentos + 1`, repaso mañana. Cerrar → `Próximo repaso` `—` y `cerrado <fecha>`.
+- **Huecos**: nuevo → fila con `Intentos` 2 (1 si viene del diagnóstico o de un examen), `Próximo repaso` mañana y `Estado` `abierto`. Bien → añade una ✔ al estado y fija el repaso a hoy + 3, 7, 14 o 30 días según las ✔. Mal → `abierto` sin ✔, `Intentos + 1`, repaso mañana. Cerrar → `Próximo repaso` `—` y `cerrado <fecha>`.
 - **Examen**: línea `- [ ] **Examen M<n>** — …` al final del módulo; al aprobar, `- [x] **Examen M<n>** — a/t (p %) · aprobado el <fecha>`.
 - **Bitácora**: una fila por sesión al final de su tabla.
 - **Ver el cuaderno**: el estudiante abre `<skill>/assets/cuaderno.html` y pulsa **Abrir carpeta** para elegir `aprendizaje/` (en Chrome y Edge se actualiza solo; en otros navegadores, **Recargar carpeta**). El visor calcula progreso, exámenes y repasos vencidos por sí mismo. Díselo en tu mensaje final.

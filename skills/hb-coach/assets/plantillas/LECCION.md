@@ -21,9 +21,9 @@ Al terminar podrás:
 
 **Bloques:** [[COMPLETAR: 1. 📖 … → 🛠 … → ❓ … · 2. …]]
 
-<!-- coach: añade cada bloque 📖 / 🛠 / ❓ con `coach nota <slug> <id>` en el mismo turno en que lo das.
-     Formatos de reto y de pregunta en references/cuaderno.md. Esta sección se reemplaza con
-     `coach nota <slug> <id> --seccion objetivos`. -->
+<!-- coach: cada bloque 📖 / 🛠 / ❓ va a la nota con una llamada a `coach nota <slug> <id>` en cuanto termina.
+     La primera llamada puede traer la sección Objetivos con su encabezado (reemplaza esta) y la de cierre,
+     Resumen con tus palabras y Fuentes. Formatos de reto y de pregunta en references/cuaderno.md. -->
 
 ## Resumen con tus palabras
 

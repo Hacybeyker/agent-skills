@@ -21,15 +21,15 @@ Adapta el plan a su realidad: en software, las prácticas se hacen en su proyect
 
 ## 2. Diagnóstico adaptativo
 
-Antes, acuerda el método (`coach metodo`). El diagnóstico mide lo que **ya** debería saber: nunca preguntes por lo que vas a enseñar.
+Antes, acuerda el método (`coach metodo`). El diagnóstico mide **dónde empezar**: es el único momento en que se pregunta por lo que aún no has enseñado, precisamente para saltar lo que ya sabe. No enseñes ni corrijas en detalle; anota.
 
-**Preguntas de contexto** (3 o 4, con opciones cuando sea posible): experiencia con el tema y con temas vecinos; meta concreta (proyecto, trabajo, examen, entrevista, curiosidad); tiempo por semana y duración de las sesiones; dónde lo aplicará.
+**Preguntas de contexto** (2 o 3, con opciones cuando sea posible): experiencia con el tema y con temas vecinos; meta concreta (proyecto, trabajo, examen, entrevista, curiosidad); dónde lo aplicará. El ritmo ya está en el método.
 
-**Preguntas de nivel** (5 a 8, una por mensaje, escalonadas): 2 de básico, 2 o 3 de intermedio, 1 o 2 de avanzado y, si responde todo bien, 1 de experto. Preferentemente abiertas o de «explica por qué». En idiomas, incluye una tarea breve de producción (escribir o decir unas frases) además de las preguntas. Si falla dos seguidas, detén el escalado. No enseñes durante el diagnóstico; solo anota. Al final, un resumen honesto y breve de su punto de partida.
+**Preguntas de nivel** (4 a 8, una por mensaje, escalonadas): 2 de básico, 2 o 3 de intermedio, 1 o 2 de avanzado y, si responde todo bien, 1 de experto. Preferentemente abiertas o de «explica por qué». En idiomas, incluye una tarea breve de producción (escribir o decir unas frases) además de las preguntas. Si falla dos seguidas, detén el escalado. No enseñes durante el diagnóstico; solo anota. Al final, un resumen honesto y breve de su punto de partida.
 
 **Decisiones**:
 
-- Pregunta básica bien respondida y con ejemplo propio → convalidar la lección correspondiente.
+- Pregunta básica bien respondida y con ejemplo propio → convalidar la lección correspondiente. Si lo que sabe es un prerrequisito sin lección propia, no hay nada que convalidar: anótalo en el resumen del plan.
 - Respuesta parcial → mantener la lección, en modo exprés.
 - Nivel avanzado demostrado → convalidar solo lo conceptual; lo práctico avanzado exige evidencia práctica.
 - Registra todo en `## Diagnóstico` y fija `nivel_actual`.
@@ -47,10 +47,11 @@ Antes, acuerda el método (`coach metodo`). El diagnóstico mide lo que **ya** d
 
 **Tamaño** (como un curso completo: unas 20 a 30 lecciones):
 
-- 5 a 8 módulos; 3 a 5 lecciones por módulo; un examen al final de cada módulo (salvo el del proyecto final).
+- 5 a 8 módulos; 3 a 5 lecciones por módulo; un examen al final de cada módulo (salvo el del proyecto final: el último módulo 🔴 o el que se llame «Proyecto…»).
 - Cada lección tiene un único resultado observable y dura entre 20 y 45 minutos.
 - Estimación: lecciones × 30–40 minutos, en semanas según el ritmo acordado. Indícala al presentar el plan.
 - Un plan corto (una entrevista la semana que viene) puede tener 2 o 3 módulos: el tamaño sigue a la meta.
+- Los niveles son relativos al curso: 🟢 es su punto de partida y 🔴 la meta. Si ya parte de un nivel medio, el módulo 🟢 consolida lo que tiene.
 
 **Contenido que casi siempre debe aparecer** (cuando aplique):
 
@@ -124,10 +125,10 @@ Valores con `:` u otros símbolos van entre comillas. No añadas comentarios `#`
 Reglas:
 
 - Encabezado de módulo de nivel 3: `### Módulo <n> · <nombre> <emoji> <Nivel>`, con la cita de la meta debajo.
-- Lección: `- [ ] **<id> <título>** — <resultado de aprendizaje>`, con el id y el título dentro de las negritas.
+- Lección: `- [ ] **<id> <título>** — <resultado de aprendizaje>`, con el id y el título dentro de las negritas. Escribe el resultado en infinitivo («Elegir el scope mínimo…»): la nota lo copia en «Al terminar podrás».
 - Id `<módulo>.<lección>` (`3.2`). Para insertar entre lecciones usa un subnivel (`3.2.1`); nunca renumeres lecciones hechas.
 - Detalles (`Objetivo`, `Práctica`, `Dominio`) en una sublista con 2 espacios. Obligatorios en los módulos básicos e intermedios; muy recomendables en el resto.
-- **Examen**: `- [ ] **Examen M<n>** — …` como última línea de cada módulo, salvo en el del proyecto final. `coach examen` la añade si falta y la marca con el resultado.
+- **Examen**: `- [ ] **Examen M<n>** — …` como última línea de cada módulo, salvo en el del proyecto final (el último módulo 🔴 o el que se llame «Proyecto…»). `coach examen` la añade si falta y la marca con el resultado.
 - Completada `- [x]`; convalidada `- [x] … (convalidada)`. Lo hace `coach completar`.
 - No uses checkboxes con un id en negrita fuera de la ruta: se contarían como lecciones.
 - No enlaces las notas: el cuaderno las asocia por el id del nombre de archivo.
@@ -163,7 +164,7 @@ La sección existe desde el primer día, aunque esté vacía. La gestiona `coach
 
 ### Bitácora
 
-Una fila por sesión, al final (la añade `coach sesion`): fecha, lecciones, logros concretos y un próximo paso que permita retomar sin contexto. También repasos y exámenes: «Examen M1: 5/6».
+Una fila por sesión, al final (la añade `coach sesion`; la tabla empieza vacía): fecha, lecciones, logros concretos y un próximo paso que permita retomar sin contexto. También repasos y exámenes: «Examen M1: 5/6».
 
 ## 5. Lista de control de un buen plan
 

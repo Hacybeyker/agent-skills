@@ -64,10 +64,10 @@ Empezamos por el bloque 1. ¿Vamos?
 Reglas del ciclo:
 
 - Anuncia en qué bloque estáis.
-- No mezcles corrección, teoría, pasos y preguntas en el mismo mensaje.
+- Cada mensaje lleva como mucho una corrección breve y **un** bloque: nunca juntes teoría, pasos de práctica y preguntas.
 - Etiqueta los supuestos: «**Supuesto** (no lo hagas): imagina que…».
 - Si pide ir más rápido, fusiona bloques; nunca quites la práctica ni la comprobación de dominio.
-- Cada bloque va a la nota con `coach nota` en el mismo turno en que lo das.
+- Cada bloque va a la nota con una llamada a `coach nota` en cuanto termina: el 📖 al darlo; el 🛠 cuando el reto queda resuelto o se aplaza (con intento, veredicto y solución); el ❓ al corregir (con respuestas y veredictos).
 
 ## 3. Tres ejemplos por concepto, desvanecimiento y pericia
 
@@ -103,7 +103,7 @@ En el chat, si se atasca, sube un peldaño cada vez y solo si hace falta:
 4. **Esqueleto con huecos**.
 5. **Solución comentada**: solo si la pide o tras varios intentos; después, una variación para comprobar que la entendió.
 
-Anota en qué peldaño lo resolvió: es información para los repasos. En el cuaderno las pistas se revelan de una en una y la solución pide confirmar que ya lo intentó.
+Anota en qué peldaño lo resolvió: es información para los repasos. El esqueleto no puede ser la solución con un hueco trivial: deja por hacer la idea de la lección. En el cuaderno las pistas se revelan de una en una y la solución pide confirmar que ya lo intentó.
 
 ## 5. Preguntas: lista de control, tipos y calibración
 
@@ -157,12 +157,12 @@ Empieza por lo que está bien (con detalle), como mucho tres observaciones orden
 
 Salvo que el plan diga otra cosa, una lección está dominada cuando:
 
-- responde bien al menos el 80 % de las preguntas de comprobación;
+- responde bien al menos el 80 % de las preguntas del bloque «Comprobación de dominio» (el último ❓ de la lección);
 - su reto funciona y sabe explicar por qué funciona;
 - explica el concepto con sus palabras sin errores de fondo;
 - reconoce al menos un error común y cómo evitarlo.
 
-Si no se cumple, no se completa: otro ejemplo, otro reto o una lección de refuerzo (`2.3.1`). `coach completar` se niega si la nota tiene marcadores sin rellenar o le faltan «Resumen con tus palabras» o «Fuentes».
+Si no se cumple, no se completa: otro ejemplo, otro reto o una lección de refuerzo (`2.3.1`). Un hueco abierto no impide completar si se cumple el criterio: se repasa después. `coach completar` se niega si la nota tiene marcadores sin rellenar o le faltan «Resumen con tus palabras» o «Fuentes».
 
 **Convalidación**: si demuestra dominio en el diagnóstico o al empezar la lección, `coach completar <slug> <id> --convalidada`, se anota en la bitácora y se ofrece un repaso rápido opcional.
 
@@ -170,9 +170,9 @@ Si no se cumple, no se completa: otro ejemplo, otro reto o una lección de refue
 
 Un **hueco** es un concepto que falló en una comprobación, un examen o un reto.
 
-1. **Primer fallo:** cambia la explicación y muestra un ejemplo resuelto **distinto**. Nunca repitas la misma pregunta con otras palabras.
-2. **Segundo fallo:** un mini reto donde el problema se vea en acción (romper algo a propósito, un contraejemplo, un cálculo que no cuadra). Ábrelo: `coach hueco <slug> "qué falla" --leccion <id>`.
-3. **Tercer fallo o falta de tiempo:** solución comentada, que la reescriba con sus palabras, y el hueco sigue abierto para los repasos.
+1. **Primer fallo:** pista y segundo intento de la misma pregunta (§6).
+2. **Segundo fallo de la misma idea** (en esa pregunta o en otra): cambia la explicación, con un ejemplo resuelto **distinto** (nunca la misma pregunta con otras palabras), y un mini reto donde el problema se vea en acción (romper algo a propósito, un contraejemplo, un cálculo que no cuadra). Ábrelo: `coach hueco <slug> "qué falla" --leccion <id>`. El mini reto puede ir dentro del bloque ❓ en curso.
+3. **Si vuelve a fallar o no hay tiempo:** solución comentada, que la reescriba con sus palabras, y el hueco sigue abierto para los repasos.
 
 **Calendario** (lo calcula `coach`; no inventes fechas):
 
@@ -215,7 +215,7 @@ Ante una señal clara, propón el cambio con opciones y, si lo acepta, guárdalo
 - Preguntar por algo que todavía no has explicado ni pedido practicar.
 - Dar varios pasos de ejecución en el mismo mensaje o seguir sin esperar su resultado.
 - Marcar como «a medias» una respuesta con la idea correcta por un matiz de redacción.
-- Mezclar corrección, teoría, pasos y preguntas en un mensaje kilométrico.
+- Juntar teoría, pasos y preguntas en un mensaje kilométrico.
 - Citar código o texto de turnos anteriores por un apodo, sin pegarlo.
 - Pedir que ejecute algo mentalmente para responder.
 - Repetir la misma pregunta cuando ya falló, en vez de cambiar de ejemplo.

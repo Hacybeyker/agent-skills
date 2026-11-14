@@ -74,7 +74,8 @@ Durante la lección
   glosario <slug> "Término" "Definición" ["Término" "Definición" ...] [--leccion ID]
   duda <slug> "Pregunta" --respuesta "..." [--contexto ...] [--explicacion ...] [--leccion ID]
                                    [--fuente "[Título](https://...)"]
-  hueco <slug> "Descripción" [--leccion ID]    Abre un hueco; se repasa mañana.
+  hueco <slug> "Descripción" [--leccion ID] [--intentos N]
+                                   Abre un hueco (por defecto tras 2 fallos); se repasa mañana.
   hueco <slug> Hn --bien|--mal|--cerrar        Registra el repaso del hueco y lo reprograma.
   completar <slug> <id> [--convalidada] [--forzar]
   reabrir <slug> <id>
@@ -625,6 +626,8 @@ def parse_plan(text):
         }
         modules[-1]["lecciones"].append(lesson["id"])
         lessons.append(lesson)
+    if modules and modules[-1]["nivel"] == "experto":
+        modules[-1]["proyecto"] = True  # el último módulo 🔴 es el del proyecto final: sin examen
     return {
         "fm": fm,
         "modulos": modules,
@@ -730,14 +733,12 @@ def load_topic(root, slug):
     text = read_text(plan_path)
     plan = parse_plan(text)
     notes = load_notes(tdir)
-    fm = plan["fm"] or {}
-    actual_id = fm_str(fm, "leccion_actual")
     for l in plan["lecciones"]:
         note = notes.get(l["id"])
         note_state = norm_state(fm_str(note["fm"], "estado")) if note else ""
         if l["hecha"]:
             l["estado"] = "convalidada" if l["convalidada"] else "completada"
-        elif l["id"] == actual_id or note_state == "en-curso":
+        elif note_state == "en-curso":
             l["estado"] = "en-curso"
         else:
             l["estado"] = "pendiente"
@@ -1140,7 +1141,9 @@ def cmd_metodo(pos, opts):
     path = root / "METODO.md"
     if not path.is_file():
         if not root.is_dir():
-            raise CoachError("No existe %s. Crea un tema primero con coach init." % rel(root))
+            root.mkdir(parents=True, exist_ok=True)
+            out("\U0001F4C1 Creada la carpeta %s" % rel(root))
+            exclude_from_git(root, opts)
         write_text(path, render_template("METODO.md", {"FECHA": today()}))
     text = read_text(path)
     changes = [(k, opts[k]) for k, _ in METODO_KEYS if k in opts]
@@ -1267,6 +1270,39 @@ def note_target(topic, ident):
     return note["path"], "lección %s" % lesson["id"]
 
 
+def replace_known_sections(text, content):
+    """Reemplaza las secciones conocidas que vengan en el contenido (con su encabezado ##) y devuelve el resto."""
+    lines = content.split("\n")
+    chunks, cur, in_fence = [], {"title": None, "lines": []}, False
+    for line in lines:
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+        h = None if in_fence else re.match(r"^##\s+(.+?)\s*$", line)
+        if h:
+            chunks.append(cur)
+            cur = {"title": h.group(1), "lines": []}
+            continue
+        cur["lines"].append(line)
+    chunks.append(cur)
+    rest, done = [], []
+    for ch in chunks:
+        key = None
+        if ch["title"] is not None:
+            for k, (rx, title) in SECCIONES.items():
+                if rx.search(ch["title"]) and not (k == "objetivos" and re.search("palabras", ch["title"], re.I)):
+                    key = k
+                    break
+        if key is None:
+            if ch["title"] is not None:
+                rest.append("## " + ch["title"])
+            rest.extend(ch["lines"])
+            continue
+        rx, title = SECCIONES[key]
+        text = replace_section(text, rx, "\n".join(ch["lines"]).strip("\n"), title)
+        done.append(title)
+    return "\n".join(rest).strip("\n"), {"text": text, "secciones": done}
+
+
 def lint_snippet(label, content):
     """Avisos inmediatos sobre el Markdown que se acaba de añadir (sin esperar a check)."""
     msgs = []
@@ -1293,6 +1329,10 @@ def cmd_nota(pos, opts):
         raise CoachError("Falta el contenido: pásalo por stdin (heredoc) o con --desde <archivo>.")
     text = read_text(path)
     did = []
+    if content and not seccion:
+        content, replaced = replace_known_sections(text, content)
+        text = replaced["text"]
+        did.extend("sección «%s» reemplazada" % s for s in replaced["secciones"])
     if content:
         if seccion:
             if seccion not in SECCIONES:
@@ -1633,7 +1673,10 @@ def cmd_hueco(pos, opts):
         find_lesson(topic, lid)
     detectado = "%s (%s)" % (lid, today()) if lid else "Repaso (%s)" % today()
     nxt = in_days(GAP_INTERVALS[0])
-    row = [cell(desc), detectado, "1", nxt, "abierto"]
+    intentos = str(opts.get("intentos") or "2")  # un hueco se abre tras el segundo fallo
+    if not intentos.isdigit():
+        raise CoachError("--intentos debe ser un número.")
+    row = [cell(desc), detectado, intentos, nxt, "abierto"]
     text = topic["text"]
     lines = text.split("\n")
     if find_section(lines, HUECOS_RE) is None:
@@ -1894,7 +1937,11 @@ def next_step(root, topic, opts):
     rf = root_flag(opts)
 
     def c(*parts):
-        return "%s %s%s" % (base, " ".join(parts), rf)
+        parts = list(parts)
+        tail = []
+        if parts and parts[-1].startswith("<<"):
+            tail = [parts.pop()]
+        return "%s %s%s%s" % (base, " ".join(parts), rf, (" " + tail[0]) if tail else "")
 
     if topic is None:
         return {"tipo": "nuevo", "texto": "Crear un plan: acuerda el método, haz el diagnóstico y crea el tema.",
@@ -1918,7 +1965,7 @@ def next_step(root, topic, opts):
                 "comandos": [c("check", slug)], "lee": ["references/plan-de-estudio.md"], "meta": meta}
     if due:
         main = {"tipo": "repaso", "texto": "Repasar lo que vence hoy (calentamiento) y después seguir.",
-                "comandos": [c("repaso", slug)], "lee": [], "meta": meta}
+                "comandos": [c("repaso", slug)], "lee": ["references/pedagogia.md (§9 Huecos y repasos)"], "meta": meta}
     else:
         main = None
     for mi, mod in enumerate(topic["plan"]["modulos"]):
@@ -1939,10 +1986,12 @@ def next_step(root, topic, opts):
         texto = "Seguir la lección %s · %s (lleva %s escritos)." % (cur["id"], cur["titulo"],
                                                                    plural(note_block_count(note), "bloque", "bloques"))
         cmds = [c("nota", slug, cur["id"], "<<'EOF'"), c("completar", slug, cur["id"])]
+        pista = "Cada bloque va a la nota cuando termina; el cierre lleva «## Resumen con tus palabras» y «## Fuentes»."
     else:
         texto = "Empezar la lección %s · %s." % (cur["id"], cur["titulo"])
         cmds = [c("leccion", slug, cur["id"]), c("nota", slug, cur["id"], "<<'EOF'")]
-    step = {"tipo": "leccion", "texto": texto, "comandos": cmds, "lee": ["references/pedagogia.md"],
+        pista = "La primera nota lleva «## Objetivos» (coach la reemplaza) y el primer bloque."
+    step = {"tipo": "leccion", "texto": texto, "comandos": cmds, "lee": ["references/pedagogia.md"], "pista": pista,
             "meta": meta + ["Lección %s · %s (20–45 min)" % (cur["id"], cur["titulo"])],
             "leccion": cur["id"]}
     return main and dict(main, meta=step["meta"]) or step
@@ -1965,6 +2014,8 @@ def cmd_siguiente(pos, opts):
     out("\u25B6 Ahora: %s" % step["texto"])
     for cmd in step["comandos"]:
         out("  $ %s" % cmd)
+    if step.get("pista"):
+        out("  \u2139 %s" % step["pista"])
     if step["lee"]:
         out("  Lee (si aún no lo hiciste en esta sesión): %s" % ", ".join(step["lee"]))
     if topic:
@@ -2150,6 +2201,11 @@ def cmd_sesion(pos, opts):
     else:
         out("\u2714 check: sin errores (%s)" % plural(counts["aviso"], "aviso", "avisos"))
     out("\u25B6 Siguiente paso: %s" % siguiente)
+    due, nxt = review_state(load_topic(root, topic["slug"]))
+    if due:
+        out("\U0001F5D3 Repaso pendiente: %s (empieza por ahí la próxima sesión)" % ", ".join(d["id"] for d in due))
+    elif nxt:
+        out("\U0001F5D3 Próximo repaso: %s (%s)" % (nxt["fecha"], nxt["id"]))
     out("\U0001F4D3 Cuaderno: %s" % (root / "cuaderno.html").resolve())
     return 1 if counts["error"] else 0
 

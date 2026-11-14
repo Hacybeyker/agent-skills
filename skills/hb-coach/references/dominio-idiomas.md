@@ -13,6 +13,8 @@ Mapa para diseñar planes y enseñar una lengua (inglés técnico, español, otr
 
 ## 1. Niveles y competencias
 
+Los niveles del plan son relativos al curso (🟢 su punto de partida, 🔴 la meta). La tabla sirve para un curso desde cero; si parte de B1 y apunta a B2, 🟢 consolida B1 y 🔴 es B2.
+
 | Nivel del plan | MCER | Puede… |
 |---|---|---|
 | 🟢 Básico | A1–A2 | presentarse, pedir y dar información sencilla, entender frases frecuentes sobre temas conocidos. |
@@ -38,8 +40,8 @@ Competencias que el plan reparte por módulos (el MCER las organiza en recepció
 ## 3. Cómo se enseña una lengua con el coach
 
 - **El ciclo es el mismo**: 📖 una función comunicativa (pedir aclaraciones, contar un logro) con modelos; 🛠 que la produzca; ❓ que la reconozca y la use en otro contexto.
-- **Tres ejemplos**: la expresión en una frase modelo; la misma en su contexto (su trabajo, su entrevista); el error típico (falso amigo, calco de su lengua, registro inadecuado) y por qué suena mal.
-- **Corrección**: idea comunicativa primero (¿se entiende?, ¿es adecuada?), después forma. Corrige como mucho tres errores por producción, los que más impiden comunicarse, y da la versión natural; no reescribas todo su texto.
+- **Tres ejemplos**: la expresión en una frase modelo; la misma en un contexto como el suyo (el perfil de un colega, no el suyo: su presentación es el reto); el error típico (falso amigo, calco de su lengua, registro inadecuado) y por qué suena mal.
+- **Corrección**: después de su intento, idea comunicativa primero (¿se entiende?, ¿es adecuada?), después forma. Corrige como mucho tres errores por producción, los que más impiden comunicarse, con la versión natural de esos fragmentos; no reescribas su texto entero: que lo reescriba él.
 - **Un paso a la vez**: una pregunta de simulacro por mensaje, como en una entrevista real.
 - **Vocabulario espaciado**: los términos nuevos van al glosario con una frase de ejemplo en contexto; el repaso pide usarlos, no traducirlos.
 - **Pronunciación**: con la transcripción fonética del diccionario y audios de referencia oficiales; el estudiante puede grabarse y comparar. Sin audio en el chat, trabaja acento y sonidos con pares mínimos escritos.

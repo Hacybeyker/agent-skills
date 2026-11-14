@@ -61,6 +61,7 @@ actualizado: {{FECHA}}
 
 ## Bitácora
 
+<!-- coach: una fila por sesión, la añade `coach sesion` al cerrar. -->
+
 | Fecha | Lecciones | Logros | Próximo paso |
 |---|---|---|---|
-| {{FECHA}} | — | Tema creado | Acordar el método, diagnóstico y plan |
