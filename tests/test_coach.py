@@ -1,4 +1,5 @@
 """Tests de la herramienta de hb-coach (skills/hb-coach/scripts/coach.py) en un proyecto temporal."""
+import importlib.util
 import json
 import os
 import re
@@ -137,6 +138,20 @@ Separa las columnas con comas.
 """
 
 DETALLE = "\n\n<details>\n<summary>Respuesta completa</summary>\n\n%s\n\n</details>\n\n"
+
+# Ejecuta el formato del cuaderno (sin DOM) con Node: una entrada JSON por nota, una salida por entrada.
+FORMATO_JS = r"""
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[2], "utf8");
+const m = /<script id="coach-formato">([\s\S]*?)<\/script>/.exec(html);
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(m[1], ctx);
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const out = input.map((x) => x.op === "limpiar" ? ctx.CoachFormato.limpiar(x.texto)
+  : JSON.parse(JSON.stringify(ctx.CoachFormato.bloques(x.texto))));
+process.stdout.write(JSON.stringify(out));
+"""
 
 
 def epoch(day):
@@ -877,13 +892,72 @@ class CoachTest(unittest.TestCase):
 
     # ---------------------------------------------------------------- visor
 
+    def formato(self, inputs):
+        """Ejecuta CoachFormato (el <script id="coach-formato"> del cuaderno) con Node sobre cada entrada."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node no está instalado")
+        harness = Path(self.tmp.name) / "formato.js"
+        harness.write_text(FORMATO_JS, encoding="utf-8")
+        result = subprocess.run([node, str(harness), str(SKILL / "assets" / "cuaderno.html")], input=json.dumps(inputs),
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_el_cuaderno_nunca_muestra_marcadores_ni_comentarios(self):
+        carlos = next((FIXTURE_31 / "algebra" / "lecciones").glob("1.3-*.md")).read_text(encoding="utf-8")
+        antigua = next((FIXTURE_301 / "hilt" / "lecciones").glob("1.3-*.md")).read_text(encoding="utf-8")
+        codigo = "```html\n<!-- en el código se queda -->\n```\n\nTexto `<!-- en línea -->` y <!-- fuera --> fin."
+        limpia, vieja, cod = self.formato([{"op": "limpiar", "texto": t.split("\n---\n", 1)[-1]}
+                                           for t in (carlos, antigua)] + [{"op": "limpiar", "texto": codigo}])
+        for text in (limpia, vieja):
+            self.assertNotIn("[[", text)
+            self.assertNotIn("<!--", text)
+        self.assertNotIn("## Resumen con tus palabras", limpia)
+        self.assertNotIn("## Fuentes", limpia)
+        self.assertNotIn("**Bloques:**", limpia)
+        self.assertIn("## Historial", limpia)
+        self.assertIn("- Aplicar las leyes de los exponentes", limpia)
+        self.assertIn("<!-- en el código se queda -->", cod)
+        self.assertIn("`<!-- en línea -->`", cod)
+        self.assertNotIn("fuera", cod)
+
+    def test_el_cuaderno_y_el_script_ven_los_mismos_bloques(self):
+        spec = importlib.util.spec_from_file_location("coach_mod", str(SCRIPT))
+        coach = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(coach)
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** x · **Veredicto:** ✘ falta la coma")
+        en_curso = self.note_path("1.1").read_text(encoding="utf-8")
+        self.ok("corregir", "sql", "1.1", stdin="**Segundo intento:** y · **Veredicto:** ✔\n\n<details>\n<summary>"
+                                                  "Solución</summary>\n\nz\n\n</details>\n\n**P1.** tu respuesta: *a* ✘")
+        notas = [en_curso, self.note_path("1.1").read_text(encoding="utf-8")]
+        for base in (FIXTURE_301 / "hilt", FIXTURE_31 / "algebra", SKILL / "assets" / "ejemplo" / "hilt",
+                     SKILL / "assets" / "ejemplo" / "estadistica-ab"):
+            notas += [p.read_text(encoding="utf-8") for p in sorted((base / "lecciones").glob("*.md"))]
+
+        def resumen(info):
+            return {"mapa": [[e["n"], e["titulo"]] for e in info["mapa"]],
+                    "bloques": [[b["n"], b["titulo"], b["espera"]["texto"] if b["espera"] else None]
+                                for b in info["bloques"]],
+                    "retos": [[r["k"], r["estado"]] for r in info["retos"]],
+                    "preguntas": [[q["k"], q["estado"]] for q in info["preguntas"]],
+                    "actual": info["actual"]["n"] if info["actual"] else None,
+                    "siguiente": info["siguiente"]["n"] if info["siguiente"] else None, "total": info["total"]}
+
+        js = self.formato([{"op": "bloques", "texto": t.split("\n---\n", 1)[-1]} for t in notas])
+        self.assertEqual(len(js), len(notas))
+        for text, got in zip(notas, js):
+            self.assertEqual(resumen(got), resumen(coach.note_blocks(text)), text[:120])
+
     def test_el_javascript_del_cuaderno_es_valido(self):
         node = shutil.which("node")
         if not node:
             self.skipTest("Node no está instalado")
         html = (SKILL / "assets" / "cuaderno.html").read_text(encoding="utf-8")
-        scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
-        self.assertTrue(scripts)
+        scripts = re.findall(r"<script(?: id=\"coach-formato\")?>(.*?)</script>", html, re.S)
+        self.assertEqual(len(scripts), 3)
         js = Path(self.tmp.name) / "cuaderno.js"
         js.write_text("\n;\n".join(scripts), encoding="utf-8")
         result = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
