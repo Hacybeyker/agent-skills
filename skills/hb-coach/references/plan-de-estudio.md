@@ -1,100 +1,92 @@
 # Diseño del plan de estudio
 
-Cómo crear y mantener `aprendizaje/<tema>/PLAN.md`. El formato es estricto porque los scripts y el cuaderno lo leen para calcular el progreso.
+Cómo crear y mantener `<slug>/PLAN.md`. El formato es estricto porque `coach` y el cuaderno lo leen para calcular el progreso, los exámenes y los repasos.
 
 ## Contenido
 
 1. Método: diseño inverso
 2. Diagnóstico adaptativo
-3. Estructura de la ruta
+3. Estructura del curso
 4. Formato exacto de PLAN.md
 5. Lista de control de un buen plan
 6. Mantenimiento del plan
 
 ## 1. Método: diseño inverso
 
-1. **Meta**: qué podrá hacer el estudiante al terminar, en una frase verificable. Mal: «saber Hilt». Bien: «diseñar e implementar la DI de una app multimódulo con Hilt, con tests, y justificar cada scope».
-2. **Evidencias**: qué demostrará que lo logró (proyecto final, preguntas de diseño, tests).
+1. **Meta**: qué podrá hacer el estudiante al terminar, en una frase verificable. Mal: «saber Hilt», «saber estadística». Bien: «diseñar la DI de una app multimódulo con Hilt, con tests, y justificar cada scope»; «decidir si un test A/B es concluyente y explicar por qué a un equipo de producto».
+2. **Evidencias**: qué demostrará que lo logró (proyecto final, exámenes, tareas reales).
 3. **Ruta**: módulos y lecciones que llevan de su punto de partida a esas evidencias, en orden de dependencias conceptuales.
 
-Adapta el plan al proyecto real: las prácticas se hacen en su código siempre que sea posible, y las versiones del plan coinciden con las del proyecto (o se indica el cambio de versión como parte del plan).
+Adapta el plan a su realidad: en software, las prácticas se hacen en su proyecto y con sus versiones; en otros temas, con sus datos, su trabajo o su meta (la entrevista, el examen oficial, el viaje).
 
 ## 2. Diagnóstico adaptativo
 
-Antes del diagnóstico, acuerda el método con el estudiante y déjalo escrito en `aprendizaje/METODO.md` (ver SKILL.md). El diagnóstico mide lo que **ya** debería saber: nunca preguntes por el contenido que vas a enseñar en el plan.
+Antes, acuerda el método (`coach metodo`). El diagnóstico mide **dónde empezar**: es el único momento en que se pregunta por lo que aún no has enseñado, precisamente para saltar lo que ya sabe. No enseñes ni corrijas en detalle; anota.
 
-**Preguntas de contexto** (3 o 4, con opciones cuando sea posible):
+**Preguntas de contexto** (2 o 3, con opciones cuando sea posible): experiencia con el tema y con temas vecinos; meta concreta (proyecto, trabajo, examen, entrevista, curiosidad); dónde lo aplicará. El ritmo ya está en el método.
 
-- Experiencia con el tema y con tecnologías vecinas.
-- Meta concreta: proyecto, trabajo, entrevista, curiosidad.
-- Tiempo disponible por semana y duración preferida de las sesiones.
-- Proyecto donde aplicarlo (si no es el actual).
-
-**Preguntas técnicas** (5 a 8, escalonadas):
-
-- 2 de nivel básico, 2 o 3 de intermedio, 1 o 2 de avanzado y, si responde todo bien, 1 de experto.
-- Preferentemente abiertas o de «explica por qué», no de memoria.
-- Si falla dos seguidas, detén el escalado: ya sabes dónde empezar.
-- No enseñes durante el diagnóstico; solo anota. Al final, da un resumen honesto y breve de su punto de partida.
+**Preguntas de nivel** (4 a 8, una por mensaje, escalonadas): 2 de básico, 2 o 3 de intermedio, 1 o 2 de avanzado y, si responde todo bien, 1 de experto. Preferentemente abiertas o de «explica por qué». En idiomas, incluye una tarea breve de producción (escribir o decir unas frases) además de las preguntas. Si falla dos seguidas, detén el escalado. No enseñes durante el diagnóstico; solo anota. Al final, un resumen honesto y breve de su punto de partida.
 
 **Decisiones**:
 
-- Pregunta básica bien respondida y con ejemplo propio → convalidar la lección correspondiente.
-- Respuesta parcial → mantener la lección, que puede ir en modo exprés.
-- Nivel avanzado demostrado → convalidar solo lo conceptual; las prácticas avanzadas requieren evidencia práctica.
-- Registra todo en la tabla `## Diagnóstico` y fija `nivel_actual` en el frontmatter.
+- Pregunta básica bien respondida y con ejemplo propio → convalidar la lección correspondiente. Si lo que sabe es un prerrequisito sin lección propia, no hay nada que convalidar: anótalo en el resumen del plan.
+- Respuesta parcial → mantener la lección, en modo exprés.
+- Nivel avanzado demostrado → convalidar solo lo conceptual; lo práctico avanzado exige evidencia práctica.
+- Registra todo en `## Diagnóstico` y fija `nivel_actual`.
 
-## 3. Estructura de la ruta
+## 3. Estructura del curso
 
 **Niveles** (encabezado de cada módulo):
 
 | Nivel | Emoji | El estudiante… |
 |---|---|---|
-| Básico | 🟢 | entiende el problema, los conceptos y usa lo esencial con guía. |
-| Intermedio | 🟡 | aplica el tema de forma autónoma en casos reales y conoce las alternativas. |
-| Avanzado | 🟠 | domina el funcionamiento interno, el rendimiento, el testing y los trade-offs. |
-| Experto | 🔴 | diseña soluciones completas, resuelve casos límite y puede enseñarlo (proyecto final). |
+| Básico | 🟢 | entiende el problema y los conceptos y usa lo esencial con guía. |
+| Intermedio | 🟡 | lo aplica de forma autónoma en casos reales y conoce las alternativas. |
+| Avanzado | 🟠 | domina el funcionamiento interno, los casos límite y los trade-offs. |
+| Experto | 🔴 | diseña soluciones completas, decide con criterio y puede enseñarlo (proyecto final). |
 
-**Tamaño**:
+**Tamaño** (como un curso completo: unas 20 a 30 lecciones):
 
-- 5 a 9 módulos; 2 a 6 lecciones por módulo.
+- 5 a 8 módulos; 3 a 5 lecciones por módulo; un examen al final de cada módulo (salvo el del proyecto final: el último módulo 🔴 o el que se llame «Proyecto…»).
 - Cada lección tiene un único resultado observable y dura entre 20 y 45 minutos.
-- Estimación total: número de lecciones × 30–40 minutos. Indícala al presentar el plan.
+- Estimación: lecciones × 30–40 minutos, en semanas según el ritmo acordado. Indícala al presentar el plan.
+- Un plan corto (una entrevista la semana que viene) puede tener 2 o 3 módulos: el tamaño sigue a la meta.
+- Los niveles son relativos al curso: 🟢 es su punto de partida y 🔴 la meta. Si ya parte de un nivel medio, el módulo 🟢 consolida lo que tiene.
 
-**Contenido que casi siempre debe aparecer** (cuando aplique al tema):
+**Contenido que casi siempre debe aparecer** (cuando aplique):
 
 - el problema que resuelve y las alternativas;
 - fundamentos antes que herramientas;
-- configuración real en su stack y versiones;
-- errores comunes y cómo depurarlos;
-- testing;
-- seguridad y rendimiento;
-- integración con el resto de su arquitectura;
-- comparativa o migración desde lo que usa hoy;
+- práctica real en su contexto;
+- errores y confusiones frecuentes;
+- en software, testing, seguridad y rendimiento;
+- integración con lo que ya hace o sabe;
 - proyecto final que integre todo.
 
-Los mapas `dominio-*.md` tienen rutas típicas por tema; úsalas como punto de partida, no como plantilla rígida.
+Los mapas `dominio-*.md` tienen rutas típicas; úsalos como punto de partida, no como plantilla rígida. Si el tema no tiene mapa, constrúyelo con [dominio-generico.md](dominio-generico.md) y, si lo guardas, en `<slug>/MAPA.md` (`coach init … --mapa`).
 
 ## 4. Formato exacto de PLAN.md
 
-Parte de la plantilla que crea `coach init` y reemplaza todos los `[[COMPLETAR: …]]`.
+Parte de la plantilla que crea `coach init` y reemplaza todos los `[[COMPLETAR: …]]`. Como el archivo ya existe, léelo antes de reescribirlo.
 
 ### Frontmatter
 
 ```yaml
 ---
-tema: "Hilt: inyección de dependencias en Android"   # título visible
-slug: hilt                                            # igual que el nombre de la carpeta
-area: android                                         # frontend, backend, seguridad, criptografia, bases-de-datos, arquitectura, android, ios, multiplataforma…
-nivel_actual: básico                                  # según el diagnóstico
-nivel_objetivo: avanzado
-leccion_actual: "1.3"                                 # la mantienen los scripts; entre comillas
-creado: 2026-09-15
-actualizado: 2026-09-15
+tema: "Estadística para entender tests A/B"   # título visible
+slug: estadistica-ab                          # igual que la carpeta
+area: estadistica                             # android, backend, idiomas, estadistica, finanzas…
+nivel_actual: básico                          # por-diagnosticar | básico | intermedio | avanzado | experto
+nivel_objetivo: intermedio                    # básico | intermedio | avanzado | experto
+leccion_actual: "1.2"                         # la mantiene coach; entre comillas
+playground: "https://…"                       # opcional: herramienta oficial para practicar
+formato: 2                                    # lo pone coach; no lo cambies
+creado: 2026-11-13
+actualizado: 2026-11-13
 ---
 ```
 
-Valores con `:` u otros símbolos van entre comillas. No añadas comentarios `#` en tus archivos reales (arriba solo explican los campos).
+Valores con `:` u otros símbolos van entre comillas. No añadas comentarios `#` en tus archivos reales.
 
 ### Secciones, en este orden
 
@@ -108,39 +100,38 @@ Valores con `:` u otros símbolos van entre comillas. No añadas comentarios `#`
 ### Módulo 2 · <nombre> 🟡 Intermedio
 ...
 ## Proyecto final
-## Recursos oficiales
+## Recursos
 ## Huecos abiertos
 ## Bitácora
 ```
 
-### Módulos
+`Recursos` también puede llamarse `Recursos oficiales` (planes de 3.0).
+
+### Módulos, lecciones y examen
 
 ```markdown
 ### Módulo 3 · Componentes, scopes y qualifiers 🟡 Intermedio
 
 > **Meta del módulo:** decidir cuánto vive cada objeto y distinguir implementaciones del mismo tipo.
-```
 
-- Encabezado de nivel 3: `### Módulo <n> · <nombre> <emoji> <Nivel>`.
-- La cita con la meta del módulo va entre el encabezado y la primera lección.
-
-### Lecciones
-
-```markdown
-- [ ] **3.2 Scopes: `@Singleton` y `@ViewModelScoped`** — Elegir el scope mínimo necesario y conocer su coste.
+- [ ] **3.1 Componentes y ciclo de vida** — Relacionar cada componente con el ciclo de vida de Android.
   - Objetivo: explicar qué componente retiene cada instancia y cuándo se destruye.
-  - Práctica: revisar los scopes de `:core:data` y justificar cada uno.
-  - Dominio: detecta un scope innecesario y mide su efecto.
+  - Práctica: dibujar el árbol de componentes de su app.
+  - Dominio: predice correctamente cuánto vive un objeto con y sin scope.
+- [ ] **3.2 Scopes** — Elegir el scope mínimo necesario y conocer su coste.
+- [ ] **Examen M3** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 ```
 
 Reglas:
 
-- Línea de lección: `- [ ] **<id> <título>** — <resultado de aprendizaje>`. El id y el título van dentro de las negritas.
-- Id `<módulo>.<lección>` (`3.2`). Para insertar entre lecciones existentes usa un subnivel (`3.2.1`); nunca renumeres lecciones ya hechas.
-- Completada: `- [x]`. Convalidada: `- [x]` y ` (convalidada)` al final de la línea. Lo hacen los scripts.
-- Los detalles (`Objetivo`, `Práctica`, `Dominio`) van como sublista con 2 espacios de sangría. Son obligatorios en los módulos básicos e intermedios y muy recomendables en el resto.
+- Encabezado de módulo de nivel 3: `### Módulo <n> · <nombre> <emoji> <Nivel>`, con la cita de la meta debajo.
+- Lección: `- [ ] **<id> <título>** — <resultado de aprendizaje>`, con el id y el título dentro de las negritas. Escribe el resultado en infinitivo («Elegir el scope mínimo…»): la nota lo copia en «Al terminar podrás».
+- Id `<módulo>.<lección>` (`3.2`). Para insertar entre lecciones usa un subnivel (`3.2.1`); nunca renumeres lecciones hechas.
+- Detalles (`Objetivo`, `Práctica`, `Dominio`) en una sublista con 2 espacios. Obligatorios en los módulos básicos e intermedios; muy recomendables en el resto.
+- **Examen**: `- [ ] **Examen M<n>** — …` como última línea de cada módulo, salvo en el del proyecto final (el último módulo 🔴 o el que se llame «Proyecto…»). `coach examen` la añade si falta y la marca con el resultado.
+- Completada `- [x]`; convalidada `- [x] … (convalidada)`. Lo hace `coach completar`.
 - No uses checkboxes con un id en negrita fuera de la ruta: se contarían como lecciones.
-- No hace falta enlazar las notas: el cuaderno las asocia por el id del nombre de archivo.
+- No enlaces las notas: el cuaderno las asocia por el id del nombre de archivo.
 
 ### Diagnóstico
 
@@ -152,60 +143,48 @@ Reglas:
 
 ### Proyecto final
 
-Descripción del entregable, requisitos, tests esperados y criterios de evaluación. Suele corresponder al último módulo (🔴 Experto).
+Descripción del entregable, requisitos, cómo se comprobará (tests, rúbrica, entrega real) y criterios de evaluación. Suele ser el último módulo (🔴 Experto), sin línea de examen: el proyecto es su examen.
 
-### Recursos oficiales
+### Recursos
 
-Lista de enlaces con una frase sobre para qué sirve cada uno. Solo fuentes verificadas (ver `fuentes-oficiales.md`).
+Enlaces con una frase sobre para qué sirve cada uno. Solo fuentes oficiales o fiables y vigentes ([fuentes-oficiales.md](fuentes-oficiales.md)).
 
 ### Huecos abiertos
 
-Conceptos que fallaron y siguen pendientes de consolidar (protocolo en `pedagogia.md`). La sección existe desde el primer día, aunque esté vacía.
+La sección existe desde el primer día, aunque esté vacía. La gestiona `coach hueco`: no calcules fechas a mano.
 
 ```markdown
 | Hueco | Detectado | Intentos | Próximo repaso | Estado |
 |---|---|---|---|---|
-| Reutilizar un caso de uso en dos pantallas | 3.1 (2026-10-02) | 3 | 2026-10-09 | abierto |
+| Reutilizar un caso de uso en dos pantallas | 3.1 (2026-10-02) | 2 | 2026-10-09 | abierto ✔ |
 | Diferencia entre `@Binds` y `@Provides` | 2.4 (2026-09-28) | 2 | — | cerrado 2026-10-05 |
 ```
 
-- Una fila por hueco, con la lección donde se detectó y la fecha.
-- `Estado`: `abierto` o `cerrado <fecha>`. Los cerrados se conservan como historia.
-- `Próximo repaso`: la fecha en la que lo volverás a preguntar; repásalo en el calentamiento de esa sesión.
+`Estado`: `abierto` más una ✔ por cada repaso bien seguido, o `cerrado <fecha>`. Los cerrados se conservan.
 
 ### Bitácora
 
-```markdown
-| Fecha | Lecciones | Logros | Próximo paso |
-|---|---|---|---|
-| 2026-09-15 | — | Plan creado tras un diagnóstico de 5 preguntas | Lección 1.2 |
-| 2026-09-17 | 1.2 | Construyó `AppContainer` y un test con fake | Lección 1.3 |
-```
-
-- Una fila por sesión, añadida al final (la última fila es la más reciente).
-- Logros concretos; el próximo paso debe permitir retomar sin contexto.
-- Registra también repasos y exámenes: «Repaso M1: 4/5, falló scopes».
+Una fila por sesión, al final (la añade `coach sesion`; la tabla empieza vacía): fecha, lecciones, logros concretos y un próximo paso que permita retomar sin contexto. También repasos y exámenes: «Examen M1: 5/6».
 
 ## 5. Lista de control de un buen plan
 
-- [ ] La meta es verificable y está alineada con lo que el estudiante quiere.
+- [ ] La meta es verificable y está alineada con lo que quiere.
 - [ ] El diagnóstico está registrado y `nivel_actual` coincide con él.
-- [ ] Los módulos progresan de 🟢 a 🔴 sin saltos de dependencias.
+- [ ] Los módulos progresan de 🟢 a 🔴 sin saltos de dependencias, y cada uno termina con su examen.
 - [ ] Cada lección tiene un resultado observable y, en los primeros módulos, objetivo, práctica y dominio.
-- [ ] Las prácticas usan el proyecto real siempre que es posible.
-- [ ] Hay lecciones de errores comunes, testing y, si aplica, seguridad y rendimiento.
+- [ ] Las prácticas usan su proyecto o su contexto real siempre que se puede.
+- [ ] Hay lecciones de errores frecuentes y, si aplica, de testing, seguridad y rendimiento.
 - [ ] El proyecto final integra lo aprendido y tiene criterios de evaluación.
-- [ ] Los recursos son oficiales y están vigentes.
-- [ ] Existen las secciones «Huecos abiertos» (aunque vacía) y «Bitácora».
+- [ ] Los recursos son oficiales o fiables y están vigentes.
 - [ ] No quedan `[[COMPLETAR]]` y `coach check` no da errores.
-- [ ] La presentación al estudiante incluye la duración estimada y el primer paso.
+- [ ] La presentación incluye la duración estimada y el primer paso.
 
 ## 6. Mantenimiento del plan
 
-- **Va más rápido de lo previsto**: convalida con evidencia, fusiona lecciones o sube `nivel_objetivo`.
+- **Va más rápido**: convalida con evidencia, fusiona lecciones o sube `nivel_objetivo`.
 - **Va más lento**: divide lecciones, añade refuerzos (`2.3.1 Refuerzo: …`) o baja el ritmo acordado.
-- **Cambia la meta o el proyecto**: ajusta el resumen, los módulos pendientes y el proyecto final.
-- **Cambia una versión** del framework: añade una lección de migración o actualiza las pendientes, y registra la fuente.
-- **Hueco que se repite**: añade una lección de refuerzo (`3.1.1 Refuerzo: …`) en lugar de volver a preguntar lo mismo, y enlaza la fila de «Huecos abiertos» con ella.
-- **Cambia la forma de trabajar** (orden de los bloques, tipo de preguntas, rigor de corrección): eso no va en el plan, va en `aprendizaje/METODO.md`.
-- Cualquier ajuste queda anotado en la bitácora y, si afecta a la lección actual, se actualiza `leccion_actual` con `coach leccion`.
+- **Cambia la meta**: ajusta el resumen, los módulos pendientes y el proyecto final.
+- **Cambia una versión** del framework o una norma: añade una lección de actualización o ajusta las pendientes, y registra la fuente.
+- **Hueco que se repite**: una lección de refuerzo en lugar de volver a preguntar lo mismo.
+- **Cambia la forma de trabajar**: eso no va en el plan, va en `METODO.md` (`coach metodo`).
+- Cualquier ajuste queda en la bitácora (`coach sesion`) y, si afecta a la lección actual, se actualiza con `coach leccion`.

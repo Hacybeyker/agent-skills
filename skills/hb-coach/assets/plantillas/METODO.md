@@ -4,25 +4,28 @@ actualizado: {{FECHA}}
 
 # Acuerdo de método
 
-<!-- coach: acuérdalo con el estudiante en la primera sesión (3 o 4 preguntas con opciones),
-     léelo al empezar cada sesión y actualízalo en cuanto pida un cambio. -->
+<!-- coach: acuérdalo en la primera sesión (3 o 4 preguntas con opciones) y guárdalo con
+     `coach metodo --<clave> "valor"`. Léelo con `coach metodo` al empezar y cámbialo en cuanto pida algo distinto. -->
 
 | Aspecto | Acuerdo |
 |---|---|
 | Orden de cada bloque | 📖 Leer → 🛠 Hacer → ❓ Responder, anunciado en el mapa de la lección |
-| Preguntas | Solo sobre lo ya explicado o implementado. [[COMPLETAR: ¿quiere preguntas de predicción etiquetadas como «adivina, no cuenta»? sí / no]] |
+| Pasos | Uno a la vez: el coach espera tu resultado antes del siguiente |
+| Preguntas | Solo sobre lo ya explicado o practicado |
+| Predicción | No (si las quieres: sí, etiquetadas «adivina, no cuenta» y nunca en la comprobación de dominio) |
 | Corrección | Idea central correcta = ✔; los matices van en «Para ampliar» y no restan |
-| Mensajes | Un bloque por mensaje; el código largo va al cuaderno |
-| Ejemplos | Tres por concepto: mínimo ejecutable, en tu proyecto y «lo que sale mal» |
-| Práctica | [[COMPLETAR: en su proyecto / en un proyecto aparte / ambas]] |
-| Verificación | El coach prueba cada paso en una copia antes de pedírtelo y revisa los avisos del compilador |
+| Mensajes | Un bloque por mensaje, corto; lo largo va al cuaderno |
+| Ejemplos | Tres por concepto: mínimo, en tu contexto y «lo que sale mal» |
+| Práctica | [[COMPLETAR: en su proyecto / en un proyecto aparte / problemas y casos / ambas]] |
+| Verificación | El coach comprueba cada paso, cálculo o dato antes de pedírtelo |
 | Ritmo | [[COMPLETAR: sesiones por semana y duración]] |
-| Profundidad | [[COMPLETAR: exprés / normal / profundo (internals y trade-offs)]] |
-| Calentamiento | [[COMPLETAR: sí, una pregunta de repaso al empezar / no]] |
+| Profundidad | [[COMPLETAR: exprés / normal / profundo]] |
+| Calentamiento | [[COMPLETAR: sí, repaso de lo que vence al empezar / no]] |
+| Repasos | Calendario de coach: lecciones a 3, 7, 14, 30 y 60 días; huecos a 1, 3, 7, 14 y 30 |
 | Idioma | [[COMPLETAR: español]] |
 
 ## Cambios acordados
 
 | Fecha | Cambio | Motivo |
 |---|---|---|
-| {{FECHA}} | Acuerdo inicial | Primera sesión |
+| {{FECHA}} | Plantilla creada | — |
