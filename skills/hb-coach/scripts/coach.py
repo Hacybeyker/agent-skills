@@ -67,7 +67,7 @@ Empezar
 
 Durante la lección
   leccion <slug> <id>              Crea la nota de la lección y la marca como actual.
-  nota <slug> <id|Mn> [--desde ARCHIVO] [--seccion objetivos|resumen|fuentes] [--historial "texto"]
+  nota <slug> <id|Mn> [--desde ARCHIVO] [--seccion objetivos|resumen|fuentes|tarea] [--historial "texto"]
                                    Sin --seccion, añade el Markdown (stdin o --desde) antes del cierre
                                    de la nota; con --seccion, reemplaza esa sección; --historial añade
                                    una fila fechada. Mn es la nota del examen del módulo n.
@@ -441,7 +441,7 @@ def insert_lines(lines, at, new):
     return lines[:at] + list(new) + lines[at:]
 
 
-CLOSING_RE = re.compile(r"^##\s+(?:resumen con tus palabras|fuentes|historial|resultado)\b", re.I)
+CLOSING_RE = re.compile(r"^##\s+(?:resumen con tus palabras|fuentes|historial|resultado|tarea pr[aá]ctica)\b", re.I)
 
 
 def insert_before_closing(text, content):
@@ -1244,8 +1244,7 @@ SECCIONES = {
     "objetivos": (OBJETIVOS_RE, "Objetivos"),
     "resumen": (re.compile(r"resumen con tus palabras", re.I), "Resumen con tus palabras"),
     "fuentes": (re.compile(r"^fuentes\b", re.I), "Fuentes"),
-    "pregunta": (re.compile(r"^preguntas\b", re.I), "Preguntas"),
-    "tarea": (re.compile(r"tarea", re.I), "Tarea práctica"),
+    "tarea": (re.compile(r"^tarea", re.I), "Tarea práctica"),
     "resultado": (re.compile(r"^resultado\b", re.I), "Resultado"),
 }
 HISTORIAL_RE = re.compile(r"^historial\b", re.I)
@@ -1853,6 +1852,11 @@ def cmd_examen(pos, opts):
         ntext = set_fm(note["text"], "estado", "aprobado" if passed else "repetir")
         ntext = set_fm(ntext, "resultado", "%d/%d" % (ok, total))
         ntext = set_fm(ntext, "fecha", today())
+        veredicto = "aprobado" if passed else "a repetir"
+        resumen = "**%d/%d (%d %%)**%s \u00b7 %s el %s." % (ok, total, pct, tarea_txt, veredicto, today())
+        ntext = replace_section(ntext, SECCIONES["resultado"][0], resumen, "Resultado")
+        ntext = append_table_row(ntext, HISTORIAL_RE, "Historial", ["Fecha", "Qué pasó"],
+                                 [today(), "Resultado: %d/%d (%d %%), %s" % (ok, total, pct, veredicto)])
         write_text(note["path"], ntext)
     if passed:
         out("\U0001F389 Examen M%s aprobado: %d/%d (%d %%)." % (mod["id"], ok, total, pct))

@@ -323,7 +323,7 @@ main.is-grid {
 .nav-mod-id { font: 600 0.72rem/1 var(--font-mono); color: var(--ink-3); flex: none; }
 .nav-mod-title { flex: 1; min-width: 0; }
 .nav-count { font: 500 0.7rem/1 var(--font-mono); color: var(--ink-3); flex: none; }
-.nav-lesson { display: grid; grid-template-columns: 10px 2.6em minmax(0, 1fr); align-items: baseline; gap: 7px; padding: 5px 10px; font-size: 0.83rem; }
+.nav-lesson { display: grid; grid-template-columns: 10px 2.6em minmax(0, 1fr) auto; align-items: baseline; gap: 7px; padding: 5px 10px; font-size: 0.83rem; }
 .nav-lesson .lesson-id { font-size: 0.72rem; }
 .nav-lesson-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-foot { margin-top: auto; padding: 18px 10px 0; display: flex; flex-direction: column; gap: 10px; font-size: 0.78rem; color: var(--ink-3); }
@@ -662,6 +662,85 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
 .welcome code, .panel code, .notice code, .banner code { font: 400 0.85em/1.4 var(--font-mono); background: var(--surface-2); border: 1px solid var(--rule); border-radius: 5px; padding: 0.05em 0.35em; }
 .loading { color: var(--ink-3); padding: 40px 0; }
 
+/* ------------------------------------------------------------------ curso: retos, repaso, progreso y exámenes */
+.meta-i { display: inline-flex; align-items: center; gap: 6px; }
+.lesson-head .eyebrow { margin-bottom: 2px; }
+.toc a .n { font: 500 0.7rem/1 var(--font-mono); color: var(--ink-3); margin-right: 8px; }
+.toc a.toc-cta {
+  display: flex; flex-direction: column; gap: 3px;
+  margin-top: 16px; padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--ink); color: var(--paper);
+}
+.toc a.toc-cta:hover { color: var(--paper); background: var(--accent-strong); }
+.toc-cta small { color: color-mix(in srgb, var(--paper) 72%, transparent); }
+.reto {
+  margin: 1.8em 0;
+  padding: 2px 20px 18px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.reto-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-top: 14px; }
+.prose .reto h3 { margin: 6px 0 0.4em; }
+.prose .reto p.expected { margin: 1em 0 0.3em; font: 600 0.7rem/1.2 var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+.prose .reto p.expected strong { background: none; }
+.reto-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 14px; }
+.reto-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--ink-2); }
+details.hint, details.solution { margin: 0.8em 0; border: 1px dashed var(--rule); border-radius: var(--radius-sm); padding: 0.1em 1em 0.6em; background: var(--paper); }
+details.hint > summary, details.solution > summary { cursor: pointer; font-weight: 700; padding: 0.5em 0; }
+details.hint > summary { color: var(--ok); }
+details.solution { border-style: solid; border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+details.solution > summary { color: var(--accent); }
+.chip[data-reto="resuelto"], .chip[data-exam="aprobado"] { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+.chip[data-reto="intentado"] { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+.chip[data-exam="toca"] { background: var(--mark-soft); border-color: color-mix(in srgb, var(--mark) 70%, transparent); color: var(--mark-ink); }
+.chip[data-exam="repetir"] { background: var(--bad-soft); border-color: transparent; color: var(--bad); }
+.chip[data-reto="pendiente"], .chip[data-exam="pendiente"] { color: var(--ink-3); }
+.lesson-row.exam-row > .icon { width: 14px; height: 14px; color: var(--ink-3); align-self: center; }
+.nav-lesson .nav-count { justify-self: end; }
+.nav-exam > .icon { width: 11px; height: 11px; color: var(--ink-3); align-self: center; }
+.nav-exam .nav-lesson-title { color: var(--ink-2); }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 158px), 1fr)); gap: 12px; }
+.stat { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px 16px; }
+.stat-value { font: 700 1.75rem/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.stat-label { font-size: 0.86rem; color: var(--ink-2); margin-top: 2px; }
+.stat-sub { font-size: 0.76rem; color: var(--ink-3); margin-top: 4px; }
+.mod-progress { display: flex; flex-direction: column; gap: 14px; }
+.mp-row { display: grid; grid-template-columns: 2.4em minmax(0, 1fr) minmax(90px, 220px) 3.2em 7.5em; align-items: center; gap: 6px 12px; }
+.mp-title { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-bar { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.mp-bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.mp-row .chip { justify-self: start; }
+@media (max-width: 640px) {
+  .mp-row { grid-template-columns: 2.4em minmax(0, 1fr) auto; }
+  .mp-row .mp-title { grid-column: 2; grid-row: 1; }
+  .mp-row .nav-count { grid-column: 3; grid-row: 1; }
+  .mp-row .mp-bar { grid-column: 2 / 4; grid-row: 2; }
+  .mp-row .chip, .mp-row .mp-empty { grid-column: 2 / 4; grid-row: 3; }
+}
+.cal { list-style: none; margin: 0; padding: 0; }
+.cal li { display: grid; grid-template-columns: 13em minmax(0, 1fr); gap: 4px 14px; padding: 10px 4px; border-bottom: 1px solid var(--rule); align-items: baseline; }
+.cal .when { font: 600 0.78rem/1.4 var(--font-mono); color: var(--ink-2); }
+.cal .when.late { color: var(--bad); }
+.cal .when.today { color: var(--mark-ink); }
+.cal .what { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; min-width: 0; }
+@media (max-width: 560px) { .cal li { grid-template-columns: minmax(0, 1fr); } }
+.flash { max-width: 74ch; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px 24px; }
+.flash-q { font: 600 1.3rem/1.4 var(--font-display); margin: 10px 0 6px; text-wrap: balance; }
+.flash-q code { font: 400 0.86em/1.4 var(--font-mono); background: var(--surface-2); border: 1px solid var(--rule); border-radius: 5px; padding: 0.05em 0.3em; }
+.flash .prose { margin: 14px 0; padding-top: 12px; border-top: 1px dashed var(--rule); }
+.flash-rate { display: flex; flex-wrap: wrap; gap: 10px; }
+.flash-done ul { padding-left: 1.2em; }
+.letters { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 14px; }
+.letters a { display: inline-grid; place-items: center; min-width: 2.1em; height: 2.1em; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); font: 600 0.8rem/1 var(--font-mono); text-decoration: none; color: var(--ink-2); }
+.letters a:hover { border-color: var(--accent); color: var(--accent); }
+.gap-list { list-style: none; margin: 0; padding: 0; }
+.gap-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; padding: 10px 4px; border-bottom: 1px solid var(--rule); }
+.gap-list .gap-name { flex: 1 1 260px; min-width: 0; }
+.gap-list .streak { color: var(--ok); font-weight: 700; letter-spacing: 1px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
@@ -671,7 +750,10 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
   main { padding: 0; background: none !important; }
   body { background: #fff; color: #000; }
   .reading { display: block; }
-  .code-block, figure.diagram, details.qa, .table-wrap, .panel { break-inside: avoid; }
+  .code-block, figure.diagram, details.qa, .table-wrap, .panel, .reto { break-inside: avoid; }
+  .reto-actions, .flash-rate, .toc-cta, .letters { display: none !important; }
+  .reto details.hint, .reto details.solution { display: block !important; }
+  .reto { box-shadow: none; }
 }
 </style>
 </head>
@@ -695,6 +777,13 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
   <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.5"/></symbol>
   <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></symbol>
+  <symbol id="i-exam" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M9 10h6M9 14h6M9 18h3"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></symbol>
 </svg>
 
 <a class="skip" href="#main">Saltar al contenido</a>
@@ -904,6 +993,36 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     return libPromises[id];
   }
 
+  // ------------------------------------------------------------------ fechas y calendario
+  function pad2(n) { return String(n).padStart(2, "0"); }
+  function isoOf(d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
+  function todayISO() { return isoOf(new Date()); }
+  function firstDate(s) { var m = /(\d{4})-(\d{2})-(\d{2})/.exec(String(s || "")); return m ? m[0] : ""; }
+  function daysFrom(iso) {
+    var a = parseDate(iso), b = parseDate(todayISO());
+    return a && b ? Math.round((a - b) / 86400000) : null;
+  }
+  function whenLabel(iso) {
+    var d = daysFrom(iso);
+    if (d === null) return iso;
+    if (d < 0) return "vencido hace " + plural(-d, "día", "días");
+    if (d === 0) return "hoy";
+    if (d === 1) return "mañana";
+    return "en " + plural(d, "día", "días");
+  }
+  function seeded(str) {
+    var h1 = 1779033703 ^ str.length;
+    for (var i = 0; i < str.length; i++) { h1 = Math.imul(h1 ^ str.charCodeAt(i), 3432918353); h1 = h1 << 13 | h1 >>> 19; }
+    return function () {
+      h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507); h1 = Math.imul(h1 ^ h1 >>> 13, 3266489909);
+      return ((h1 ^= h1 >>> 16) >>> 0) / 4294967296;
+    };
+  }
+  function shuffle(list, rnd) {
+    for (var i = list.length - 1; i > 0; i--) { var j = Math.floor(rnd() * (i + 1)); var x = list[i]; list[i] = list[j]; list[j] = x; }
+    return list;
+  }
+
   // ------------------------------------------------------------------ formato (mismo que coach.py)
   var LESSON_RE = /^\s*[-*+]\s+\[([ xX])\]\s+\*\*([0-9]+(?:\.[0-9]+)+)\.?\s+(.+?)\*\*(.*)$/;
   var HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
@@ -917,6 +1036,13 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
   var DESC_LEAD_RE = /^[\s—–\-:·|]+/;
   var TITLE_LEAD_RE = /^[·:\-—–]\s*/;
   var NOTE_ID_RE = /^([0-9]+(?:\.[0-9]+)+)(?=[-_ .])/;
+  // Examen de módulo en PLAN.md: «- [ ] **Examen M2** — …» (mismo patrón que EXAM_RE de coach.py)
+  var EXAM_RE = /^(\s*[-*+]\s+)\[([ xX])\](\s+\*\*Examen\s+M?([0-9]+)[^*]*\*\*)(.*)$/i;
+  var PROJECT_RE = /\bproyecto\b|\bproject\b/i;
+  var RETO_RE = /^(?:🧩\s*)?reto\b/iu;
+  var RETO_LABEL = { resuelto: "Resuelto", intentado: "Intentado", pendiente: "Sin resolver" };
+  var EXAM_LABEL = { aprobado: "Aprobado", toca: "Toca", repetir: "Repetir", pendiente: "Pendiente" };
+  var WORDS_PER_MINUTE = 200;  // lectura en pantalla; el código cuenta aparte (~12 líneas por minuto)
   var FM_KEY_RE = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/;
   var LEVELS = {
     basico: { n: 1, label: "Básico", emoji: "🟢", re: /\bb[aá]sico\b|\bbasic\b|\bbeginner\b/i },
@@ -989,12 +1115,44 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
   }
   function normState(s) { return fold(s).trim().replace(/[\s_]+/g, "-"); }
 
+  function splitCells(line) {
+    var s = line.trim();
+    if (s.charAt(0) === "|") s = s.slice(1);
+    if (s.slice(-1) === "|" && s.slice(-2) !== "\\|") s = s.slice(0, -1);
+    var cells = [], cur = "";
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === "\\" && s.charAt(i + 1) === "|") { cur += "\\|"; i++; continue; }
+      if (ch === "|") { cells.push(cur.trim()); cur = ""; continue; }
+      cur += ch;
+    }
+    cells.push(cur.trim());
+    return cells;
+  }
+  function isSeparator(cells) {
+    var ne = cells.filter(function (c) { return c; });
+    return ne.length > 0 && ne.every(function (c) { return /^:?-{2,}:?$/.test(c); });
+  }
+  function parseGaps(rows) {
+    var hoy = todayISO(), out = [];
+    rows.forEach(function (cells) {
+      var name = cells[0] || "";
+      if (!name || name.indexOf("[[") === 0) return;
+      var estado = (cells[4] || "").trim();
+      var abierto = !/^(cerrad|resuelt)/i.test(estado);
+      var vence = firstDate(cells[3]);
+      out.push({ id: "H" + (out.length + 1), hueco: name, detectado: cells[1] || "", intentos: cells[2] || "", proximo: cells[3] || "",
+        estado: estado, abierto: abierto, racha: (estado.match(/✔/g) || []).length, vence: vence, vencido: !!(abierto && vence && vence <= hoy) });
+    });
+    return out;
+  }
+
   function parsePlan(text) {
     var fmParts = parseFrontmatter(text);
     var split = splitFrontmatter(text);
     var lines = text.split("\n");
-    var modules = [], lessons = [], bitacora = [];
-    var heading = null, headingUsed = false, inFence = false, inBitacora = false;
+    var modules = [], lessons = [], tables = { bitacora: [], huecos: [] };
+    var heading = null, headingUsed = false, inFence = false, tableTarget = null;
     var pendingMeta = [], lastLesson = null;
     for (var n = split.start; n < lines.length; n++) {
       var line = lines[n];
@@ -1003,15 +1161,21 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       var hm = HEADING_RE.exec(line);
       if (hm) {
         if (hm[1].length >= 2) { heading = hm[2]; headingUsed = false; pendingMeta = []; }
-        inBitacora = /bit[aá]cora/i.test(hm[2]);
+        tableTarget = /bit[aá]cora/i.test(hm[2]) ? "bitacora" : (/huecos/i.test(hm[2]) ? "huecos" : null);
         lastLesson = null;
         continue;
       }
-      if (inBitacora && line.trim().charAt(0) === "|") {
-        var cells = line.trim().replace(/^\|+|\|+$/g, "").split("|").map(function (c) { return c.trim(); });
-        var nonEmpty = cells.filter(function (c) { return c; });
-        if (nonEmpty.every(function (c) { return /^:?-{2,}:?$/.test(c); }) && nonEmpty.length) continue;
-        bitacora.push(cells);
+      if (tableTarget && line.trim().charAt(0) === "|") {
+        var cells = splitCells(line);
+        if (!isSeparator(cells)) tables[tableTarget].push(cells);
+        continue;
+      }
+      var em = EXAM_RE.exec(line);
+      if (em) {
+        if (modules.length && headingUsed) {
+          modules[modules.length - 1].exam = { hecho: em[2] === "x" || em[2] === "X", detalle: em[5].replace(DESC_LEAD_RE, "").trim() };
+        }
+        lastLesson = null;
         continue;
       }
       var m = LESSON_RE.exec(line);
@@ -1026,7 +1190,9 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
         var mid = MOD_ID_RE.exec(htext), moduleId;
         if (mid) moduleId = mid[1];
         else { var mn = MOD_NUM_RE.exec(htext.trim()); moduleId = mn ? mn[1] : String(modules.length + 1); }
-        modules.push({ index: modules.length, id: moduleId, titulo: cleanModuleTitle(htext), nivel: detectLevel(htext), meta: pendingMeta.join("\n").trim(), lessons: [] });
+        var mtitle = cleanModuleTitle(htext);
+        modules.push({ index: modules.length, id: moduleId, titulo: mtitle, nivel: detectLevel(htext), meta: pendingMeta.join("\n").trim(),
+          lessons: [], exam: null, proyecto: PROJECT_RE.test(mtitle) });
         headingUsed = true;
       }
       var rest = m[4];
@@ -1043,7 +1209,26 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       lessons.push(lesson);
       lastLesson = lesson;
     }
-    return { fm: fmParts.fm, body: fmParts.body, modules: modules, lessons: lessons, bitacora: bitacora.length ? bitacora.slice(1) : [], bitacoraHead: bitacora[0] || null };
+    var bit = tables.bitacora;
+    return { fm: fmParts.fm, body: fmParts.body, modules: modules, lessons: lessons, bitacora: bit.length ? bit.slice(1) : [],
+      bitacoraHead: bit[0] || null, gaps: parseGaps(tables.huecos.slice(1)) };
+  }
+
+  // Retos, preguntas y minutos de lectura de una nota (para la cabecera y la barra lateral)
+  function noteStats(body) {
+    var inFence = false, words = 0, codeLines = 0, retos = 0, resueltos = 0, preguntas = 0, inReto = false, verdict = "";
+    function closeReto() { if (inReto) { retos++; if (verdict === "ok") resueltos++; } inReto = false; verdict = ""; }
+    body.split("\n").forEach(function (line) {
+      if (FENCE_RE.test(line)) { inFence = !inFence; return; }
+      if (inFence) { codeLines++; return; }
+      var hm = HEADING_RE.exec(line);
+      if (hm && hm[1].length <= 3) { closeReto(); if (hm[1].length === 3 && RETO_RE.test(hm[2])) inReto = true; }
+      if (inReto && /veredicto/i.test(line)) verdict = /✔/.test(line) ? "ok" : (/✘/.test(line) ? "ko" : verdict);
+      if (/^\*\*P[0-9]+\.?\*\*/.test(line.trim())) preguntas++;
+      words += (line.replace(/<[^>]+>/g, " ").match(/[\p{L}\p{N}]+/gu) || []).length;
+    });
+    closeReto();
+    return { retos: retos, resueltos: resueltos, preguntas: preguntas, minutos: Math.max(1, Math.round(words / WORDS_PER_MINUTE + codeLines / 12)) };
   }
 
   function splitSections(body) {
@@ -1065,7 +1250,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     var text = files[slug + "/PLAN.md"];
     var plan = parsePlan(text);
     var fm = plan.fm || {};
-    var notes = {}, notesByPath = {}, docs = [];
+    var notes = {}, notesByPath = {}, exams = {}, examsByPath = {}, docs = [];
     paths.forEach(function (p) {
       if (p.indexOf(slug + "/") !== 0) return;
       var restPath = p.slice(slug.length + 1);
@@ -1078,8 +1263,17 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
         if (!nid || notes[nid]) return;
         var h1 = /^#\s+(.+)$/m.exec(parsed.body);
         var title = fmStr(parsed.fm, "titulo") || (h1 ? h1[1].replace(/^[0-9.]+\s*[·:\-—–]?\s*/, "") : lm[1]);
-        notes[nid] = { id: nid, path: p, fm: parsed.fm || {}, body: parsed.body, raw: files[p], titulo: title };
+        notes[nid] = { id: nid, path: p, fm: parsed.fm || {}, body: parsed.body, raw: files[p], titulo: title, stats: noteStats(parsed.body) };
         notesByPath[p] = nid;
+        return;
+      }
+      var xm = /^examenes\/(m([0-9]+)[-_ .][^/]*\.md)$/i.exec(restPath);
+      if (xm) {
+        if (!exams[xm[2]]) {
+          var pe = parseFrontmatter(files[p]);
+          exams[xm[2]] = { id: xm[2], path: p, fm: pe.fm || {}, body: pe.body, raw: files[p] };
+          examsByPath[p] = xm[2];
+        }
         return;
       }
       docs.push(p);
@@ -1099,6 +1293,20 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       lessons.filter(function (l) { return !l.hecha; })[0] || null;
     var done = lessons.filter(function (l) { return l.hecha; }).length;
     plan.modules.forEach(function (mod) { mod.done = mod.lessons.filter(function (l) { return l.hecha; }).length; });
+    var hoy = todayISO();
+    var reviews = [];
+    lessons.forEach(function (l) {
+      if (!l.hecha || l.convalidada || !l.note) return;
+      var d = firstDate(fmStr(l.note.fm, "repaso"));
+      if (d) reviews.push({ tipo: "leccion", id: l.id, titulo: l.titulo, fecha: d, vencido: d <= hoy, lesson: l });
+    });
+    reviews.sort(function (a, b) { return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0; });
+    var openGaps = plan.gaps.filter(function (g) { return g.abierto; });
+    var due = openGaps.filter(function (g) { return g.vencido; })
+      .map(function (g) { return { tipo: "hueco", id: g.id, titulo: g.hueco, fecha: g.vence }; })
+      .concat(reviews.filter(function (r) { return r.vencido; }));
+    var retos = { total: 0, resueltos: 0 };
+    Object.keys(notes).forEach(function (k) { retos.total += notes[k].stats.retos; retos.resueltos += notes[k].stats.resueltos; });
     var glossary = files[slug + "/GLOSARIO.md"];
     var doubts = files[slug + "/DUDAS.md"];
     return {
@@ -1106,6 +1314,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       fm: fm,
       tema: fmStr(fm, "tema") || slug,
       area: fmStr(fm, "area"),
+      playground: fmStr(fm, "playground"),
       nivelActual: fmStr(fm, "nivel_actual"),
       nivelObjetivo: fmStr(fm, "nivel_objetivo"),
       creado: fmStr(fm, "creado"),
@@ -1117,11 +1326,19 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       lessons: lessons,
       notes: notes,
       notesByPath: notesByPath,
+      exams: exams,
+      examsByPath: examsByPath,
       docs: docs,
       current: current,
       done: done,
       total: lessons.length,
       pct: lessons.length ? Math.floor(done * 100 / lessons.length) : 0,
+      gaps: plan.gaps,
+      openGaps: openGaps,
+      reviews: reviews,
+      due: due,
+      retos: retos,
+      sessions: plan.bitacora.filter(function (r) { return r.some(function (c) { return c; }); }).length,
       glossary: glossary === undefined ? null : glossary,
       doubts: doubts === undefined ? null : doubts,
       glossaryCount: glossary ? countTableRows(glossary) : 0,
@@ -1162,6 +1379,9 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     topic: function (s) { return "#/t/" + enc(s); },
     plan: function (s) { return "#/t/" + enc(s) + "/plan"; },
     lesson: function (s, id) { return "#/t/" + enc(s) + "/l/" + enc(id); },
+    exam: function (s, m) { return "#/t/" + enc(s) + "/examen/" + enc(m); },
+    progress: function (s) { return "#/t/" + enc(s) + "/progreso"; },
+    review: function (s) { return "#/t/" + enc(s) + "/repaso"; },
     glossary: function (s) { return "#/t/" + enc(s) + "/glosario"; },
     doubts: function (s) { return "#/t/" + enc(s) + "/dudas"; },
     doc: function (p) { return "#/doc/" + p.split("/").map(enc).join("/"); },
@@ -1182,6 +1402,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       if (restPath === "GLOSARIO.md") return R.glossary(t.slug);
       if (restPath === "DUDAS.md") return R.doubts(t.slug);
       if (t.notesByPath[p]) return R.lesson(t.slug, t.notesByPath[p]);
+      if (t.examsByPath[p]) return R.exam(t.slug, t.examsByPath[p]);
     }
     return R.doc(p);
   }
@@ -1194,8 +1415,10 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       if (restPath === "PLAN.md") return { title: "Plan de estudio", where: t.tema };
       if (restPath === "GLOSARIO.md") return { title: "Glosario", where: t.tema };
       if (restPath === "DUDAS.md") return { title: "Dudas resueltas", where: t.tema };
+      if (restPath === "MAPA.md") return { title: "Mapa del tema", where: t.tema };
       var nid = t.notesByPath[p];
       if (nid) return { title: nid + " · " + t.notes[nid].titulo, where: t.tema };
+      if (t.examsByPath[p]) return { title: "Examen M" + t.examsByPath[p], where: t.tema };
       return { title: basename(p), where: t.tema };
     }
     if (p === "README.md") return { title: "Cómo usar esta carpeta", where: "Cuaderno" };
@@ -1511,27 +1734,47 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
   // ------------------------------------------------------------------ vistas
   function welcomeView() {
     var el = h("section", { class: "page welcome" },
-      h("p", { class: "eyebrow" }, "Software Coach"),
+      h("p", { class: "eyebrow" }, "hb-coach"),
       h("h1", null, "Cuaderno de aprendizaje"),
       h("p", null, "Este archivo es la plantilla del cuaderno y todavía no tiene datos. Puedes usarlo de dos formas:"),
       h("ol", null,
         h("li", null, "Pide al coach que genere tu cuaderno: escribe ", h("code", null, "coach.py build"), " y abre ", h("code", null, "aprendizaje/cuaderno.html"), "."),
-        h("li", null, "O pulsa ", h("strong", null, "Abrir carpeta"), " y elige la carpeta ", h("code", null, "aprendizaje"), " de tu proyecto para leer los archivos directamente.")),
+        h("li", null, "O pulsa ", h("strong", null, "Abrir carpeta"), " y elige tu carpeta ", h("code", null, "aprendizaje"), " para leer los archivos directamente.")),
       h("p", null, h("button", { class: "btn primary", type: "button", onclick: pickFolder }, icon("folder"), "Abrir carpeta aprendizaje")));
     return { el: el, title: "Cuaderno", grid: true };
   }
-  function promptsBlock() {
-    var items = [
-      ["Quiero aprender Hilt", "Diagnóstico corto y plan de básico a avanzado."],
-      ["Continuemos con hilt", "Retoma la lección actual, paso a paso."],
-      ["Tengo una duda: …", "Respuesta directa; queda guardada en Dudas."],
-      ["Hazme un repaso de hilt", "Preguntas sobre lo ya visto, con corrección."],
-      ["Evalúame en hilt", "Mini examen del módulo; decide si avanzas."],
-      ["¿Cómo voy?", "Resumen de progreso y siguiente paso."]
-    ];
+  function promptsBlock(t) {
+    var items;
+    if (t) {
+      var mod = t.current ? moduleOf(t, t.current) : t.modules[0];
+      items = [
+        ["Sigamos con mi plan de " + t.tema, "Retoma donde lo dejaste, con el repaso que toque."],
+        ["Repasemos " + t.tema, "Preguntas mezcladas sobre lo que vence hoy."],
+        ["Hazme el examen del módulo " + (mod ? mod.id : "1") + " de " + t.tema, "6 a 10 preguntas y una tarea; aprueba con el 80 %."],
+        ["Tengo una duda: …", "Respuesta directa; queda guardada en Dudas."],
+        ["¿Cómo voy con " + t.tema + "?", "Progreso, huecos y próximos repasos."],
+        ["Quiero aprender <otro tema>", "Diagnóstico corto y un plan nuevo por módulos."]
+      ];
+    } else {
+      items = [
+        ["Quiero aprender <tema>", "Diagnóstico corto y un plan por módulos, de básico a experto."],
+        ["Tengo una duda: …", "Respuesta directa y breve."]
+      ];
+    }
     return h("div", { class: "prompts" }, items.map(function (it) {
       return h("div", { class: "prompt" }, h("code", null, "«" + it[0] + "»"), h("p", null, it[1]));
     }));
+  }
+  function examState(mod) {
+    if (!mod.exam) return "";
+    if (mod.exam.hecho) return "aprobado";
+    if (/repetir/i.test(mod.exam.detalle)) return "repetir";
+    if (mod.lessons.length && mod.done === mod.lessons.length) return "toca";
+    return "pendiente";
+  }
+  function examChip(mod, prefix) {
+    var s = examState(mod);
+    return s ? h("span", { class: "chip", dataset: { exam: s } }, (prefix || "") + EXAM_LABEL[s]) : null;
   }
   function resumeCard(t) {
     var l = t.current;
@@ -1541,27 +1784,31 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
         h("p", { class: "eyebrow" }, "Continuar donde lo dejaste"),
         h("h2", null, h("a", { href: R.topic(t.slug), style: "color:inherit;text-decoration:none" }, t.tema)),
         h("p", { class: "resume-lesson" }, h("span", { class: "lesson-id" }, l.id), h("strong", null, inlineText(l.titulo)), stateChip(l.estado)),
-        h("p", { class: "muted", style: "margin:0" }, "Módulo " + mod.id + " · " + mod.titulo, mod.nivel ? " · " + LEVELS[mod.nivel].label : "")),
+        h("p", { class: "muted", style: "margin:0" }, "Módulo " + mod.id + " · " + mod.titulo, mod.nivel ? " · " + LEVELS[mod.nivel].label : "",
+          t.due.length ? " · " : "", t.due.length ? h("a", { href: R.review(t.slug) }, plural(t.due.length, "repaso vence hoy", "repasos vencen hoy")) : null)),
       h("div", { class: "resume-side" },
         h("div", { class: "big-pct", title: t.done + " de " + t.total + " lecciones" }, String(t.pct), h("span", null, "%")),
         h("a", { class: "btn primary", href: R.lesson(t.slug, l.id) }, "Abrir lección", icon("right"))));
   }
   function topicCard(t) {
+    var exams = t.modules.filter(function (m) { return m.exam; });
+    var passed = exams.filter(function (m) { return m.exam.hecho; }).length;
     return h("article", { class: "topic-card" },
       h("div", { class: "tc-main" },
         h("div", { class: "tc-top" }, t.area ? h("span", { class: "chip mono" }, t.area) : h("span"), levelRange(t)),
         h("h3", null, h("a", { href: R.topic(t.slug) }, t.tema)),
         squares(t, t.lessons),
-        h("div", { class: "tc-stats" }, h("strong", null, t.done + "/" + t.total), "lecciones · " + t.pct + " %")),
+        h("div", { class: "tc-stats" }, h("strong", null, t.done + "/" + t.total), "lecciones · " + t.pct + " %" + (exams.length ? " · exámenes " + passed + "/" + exams.length : ""))),
       h("div", { class: "tc-side" },
         t.current
           ? h("p", { class: "tc-line" }, h("b", null, "Actual"), h("span", null, h("span", { class: "lesson-id" }, t.current.id), " ", inlineText(t.current.titulo)))
-          : h("p", { class: "tc-line" }, h("b", null, "Estado"), h("span", null, "Plan completado")),
+          : h("p", { class: "tc-line" }, h("b", null, "Estado"), h("span", null, "Lecciones terminadas")),
+        t.due.length ? h("p", { class: "tc-line" }, h("b", null, "Repaso"), h("a", { href: R.review(t.slug) }, plural(t.due.length, "elemento vence hoy", "elementos vencen hoy"))) : null,
         t.lastSession ? h("p", { class: "tc-line" }, h("b", null, "Sesión"), h("span", null, sessionNodes(t.lastSession))) : null,
         h("div", { class: "tc-actions" },
           t.current ? h("a", { class: "btn primary small", href: R.lesson(t.slug, t.current.id) }, "Continuar") : null,
           h("a", { class: "btn small", href: R.topic(t.slug) }, "Ver ruta"),
-          t.glossary !== null ? h("a", { class: "btn small", href: R.glossary(t.slug) }, "Glosario") : null)));
+          h("a", { class: "btn small", href: R.progress(t.slug) }, "Progreso"))));
   }
   function dashboardView() {
     var m = state.model;
@@ -1582,7 +1829,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       m.topics.forEach(function (t) { grid.append(topicCard(t)); });
       el.append(grid);
     }
-    el.append(h("h2", { class: "section-title" }, "Qué pedirle al coach"), promptsBlock());
+    el.append(h("h2", { class: "section-title" }, "Qué pedirle al coach"), promptsBlock(focus || m.topics[0] || null));
     if (m.rootDocs.indexOf("README.md") >= 0) {
       el.append(h("p", { style: "margin-top:18px" }, h("a", { class: "btn small", href: R.doc("README.md") }, icon("book"), "Cómo usar esta carpeta")));
     }
@@ -1615,6 +1862,14 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       }
       list.append(li);
     });
+    if (mod.exam) {
+      list.append(h("li", { class: "lesson-row exam-row" },
+        icon("exam"),
+        h("span", { class: "lesson-id" }, "M" + mod.id),
+        h("a", { class: "l-title", href: R.exam(t.slug, mod.id) }, "Examen del módulo"),
+        examChip(mod),
+        mod.exam.detalle ? h("span", { class: "l-desc" }, inlineText(mod.exam.detalle)) : null));
+    }
     return h("section", { class: "module" },
       h("div", { class: "module-head" },
         h("span", { class: "nav-mod-id" }, "M" + mod.id),
@@ -1623,6 +1878,19 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
         h("span", { class: "nav-count" }, mod.done + "/" + mod.lessons.length)),
       mod.meta ? (function () { var d = renderMarkdown(mod.meta, t.planPath, { raw: true }); d.classList.add("module-meta"); return d; })() : null,
       list);
+  }
+  function quickLinks(t) {
+    var links = h("div", { class: "quick-links" },
+      h("a", { class: "btn small", href: R.progress(t.slug) }, icon("chart"), "Progreso"),
+      h("a", { class: "btn small", href: R.review(t.slug) }, icon("repeat"), t.due.length ? "Repaso · " + t.due.length + " hoy" : "Repaso"),
+      h("a", { class: "btn small", href: R.plan(t.slug) }, icon("book"), "Plan completo"));
+    if (t.glossary !== null) links.append(h("a", { class: "btn small", href: R.glossary(t.slug) }, "Glosario · " + t.glossaryCount));
+    if (t.doubts !== null) links.append(h("a", { class: "btn small", href: R.doubts(t.slug) }, "Dudas · " + t.doubtsCount));
+    t.docs.forEach(function (p) { links.append(h("a", { class: "btn small", href: R.doc(p) }, labelForPath(p).title)); });
+    if (/^https?:\/\//i.test(t.playground)) {
+      links.append(h("a", { class: "btn small", href: t.playground, target: "_blank", rel: "noopener noreferrer" }, icon("code"), "Playground"));
+    }
+    return links;
   }
   function topicView(t) {
     var el = h("div", { class: "page" });
@@ -1653,11 +1921,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
         h("p", null, h("span", { class: "eyebrow" }, "Siguiente paso"), h("span", { class: "lesson-id" }, t.current.id), h("strong", null, inlineText(t.current.titulo))),
         h("a", { class: "btn primary", href: R.lesson(t.slug, t.current.id) }, t.current.note ? "Abrir lección" : "Ver lección", icon("right"))));
     }
-    var links = h("div", { class: "quick-links" }, h("a", { class: "btn small", href: R.plan(t.slug) }, icon("book"), "Plan completo"));
-    if (t.glossary !== null) links.append(h("a", { class: "btn small", href: R.glossary(t.slug) }, "Glosario · " + t.glossaryCount));
-    if (t.doubts !== null) links.append(h("a", { class: "btn small", href: R.doubts(t.slug) }, "Dudas · " + t.doubtsCount));
-    t.docs.forEach(function (p) { links.append(h("a", { class: "btn small", href: R.doc(p) }, basename(p))); });
-    el.append(links);
+    el.append(quickLinks(t));
     el.append(sectionBlock("Resumen", t, findSection(t, "resumen")));
     var route = h("section", null, h("h2", { class: "section-title" }, "Ruta de aprendizaje"));
     t.modules.forEach(function (mod) { route.append(moduleBlock(t, mod)); });
@@ -1665,7 +1929,7 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     var gaps = findSection(t, "huecos");
     if (gaps && tableHasRows(gaps.md)) el.append(sectionBlock("Huecos abiertos", t, gaps));
     el.append(sectionBlock("Proyecto final", t, findSection(t, "proyectofinal")));
-    el.append(sectionBlock("Recursos oficiales", t, findSection(t, "recursos")));
+    el.append(sectionBlock("Recursos", t, findSection(t, "recursos")));
     el.append(sectionBlock("Diagnóstico", t, findSection(t, "diagnostico")));
     el.append(sectionBlock("Bitácora", t, findSection(t, "bitacora")));
     return { el: el, title: t.tema };
@@ -1676,26 +1940,105 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     var prose = renderMarkdown(t.plan.body, t.planPath, { raw: true });
     $$("li.task", prose).forEach(function (li) {
       var strong = li.querySelector("strong");
-      var m = strong && /^([0-9]+(?:\.[0-9]+)+)/.exec(strong.textContent.trim());
-      if (!m) return;
-      var lesson = t.lessons.filter(function (l) { return l.id === m[1]; })[0];
-      if (!lesson) return;
-      var a = h("a", { href: R.lesson(t.slug, lesson.id) });
+      var txt = strong ? strong.textContent.trim() : "";
+      var m = /^([0-9]+(?:\.[0-9]+)+)/.exec(txt);
+      var xm = /^Examen\s+M?([0-9]+)/i.exec(txt);
+      var href = null, dotState = null;
+      if (m) {
+        var lesson = t.lessons.filter(function (l) { return l.id === m[1]; })[0];
+        if (lesson) { href = R.lesson(t.slug, lesson.id); dotState = lesson.estado; }
+      } else if (xm) {
+        var mod = t.modules.filter(function (x) { return x.id === xm[1]; })[0];
+        if (mod) { href = R.exam(t.slug, mod.id); dotState = mod.exam && mod.exam.hecho ? "completada" : "pendiente"; }
+      }
+      if (!href) return;
+      var a = h("a", { href: href });
       strong.replaceWith(a);
       a.append(strong);
-      li.prepend(h("span", { class: "dot", dataset: { state: lesson.estado }, title: STATE_LABEL[lesson.estado] }));
+      li.prepend(h("span", { class: "dot", dataset: { state: dotState }, title: STATE_LABEL[dotState] }));
     });
     el.append(h("div", { class: "reading" }, prose));
     return { el: el, title: "Plan · " + t.tema };
   }
-  function tocFor(prose) {
+  function tocFor(prose, cta, label) {
     var heads = $$("h2", prose);
-    if (heads.length < 2) return null;
-    var nav = h("nav", { class: "toc", "aria-label": "En esta página" }, h("p", { class: "eyebrow" }, "En esta página"));
-    heads.forEach(function (hd) {
-      nav.append(h("a", { href: "#" + hd.id, onclick: function (e) { e.preventDefault(); hd.scrollIntoView({ behavior: "smooth", block: "start" }); } }, hd.textContent));
+    if (heads.length < 2 && !cta) return null;
+    var nav = h("nav", { class: "toc", "aria-label": label || "En esta página" }, h("p", { class: "eyebrow" }, label || "En esta página"));
+    heads.forEach(function (hd, i) {
+      nav.append(h("a", { href: "#" + hd.id, onclick: function (e) { e.preventDefault(); hd.scrollIntoView({ behavior: "smooth", block: "start" }); } },
+        h("span", { class: "n" }, pad2(i + 1)), hd.textContent));
     });
+    if (cta) nav.append(cta);
     return nav;
+  }
+  // Retos: «### 🧩 Reto n · …» con «Resultado esperado», pistas y solución en <details>.
+  function enhanceChallenges(prose) {
+    var heads = $$("h3", prose).filter(function (hd) { return RETO_RE.test(hd.textContent.trim()); });
+    heads.forEach(function (hd, i) {
+      var nodes = [], node = hd;
+      while (node && !(node !== hd && /^H[1-3]$/.test(node.tagName))) { nodes.push(node); node = node.nextElementSibling; }
+      var sec = h("section", { class: "reto", "aria-label": "Reto " + (i + 1) + " de " + heads.length });
+      hd.before(sec);
+      var text = nodes.map(function (n) { return n.textContent; }).join(" ");
+      var vm = /veredicto\s*:?\s*([✔✘])/i.exec(text);
+      var st = vm ? (vm[1] === "✔" ? "resuelto" : "intentado") : "pendiente";
+      sec.append(h("div", { class: "reto-head" }, h("span", { class: "eyebrow" }, "Reto " + (i + 1) + " de " + heads.length),
+        h("span", { class: "chip", dataset: { reto: st } }, RETO_LABEL[st])));
+      var hints = [], solution = null;
+      nodes.forEach(function (n) {
+        sec.append(n);
+        if (n.tagName === "DETAILS") {
+          var sum = n.querySelector("summary");
+          var label = sum ? sum.textContent.trim() : "";
+          if (/^pista/i.test(label)) { n.classList.remove("qa"); n.classList.add("hint"); hints.push(n); }
+          else if (/^soluci[oó]n/i.test(label)) { n.classList.remove("qa"); n.classList.add("solution"); solution = n; }
+        }
+        if (n.tagName === "P" && /^resultado esperado/i.test(n.textContent.trim())) n.classList.add("expected");
+      });
+      var actions = h("div", { class: "reto-actions" });
+      if (hints.length) {
+        hints.forEach(function (d) { d.hidden = true; });
+        var shown = 0;
+        var hintLabel = h("span", null, "Pedir una pista (" + hints.length + ")");
+        var hintBtn = h("button", { class: "btn small", type: "button" }, icon("bulb"), hintLabel);
+        hintBtn.addEventListener("click", function () {
+          var d = hints[shown++];
+          d.hidden = false;
+          d.open = true;
+          if (shown >= hints.length) hintBtn.remove();
+          else hintLabel.textContent = "Otra pista (" + (hints.length - shown) + ")";
+        });
+        actions.append(hintBtn);
+      }
+      if (solution) {
+        solution.hidden = true;
+        var solBtn = h("button", { class: "btn small", type: "button" }, icon("eye"), "Ver solución");
+        var confirm = h("span", { class: "reto-confirm", hidden: true }, "¿Ya lo intentaste por tu cuenta?",
+          h("button", { class: "btn small primary", type: "button", onclick: function () { solution.hidden = false; solution.open = true; actions.remove(); } }, "Sí, ver la solución"));
+        solBtn.addEventListener("click", function () { confirm.hidden = false; solBtn.hidden = true; confirm.querySelector("button").focus(); });
+        actions.append(solBtn, confirm);
+      }
+      if (actions.children.length) sec.append(actions);
+    });
+    return heads.length;
+  }
+  function seqItems(t) {
+    var items = [];
+    t.modules.forEach(function (mod) {
+      mod.lessons.forEach(function (l) { items.push({ key: "l:" + l.id, href: R.lesson(t.slug, l.id), label: l.id, title: l.titulo }); });
+      if (mod.exam) items.push({ key: "e:" + mod.id, href: R.exam(t.slug, mod.id), label: "Examen M" + mod.id, title: mod.titulo });
+    });
+    return items;
+  }
+  function pagerFor(t, key) {
+    var items = seqItems(t);
+    var i = items.map(function (x) { return x.key; }).indexOf(key);
+    if (i < 0) return { el: null, keys: null };
+    var prev = items[i - 1], next = items[i + 1];
+    var pager = h("nav", { class: "pager", "aria-label": "Anterior y siguiente" });
+    if (prev) pager.append(h("a", { class: "prev", href: prev.href, rel: "prev" }, h("small", null, "← Anterior · " + prev.label), h("span", { class: "t" }, inlineText(prev.title))));
+    if (next) pager.append(h("a", { class: "next", href: next.href, rel: "next" }, h("small", null, "Siguiente · " + next.label + " →"), h("span", { class: "t" }, inlineText(next.title))));
+    return { el: pager, keys: { prev: prev ? prev.href : null, next: next ? next.href : null } };
   }
   function lessonView(t, id) {
     var l = t.lessons.filter(function (x) { return x.id === id; })[0] || null;
@@ -1703,22 +2046,36 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     if (!l && !note) return notFound("La lección " + id + " no existe en el plan de " + t.tema + ".");
     var mod = l ? moduleOf(t, l) : null;
     var title = l ? l.titulo : note.titulo;
+    var pos = l ? t.lessons.indexOf(l) : -1;
+    var stats = note ? note.stats : null;
     var el = h("div", { class: "page" });
     el.append(crumbs([{ label: "Inicio", href: R.home() }, { label: t.tema, href: R.topic(t.slug) }, { label: mod ? "Módulo " + mod.id + " · " + mod.titulo : "Lección" }]));
     var tags = note ? note.fm.etiquetas : null;
-    var fmNote = note ? note.fm : {};
+    var nextReview = note && l && l.hecha ? firstDate(fmStr(note.fm, "repaso")) : "";
     el.append(h("header", { class: "page-head lesson-head" },
+      l ? h("p", { class: "eyebrow" }, "Lección " + pad2(pos + 1) + " de " + pad2(t.total) + (mod ? " · Módulo " + mod.id : "")) : null,
       h("h1", null, h("span", { class: "lesson-id" }, id), h("span", null, inlineText(title))),
       h("div", { class: "meta-row" },
         l ? stateChip(l.estado) : null,
         mod && mod.nivel ? levelBadge(mod.nivel) : null,
-        fmStr(fmNote, "inicio") ? h("span", null, "Inicio " + fmtDate(fmStr(fmNote, "inicio"))) : null,
-        fmStr(fmNote, "fin") ? h("span", null, "Fin " + fmtDate(fmStr(fmNote, "fin"))) : null,
+        stats ? h("span", { class: "meta-i" }, icon("clock"), stats.minutos + " min de lectura") : null,
+        stats && stats.retos ? h("a", { class: "meta-i", href: "#", onclick: function (e) { e.preventDefault(); var r = $(".reto", $("#view")); if (r) r.scrollIntoView({ behavior: "smooth", block: "start" }); } },
+          icon("target"), stats.resueltos + "/" + stats.retos + " retos resueltos") : null,
+        stats && stats.preguntas ? h("span", { class: "meta-i" }, icon("info"), plural(stats.preguntas, "pregunta", "preguntas")) : null,
+        nextReview ? h("a", { class: "meta-i", href: R.review(t.slug) }, icon("repeat"), "Repaso " + whenLabel(nextReview)) : null,
+        /^https?:\/\//i.test(t.playground) ? h("a", { class: "meta-i", href: t.playground, target: "_blank", rel: "noopener noreferrer" }, icon("code"), "Playground") : null,
         Array.isArray(tags) ? tags.map(function (tg) { return h("span", { class: "chip mono" }, "#" + tg); }) : null)));
     var article, toc = null;
     if (note) {
       article = renderMarkdown(note.raw, note.path, { hideTitle: true });
-      toc = tocFor(article);
+      var n = enhanceChallenges(article);
+      var cta = null;
+      if (n) {
+        var firstReto = $(".reto", article);
+        cta = h("a", { class: "toc-cta", href: "#", onclick: function (e) { e.preventDefault(); firstReto.scrollIntoView({ behavior: "smooth", block: "start" }); } },
+          h("strong", null, "Ir a los retos"), h("small", null, plural(n, "reto", "retos") + " para practicar"));
+      }
+      toc = tocFor(article, cta, "En esta lección");
     } else {
       var validated = l.estado === "convalidada";
       article = h("div", { class: "empty-note" },
@@ -1726,19 +2083,13 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
         l.descripcion ? inlineMarkdown(l.descripcion) : null,
         l.detalle.length ? renderMarkdown(l.detalle.join("\n"), t.planPath, { raw: true }) : null,
         validated
-          ? h("p", { class: "muted" }, "Demostraste este contenido en el diagnóstico. Si quieres repasarlo, pídele al coach: ", h("code", null, "«Repasemos la lección " + id + " de " + t.slug + "»"), ".")
-          : h("p", { class: "muted" }, "Las notas se escriben durante la lección. Pídele al coach: ", h("code", null, "«Continuemos con la lección " + id + " de " + t.slug + "»"), "."));
+          ? h("p", { class: "muted" }, "Demostraste este contenido en el diagnóstico. Si quieres repasarlo, pídele al coach: ", h("code", null, "«Repasemos la lección " + id + " de " + t.tema + "»"), ".")
+          : h("p", { class: "muted" }, "Las notas se escriben durante la lección. Pídele al coach: ", h("code", null, "«Sigamos con la lección " + id + " de " + t.tema + "»"), "."));
     }
     el.append(h("div", { class: "reading" }, h("article", null, article), toc));
-    if (l) {
-      var idx = t.lessons.indexOf(l);
-      var prev = t.lessons[idx - 1], next = t.lessons[idx + 1];
-      var pager = h("nav", { class: "pager", "aria-label": "Lecciones" });
-      if (prev) pager.append(h("a", { class: "prev", href: R.lesson(t.slug, prev.id), rel: "prev" }, h("small", null, "← Anterior · " + prev.id), h("span", { class: "t" }, inlineText(prev.titulo))));
-      if (next) pager.append(h("a", { class: "next", href: R.lesson(t.slug, next.id), rel: "next" }, h("small", null, "Siguiente · " + next.id + " →"), h("span", { class: "t" }, inlineText(next.titulo))));
-      el.append(pager);
-    }
-    return { el: el, title: id + " " + title, keys: { prev: l && t.lessons[t.lessons.indexOf(l) - 1], next: l && t.lessons[t.lessons.indexOf(l) + 1], topic: t } };
+    var pg = l ? pagerFor(t, "l:" + l.id) : { el: null, keys: null };
+    if (pg.el) el.append(pg.el);
+    return { el: el, title: id + " " + title, keys: pg.keys };
   }
   function filterBox(placeholder, onInput, countLabel) {
     var id = "filter-" + Math.random().toString(36).slice(2, 8);
@@ -1759,6 +2110,15 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       rows.forEach(function (r) { var ok = !q || fold(r.textContent).indexOf(q) >= 0; r.hidden = !ok; if (ok) shown++; });
       return plural(shown, "término", "términos");
     }, plural(rows.length, "término", "términos")));
+    var letters = h("nav", { class: "letters", "aria-label": "Índice alfabético" });
+    var seen = {};
+    rows.forEach(function (r) {
+      var first = r.cells[0] ? fold(r.cells[0].textContent.trim()).charAt(0).toUpperCase() : "";
+      if (!first || seen[first]) return;
+      seen[first] = true;
+      letters.append(h("a", { href: "#", onclick: function (e) { e.preventDefault(); r.scrollIntoView({ behavior: "smooth", block: "center" }); } }, first));
+    });
+    if (letters.children.length > 1) el.append(letters);
     el.append(h("div", { class: "reading" }, prose));
     return { el: el, title: "Glosario · " + t.tema };
   }
@@ -1787,6 +2147,190 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
     }, plural(groups.length, "duda", "dudas")));
     el.append(h("div", { class: "reading" }, prose));
     return { el: el, title: "Dudas · " + t.tema };
+  }
+  function statTile(value, label, sub) {
+    return h("div", { class: "stat" }, h("div", { class: "stat-value" }, value), h("div", { class: "stat-label" }, label), sub ? h("div", { class: "stat-sub" }, sub) : null);
+  }
+  function calendarBlock(t) {
+    var items = t.reviews.map(function (r) { return { fecha: r.fecha, label: "Lección " + r.id, title: r.titulo, href: R.lesson(t.slug, r.id) }; })
+      .concat(t.openGaps.filter(function (g) { return g.vence; }).map(function (g) { return { fecha: g.vence, label: "Hueco " + g.id, title: g.hueco, href: null }; }));
+    items.sort(function (a, b) { return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0; });
+    if (!items.length) return h("p", { class: "muted" }, "Cuando completes lecciones o abras huecos, el coach programa aquí sus repasos: las lecciones a 3, 7, 14, 30 y 60 días; los huecos, antes.");
+    var list = h("ol", { class: "cal" });
+    items.slice(0, 14).forEach(function (it) {
+      var d = daysFrom(it.fecha);
+      list.append(h("li", null,
+        h("span", { class: "when" + (d !== null && d < 0 ? " late" : d === 0 ? " today" : "") }, fmtDate(it.fecha) + " · " + whenLabel(it.fecha)),
+        h("span", { class: "what" }, h("span", { class: "chip mono" }, it.label), it.href ? h("a", { href: it.href }, inlineText(it.title)) : h("span", null, inlineText(it.title)))));
+    });
+    return list;
+  }
+  function progressView(t) {
+    var el = h("div", { class: "page" });
+    el.append(crumbs([{ label: "Inicio", href: R.home() }, { label: t.tema, href: R.topic(t.slug) }, { label: "Progreso" }]));
+    el.append(h("header", { class: "page-head" }, h("p", { class: "eyebrow" }, t.tema), h("h1", null, "Tu progreso")));
+    var exams = t.modules.filter(function (m) { return m.exam; });
+    var passed = exams.filter(function (m) { return m.exam.hecho; }).length;
+    var pending = t.total - t.done;
+    var dueGaps = t.openGaps.filter(function (g) { return g.vencido; }).length;
+    var hours = Math.round(pending * 35 / 6) / 10;  // ~35 min por lección (references/plan-de-estudio.md)
+    el.append(h("div", { class: "stat-grid" },
+      statTile(t.pct + " %", "del plan", t.done + " de " + t.total + " lecciones"),
+      statTile(passed + "/" + exams.length, "exámenes aprobados", exams.length ? null : "el plan no tiene exámenes"),
+      statTile(t.retos.resueltos + "/" + t.retos.total, "retos resueltos", t.retos.total ? null : "aún no hay retos"),
+      statTile(String(t.openGaps.length), "huecos abiertos", dueGaps ? plural(dueGaps, "vence hoy", "vencen hoy") : null),
+      statTile(String(t.sessions), t.sessions === 1 ? "sesión" : "sesiones", t.lastSession ? "última: " + fmtDate(t.lastSession[0]) : null),
+      statTile(pending ? "≈ " + String(hours).replace(".", ",") + " h" : "—", "por delante", pending ? plural(pending, "lección pendiente", "lecciones pendientes") : "lecciones terminadas")));
+    var mods = h("div", { class: "panel mod-progress" });
+    t.modules.forEach(function (mod) {
+      var pct = mod.lessons.length ? Math.round(mod.done * 100 / mod.lessons.length) : 0;
+      mods.append(h("div", { class: "mp-row" },
+        h("span", { class: "nav-mod-id" }, "M" + mod.id),
+        h("a", { class: "mp-title", href: R.topic(t.slug) }, inlineText(mod.titulo)),
+        h("span", { class: "mp-bar", role: "img", "aria-label": pct + " % del módulo" }, h("i", { style: "width:" + pct + "%" })),
+        h("span", { class: "nav-count" }, mod.done + "/" + mod.lessons.length),
+        mod.exam ? examChip(mod, "Examen · ") : h("span", { class: "mp-empty" })));
+    });
+    el.append(h("h2", { class: "section-title" }, "Módulos"), mods);
+    el.append(h("h2", { class: "section-title" }, "Próximos repasos", h("small", null, "repetición espaciada")), calendarBlock(t));
+    el.append(h("h2", { class: "section-title" }, "Huecos", h("small", null, "lo que falló y se está consolidando")));
+    if (!t.gaps.length) el.append(h("p", { class: "muted" }, "Sin huecos registrados."));
+    else {
+      var gl = h("ul", { class: "gap-list" });
+      t.gaps.filter(function (g) { return g.abierto; }).forEach(function (g) {
+        gl.append(h("li", null, h("span", { class: "chip mono" }, g.id), h("span", { class: "gap-name" }, inlineText(g.hueco)),
+          g.racha ? h("span", { class: "streak", title: "repasos bien seguidos" }, "✔".repeat(g.racha)) : null,
+          g.vence ? h("span", { class: "chip", dataset: { exam: g.vencido ? "toca" : "pendiente" } }, "Repaso " + whenLabel(g.vence)) : null));
+      });
+      var closed = t.gaps.filter(function (g) { return !g.abierto; }).length;
+      el.append(gl);
+      if (closed) el.append(h("p", { class: "muted" }, plural(closed, "hueco cerrado", "huecos cerrados") + " (en la sección «Huecos abiertos» del plan)."));
+    }
+    var bit = t.plan.bitacora.filter(function (r) { return r.some(function (c) { return c; }); }).slice(-5).reverse();
+    if (bit.length) {
+      el.append(h("h2", { class: "section-title" }, "Últimas sesiones"));
+      var ul = h("ul", { class: "gap-list" });
+      bit.forEach(function (r) { ul.append(h("li", null, h("span", { class: "chip mono" }, r[0] || ""), h("span", { class: "gap-name" }, sessionNodes(r.slice(1))))); });
+      el.append(ul);
+    }
+    el.append(h("p", { class: "muted", style: "margin-top:24px" }, "Pídele al coach: ", h("code", null, "«¿Cómo voy con " + t.tema + "?»"), " para un resumen y el siguiente paso."));
+    return { el: el, title: "Progreso · " + t.tema };
+  }
+  // Preguntas de recuperación de una nota: «**Pn.** pregunta — tu respuesta…» + respuesta en <details>.
+  function questionsOf(note) {
+    var lines = note.body.split("\n"), out = [], inFence = false;
+    for (var i = 0; i < lines.length; i++) {
+      if (FENCE_RE.test(lines[i])) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      var m = /^\*\*(P[0-9]+)\.?\*\*\s*(.+)$/.exec(lines[i].trim());
+      if (!m) continue;
+      var q = m[2].split(/\s+—\s+tu respuesta/i)[0].trim();
+      var ans = [], inDet = false;
+      for (var j = i + 1; j < lines.length && j < i + 80; j++) {
+        var s = lines[j];
+        if (!inDet && (/^\*\*P[0-9]+/.test(s.trim()) || /^#{1,3}\s/.test(s))) break;
+        if (/^\s*<details/i.test(s)) { inDet = true; continue; }
+        if (inDet && /^\s*<summary/i.test(s)) continue;
+        if (inDet && /^\s*<\/details>/i.test(s)) break;
+        if (inDet) ans.push(s);
+      }
+      out.push({ id: m[1], q: q, a: ans.join("\n").trim() });
+    }
+    return out;
+  }
+  function reviewView(t) {
+    var el = h("div", { class: "page" });
+    el.append(crumbs([{ label: "Inicio", href: R.home() }, { label: t.tema, href: R.topic(t.slug) }, { label: "Repaso" }]));
+    var due = t.reviews.filter(function (r) { return r.vencido; });
+    var source = due.length ? due.map(function (r) { return r.lesson; }) : t.lessons.filter(function (l) { return l.hecha && l.note; });
+    var cards = [];
+    source.forEach(function (l) {
+      questionsOf(l.note).forEach(function (q) { cards.push({ lesson: l, q: q }); });
+    });
+    shuffle(cards, seeded(todayISO() + ":" + t.slug));
+    cards = cards.slice(0, 12);
+    el.append(h("header", { class: "page-head" }, h("p", { class: "eyebrow" }, t.tema), h("h1", null, "Repaso de hoy"),
+      h("p", { class: "dash-sub" }, due.length
+        ? plural(due.length, "lección vence hoy", "lecciones vencen hoy") + ": preguntas mezcladas entre módulos."
+        : "Nada vence hoy: repaso libre con lo ya completado.")));
+    var dueGaps = t.openGaps.filter(function (g) { return g.vencido; });
+    if (dueGaps.length) {
+      var gapNote = h("blockquote", { class: "callout", dataset: { kind: "warning" } },
+        h("div", { class: "callout-title" }, icon("alert"), "Huecos que tocan hoy"),
+        h("p", null, dueGaps.map(function (g) { return g.id + " · " + g.hueco; }).join(" · ")),
+        h("p", null, "Esos se repasan con el coach: ", h("code", null, "«Repasemos " + t.tema + "»"), "."));
+      el.append(h("div", { class: "prose", style: "max-width:74ch" }, gapNote));
+    }
+    if (!cards.length) {
+      el.append(h("div", { class: "empty-note" }, h("h2", null, "Aún no hay preguntas de repaso"),
+        h("p", { class: "muted" }, "Las tarjetas salen de las preguntas (P1, P2…) de tus lecciones completadas.")));
+      return { el: el, title: "Repaso · " + t.tema };
+    }
+    var idx = 0, results = [];
+    var box = h("section", { class: "flash", "aria-live": "polite" });
+    function show() {
+      box.replaceChildren();
+      if (idx >= cards.length) { summary(); return; }
+      var c = cards[idx];
+      var mod = moduleOf(t, c.lesson);
+      var answer = renderMarkdown(c.q.a || "_Esta pregunta no tiene respuesta modelo en la nota._", c.lesson.note.path, { raw: true });
+      answer.hidden = true;
+      var rate = h("div", { class: "flash-rate", hidden: true },
+        h("button", { class: "btn", type: "button", onclick: function () { next(true); } }, "✔ Me la sabía"),
+        h("button", { class: "btn", type: "button", onclick: function () { next(false); } }, "↺ A repasar"));
+      var reveal = h("button", { class: "btn primary", type: "button" }, icon("eye"), "Mostrar respuesta");
+      reveal.addEventListener("click", function () {
+        answer.hidden = false; rate.hidden = false; reveal.hidden = true;
+        rate.querySelector("button").focus();
+        highlightIn(answer);
+        renderDiagrams(answer);
+      });
+      var q = h("div", { class: "flash-q" });
+      q.append(inlineMarkdown(c.q.q));
+      box.append(h("p", { class: "eyebrow" }, "Tarjeta " + (idx + 1) + " de " + cards.length + " · Lección " + c.lesson.id + " · M" + mod.id),
+        q, h("p", { class: "muted" }, "Piensa o escribe tu respuesta antes de mirar."), reveal, answer, rate);
+    }
+    function next(ok) { results.push({ card: cards[idx], ok: ok }); idx++; show(); }
+    function summary() {
+      var good = results.filter(function (r) { return r.ok; }).length;
+      var weak = results.filter(function (r) { return !r.ok; });
+      var list = h("ul");
+      weak.forEach(function (r) { list.append(h("li", null, h("a", { href: R.lesson(t.slug, r.card.lesson.id) }, "Lección " + r.card.lesson.id), " · ", inlineText(r.card.q.q))); });
+      box.append(h("div", { class: "flash-done" },
+        h("p", { class: "eyebrow" }, "Repaso terminado"),
+        h("p", { class: "flash-q" }, "Sabías " + good + " de " + results.length + "."),
+        weak.length ? h("p", null, "A repasar:") : null, weak.length ? list : null,
+        h("p", { class: "muted" }, "Este resultado queda solo en esta pestaña. Para que cuente en tu plan y reprograme los repasos, díselo al coach: ",
+          h("code", null, "«Repasemos " + t.tema + "»"), "."),
+        h("button", { class: "btn", type: "button", onclick: function () { idx = 0; results = []; show(); } }, icon("repeat"), "Empezar otra vez")));
+    }
+    show();
+    el.append(box);
+    return { el: el, title: "Repaso · " + t.tema };
+  }
+  function examView(t, mid) {
+    var mod = t.modules.filter(function (m) { return m.id === mid; })[0];
+    if (!mod) return notFound("El módulo " + mid + " no existe en el plan de " + t.tema + ".");
+    var note = t.exams[mid] || null;
+    var el = h("div", { class: "page" });
+    el.append(crumbs([{ label: "Inicio", href: R.home() }, { label: t.tema, href: R.topic(t.slug) }, { label: "Módulo " + mod.id + " · " + mod.titulo }]));
+    el.append(h("header", { class: "page-head lesson-head" },
+      h("p", { class: "eyebrow" }, "Examen de módulo"),
+      h("h1", null, h("span", { class: "lesson-id" }, "M" + mod.id), h("span", null, inlineText(mod.titulo))),
+      h("div", { class: "meta-row" }, mod.exam ? examChip(mod) : h("span", { class: "chip" }, "Sin examen en el plan"),
+        mod.exam && mod.exam.detalle ? h("span", null, inlineText(mod.exam.detalle)) : null)));
+    var covers = h("ul", { class: "lesson-list" });
+    mod.lessons.forEach(function (l) {
+      covers.append(h("li", { class: "lesson-row" }, squareFor(t, l, false), h("span", { class: "lesson-id" }, l.id), lessonLink(t, l), stateChip(l.estado)));
+    });
+    var article = note
+      ? renderMarkdown(note.raw, note.path, { hideTitle: true })
+      : h("div", { class: "empty-note" }, h("h2", null, "Este examen aún no tiene preguntas"),
+          h("p", { class: "muted" }, "Cuando termines las lecciones del módulo, pídele al coach: ", h("code", null, "«Hazme el examen del módulo " + mod.id + " de " + t.tema + "»"), ". Aprueba con el 80 % y la tarea hecha."));
+    el.append(h("div", { class: "reading" }, h("article", null, note ? null : h("h2", { class: "section-title", style: "margin-top:0" }, "Qué cubre"), note ? null : covers, article), note ? tocFor(article, null, "En este examen") : null));
+    var pg = pagerFor(t, "e:" + mod.id);
+    if (pg.el) el.append(pg.el);
+    return { el: el, title: "Examen M" + mod.id + " · " + t.tema, keys: pg.keys };
   }
   function docView(p) {
     var m = state.model;
@@ -1900,21 +2444,35 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
   }
   function topicNav(t, parts) {
     var box = h("div", { class: "nav-sub" });
-    box.append(navLink(R.plan(t.slug), "Plan completo", parts[2] === "plan"));
+    box.append(navLink(R.progress(t.slug), [icon("chart"), "Progreso"], parts[2] === "progreso"));
+    box.append(navLink(R.review(t.slug), [icon("repeat"), "Repaso de hoy"], parts[2] === "repaso", t.due.length ? String(t.due.length) : null));
+    box.append(navLink(R.plan(t.slug), [icon("book"), "Plan completo"], parts[2] === "plan"));
     if (t.glossary !== null) box.append(navLink(R.glossary(t.slug), "Glosario", parts[2] === "glosario", String(t.glossaryCount)));
     if (t.doubts !== null) box.append(navLink(R.doubts(t.slug), "Dudas", parts[2] === "dudas", String(t.doubtsCount)));
-    t.docs.forEach(function (p) { box.append(navLink(R.doc(p), basename(p), parts[0] === "doc" && parts.slice(1).join("/") === p)); });
+    t.docs.forEach(function (p) { box.append(navLink(R.doc(p), labelForPath(p).title, parts[0] === "doc" && parts.slice(1).join("/") === p)); });
     var activeLesson = parts[2] === "l" ? parts[3] : null;
+    var activeExam = parts[2] === "examen" ? parts[3] : null;
     t.modules.forEach(function (mod) {
-      var open = mod.lessons.some(function (l) { return l.id === activeLesson; }) || (!activeLesson && t.current && t.current.modIndex === mod.index);
+      var open = mod.lessons.some(function (l) { return l.id === activeLesson; }) || activeExam === mod.id ||
+        (!activeLesson && !activeExam && t.current && t.current.modIndex === mod.index);
       var det = h("details", { class: "nav-mod", open: open ? true : null },
         h("summary", null, h("span", { class: "nav-mod-id" }, "M" + mod.id), h("span", { class: "nav-mod-title" }, inlineText(mod.titulo)), h("span", { class: "nav-count" }, mod.done + "/" + mod.lessons.length)));
       mod.lessons.forEach(function (l) {
+        var st = l.note && l.note.stats.retos ? l.note.stats : null;
         det.append(h("a", { class: "nav-link nav-lesson", href: R.lesson(t.slug, l.id), "aria-current": l.id === activeLesson ? "page" : null, title: l.titulo + " · " + STATE_LABEL[l.estado] },
           h("span", { class: "dot", dataset: { state: l.estado } }),
           h("span", { class: "lesson-id" }, l.id),
-          h("span", { class: "nav-lesson-title" }, inlineText(l.titulo))));
+          h("span", { class: "nav-lesson-title" }, inlineText(l.titulo)),
+          st ? h("span", { class: "nav-count", title: "retos resueltos" }, st.resueltos + "/" + st.retos) : h("span")));
       });
+      if (mod.exam) {
+        var es = examState(mod);
+        det.append(h("a", { class: "nav-link nav-lesson nav-exam", href: R.exam(t.slug, mod.id), "aria-current": activeExam === mod.id ? "page" : null, title: "Examen del módulo " + mod.id + " · " + EXAM_LABEL[es] },
+          icon("exam"),
+          h("span", { class: "lesson-id" }, "M" + mod.id),
+          h("span", { class: "nav-lesson-title" }, "Examen"),
+          h("span", { class: "nav-count" }, es === "aprobado" ? "✔" : es === "toca" ? "toca" : es === "repetir" ? "repetir" : "")));
+      }
       box.append(det);
     });
     return box;
@@ -1968,6 +2526,9 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       else if (parts[2] === "l" && parts[3]) page = lessonView(t, parts[3]);
       else if (parts[2] === "glosario") page = glossaryView(t);
       else if (parts[2] === "dudas") page = doubtsView(t);
+      else if (parts[2] === "progreso") page = progressView(t);
+      else if (parts[2] === "repaso") page = reviewView(t);
+      else if (parts[2] === "examen" && parts[3]) page = examView(t, parts[3]);
       else page = notFound("Ruta desconocida.");
     } else if (parts[0] === "doc" && parts.length > 1) page = docView(parts.slice(1).join("/"));
     else if (parts[0] === "buscar") page = searchView(parts.slice(1).join("/"));
@@ -2139,8 +2700,8 @@ mark, .hit { background: var(--mark); color: var(--mark-on); border-radius: 2px;
       if (e.key === "/") { e.preventDefault(); $("#search-input").focus(); return; }
       var keys = currentPage && currentPage.keys;
       if (!keys) return;
-      if (e.key === "ArrowLeft" && keys.prev) location.hash = R.lesson(keys.topic.slug, keys.prev.id);
-      if (e.key === "ArrowRight" && keys.next) location.hash = R.lesson(keys.topic.slug, keys.next.id);
+      if (e.key === "ArrowLeft" && keys.prev) location.hash = keys.prev;
+      if (e.key === "ArrowRight" && keys.next) location.hash = keys.next;
     });
     doc.addEventListener("click", function (e) {
       if ($("#app").classList.contains("nav-open") && !e.target.closest("#sidebar, #menu-btn")) setNav(false);

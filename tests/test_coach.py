@@ -406,7 +406,13 @@ class CoachTest(unittest.TestCase):
         self.assertRegex(self.lesson_line_exam(), r"^- \[ \] \*\*Examen M1\*\* — 4/6 \(66 %\) el 2026-11-13 · repetir$")
         self.ok("examen", "sql", "1", "--resultado", "5/6", "--tarea", "si")
         self.assertRegex(self.lesson_line_exam(), r"^- \[x\] \*\*Examen M1\*\* — 5/6 \(83 %\) · tarea hecha · aprobado")
-        self.assertIn("estado: aprobado", exam.read_text(encoding="utf-8"))
+        exam_text = exam.read_text(encoding="utf-8")
+        self.assertIn("estado: aprobado", exam_text)
+        self.assertLess(exam_text.index("## Preguntas"), exam_text.index("**P1.**"))
+        self.assertLess(exam_text.index("**P1.**"), exam_text.index("## Tarea práctica"))
+        resultado = exam_text[exam_text.index("## Resultado"):exam_text.index("## Historial")]
+        self.assertIn("**5/6 (83 %)** · tarea hecha · aprobado el 2026-11-13.", resultado)
+        self.assertNotIn("Pendiente", resultado)
         self.assertTrue(self.estado()["examenes"][0]["hecho"])
         self.assertIn("aciertos/total", self.fails("examen", "sql", "1", "--resultado", "7/6").stderr)
 
