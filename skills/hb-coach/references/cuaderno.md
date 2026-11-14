@@ -229,7 +229,7 @@ Reglas para que renderice a la primera y se lea bien:
 
 ## 7. Código, avisos y tablas
 
-**Código**: los mensajes de error exactos que no quepan en 80 caracteres se parten en varias líneas y se dice («una sola línea de la consola, repartida aquí para que quepa»). Siempre con lenguaje (`kotlin`, `swift`, `sql`, `python`, `bash`, `json`, `text`…), líneas de menos de 80 caracteres, un bloque por archivo con su ruta en la primera línea, ejemplos probados y `diff` para cambios sobre código existente. Nunca secretos ni datos personales reales.
+**Código**: los mensajes de error exactos que no quepan en 80 caracteres se parten en varias líneas y se dice («una sola línea de la consola, repartida aquí para que quepa»). Siempre con lenguaje (`kotlin`, `swift`, `sql`, `python`, `bash`, `json`, `text`…), líneas de menos de 80 caracteres (un comando `cd <ruta completa> && …` más largo se parte con `\` al final de la línea), un bloque por archivo con su ruta en la primera línea, ejemplos probados y `diff` para cambios sobre código existente. Nunca secretos ni datos personales reales.
 
 **Avisos** (estilo GitHub; el cuaderno los muestra con color e icono): `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`.
 

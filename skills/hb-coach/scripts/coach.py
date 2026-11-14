@@ -1433,6 +1433,7 @@ def cmd_nota(pos, opts):
     nb = len(note_blocks(text)["bloques"]) if label.startswith("lecci") else 0
     out("\u270D %s: %s%s" % (label[:1].upper() + label[1:], ", ".join(did),
                              (" \u00b7 " + plural(nb, "bloque", "bloques")) if nb else ""))
+    out("\U0001F517 %s" % notebook_link(root, note_route(topic, pos[1].strip())))
     if content:
         lint_snippet(rel(path), content)
     pending = len(PENDING_RE.findall(prose_only(text)))
@@ -1736,6 +1737,16 @@ def lesson_route(slug, lid, n=None):
     return route + ("/b%d" % n if n else "")
 
 
+def note_route(topic, ident):
+    """Ruta del cuaderno para una lección (1.2), un examen (M1) o el repaso del día."""
+    slug = urllib.parse.quote(topic["slug"], safe="")
+    if fold(ident) == "repaso":
+        return "/t/%s/repaso" % slug
+    if re.match(r"^[mM][0-9]+$", ident):
+        return "/t/%s/examen/%s" % (slug, ident[1:])
+    return lesson_route(topic["slug"], ident)
+
+
 def has_solution(text):
     prose = prose_only(text)
     return bool(SOL_RE.search(prose) or FULL_RE.search(prose))
@@ -1794,11 +1805,32 @@ def insert_block(lines, at, new):
     return before + block + after
 
 
+def lesson_idea(topic, lesson):
+    """«En una frase» de la nota de la lección, o su resultado en el plan."""
+    note = topic["notes"].get(lesson["id"])
+    if note:
+        m = re.search(r"^>\s*\*\*En una frase:\*\*\s*(.+)$", note["text"], re.M)
+        if m and not PENDING_RE.search(m.group(1)):
+            return m.group(1).strip()
+    return strip_links(lesson["descripcion"])
+
+
+def lesson_plan_detail(topic, lesson):
+    """Las líneas de detalle de la lección en el plan (objetivo, práctica, dominio), sin el guion de la lista."""
+    lines = topic["text"].split("\n")
+    detail = []
+    for line in lines[lesson["linea"] + 1:]:
+        if not line.strip() or not re.match(r"^(\s{2,}|\t)", line):
+            break
+        detail.append(re.sub(r"^\s*[-*+]\s*", "", line).strip())
+    return detail
+
+
 def lesson_step(root, topic, cur, opts):
     """Qué toca en la lección actual, bloque a bloque: texto, comandos, pista y datos del bloque."""
     slug, lid = topic["slug"], cur["id"]
     note = topic["notes"].get(lid)
-    step = {"tipo": "leccion", "leccion": lid, "bloque": None}
+    step = {"tipo": "leccion", "leccion": lid, "bloque": None, "plan": lesson_plan_detail(topic, cur)}
     if note is None:
         step.update(texto="Empezar la lección %s · %s." % (lid, cur["titulo"]),
                     comandos=[command(opts, "bloque", slug, lid, "1", "<<'EOF'")],
@@ -2049,6 +2081,8 @@ def cmd_corregir(pos, opts):
         out("\u25B6 %s" % step["texto"])
         for c in step["comandos"]:
             out("  $ %s" % c)
+        if step.get("pista") and "bloques terminados" in step["texto"]:
+            out("  \u2139 %s" % step["pista"])
         out("\u2709 Terminal: el resumen (p. ej. «4/5 \u2714, el 3 falló por el signo; la corrección está en el "
             "cuaderno») y el siguiente paso, sin repetir la corrección.")
         return
@@ -2670,10 +2704,18 @@ def cmd_examen(pos, opts):
             out("\U0001F4DD Nota del examen: %s" % rel(note["path"]))
         pend = [l["id"] for l in lessons if not l["hecha"]]
         out("Examen M%s \u00b7 %s \u00b7 cubre %s" % (mod["id"], mod["titulo"], ", ".join(l["id"] for l in lessons)))
+        for l in lessons:
+            idea = lesson_idea(topic, l)
+            if idea:
+                out("  %s %s: %s" % (l["id"], l["titulo"], idea))
         out("  6 a 10 preguntas de nivel variado (encontrar el error, elegir entre alternativas, explicar, aplicar a un "
             "caso nuevo) y una tarea práctica corta. Aprueba con %d %% y la tarea hecha." % EXAM_PASS)
-        out("  Escribe las preguntas en la nota con: coach nota %s M%s (una por mensaje en el chat)."
-            % (topic["slug"], mod["id"]))
+        out("\u25B6 Escribe todas las preguntas (sin respuestas) y la tarea en la nota; el estudiante responde en la "
+            "terminal y las corriges en la nota:")
+        out("  $ %s" % command(opts, "nota", topic["slug"], "M" + mod["id"], "<<'EOF'"))
+        out("  $ %s" % command(opts, "nota", topic["slug"], "M" + mod["id"], "--seccion", "tarea", "<<'EOF'"))
+        out("  $ %s" % command(opts, "corregir", topic["slug"], "M" + mod["id"], "<<'EOF'"))
+        out("\U0001F517 %s" % notebook_link(root, "/t/%s/examen/%s" % (urllib.parse.quote(topic["slug"], safe=""), mod["id"])))
         if pend:
             out("  \u26A0 Lecciones del módulo sin completar: %s." % ", ".join(pend))
         maybe_build(root, opts)
@@ -2795,7 +2837,8 @@ def next_step(root, topic, opts):
                 "meta": meta + ["Proyecto final"]}
         return main and dict(main, meta=step["meta"], despues=step) or step
     step = lesson_step(root, topic, cur, opts)
-    step.update(lee=["references/pedagogia.md"], meta=meta + ["Lección %s · %s (20–45 min)" % (cur["id"], cur["titulo"])])
+    lee = ["references/pedagogia.md (§2 a §4)", "references/cuaderno.md (§3 y §4)"]
+    step.update(lee=lee, meta=meta + ["Lección %s · %s (20–45 min)" % (cur["id"], cur["titulo"])])
     return main and dict(main, meta=step["meta"], despues=step) or step
 
 
@@ -2837,6 +2880,8 @@ def cmd_siguiente(pos, opts):
         out("  $ %s" % cmd)
     if step.get("pista"):
         out("  \u2139 %s" % step["pista"])
+    if step.get("plan") and step.get("comandos") and " bloque " in step["comandos"][0]:
+        out("  Del plan: %s" % " \u00b7 ".join(step["plan"]))
     if step.get("bloque"):
         out("  \U0001F517 %s" % step["bloque"]["enlace"])
     if step.get("despues"):
@@ -3047,6 +3092,8 @@ def cmd_sesion(pos, opts):
         out("\U0001F5D3 Repaso pendiente: %s (empieza por ahí la próxima sesión)" % ", ".join(d["id"] for d in due))
     elif nxt:
         out("\U0001F5D3 Próximo repaso: %s (%s)" % (nxt["fecha"], nxt["id"]))
+    else:
+        out("\U0001F5D3 Sin repasos programados: el primero se programa al completar una lección.")
     out("\U0001F4D3 Cuaderno: %s" % (root / "cuaderno.html").resolve())
     return 1 if counts["error"] else 0
 

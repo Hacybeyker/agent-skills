@@ -458,6 +458,7 @@ class CoachTest(unittest.TestCase):
         self.assertEqual(step["bloque"]["espera"], "el intento del reto 1")
         self.assertTrue(step["bloque"]["enlace"].endswith("cuaderno.html#/t/sql/l/1.1/b1"))
         self.assertTrue(any(" corregir sql 1.1" in c for c in step["comandos"]))
+        self.assertEqual(step["plan"], ["Objetivo: elegir columnas."])
         self.assertEqual(self.estado()["actual"]["bloque"]["espera"], "el intento del reto 1")
 
     def test_bloque_no_escribe_soluciones_ni_se_salta_lo_pendiente(self):
@@ -563,7 +564,9 @@ class CoachTest(unittest.TestCase):
 
     def test_el_examen_se_corrige_en_su_nota(self):
         self.init_topic()
-        self.ok("examen", "sql", "1")
+        out = self.ok("examen", "sql", "1").stdout
+        self.assertIn(" corregir sql M1", out)
+        self.assertIn("cuaderno.html#/t/sql/examen/1", out)
         exam = next((self.space / "sql" / "examenes").glob("m1-*.md"))
         self.assertNotIn("<!--", exam.read_text(encoding="utf-8"))
         self.assertNotIn("coach nota", exam.read_text(encoding="utf-8"))
@@ -778,6 +781,7 @@ class CoachTest(unittest.TestCase):
         out = self.ok("sesion", "sql", "--logros", "Primeras consultas", "--lecciones", "1.1").stdout
         self.assertIn("check: sin errores", out)
         self.assertIn("Siguiente paso: Empezar la lección 1.1", out)
+        self.assertIn("Sin repasos programados", out)
         last = [l for l in self.plan.read_text(encoding="utf-8").splitlines() if l.startswith("| 2026-")][-1]
         self.assertEqual(last, "| 2026-11-13 | 1.1 | Primeras consultas | Empezar la lección 1.1 · Primera. |")
         self.assertEqual(self.estado()["sesiones"], 1)

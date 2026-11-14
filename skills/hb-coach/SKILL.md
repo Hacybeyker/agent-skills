@@ -115,7 +115,7 @@ Una sesión es un chat de estudio: si en el mismo chat se pasa del plan a la pri
 1. **Abre** con `coach siguiente` (sin proyecto, primero pregunta dónde está o dónde guardarlo) y, si no lo tienes en este chat, `coach metodo`. Tu primera línea es la meta de hoy en una frase («Hoy: repaso de 2 conceptos y la lección 1.3, unos 40 min»); en la primera sesión, sin tema todavía, la meta es crear el plan. Si prefiere otra cosa, adapta.
 2. **Calentamiento**: si toca repaso, modo D (5 a 10 minutos) antes de lo nuevo.
 3. **Trabajo principal**: el modo que corresponda.
-4. **Cierre**: `coach sesion <slug> --logros "…"`, una vez por sesión. Tu último mensaje dice qué logró hoy (en concreto), el siguiente paso y el próximo repaso que imprime `sesion`, y dónde ver el cuaderno. Un único siguiente paso, no una lista.
+4. **Cierre**: `coach sesion <slug> --logros "…"`, una vez por sesión. Tu último mensaje dice qué logró hoy (en concreto), el siguiente paso, el próximo repaso que imprime `sesion` (o que aún no hay ninguno) y dónde ver el cuaderno. Un único siguiente paso, no una lista.
 
 ## A · Nuevo plan
 
@@ -134,16 +134,30 @@ Lee [references/plan-de-estudio.md](references/plan-de-estudio.md) y el mapa del
 
 ## B · Lección: el cuaderno es el aula
 
-El ciclo, los tres ejemplos, los retos y la escalera de pistas están en [references/pedagogia.md](references/pedagogia.md); los formatos de la nota y de la corrección, en [references/cuaderno.md](references/cuaderno.md). La lección avanza bloque a bloque: tú escribes el bloque en la nota, el estudiante lo lee en el cuaderno y te responde en la terminal, y tú anotas su intento y la corrección en el mismo bloque.
+El ciclo, los tres ejemplos, los retos y la escalera de pistas están en [references/pedagogia.md](references/pedagogia.md); los formatos de la nota y de la corrección, en [references/cuaderno.md](references/cuaderno.md). La lección avanza bloque a bloque: tú escribes el bloque en la nota, el estudiante lo lee en el cuaderno y te responde en la terminal, y tú anotas su intento y la corrección en el mismo bloque. Antes del primer bloque basta con leer pedagogia.md §2 a §4 y cuaderno.md §3 y §4.
 
-1. **Dónde está**: `coach siguiente` dice si toca empezar, qué espera el bloque actual (el intento de un reto, unas respuestas, un segundo intento) o qué bloque escribir. Si retomas en otro chat, lee solo las líneas del bloque que te da.
+1. **Dónde está**: `coach siguiente` dice si toca empezar, qué espera el bloque actual (el intento de un reto, unas respuestas, un segundo intento) o qué bloque escribir, con el objetivo, la práctica y el criterio de dominio que fija el plan. Si retomas en otro chat, lee solo las líneas del bloque que te da. No mandes antes un mensaje con el mapa ni esperes un «¿vamos?»: tu primer mensaje es la meta de hoy y el bloque ya escrito.
 2. **Abrir un bloque**: **una** llamada a `coach bloque <slug> <id> <n>` con el bloque entero; la primera lleva también `## Objetivos` (la idea en una frase, 2 o 3 objetivos observables y el mapa `**Bloques:**` en lista numerada: `1. **Título** — 📖 → 🛠 reto → ❓ 2 preguntas`).
    - **📖 Teoría**: la idea, la definición precisa y los tres ejemplos (mínimo · en su contexto · lo que sale mal), con el patrón explicación → ejemplo → desglose en viñetas → aviso. Si el diagnóstico mostró dominio, abrevia.
    - **🛠 Práctica**: `### 🧩 Reto k · …` con el enunciado, el **Resultado esperado** (lo observable que dice que terminó; si la respuesta es el propio cálculo, describe su forma, no el valor) y las pistas de menos a más en `<details>`. **Sin solución.** El material de práctica (una base de datos, unos datos, un proyecto de juguete) lo preparas tú, verificado, en `<slug>/practica/` o en su proyecto si te deja.
    - **❓ Preguntas**: 2 a 4 `**Pn.**` (numeradas a lo largo de la lección) solo sobre este bloque, **sin respuesta**.
-3. **Su respuesta**: **una** llamada a `coach corregir <slug> <id>` con su intento tal cual, el veredicto por ítem y la corrección. Si es ✔ (o tras el segundo intento), añade la solución plegada y «Para ampliar»; si es ✘, solo la pista: la solución todavía no. Las preguntas van en el mismo formato (`**P1.** tu respuesta: *«…»* ✔` y la respuesta completa plegada). Formatos exactos en [references/cuaderno.md](references/cuaderno.md) §4.
-4. **Siguiente bloque**: cuando el bloque termina, `corregir` te da el comando del siguiente. Escríbelo adaptado a lo que falló. Términos nuevos con `coach glosario`; si la misma idea falla dos veces, `coach hueco` (ver abajo).
-5. **Comprobación de dominio**: el último bloque ❓ («Comprobación de dominio»), con preguntas de distinto nivel sobre lo trabajado; el 80 % se mide sobre él, con el primer intento de cada pregunta. Después le pides su explicación con sus palabras.
+3. **Su respuesta**: **una** llamada a `coach corregir <slug> <id>` con su intento tal cual, el veredicto por ítem y la corrección. Si es ✔ (o tras el segundo intento), añade la solución plegada y «Para ampliar»; si es ✘, solo la pista: la solución todavía no. Las preguntas, una pieza cada una, empezando por `**Pn.**`. Formatos completos en [references/cuaderno.md](references/cuaderno.md) §4:
+
+   ```markdown
+   **Tu intento:** 1) 1 · 2) 1/8 · 3) −100 · 4) 1/9 · 5) 1
+   **Veredicto:** 4/5 ✔ · ✘ en el 3: el exponente negativo no hace negativo el resultado.
+   **Corrección:** … Abre la Pista 2 y vuelve a intentar solo el 3.
+
+   **P1.** tu respuesta: *«a⁵/a⁵ es 1 y también a⁰»* ✔
+   <details>
+   <summary>Respuesta completa</summary>
+
+   …
+
+   </details>
+   ```
+4. **Siguiente bloque**: cuando el bloque termina, `corregir` te da el comando del siguiente. Escríbelo adaptado a lo que falló y ábrelo en el mismo mensaje en que cierras el anterior, salvo que la sesión ya haya llegado al tiempo pactado o el estudiante quiera parar: entonces ciérrala y el bloque se escribe al retomar. Los términos nuevos van al glosario (`coach glosario`) al abrir el bloque que los define; si la misma idea falla dos veces, `coach hueco` (ver abajo).
+5. **Comprobación de dominio**: el último bloque ❓ («Comprobación de dominio»), con 5 preguntas de distinto nivel sobre lo trabajado (con 5, el 80 % deja fallar una; con 4, ninguna); se mide con el primer intento de cada pregunta. Después le pides su explicación con sus palabras.
 6. **Cierre**: `coach nota` con `## Resumen con tus palabras` y `## Fuentes` y, si se cumplió el criterio de dominio, `coach completar <slug> <id>` (un hueco abierto no lo impide) y, una vez por sesión, `coach sesion`, encadenados con `&&`.
 
 Si la sesión se corta, la nota ya tiene lo hecho y `siguiente` sabe en qué bloque está y qué espera.
@@ -178,7 +192,7 @@ Siempre cortos (3 a 5 líneas), sin repetir la teoría ni la corrección: dicen 
 🛠 Lee la teoría y resuelve el reto 2; envíame la potencia de 2 y su valor.
 ```
 
-Al cerrar la lección: qué logró (en concreto), el siguiente paso y el próximo repaso que imprime `sesion`, y el enlace al cuaderno.
+Al cerrar la lección: qué logró (en concreto), el siguiente paso, el próximo repaso que imprime `sesion` y el enlace al cuaderno.
 
 ## Cómo preguntar y corregir
 
@@ -200,7 +214,8 @@ No existe «a medias» por redacción. Si la respuesta es ambigua, pide una fras
 
 ## Verificar antes de pedir
 
-- **Software:** copia del proyecto o worktree, nunca su copia de trabajo. No basta con compilar: lee los avisos y los *deprecated* del código que vas a enseñar. Versiones alineadas con su catálogo o BOM. Para demostrar si un test sirve, rompe a propósito el código en la copia (mutación). En su emulador o dispositivo, solo con permiso, con un `applicationId` temporal y dejándolo todo como estaba.
+- **Software:** una copia del proyecto (`git clone` a una carpeta temporal), nunca su copia de trabajo. No basta con compilar: lee los avisos y los *deprecated* del código que vas a enseñar. Versiones alineadas con su catálogo o BOM. Para demostrar si un test sirve, rompe a propósito el código en la copia (mutación); en Python, con `python3 -B` y sin `__pycache__`, o el bytecode viejo puede dar un OK falso. En su emulador o dispositivo, solo con permiso, con un `applicationId` temporal y dejándolo todo como estaba.
+- **Herramientas interactivas** (sqlite3, psql, un REPL): por tubería muestran otro formato que en su terminal (sin cabeceras, otro indicador). Verifica lo que importa (filas, cifras, el texto del error) y dile que el aspecto puede variar; no hace falta emular una terminal.
 - **Números:** calcula cada resultado y cada respuesta modelo con un script (Python con su librería estándar) antes de pedirlo.
 - **Hechos, normas y lenguas:** fuente fiable consultada en la sesión; si no puedes consultarla, márcalo «a verificar».
 - **Mensajes de error:** el texto exacto de una ejecución real; si es más largo que una línea de código, pártelo y dilo. Si en su herramienta puede verse distinto (otra versión, otro terminal), avísalo.
@@ -214,8 +229,8 @@ Respuesta directa (1 a 3 frases) → por qué → ejemplo mínimo si ayuda → q
 
 Mismo patrón que la lección: las preguntas en el cuaderno, las respuestas en la terminal y la corrección en el cuaderno.
 
-- **Repaso (5 a 10 min):** `coach repaso <slug>` te da lo que vence hoy (lecciones y huecos), mezclado entre módulos, con las preguntas de cada lección, y prepara la nota del día. Escribe ahí una pregunta **nueva** por elemento (no las de la nota tal cual), `**P1.** (1.2) …`, con `coach nota <slug> repaso`; corrige sus respuestas con `coach corregir <slug> repaso` y registra cada resultado con `coach repaso <slug> <id|Hn> --bien|--mal`, también los huecos. En un chat nuevo, lee antes el §9 de [references/pedagogia.md](references/pedagogia.md).
-- **Examen de módulo:** cuando `siguiente` lo proponga, `coach examen <slug> <n>` prepara la nota y el alcance. Escribe en ella 6 a 10 preguntas de distinto tipo (encontrar el error, elegir entre alternativas, explicar, aplicar a un caso nuevo, interpretar un resultado real) con `coach nota <slug> Mn` y una tarea práctica corta con `--seccion tarea`, sin respuestas; corrígelas con `coach corregir <slug> Mn`. Registra con `coach examen <slug> <n> --resultado aciertos/total --tarea si|no`. Para aprobar: 80 % y la tarea hecha; si no, abre cada concepto fallado con `coach hueco <slug> "…" --examen <n>` y `siguiente` lo propondrá de nuevo cuando esos huecos tengan un repaso bien.
+- **Repaso (5 a 10 min):** cuenta el primer intento de cada pregunta: un fallo es `--mal`. Si un hueco vuelve a fallar, no basta con una pista: explícalo de otra forma, con un ejemplo resuelto distinto y un mini reto (ver «Cuando algo falla dos veces»), y regístralo con `--mal`. `coach repaso <slug>` te da lo que vence hoy (lecciones y huecos), mezclado entre módulos, con las preguntas de cada lección, y prepara la nota del día. Escribe ahí una pregunta **nueva** por elemento (no las de la nota tal cual), `**P1.** (1.2) …`, con `coach nota <slug> repaso`; corrige sus respuestas con `coach corregir <slug> repaso` y registra cada resultado con `coach repaso <slug> <id|Hn> --bien|--mal`, también los huecos. En un chat nuevo, lee antes el §9 de [references/pedagogia.md](references/pedagogia.md).
+- **Examen de módulo:** cuando `siguiente` lo proponga, `coach examen <slug> <n>` prepara la nota y el alcance. Escribe en ella 6 a 10 preguntas de distinto tipo (encontrar el error, elegir entre alternativas, explicar, aplicar a un caso nuevo, interpretar un resultado real) con `coach nota <slug> Mn` y una tarea práctica corta con `--seccion tarea`, sin respuestas; corrígelas con `coach corregir <slug> Mn`. En el examen no hay pistas ni segundo intento: cada ✘ lleva su corrección y la respuesta completa, y cuenta el primer intento. Registra con `coach examen <slug> <n> --resultado aciertos/total --tarea si|no`. Un concepto fallado, aunque apruebe, se abre como hueco (`coach hueco <slug> "…" --examen <n>`) o, si ya lo es, se anota con `coach hueco <slug> Hn --mal`. Para aprobar: 80 % y la tarea hecha; si no, abre cada concepto fallado con `coach hueco <slug> "…" --examen <n>` y `siguiente` lo propondrá de nuevo cuando esos huecos tengan un repaso bien.
 
 ## E · Estado
 
