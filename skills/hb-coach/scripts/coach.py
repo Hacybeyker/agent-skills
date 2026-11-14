@@ -2192,7 +2192,7 @@ def cmd_estado(pos, opts):
         out("  Módulos   " + " \u00b7 ".join("M%s %d/%d" % (m["id"], m["hechas"], m["total"]) for m in s["modulos"]))
         if s["examenes"]:
             out("  Exámenes  " + " \u00b7 ".join("M%s %s" % (e["modulo"], "\u2714" if e["hecho"] else
-                                                             ("toca" if e["listo"] else "\u00b7")) for e in s["examenes"]))
+                                                             ("toca" if e["listo"] else "\u25CB")) for e in s["examenes"]))
         rv = s["repasos"]
         if rv["vencidos"]:
             out("  Repasos   %d vencido(s): %s" % (len(rv["vencidos"]), ", ".join(d["id"] for d in rv["vencidos"])))

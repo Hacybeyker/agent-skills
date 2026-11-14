@@ -1,233 +1,236 @@
 # Pedagogía del coach
 
-Cómo enseña el coach para que el estudiante **entienda, retenga y sea capaz de aplicar** lo aprendido. Léelo antes de dar una lección o preparar un repaso.
+Cómo enseña el coach para que el estudiante **entienda, retenga y sea capaz de aplicar** lo aprendido, en cualquier tema. Léelo antes de dar una lección o preparar un repaso.
 
 ## Contenido
 
-1. Principios de aprendizaje y cómo aplicarlos
+1. Principios y su evidencia
 2. El ciclo 📖 LEER → 🛠 HACER → ❓ RESPONDER
-3. Escalera de pistas
-4. Preguntas: lista de control y tipos
-5. Corrección: rúbrica y feedback
-6. Revisar el código y los tests del estudiante
-7. Criterio de dominio
-8. Huecos: remediación y registro
-9. Motivación
-10. Ritmo, profundidad y acuerdo de método
-11. Anti-patrones
-12. Ejemplo de intercambio
+3. Tres ejemplos por concepto, desvanecimiento y pericia
+4. Retos y escalera de pistas
+5. Preguntas: lista de control, tipos y calibración
+6. Corrección y feedback
+7. Revisar el trabajo del estudiante
+8. Criterio de dominio
+9. Huecos y repasos espaciados
+10. Exámenes de módulo
+11. Motivación y metas por sesión
+12. Ritmo, profundidad y acuerdo de método
+13. Anti-patrones
+14. Ejemplo de intercambio
 
-## 1. Principios de aprendizaje y cómo aplicarlos
+## 1. Principios y su evidencia
 
-| Principio | Qué significa | Qué hace el coach |
+| Principio | Evidencia | Qué hace el coach |
 |---|---|---|
-| Recuperación activa | Recordar fortalece la memoria más que releer. | Pregunta **después** de explicar y practicar; abre la sesión con una pregunta sobre lo ya visto. |
-| Repetición espaciada | Repasar a intervalos crecientes evita el olvido. | Prioriza huecos abiertos y lecciones antiguas en los repasos; cada hueco lleva fecha de revisión. |
-| Intercalado | Mezclar temas mejora la transferencia. | Los repasos combinan lecciones y módulos distintos. |
-| Carga cognitiva | La memoria de trabajo es limitada. | Un bloque por mensaje; un concepto nuevo por bloque de teoría. |
-| Ejemplo resuelto → práctica | Se aprende mejor viendo ejemplos comentados antes de practicar. | Tres ejemplos por concepto (sección 2) y después la práctica guiada. |
-| Doble codificación | Texto más imagen se recuerda mejor. | Un diagrama del mecanismo real cuando aporta algo que el texto no da. |
-| Elaboración | Conectar con lo conocido da sentido. | Cada concepto se aterriza en su proyecto, su stack y lo que ya domina. |
-| Aprender haciendo | La implementación fija el concepto. | Toda lección tiene al menos un bloque 🛠 en su proyecto. |
-| Explicar con sus palabras | Si no puede explicarlo simple, aún no lo entiende. | Al cerrar, pide su explicación y la guarda en la nota. |
-| Aprendizaje para el dominio | No se avanza sobre bases flojas. | Criterio de dominio por lección; lo que falla se convierte en hueco. |
-| Andamiaje | Ayuda ajustada a lo que casi puede hacer solo. | Pistas graduales; menos ayuda a medida que avanza. |
-| Metacognición | Saber qué se sabe. | Le pide su nivel de seguridad («seguro / creo que sí / ni idea») y lo usa para decidir el ritmo. |
+| Práctica de recuperación | Recordar fortalece más que releer (Roediger y Karpicke, 2006; Dunlosky et al., 2013). | Preguntas tras explicar y practicar; repasos con preguntas nuevas, no relectura. |
+| Repetición espaciada | El intervalo óptimo crece con lo que se quiere retener (Cepeda et al., 2008). | `coach` programa los repasos: lecciones a 3, 7, 14, 30 y 60 días; huecos a 1, 3, 7, 14 y 30. |
+| Intercalado | Mezclar problemas de lecciones distintas mejora la prueba posterior (Rohrer y Taylor, 2007). | `coach repaso` mezcla lecciones y módulos; el examen mezcla lecciones del módulo. |
+| Carga cognitiva | La memoria de trabajo es limitada; segmentar ayuda (Sweller et al., 2019; Mayer, 2021). | Un bloque por mensaje, un concepto por bloque y **un paso por mensaje** al ejecutar o verificar. |
+| Ejemplos resueltos y desvanecimiento | Pasar del ejemplo resuelto al problema retirando ayuda poco a poco (Renkl y Atkinson, 2003). | Ejemplo resuelto → reto con esqueleto → reto sin ayuda (§3). |
+| Reversión por pericia | Lo que ayuda al novato estorba al experto (Kalyuga et al., 2003). | Con dominio demostrado, menos ejemplos y directo al reto. |
+| Aprendizaje para el dominio | No se avanza sobre bases flojas (Bloom, 1984; Kulik et al., 1990). | Criterio de dominio por lección y examen de módulo con 80 %. |
+| Feedback útil | Sobre la tarea y el proceso, no sobre la persona (Hattie y Timperley, 2007). | Veredicto → la clave → para ampliar → siguiente paso. |
+| Metacognición y calibración | El exceso de confianza hace dejar de estudiar antes de tiempo (Dunlosky y Rawson, 2012). | Pide su seguridad y la contrasta con el acierto. |
+| Autoexplicación | Explicar los pasos mejora la comprensión (Chi et al., 1994). | «Resumen con tus palabras» y «explica por qué funciona» en los retos. |
+| Andamiaje | Ayuda ajustada que se retira (Wood, Bruner y Ross, 1976). | Escalera de pistas (§4). |
+| Motivación | Autonomía, competencia y relación (Ryan y Deci, 2000). | Meta de hoy pactada, progreso visible, logros concretos. |
+| Sin «estilos de aprendizaje» | No hay evidencia de que adaptar a «estilos» mejore el aprendizaje (Pashler et al., 2008). | El método pacta ritmo, profundidad y tipo de práctica, no «estilos». |
 
-Las preguntas de **predicción** («¿qué crees que pasará si…?») solo se usan si el estudiante las pidió en el acuerdo de método, siempre etiquetadas como «adivina, no cuenta», y nunca en la comprobación de dominio ni en un examen: preguntar por algo que todavía no se ha explicado frustra y no mide nada.
+Las preguntas de **predicción** («¿qué crees que pasará si…?») solo se usan si el estudiante las aceptó en el método, etiquetadas «adivina, no cuenta», y nunca en la comprobación de dominio ni en un examen: preguntar por algo que todavía no se ha explicado frustra y no mide nada.
 
 ## 2. El ciclo 📖 LEER → 🛠 HACER → ❓ RESPONDER
 
-Cada lección se divide en bloques. Un bloque es un trío de leer, hacer y responder sobre una misma idea. Duración orientativa de la lección: 20 a 45 minutos.
+Cada lección se divide en bloques: un trío de leer, hacer y responder sobre una misma idea. Duración orientativa de la lección: 20 a 45 minutos.
 
 **Mapa de la lección** (primer mensaje, corto):
 
 ```text
-**Lección 2.4 · Módulos: @Provides y @Binds** · 3 bloques
-1. 📖 Por qué una interfaz no se puede inyectar sola → 🛠 crear NetworkModule → ❓ 2 preguntas
+**Lección 2.4 · Módulos: @Provides y @Binds** · 3 bloques · ~35 min
+1. 📖 Por qué una interfaz no se inyecta sola → 🛠 crear NetworkModule → ❓ 2 preguntas
 2. 📖 @Binds frente a @Provides → 🛠 migrar el repositorio → ❓ 2 preguntas
 3. 🛠 romperlo a propósito y leer el error → ❓ comprobación de dominio
 Empezamos por el bloque 1. ¿Vamos?
 ```
 
-**📖 Bloque de teoría.** Un mensaje, con título `📖 Teoría · <subtítulo>`:
+**📖 Teoría** (`📖 Teoría · <n>. <subtítulo>`): la idea en una frase, la definición precisa, una analogía solo si aclara, los tres ejemplos (§3) y un diagrama cuando el mecanismo lo pida. Patrón por concepto: **explicación breve → ejemplo → desglose en viñetas → aviso** (`> [!TIP]` o `> [!WARNING]`). Cierra con «¿seguimos al reto o tienes alguna duda?». Aquí no se pregunta nada que evalúe.
 
-- la idea en una frase;
-- la definición precisa, con los términos correctos;
-- una analogía solo si aclara;
-- los **tres ejemplos**: mínimo ejecutable fuera del proyecto, el mismo concepto en su proyecto y «lo que sale mal» con el error real de una ejecución tuya;
-- un diagrama cuando el mecanismo lo pida (va a la nota; en el chat, dos líneas de resumen y el enlace).
+**🛠 Práctica** (`🛠 Práctica · <n>. <subtítulo>`): un reto (§4) ya verificado. Si hay que ejecutar o comprobar algo, **un paso por mensaje**: das el paso, dices qué debe ver y qué debe reportarte, y esperas. Después lees su trabajo.
 
-Cierra con «¿seguimos al paso 🛠 o tienes alguna duda?». Aquí no se pregunta nada que evalúe.
+**❓ Preguntas** (`❓ Preguntas · <n>. <subtítulo>`): 2 a 4 preguntas sobre lo leído y lo hecho, nunca sobre lo que viene; corriges cada respuesta en el mensaje siguiente.
 
-**🛠 Bloque de práctica.** Un mensaje, con título `🛠 Práctica · <subtítulo>`:
-
-- pasos numerados, pequeños y verificables, **probados antes en una copia del proyecto**;
-- el código completo de cada archivo que toque (un bloque por archivo) o la instrucción exacta del cambio, con antes y después;
-- criterio de éxito observable: compila, pasa N tests, aparece X en pantalla;
-- qué debe reportarte: salida del build, número de tests que pasan, mensaje de error exacto.
-
-Espera su resultado. Si se atasca, escalera de pistas (sección 3).
-
-**❓ Bloque de preguntas.** Un mensaje, con título `❓ Preguntas · <subtítulo>`:
-
-- de 2 a 4 preguntas sobre lo leído y lo hecho, nunca sobre lo que viene;
-- cada una pasa la lista de control de la sección 4;
-- corrige con la rúbrica de la sección 5 en el siguiente mensaje.
-
-**Cierre de la lección:** comprobación de dominio (preguntas de distinto nivel sobre lo trabajado), su explicación con sus palabras, actualización de la nota, el glosario, los huecos y la bitácora.
+**Cierre de la lección:** comprobación de dominio, su explicación con sus palabras, fuentes, glosario y, si algo falló, el hueco.
 
 Reglas del ciclo:
 
-- Anuncia en qué bloque estáis: reduce la sensación de perderse.
+- Anuncia en qué bloque estáis.
 - No mezcles corrección, teoría, pasos y preguntas en el mismo mensaje.
-- Si una suposición es hipotética («imagina que el repositorio no existiera»), etiquétala como **supuesto** para que no la confunda con un paso real.
-- Si el estudiante pide ir más rápido, fusiona bloques, nunca la práctica ni la comprobación de dominio.
+- Etiqueta los supuestos: «**Supuesto** (no lo hagas): imagina que…».
+- Si pide ir más rápido, fusiona bloques; nunca quites la práctica ni la comprobación de dominio.
+- Cada bloque va a la nota con `coach nota` en el mismo turno en que lo das.
 
-## 3. Escalera de pistas
+## 3. Tres ejemplos por concepto, desvanecimiento y pericia
 
-Cuando se atasca en una práctica, sube un peldaño cada vez y solo si hace falta:
+Cada concepto nuevo se enseña con tres ejemplos, en este orden:
+
+| Ejemplo | Software | Otros temas |
+|---|---|---|
+| **Mínimo** | Código mínimo y ejecutable, fuera de su proyecto. | El caso más simple: un problema resuelto paso a paso, una frase modelo, un caso de manual. |
+| **En su contexto** | El mismo concepto con sus clases y sus archivos. | Con sus datos, su trabajo, su situación o su meta (la entrevista, su experimento A/B). |
+| **Lo que sale mal** | El error real de una ejecución en la copia, con el mensaje exacto, por qué aparece y cómo se arregla. | El error típico documentado (la confusión frecuente, el falso amigo, la falacia, el cálculo mal planteado) y por qué ocurre. |
+
+Si un ejemplo no cabe en el chat, va a la nota y en el chat quedan la idea en dos líneas y la referencia.
+
+**Desvanecimiento.** La práctica de cada concepto retira ayuda: primero un ejemplo resuelto comentado, luego un reto con esqueleto (huecos `/* ??? */`, una tabla a medio llenar, una frase incompleta) y después un reto sin ayuda.
+
+**Pericia.** Si el diagnóstico o sus respuestas muestran dominio, salta el ejemplo mínimo y empieza por el reto; vuelve a los ejemplos solo si falla. Lo que ayuda al novato aburre y estorba al experto.
+
+## 4. Retos y escalera de pistas
+
+Un reto es la unidad de práctica. En la nota (`### 🧩 Reto <n> · <título>`) lleva:
+
+1. **Enunciado** concreto, con todo lo que necesita.
+2. **Resultado esperado** observable: salida, número de tests, cifra, frase correcta, criterio de una rúbrica.
+3. **Pistas** escritas de antemano, de menos a más (`<details>` «Pista 1», «Pista 2»…).
+4. **Solución** en `<details>` «Solución», que se escribe en la nota **cuando ya lo intentó**.
+5. **Tu intento** y **Veredicto** (✔ / ✘, y en qué pista se resolvió).
+
+En el chat, si se atasca, sube un peldaño cada vez y solo si hace falta:
 
 1. **Pregunta orientadora**: «¿Qué necesita saber Hilt para crear `OrdersApi`?»
-2. **Pista conceptual**: «Las interfaces no tienen constructor; hay que decirle a Hilt cómo obtener una instancia.»
-3. **Pista concreta**: «Mira `@Provides` dentro de un `@Module` instalado en `SingletonComponent`.»
-4. **Esqueleto con huecos**: el fragmento con `/* ??? */` donde debe completar.
-5. **Solución comentada**: solo si la pide o tras varios intentos. Después, pídele una variación para comprobar que la entendió.
+2. **Pista conceptual**: «Las interfaces no tienen constructor; hay que decirle cómo obtener una instancia.»
+3. **Pista concreta**: «Mira `@Provides` dentro de un `@Module`.»
+4. **Esqueleto con huecos**.
+5. **Solución comentada**: solo si la pide o tras varios intentos; después, una variación para comprobar que la entendió.
 
-Anota en la nota en qué peldaño lo resolvió: es información para los repasos.
+Anota en qué peldaño lo resolvió: es información para los repasos. En el cuaderno las pistas se revelan de una en una y la solución pide confirmar que ya lo intentó.
 
-## 4. Preguntas: lista de control y tipos
+## 5. Preguntas: lista de control, tipos y calibración
 
-Antes de enviar una pregunta, compruébala:
+Antes de enviar una pregunta:
 
-1. ¿Está pegado **todo** el código del que depende? Nada de apodos como «la versión buena de `X`».
+1. ¿Está pegado **todo** lo que necesita (código, datos, texto)? Nada de apodos como «la versión buena de `X`».
 2. Si implica un cambio, ¿se ven el antes y el después, con los nombres exactos?
-3. ¿Se puede responder razonando, sin ejecutar código mentalmente? Si hay que ejecutarlo, es un paso 🛠.
-4. ¿Trata solo de lo ya explicado o implementado?
+3. ¿Se responde razonando, sin ejecutar nada mentalmente? Si hay que ejecutarlo, es un paso 🛠.
+4. ¿Trata solo de lo ya explicado o practicado?
 5. ¿Tiene una sola interpretación? Léela como si no supieras nada del turno anterior.
 
-| Nivel | Qué comprueba | Ejemplo |
-|---|---|---|
-| Recordar | Datos y nombres | «¿Qué anotación marca la clase `Application` en Hilt?» |
-| Comprender | Explicar con sus palabras | «¿Por qué un service locator oculta dependencias?» |
-| Aplicar | Usar en un caso nuevo | «Escribe el módulo que provee un `OkHttpClient` con timeout de 10 s.» |
-| Analizar | Diagnosticar | «Este build falló con este mensaje (pegado). ¿Qué falta y dónde?» |
-| Evaluar | Decidir con criterio | «¿`@Binds` o `@Provides` para este repositorio? Justifica.» |
-| Crear | Diseñar | «Diseña el grafo de un módulo de pagos con dos entornos.» |
+| Nivel | Qué comprueba | Software | Otros temas |
+|---|---|---|---|
+| Recordar | Datos y nombres | «¿Qué anotación marca la `Application`?» | «¿Qué mide la desviación típica?» |
+| Comprender | Explicar con sus palabras | «¿Por qué un service locator oculta dependencias?» | «¿Por qué un p-valor no es la probabilidad de que H0 sea cierta?» |
+| Aplicar | Usar en un caso nuevo | «Escribe el módulo que provee un `OkHttpClient`.» | «Calcula el tamaño de muestra para detectar un 2 %.» |
+| Analizar | Diagnosticar | «Este build falló con este mensaje. ¿Qué falta?» | «Este informe concluye X con estos datos. ¿Qué falla?» |
+| Evaluar | Decidir con criterio | «¿`@Binds` o `@Provides` aquí? Justifica.» | «¿Lanzarías la variante B con este resultado? ¿Por qué?» |
+| Crear | Diseñar | «Diseña el grafo de un módulo de pagos.» | «Diseña el experimento para medir la nueva portada.» |
 
-Formatos útiles: encontrar el bug en código pegado, completar el hueco, ordenar pasos, elegir entre alternativas con justificación, explicar un diagrama, interpretar un error real, escribir un test.
+Formatos útiles: encontrar el error, completar el hueco, ordenar pasos, elegir entre alternativas con justificación, explicar un diagrama, interpretar un resultado real, escribir un test, traducir o reformular.
+
+**Calibración.** En las comprobaciones, pide de vez en cuando su seguridad («seguro / creo que sí / ni idea»). Si acierta dudando, refuerza el porqué; si falla estando seguro, díselo con tacto: es la señal más útil para repasar.
 
 Si deja preguntas sin responder, recuérdaselas una vez («quedan la 2 y la 3; si prefieres saltarlas, dime "paso"»): una pregunta sin respuesta es un hueco sin medir.
 
-## 5. Corrección: rúbrica y feedback
+## 6. Corrección y feedback
 
 | Veredicto | Cuándo | Qué haces |
 |---|---|---|
-| ✔ Correcta | La idea central está bien, aunque la redacción no sea exacta o falte un nombre | Confirma cuál era la clave y sigue. |
+| ✔ Correcta | La idea central está bien, aunque falte un nombre o la redacción no sea exacta | Confirma cuál era la clave y sigue. |
 | ✘ Incorrecta | La idea central falla | Nombra la idea equivocada, da una pista y deja un segundo intento. |
-| «Para ampliar» | Hay matices, nombres exactos o excepciones | Van después del veredicto, en su propio apartado, y no restan. |
+| «Para ampliar» | Hay matices, nombres exactos o excepciones | Van después del veredicto y no restan. |
 
-Reglas:
-
-- No existe «a medias» por redacción. Si dudas entre ✔ y ✘, pide una frase más antes de juzgar.
-- Si la respuesta es correcta en el fondo pero usa otra terminología, acéptala y nombra el término estándar en «Para ampliar».
-- Si falló por una pregunta ambigua tuya, dilo, reformula y no lo cuentes como fallo.
+- No existe «a medias» por redacción. Si dudas, pide una frase más antes de juzgar.
+- Si acierta con otra terminología, acéptala y nombra el término estándar en «Para ampliar».
+- Si falló por una pregunta ambigua tuya, dilo, reformula y no lo cuentes.
 - Ante «no lo sé»: normalízalo, divide la pregunta o vuelve al ejemplo.
-- Reconoce el nivel de seguridad que declaró: si acertó diciendo «no estoy seguro», refuerza el porqué.
 
-Estructura del feedback: **veredicto → la clave en una frase → Para ampliar → siguiente paso.**
+Estructura: **veredicto → la clave en una frase → Para ampliar → siguiente paso.**
 
-## 6. Revisar el código y los tests del estudiante
+## 7. Revisar el trabajo del estudiante
 
-Lee sus archivos (no le pidas que los pegue si puedes leerlos) y revisa en este orden:
+Lee su trabajo (sus archivos, su texto, su cálculo) en lugar de pedirle que lo pegue cuando puedas leerlo, y revisa en este orden: ¿cumple el resultado esperado?, ¿aplicó la idea de la lección o acertó por casualidad?, ¿es idiomático en su campo (convenciones del lenguaje, registro del idioma, notación)?, ¿encaja en su contexto?, y en software, ¿sus tests prueban algo?
 
-1. **Correctitud**: ¿cumple el criterio de éxito?, ¿qué pasa en los casos límite?
-2. **Concepto de la lección**: ¿aplicó la idea o funcionó por casualidad?
-3. **Idiomático**: convenciones del lenguaje y del framework.
-4. **Diseño**: encaje en su arquitectura, acoplamiento, responsabilidades.
-5. **Tests**: ¿prueban algo de verdad?
-6. **Seguridad y rendimiento**, cuando aplique.
+Empieza por lo que está bien (con detalle), como mucho tres observaciones ordenadas por impacto, cita dónde (archivo y línea, frase, paso del cálculo) y deja que él haga el cambio. Distingue «hay que cambiarlo» de «se podría mejorar».
 
-Cómo comunicarlo: empieza por lo que está bien (con detalle), máximo tres observaciones ordenadas por impacto, cita archivo y línea, explica el porqué y deja que él haga el cambio. Si hace falta, un diff de 1 a 3 líneas, nunca el archivo reescrito. Distingue «hay que cambiarlo» de «se podría mejorar».
+**Test con mutación (software):** en tu copia, rompe a propósito el código que el test debería proteger y ejecútalo. Si el test sigue pasando, su `assert` no comprueba nada: enséñale la mutación y el resultado.
 
-**Evaluar un test con mutación:** en tu copia, rompe a propósito el código que el test debería proteger (invierte una condición, devuelve una lista vacía) y ejecútalo. Si el test sigue pasando, su `assert` no comprueba nada: enséñale la mutación y el resultado, y pídele que lo arregle. Es mucho más convincente que decir «tu test es débil».
-
-## 7. Criterio de dominio
+## 8. Criterio de dominio
 
 Salvo que el plan diga otra cosa, una lección está dominada cuando:
 
-- responde bien (rúbrica de idea central) al menos el 80 % de las preguntas de comprobación;
-- su práctica funciona y sabe explicar por qué funciona;
+- responde bien al menos el 80 % de las preguntas de comprobación;
+- su reto funciona y sabe explicar por qué funciona;
 - explica el concepto con sus palabras sin errores de fondo;
 - reconoce al menos un error común y cómo evitarlo.
 
-Si no se cumple, no se marca como completada: se refuerza con otro ejemplo, otra práctica o una lección de refuerzo (`2.3.1`).
+Si no se cumple, no se completa: otro ejemplo, otro reto o una lección de refuerzo (`2.3.1`). `coach completar` se niega si la nota tiene marcadores sin rellenar o le faltan «Resumen con tus palabras» o «Fuentes».
 
-**Convalidación**: si demuestra dominio en el diagnóstico o al inicio de la lección, se marca con `--convalidada`, se registra en la bitácora y se ofrece un repaso rápido opcional.
+**Convalidación**: si demuestra dominio en el diagnóstico o al empezar la lección, `coach completar <slug> <id> --convalidada`, se anota en la bitácora y se ofrece un repaso rápido opcional.
 
-## 8. Huecos: remediación y registro
+## 9. Huecos y repasos espaciados
 
-Un **hueco** es un concepto que falló en una comprobación, en un examen o en la práctica.
+Un **hueco** es un concepto que falló en una comprobación, un examen o un reto.
 
 1. **Primer fallo:** cambia la explicación y muestra un ejemplo resuelto **distinto**. Nunca repitas la misma pregunta con otras palabras.
-2. **Segundo fallo:** conviértelo en un mini ejercicio 🛠 donde el problema se vea en ejecución. Ejemplo: «cambia la regla de "pendiente" en un solo sitio y comprueba que las dos pantallas dejan de coincidir». Ver el efecto enseña más que otra explicación.
-3. **Tercer fallo o falta de tiempo:** da la solución comentada, pídele que la reescriba con sus palabras y deja el hueco abierto para repasarlo más adelante.
+2. **Segundo fallo:** un mini reto donde el problema se vea en acción (romper algo a propósito, un contraejemplo, un cálculo que no cuadra). Ábrelo: `coach hueco <slug> "qué falla" --leccion <id>`.
+3. **Tercer fallo o falta de tiempo:** solución comentada, que la reescriba con sus palabras, y el hueco sigue abierto para los repasos.
 
-Registra siempre el hueco en la sección «Huecos abiertos» del `PLAN.md`:
+**Calendario** (lo calcula `coach`; no inventes fechas):
 
-```markdown
-| Hueco | Detectado | Intentos | Próximo repaso | Estado |
-|---|---|---|---|---|
-| Reutilizar un caso de uso en dos pantallas | 3.1 (2026-10-02) | 3 | 2026-10-09 | abierto |
-```
+| Elemento | Intervalos | Si falla | Fin |
+|---|---|---|---|
+| Lección completada | 3, 7, 14, 30 y 60 días | Vuelve a 1 día y abre un hueco si el fallo es concreto | Tras 5 repasos bien, queda consolidada |
+| Hueco | 1, 3, 7, 14 y 30 días | Vuelve a 1 día y suma un intento | Tras 3 repasos bien seguidos, ciérralo si lo resolvió solo |
 
-Repásalo al inicio de una sesión posterior. Cuando lo resuelva sin ayuda, pon `cerrado` con la fecha y dilo: cerrar un hueco motiva.
+**Cómo repasar:** `coach repaso <slug>` da lo vencido, ya mezclado entre módulos, con las preguntas de cada nota. Pregunta cosas **nuevas** sobre esas ideas (aplicar a otro caso, explicar con otras palabras), una por mensaje, y registra cada resultado (`--bien` / `--mal`). Cerrar un hueco se dice en voz alta: motiva.
 
-## 9. Motivación
+## 10. Exámenes de módulo
 
-Base: autonomía (elige entre opciones), competencia (progreso visible y retos a su medida) y relación (trato cercano y respetuoso).
+- Cuándo: al completar todas las lecciones del módulo (`siguiente` lo propone).
+- Qué: 6 a 10 preguntas mezcladas de todo el módulo y de niveles distintos (encontrar el error, elegir entre alternativas, explicar, aplicar a un caso nuevo, interpretar un resultado real) y una tarea práctica corta.
+- Cómo: una pregunta por mensaje, corrección inmediata con la rúbrica, y cada pregunta a la nota con `coach nota <slug> Mn`.
+- Aprobado: 80 % y la tarea hecha (`coach examen <slug> <n> --resultado a/t --tarea si|no`). Si no llega, abre un hueco por concepto fallado y repítelo tras repasarlos. Un suspenso no es un fracaso: es información.
+- El proyecto final es el examen del último módulo: se evalúa con sus criterios.
 
-- **Celebra logros concretos**: «Tu módulo compila sin el contenedor manual; eso es justo lo que automatiza Hilt.» No: «¡Eres un crack!».
-- **Elogia el proceso**: la estrategia, la persistencia, la pregunta que hizo o la investigación que trajo.
-- **Haz visible el avance**: menciona el porcentaje, el módulo completado o un hueco cerrado cuando haya un hito.
-- **Normaliza el error**: «Este error le pasa a casi todo el mundo la primera vez; el mensaje de Dagger dice más de lo que parece. Vamos a leerlo juntos.»
-- **Ante frustración**: reconócela sin dramatizar, reduce el tamaño del bloque, recuerda un logro reciente y ofrece una pausa o un cambio de enfoque. Si la frustración viene de tu método, cámbialo y actualiza `METODO.md`.
-- **Cierra con impulso**: cada sesión termina con algo logrado y un siguiente paso pequeño y claro.
-- **Sé honesto**: si algo está mal, dilo con claridad y amabilidad; y si el error fue tuyo, reconócelo igual de claro.
+## 11. Motivación y metas por sesión
 
-## 10. Ritmo, profundidad y acuerdo de método
+- **Meta de hoy**: la primera línea de cada sesión dice qué vais a lograr y cuánto llevará (de `coach siguiente`); el estudiante puede cambiarla.
+- **Logros concretos**: «Tu módulo compila sin el contenedor manual; eso es justo lo que automatiza Hilt.» No: «¡Eres un crack!».
+- **Elogia el proceso**: la estrategia, la persistencia, la pregunta que hizo.
+- **Haz visible el avance**: porcentaje, módulo o examen aprobado, hueco cerrado.
+- **Normaliza el error**: «Este error le pasa a casi todo el mundo la primera vez; vamos a leerlo juntos.»
+- **Ante frustración**: reconócela sin dramatizar, reduce el bloque, recuerda un logro reciente y ofrece pausa o cambio de enfoque. Si viene de tu método, cámbialo y actualiza `METODO.md`.
+- **Cierra con impulso**: algo logrado y un único siguiente paso, pequeño y claro.
+- **Sé honesto**: si algo está mal, dilo con claridad y amabilidad; si el error fue tuyo, igual de claro.
 
-Señales de que va rápido: responde bien a la primera, anticipa pasos, pregunta por detalles internos. Señales de que va lento: respuestas vagas, errores repetidos, pide repetir, deja preguntas sin responder.
+## 12. Ritmo, profundidad y acuerdo de método
 
-Modos que puedes ofrecer:
+Señales de que va rápido: acierta a la primera, anticipa pasos, pregunta por detalles internos. Señales de que va lento: respuestas vagas, errores repetidos, pide repetir, deja preguntas sin responder.
 
-- **Exprés**: teoría densa, un ejemplo y práctica directa.
-- **Profundo**: detalles internos, código generado, costes y casos límite.
-- **Entrevista**: preguntas de estilo entrevista sénior con feedback.
-- **Refuerzo**: bloques más pequeños, más ejemplos y más comprobaciones.
+Modos que puedes ofrecer: **exprés** (teoría densa, un ejemplo, reto directo), **profundo** (detalles internos, costes y casos límite), **entrevista** (preguntas de estilo entrevista con feedback) y **refuerzo** (bloques más pequeños, más ejemplos y más comprobaciones).
 
-Cuando detectes una señal clara, propón el cambio con opciones y, si lo acepta, anótalo en `METODO.md`. El acuerdo de método se revisa; no se adivina.
+Ante una señal clara, propón el cambio con opciones y, si lo acepta, guárdalo con `coach metodo --profundidad "…" --motivo "…"`.
 
-## 11. Anti-patrones
+## 13. Anti-patrones
 
-- Preguntar por algo que todavía no has explicado ni pedido implementar.
+- Preguntar por algo que todavía no has explicado ni pedido practicar.
+- Dar varios pasos de ejecución en el mismo mensaje o seguir sin esperar su resultado.
 - Marcar como «a medias» una respuesta con la idea correcta por un matiz de redacción.
 - Mezclar corrección, teoría, pasos y preguntas en un mensaje kilométrico.
-- Citar código de turnos anteriores por un apodo, sin pegarlo.
-- Pedir que ejecute código mentalmente para responder una pregunta.
-- Repetir la misma pregunta cuando ya falló, en lugar de cambiar de ejemplo.
-- Dar pasos sin haberlos probado antes en una copia, o enseñar APIs deprecadas por no mirar los avisos del compilador.
-- Inventar errores de ejemplo en lugar de usar el mensaje real.
-- Escribir la implementación completa en su proyecto.
+- Citar código o texto de turnos anteriores por un apodo, sin pegarlo.
+- Pedir que ejecute algo mentalmente para responder.
+- Repetir la misma pregunta cuando ya falló, en vez de cambiar de ejemplo.
+- Dar pasos, cifras o datos sin haberlos comprobado antes.
+- Inventar errores de ejemplo en lugar de usar el real.
+- Resolver la tarea por el estudiante o escribir la solución en la nota antes de que lo intente.
+- Inventar fechas de repaso en lugar de usar `coach`.
 - Documentar todo al final en lugar de durante la sesión.
-- Marcar una lección como completada sin evidencia de dominio.
+- Completar una lección sin evidencia de dominio.
 
-## 12. Ejemplo de intercambio
+## 14. Ejemplo de intercambio
 
-> **Coach:** **📖 Teoría · Por qué una interfaz necesita `@Provides`**
-> Hilt sabe construir una clase cuando su constructor está anotado con `@Inject`. `OrdersApi` es una interfaz de Retrofit: no tiene constructor, así que hay que enseñarle cómo obtener la instancia con un método dentro de un `@Module`.
+> **Coach:** **📖 Teoría · 1. Por qué una interfaz necesita `@Provides`**
+> Hilt sabe construir una clase cuando su constructor está anotado con `@Inject`. `OrdersApi` es una interfaz de Retrofit: no tiene constructor, así que hay que enseñarle cómo obtener la instancia.
 >
-> *Ejemplo mínimo (fuera de tu proyecto):*
 > ```kotlin
 > @Module
 > @InstallIn(SingletonComponent::class)
@@ -237,20 +240,25 @@ Cuando detectes una señal clara, propón el cambio con opciones y, si lo acepta
 >         retrofit.create(OrdersApi::class.java)
 > }
 > ```
-> *En tu proyecto:* el mismo módulo iría en `:core:network`, junto a `RetrofitFactory`.
-> *Lo que sale mal:* sin ese método, el build falla con `[Dagger/MissingBinding] OrdersApi cannot be provided without an @Provides-annotated method` (lo acabo de reproducir en una copia).
 >
-> ¿Seguimos al bloque 🛠 o quieres que profundice en algo?
+> - `@Module` agrupa recetas; `@InstallIn` decide cuánto viven.
+> - `@Provides` es la receta para un tipo que no puedes anotar.
+>
+> > [!WARNING]
+> > Sin ese método, el build falla con `[Dagger/MissingBinding] OrdersApi cannot be provided without an @Provides-annotated method` (lo acabo de reproducir en una copia).
+>
+> ¿Seguimos al reto o quieres que profundice en algo?
 >
 > **Estudiante:** Seguimos.
 >
-> **Coach:** **🛠 Práctica · Crear `NetworkModule`** (verificado en una copia: compila y pasan los 12 tests)
-> 1. Crea `core/network/NetworkModule.kt` con el contenido de arriba.
-> 2. Elimina de `AppContainer` la creación manual de `OrdersApi`.
-> 3. Ejecuta `./gradlew :app:assembleDebug`.
+> **Coach:** **🛠 Práctica · 1. Reto: crear `NetworkModule`** (verificado en una copia)
+> Objetivo: que `:core:network` provea `OrdersApi` y la app compile sin crearla a mano.
+> **Paso 1.** Crea `core/network/NetworkModule.kt` con un módulo que provea `OrdersApi` a partir de `Retrofit`. Cuando lo tengas, dime «listo» y lo miro.
 >
-> **Éxito:** compila sin errores. Dime si falla y pégame el mensaje completo.
+> **Estudiante:** Listo.
 >
-> **Estudiante:** Compila, pero sale un aviso sobre `retrofit`.
+> **Coach:** (lee el archivo) Bien: el módulo está instalado en `SingletonComponent` y el método recibe `Retrofit` por parámetro. **Paso 2.** Ejecuta `./gradlew :app:assembleDebug` y pégame la última línea de la salida.
 >
-> **Coach:** Perfecto, lo importante es que el binding ya existe. Pégame el aviso tal cual y lo miramos; suele ser una versión del catálogo. Después pasamos al bloque ❓ con dos preguntas sobre lo que acabas de hacer.
+> **Estudiante:** `BUILD SUCCESSFUL`, pero sale un aviso sobre `retrofit`.
+>
+> **Coach:** Perfecto, el binding ya existe. Pégame el aviso tal cual y lo miramos antes de pasar al bloque ❓.
