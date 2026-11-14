@@ -147,7 +147,7 @@ Descripción del entregable, requisitos, cómo se comprobará (tests, rúbrica, 
 
 ### Recursos
 
-Enlaces con una frase sobre para qué sirve cada uno. Solo fuentes oficiales o fiables y vigentes ([fuentes-oficiales.md](fuentes-oficiales.md)).
+Enlaces con una frase sobre para qué sirve cada uno. Solo fuentes oficiales o fiables y vigentes ([fuentes-oficiales.md](fuentes-oficiales.md)), leídas en la sesión; una que no pudiste leer (por ejemplo, porque se genera con JavaScript) va marcada «(no verificada: <motivo>)».
 
 ### Huecos abiertos
 
