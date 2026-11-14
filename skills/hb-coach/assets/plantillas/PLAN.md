@@ -5,6 +5,8 @@ area: {{AREA_YAML}}
 nivel_actual: por-diagnosticar
 nivel_objetivo: {{NIVEL_OBJETIVO_YAML}}
 leccion_actual: ""
+playground: {{PLAYGROUND_YAML}}
+formato: 2
 creado: {{FECHA}}
 actualizado: {{FECHA}}
 ---
@@ -16,11 +18,11 @@ actualizado: {{FECHA}}
 ## Resumen
 
 - **Meta:** [[COMPLETAR: qué podrá hacer el estudiante al terminar, en una frase verificable]]
-- **Por qué importa:** [[COMPLETAR: el problema real que esto resuelve en sus proyectos]]
+- **Por qué importa:** [[COMPLETAR: el problema real que esto le resuelve]]
 - **Punto de partida:** [[COMPLETAR: resultado del diagnóstico en una línea]]
-- **Contexto del proyecto:** [[COMPLETAR: stack y versiones detectadas (p. ej. AGP, Kotlin, Xcode, Node)]]
+- **Contexto:** [[COMPLETAR: su proyecto, stack y versiones, o dónde lo aplicará si no es software]]
 - **Ritmo acordado:** [[COMPLETAR: p. ej. 3 sesiones de 45 min por semana]]
-- **Proyecto final:** [[COMPLETAR: entregable que demuestra dominio]]
+- **Duración estimada:** [[COMPLETAR: lecciones × 30–40 min, en semanas según el ritmo]]
 
 ## Diagnóstico
 
@@ -35,22 +37,24 @@ actualizado: {{FECHA}}
 > **Meta del módulo:** [[COMPLETAR: qué cambia en su forma de trabajar al terminarlo]]
 
 - [ ] **1.1 [[COMPLETAR: título de la lección]]** — [[COMPLETAR: resultado de aprendizaje en una línea]]
-  - Objetivo: [[COMPLETAR: verbo observable (explicar, implementar, comparar…)]]
-  - Práctica: [[COMPLETAR: lo que el estudiante hará en su proyecto]]
+  - Objetivo: [[COMPLETAR: verbo observable (explicar, implementar, calcular, comparar…)]]
+  - Práctica: [[COMPLETAR: lo que hará el estudiante (en su proyecto, un problema, un texto…)]]
   - Dominio: [[COMPLETAR: evidencia de que lo domina]]
+- [ ] **Examen M1** — 6 a 10 preguntas y una tarea · aprueba con {{EXAMEN_UMBRAL}} %
 
 ## Proyecto final
 
-[[COMPLETAR: descripción del entregable, requisitos y criterios de evaluación]]
+[[COMPLETAR: entregable que integra el plan, requisitos y criterios de evaluación]]
 
-## Recursos oficiales
+## Recursos
+
+<!-- coach: fuentes oficiales o fiables (references/fuentes-oficiales.md), con una frase de para qué sirve cada una -->
 
 - [[COMPLETAR: [Nombre del recurso](https://…) — para qué sirve]]
 
 ## Huecos abiertos
 
-<!-- coach: conceptos que fallaron y siguen pendientes. Protocolo en references/pedagogia.md.
-     La sección existe aunque esté vacía; los cerrados se conservan con su fecha. -->
+<!-- coach: los gestiona `coach hueco`. Protocolo en references/pedagogia.md. La sección existe aunque esté vacía. -->
 
 | Hueco | Detectado | Intentos | Próximo repaso | Estado |
 |---|---|---|---|---|
@@ -59,4 +63,4 @@ actualizado: {{FECHA}}
 
 | Fecha | Lecciones | Logros | Próximo paso |
 |---|---|---|---|
-| {{FECHA}} | — | Plan creado | Diagnóstico y lección 1.1 |
+| {{FECHA}} | — | Tema creado | Acordar el método, diagnóstico y plan |
