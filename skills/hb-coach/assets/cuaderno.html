@@ -1785,7 +1785,7 @@ details.solution > summary { color: var(--accent); }
         h("h2", null, h("a", { href: R.topic(t.slug), style: "color:inherit;text-decoration:none" }, t.tema)),
         h("p", { class: "resume-lesson" }, h("span", { class: "lesson-id" }, l.id), h("strong", null, inlineText(l.titulo)), stateChip(l.estado)),
         h("p", { class: "muted", style: "margin:0" }, "Módulo " + mod.id + " · " + mod.titulo, mod.nivel ? " · " + LEVELS[mod.nivel].label : "",
-          t.due.length ? " · " : "", t.due.length ? h("a", { href: R.review(t.slug) }, plural(t.due.length, "repaso vence hoy", "repasos vencen hoy")) : null)),
+          t.due.length ? " · " : "", t.due.length ? h("a", { href: R.review(t.slug) }, plural(t.due.length, "repaso pendiente", "repasos pendientes")) : null)),
       h("div", { class: "resume-side" },
         h("div", { class: "big-pct", title: t.done + " de " + t.total + " lecciones" }, String(t.pct), h("span", null, "%")),
         h("a", { class: "btn primary", href: R.lesson(t.slug, l.id) }, "Abrir lección", icon("right"))));
@@ -1803,7 +1803,7 @@ details.solution > summary { color: var(--accent); }
         t.current
           ? h("p", { class: "tc-line" }, h("b", null, "Actual"), h("span", null, h("span", { class: "lesson-id" }, t.current.id), " ", inlineText(t.current.titulo)))
           : h("p", { class: "tc-line" }, h("b", null, "Estado"), h("span", null, "Lecciones terminadas")),
-        t.due.length ? h("p", { class: "tc-line" }, h("b", null, "Repaso"), h("a", { href: R.review(t.slug) }, plural(t.due.length, "elemento vence hoy", "elementos vencen hoy"))) : null,
+        t.due.length ? h("p", { class: "tc-line" }, h("b", null, "Repaso"), h("a", { href: R.review(t.slug) }, plural(t.due.length, "elemento pendiente", "elementos pendientes"))) : null,
         t.lastSession ? h("p", { class: "tc-line" }, h("b", null, "Sesión"), h("span", null, sessionNodes(t.lastSession))) : null,
         h("div", { class: "tc-actions" },
           t.current ? h("a", { class: "btn primary small", href: R.lesson(t.slug, t.current.id) }, "Continuar") : null,
@@ -1882,7 +1882,7 @@ details.solution > summary { color: var(--accent); }
   function quickLinks(t) {
     var links = h("div", { class: "quick-links" },
       h("a", { class: "btn small", href: R.progress(t.slug) }, icon("chart"), "Progreso"),
-      h("a", { class: "btn small", href: R.review(t.slug) }, icon("repeat"), t.due.length ? "Repaso · " + t.due.length + " hoy" : "Repaso"),
+      h("a", { class: "btn small", href: R.review(t.slug) }, icon("repeat"), t.due.length ? "Repaso · " + t.due.length + " pendientes" : "Repaso"),
       h("a", { class: "btn small", href: R.plan(t.slug) }, icon("book"), "Plan completo"));
     if (t.glossary !== null) links.append(h("a", { class: "btn small", href: R.glossary(t.slug) }, "Glosario · " + t.glossaryCount));
     if (t.doubts !== null) links.append(h("a", { class: "btn small", href: R.doubts(t.slug) }, "Dudas · " + t.doubtsCount));
@@ -2178,7 +2178,7 @@ details.solution > summary { color: var(--accent); }
       statTile(t.pct + " %", "del plan", t.done + " de " + t.total + " lecciones"),
       statTile(passed + "/" + exams.length, "exámenes aprobados", exams.length ? null : "el plan no tiene exámenes"),
       statTile(t.retos.resueltos + "/" + t.retos.total, "retos resueltos", t.retos.total ? null : "aún no hay retos"),
-      statTile(String(t.openGaps.length), "huecos abiertos", dueGaps ? plural(dueGaps, "vence hoy", "vencen hoy") : null),
+      statTile(String(t.openGaps.length), "huecos abiertos", dueGaps ? plural(dueGaps, "toca repasar", "tocan repasar") : null),
       statTile(String(t.sessions), t.sessions === 1 ? "sesión" : "sesiones", t.lastSession ? "última: " + fmtDate(t.lastSession[0]) : null),
       statTile(pending ? "≈ " + String(hours).replace(".", ",") + " h" : "—", "por delante", pending ? plural(pending, "lección pendiente", "lecciones pendientes") : "lecciones terminadas")));
     var mods = h("div", { class: "panel mod-progress" });
@@ -2251,7 +2251,7 @@ details.solution > summary { color: var(--accent); }
     cards = cards.slice(0, 12);
     el.append(h("header", { class: "page-head" }, h("p", { class: "eyebrow" }, t.tema), h("h1", null, "Repaso de hoy"),
       h("p", { class: "dash-sub" }, due.length
-        ? plural(due.length, "lección vence hoy", "lecciones vencen hoy") + ": preguntas mezcladas entre módulos."
+        ? plural(due.length, "lección toca repaso", "lecciones tocan repaso") + ": preguntas mezcladas entre módulos."
         : "Nada vence hoy: repaso libre con lo ya completado.")));
     var dueGaps = t.openGaps.filter(function (g) { return g.vencido; });
     if (dueGaps.length) {
