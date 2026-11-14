@@ -71,6 +71,8 @@ Elige `title` y `year`.
 title | year
 ```
 
+**Tu intento:** `SELECT title, year FROM juegos;` · **Veredicto:** ✔ resuelto sin pistas
+
 **P1.** ¿Qué hace `FROM`? — tu respuesta: *la tabla* ✔
 
 <details>
@@ -80,6 +82,61 @@ Indica la tabla de origen de las filas.
 
 </details>
 """
+
+
+FIXTURE_31 = ROOT / "tests" / "fixtures" / "hb-coach-3.1.0-a-medias" / "aprendizaje"
+
+# Cabecera y primer bloque de una lección en el modelo «el cuaderno es el aula»: se escriben antes de que
+# el estudiante lo intente (sin soluciones) y su intento y la corrección llegan después con `corregir`.
+HEADER = """## Objetivos
+
+> **En una frase:** SELECT elige columnas de una tabla.
+
+Al terminar podrás:
+
+- Elegir columnas con SELECT.
+
+**Bloques:**
+
+1. **Qué devuelve SELECT** — 📖 → 🛠 reto → ❓ 2 preguntas
+2. **Filtrar con WHERE** — 📖 → 🛠
+"""
+
+BLOQUE_1 = """## 📖 Teoría · Qué devuelve SELECT
+
+`SELECT` elige columnas.
+
+## 🛠 Práctica
+
+### 🧩 Reto 1 · Dos columnas
+
+Elige `title` y `year`.
+
+**Resultado esperado**
+
+Dos columnas y todas las filas.
+
+<details>
+<summary>Pista 1</summary>
+
+Separa las columnas con comas.
+
+</details>
+
+## ❓ Preguntas · 1. SELECT
+
+**P1.** ¿Qué hace `FROM`?
+
+**P2.** Con esta tabla:
+
+| a | b |
+|---|---|
+| 1 | 2 |
+
+¿qué devuelve `SELECT b`?
+"""
+
+DETALLE = "\n\n<details>\n<summary>Respuesta completa</summary>\n\n%s\n\n</details>\n\n"
 
 
 def epoch(day):
@@ -201,7 +258,7 @@ class CoachTest(unittest.TestCase):
         self.plan.write_text(text[:start] + PLAN_BODY + text[end:], encoding="utf-8")
         step = self.siguiente()
         self.assertEqual((step["tipo"], step["leccion"]), ("leccion", "1.1"))
-        self.assertTrue(any(" leccion sql 1.1" in c for c in step["comandos"]))
+        self.assertTrue(any(" bloque sql 1.1 1" in c and c.endswith("<<'EOF'") for c in step["comandos"]))
 
     def test_siguiente_propone_repaso_y_examen_cuando_tocan(self):
         self.init_topic()
@@ -354,6 +411,168 @@ class CoachTest(unittest.TestCase):
         self.plan.write_text(text, encoding="utf-8")
         self.assertEqual(self.estado()["modulos"][-1]["proyecto"], True)
         self.assertNotIn("sin línea de examen: 2, 3", self.ok("check", "sql").stdout)
+
+    # ---------------------------------------------------------------- bloques: el cuaderno es el aula
+
+    def test_la_plantilla_de_leccion_no_trae_marcadores_ni_comentarios(self):
+        self.init_topic()
+        out = self.ok("leccion", "sql", "1.1").stdout
+        self.assertIn(" bloque sql 1.1 1", out)
+        text = self.note_path("1.1").read_text(encoding="utf-8")
+        self.assertNotIn("[[", text)
+        self.assertNotIn("<!--", text)
+        self.assertIn("- a\n", text)
+        err = self.fails("completar", "sql", "1.1").stderr
+        self.assertIn("«Resumen con tus palabras» y «Fuentes» sin contenido", err)
+
+    def test_bloque_crea_la_nota_con_la_cabecera_y_numera_el_bloque(self):
+        self.init_topic()
+        out = self.ok("bloque", "sql", "1.1", stdin=HEADER + "\n" + BLOQUE_1).stdout
+        self.assertIn("bloque 1 de 2 en el cuaderno", out)
+        self.assertIn("cuaderno.html#/t/sql/l/1.1/b1", out)
+        self.assertIn("Espera: el intento del reto 1.", out)
+        text = self.note_path("1.1").read_text(encoding="utf-8")
+        self.assertIn("## 📖 Teoría · 1. Qué devuelve SELECT", text)
+        self.assertIn("## 🛠 Práctica · 1. Qué devuelve SELECT", text)
+        self.assertEqual(text.count("## Objetivos"), 1)
+        self.assertNotIn("Al terminar podrás:\n\n- a\n", text)
+        self.assertLess(text.index("## Objetivos"), text.index("## 📖 Teoría"))
+        self.assertLess(text.index("## ❓ Preguntas · 1."), text.index("## Resumen con tus palabras"))
+        step = self.siguiente()
+        self.assertEqual((step["bloque"]["n"], step["bloque"]["total"]), (1, 2))
+        self.assertEqual(step["bloque"]["espera"], "el intento del reto 1")
+        self.assertTrue(step["bloque"]["enlace"].endswith("cuaderno.html#/t/sql/l/1.1/b1"))
+        self.assertTrue(any(" corregir sql 1.1" in c for c in step["comandos"]))
+        self.assertEqual(self.estado()["actual"]["bloque"]["espera"], "el intento del reto 1")
+
+    def test_bloque_no_escribe_soluciones_ni_se_salta_lo_pendiente(self):
+        self.init_topic()
+        sol = BLOQUE_1 + "\n<details>\n<summary>Solución</summary>\n\nSELECT title, year;\n\n</details>\n"
+        self.assertIn("Solución", self.fails("bloque", "sql", "1.1", stdin=sol).stderr)
+        self.assertFalse(list((self.space / "sql" / "lecciones").glob("1.1-*")))
+        self.assertIn("coach corregir", self.fails("bloque", "sql", "1.1", stdin=BLOQUE_1 + "\n**Tu intento:** x").stderr)
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.assertIn("ya está escrito", self.fails("bloque", "sql", "1.1", "1", stdin=BLOQUE_1).stderr)
+        bloque_2 = "## 📖 Teoría · 2. WHERE\n\nFiltra filas.\n"
+        self.assertIn("aún espera el intento del reto 1", self.fails("bloque", "sql", "1.1", stdin=bloque_2).stderr)
+        self.assertIn("estás escribiendo el bloque 3", self.fails("bloque", "sql", "1.1", "3", "--forzar",
+                                                                 stdin=bloque_2).stderr)
+        self.ok("bloque", "sql", "1.1", "--forzar", stdin=bloque_2)
+        self.assertIn("## 📖 Teoría · 2. WHERE", self.note_path("1.1").read_text(encoding="utf-8"))
+
+    def test_corregir_un_reto_con_segundo_intento_y_la_solucion_al_cerrarlo(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        solucion = "<details>\n<summary>Solución</summary>\n\n`SELECT title, year FROM juegos;`\n\n</details>"
+        self.assertIn("después del intento", self.fails("corregir", "sql", "1.1", stdin=solucion).stderr)
+        out = self.ok("corregir", "sql", "1.1",
+                      stdin="**Tu intento:** `SELECT title year`\n\n**Veredicto:** ✘ falta la coma.").stdout
+        self.assertIn("reto 1 intento registrado; queda el segundo intento", out)
+        text = self.note_path("1.1").read_text(encoding="utf-8")
+        self.assertNotIn("<summary>Solución", text)
+        self.assertLess(text.index("<summary>Pista 1"), text.index("**Tu intento:**"))
+        self.assertLess(text.index("**Tu intento:**"), text.index("## ❓ Preguntas"))
+        self.assertEqual(self.siguiente()["bloque"]["espera"], "el segundo intento del reto 1 (la solución, al cerrarlo)")
+        out = self.ok("corregir", "sql", "1.1", stdin="**Segundo intento:** `SELECT title, year` · **Veredicto:** ✔ "
+                                                       "con la pista 1\n\n" + solucion).stdout
+        self.assertIn("reto 1 cerrado", out)
+        self.assertIn("espera las respuestas a P1–P2", out)
+
+    def test_corregir_cada_pregunta_en_su_sitio_y_pasar_al_bloque_siguiente(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** ok · **Veredicto:** ✔")
+        self.assertIn("No encuentro la pregunta P9", self.fails("corregir", "sql", "1.1",
+                                                                stdin="**P9.** tu respuesta: x ✔").stderr)
+        out = self.ok("corregir", "sql", "1.1", stdin="**P1.** tu respuesta: *«la tabla»* ✔" + DETALLE % "El origen."
+                      + "**P2.** *«a»* ✘ Pista: mira la columna.").stdout
+        self.assertIn("P1 corregida · P2 espera el segundo intento", out)
+        text = self.note_path("1.1").read_text(encoding="utf-8")
+        self.assertIn("**P1.** ¿Qué hace `FROM`? — tu respuesta: *«la tabla»* ✔\n\n<details>", text)
+        self.assertIn("**Tu respuesta:** *«a»* ✘ Pista: mira la columna.", text)
+        self.assertLess(text.index("| 1 | 2 |"), text.index("**Tu respuesta:**"))
+        self.assertEqual(text.count("**P2.**"), 1)
+        out = self.ok("corregir", "sql", "1.1", stdin="**P2.** *«2»* ✔" + DETALLE % "La columna b.").stdout
+        self.assertIn("**Segundo intento:** *«2»* ✔", self.note_path("1.1").read_text(encoding="utf-8"))
+        self.assertIn("bloque 1 terminado: escribe el bloque 2 de 2 (Filtrar con WHERE)", out)
+        self.assertTrue(any(" bloque sql 1.1 2" in c for c in self.siguiente()["comandos"]))
+        self.ok("bloque", "sql", "1.1", stdin="## 📖 Teoría · WHERE\n\nFiltra filas.\n")
+        self.assertIn("## 📖 Teoría · 2. WHERE", self.note_path("1.1").read_text(encoding="utf-8"))
+        self.assertIn("bloques terminados", self.siguiente()["texto"])
+
+    def test_completar_exige_el_cierre_con_contenido_y_nada_pendiente(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.ok("nota", "sql", "1.1", stdin="## Resumen con tus palabras\n\n«Columnas.»\n\n## Fuentes\n\n"
+                                              "- [SQLite](https://sqlite.org)")
+        self.assertIn("el bloque 1 aún espera el intento del reto 1", self.fails("completar", "sql", "1.1").stderr)
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** ok · **Veredicto:** ✔\n\n**P1.** tu respuesta: *a* ✔"
+                                                  "\n\n**P2.** tu respuesta: *2* ✔")
+        self.ok("completar", "sql", "1.1")
+
+    def test_nota_no_escribe_una_solucion_sin_el_intento(self):
+        self.init_topic()
+        self.ok("leccion", "sql", "1.1")
+        reto = ("## 🛠 Práctica · 1. X\n\n### 🧩 Reto 1 · X\n\n**Resultado esperado**\n\nAlgo.\n\n"
+                "<details>\n<summary>Solución</summary>\n\nY\n\n</details>")
+        self.assertIn("sin el intento", self.fails("nota", "sql", "1.1", stdin=reto).stderr)
+        self.ok("nota", "sql", "1.1", "--forzar", stdin=reto)
+        self.assertIn("el reto 1 tiene la solución pero no el intento", self.ok("check", "sql").stdout)
+
+    def test_el_repaso_se_hace_en_su_nota_del_dia(self):
+        self.init_topic()
+        self.lesson_with_note("1.1")
+        self.ok("completar", "sql", "1.1")
+        self.ok("hueco", "sql", "Confunde FROM con WHERE")
+        self.assertIn("Aún no hay nota de repaso", self.fails("nota", "sql", "repaso", stdin="**P1.** x").stderr)
+        self.day = DAY0 + timedelta(days=3)
+        out = self.ok("repaso", "sql").stdout
+        self.assertIn("repasos/2026-11-16.md", out)
+        self.assertIn("cuaderno.html#/t/sql/repaso", out)
+        nota = self.read("sql/repasos/2026-11-16.md")
+        self.assertIn("- **1.1** Primera (lección)", nota)
+        self.assertIn("- **H1** Confunde FROM con WHERE (hueco)", nota)
+        self.ok("nota", "sql", "repaso", stdin="**P1.** (1.1) ¿Qué elige SELECT?\n\n**P2.** (H1) ¿Qué filtra WHERE?")
+        self.assertIn("Respuesta completa", self.fails("nota", "sql", "repaso",
+                                                       stdin="**P3.** x" + DETALLE % "y").stderr)
+        out = self.ok("corregir", "sql", "repaso", stdin="**P1.** tu respuesta: *columnas* ✔\n\n"
+                                                          "**P2.** tu respuesta: *columnas* ✘").stdout
+        self.assertIn("Quedan por corregir: P2", out)
+        self.assertIn("solo hay preguntas", self.fails("corregir", "sql", "repaso", stdin="algo").stderr)
+        self.ok("repaso", "sql", "1.1", "--bien")
+        self.ok("repaso", "sql", "H1", "--mal")
+        nota = self.read("sql/repasos/2026-11-16.md")
+        self.assertIn("**P2.** (H1) ¿Qué filtra WHERE? — tu respuesta: *columnas* ✘", nota)
+        self.assertIn("| 2026-11-16 | Lección 1.1: bien |", nota)
+        self.assertIn("| 2026-11-16 | Hueco H1: a reforzar |", nota)
+
+    def test_el_examen_se_corrige_en_su_nota(self):
+        self.init_topic()
+        self.ok("examen", "sql", "1")
+        exam = next((self.space / "sql" / "examenes").glob("m1-*.md"))
+        self.assertNotIn("<!--", exam.read_text(encoding="utf-8"))
+        self.assertNotIn("coach nota", exam.read_text(encoding="utf-8"))
+        self.ok("nota", "sql", "M1", stdin="**P1.** ¿Qué hace WHERE?\n\n**P2.** ¿Y ORDER BY?")
+        self.ok("nota", "sql", "M1", "--seccion", "tarea", stdin="Escribe una consulta con WHERE.")
+        out = self.ok("corregir", "sql", "M1", stdin="**Tu intento:** `SELECT * FROM t WHERE a > 1;` · **Veredicto:** ✔"
+                                                      "\n\n**P1.** tu respuesta: *filtra* ✔\n\n"
+                                                      "**P2.** tu respuesta: *ordena* ✔").stdout
+        self.assertIn("Todo corregido", out)
+        self.assertIn(" examen sql 1 --resultado", out)
+        text = exam.read_text(encoding="utf-8")
+        self.assertIn("**Tu intento:**", text[text.index("## Tarea práctica"):text.index("## Resultado")])
+        self.assertIn("**P1.** ¿Qué hace WHERE? — tu respuesta: *filtra* ✔", text)
+
+    def test_build_escribe_el_latido_del_cuaderno(self):
+        self.init_topic()
+        self.ok("build")
+        latido = (self.space / ".cuaderno-version.js").read_text(encoding="utf-8")
+        huella = re.search(r'coachLatido\("([0-9a-f]{8})"\)', latido).group(1)
+        self.assertIn('"huella":"%s"' % huella, (self.space / "cuaderno.html").read_text(encoding="utf-8"))
+        self.ok("build")
+        self.assertEqual((self.space / ".cuaderno-version.js").read_text(encoding="utf-8"), latido)
+        self.ok("glosario", "sql", "Tabla", "Conjunto de filas.")
+        self.assertNotEqual((self.space / ".cuaderno-version.js").read_text(encoding="utf-8"), latido)
 
     # ---------------------------------------------------------------- glosario y dudas
 
@@ -604,6 +823,32 @@ class CoachTest(unittest.TestCase):
         self.assertNotIn("sin línea de examen", check)
         self.assertIn("coach migrar --dry-run", check)
         self.ok("build")
+
+    def test_una_leccion_301_a_medias_espera_su_practica(self):
+        self.copy_fixture()
+        step = json.loads(self.ok("siguiente", "hilt", "--json").stdout)
+        self.assertEqual(step["tipo"], "repaso")
+        step = step["despues"]
+        self.assertEqual((step["bloque"]["n"], step["bloque"]["total"]), (2, 2))
+        self.assertEqual(step["bloque"]["espera"], "el intento de la práctica 2")
+        out = self.ok("corregir", "hilt", "1.3",
+                      stdin="**Tu intento:** el build falló con `MissingBinding` · **Veredicto:** ✔").stdout
+        self.assertIn("práctica 2 cerrada", out)
+        self.assertIn("bloques terminados", out)
+
+    def test_una_leccion_31_a_medias_sigue_por_el_bloque_1(self):
+        shutil.copytree(str(FIXTURE_31), str(self.space))
+        step = json.loads(self.ok("siguiente", "algebra", "--json").stdout)
+        self.assertIn("la nota aún no tiene bloques", step["texto"])
+        self.assertTrue(any(" bloque algebra 1.3 1" in c for c in step["comandos"]))
+        self.ok("bloque", "algebra", "1.3", stdin=HEADER + BLOQUE_1)
+        text = next((self.space / "algebra" / "lecciones").glob("1.3-*.md")).read_text(encoding="utf-8")
+        self.assertNotIn("<!--", text)
+        self.assertNotIn("COMPLETAR", text[text.index("## Objetivos"):text.index("## 📖")])
+        self.assertLess(text.index("## ❓ Preguntas · 1."), text.index("## Resumen con tus palabras"))
+        step = json.loads(self.ok("siguiente", "algebra", "--json").stdout)
+        self.assertEqual((step["bloque"]["n"], step["bloque"]["total"]), (1, 2))
+        self.assertIn("Sin errores", self.ok("check", "algebra").stdout)
 
     def test_migrar_anade_sin_borrar_con_respaldo_e_idempotente(self):
         self.copy_fixture()
