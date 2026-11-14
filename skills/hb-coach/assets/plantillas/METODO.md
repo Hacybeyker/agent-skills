@@ -11,7 +11,8 @@ actualizado: {{FECHA}}
 |---|---|
 | Orden de cada bloque | 📖 Leer → 🛠 Hacer → ❓ Responder, anunciado en el mapa de la lección |
 | Pasos | Uno a la vez: el coach espera tu resultado antes del siguiente |
-| Preguntas | Solo sobre lo ya explicado o practicado. [[COMPLETAR: ¿preguntas de predicción etiquetadas «adivina, no cuenta»? sí / no]] |
+| Preguntas | Solo sobre lo ya explicado o practicado |
+| Predicción | No (si las quieres: sí, etiquetadas «adivina, no cuenta» y nunca en la comprobación de dominio) |
 | Corrección | Idea central correcta = ✔; los matices van en «Para ampliar» y no restan |
 | Mensajes | Un bloque por mensaje, corto; lo largo va al cuaderno |
 | Ejemplos | Tres por concepto: mínimo, en tu contexto y «lo que sale mal» |

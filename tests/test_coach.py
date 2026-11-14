@@ -329,6 +329,18 @@ class CoachTest(unittest.TestCase):
         self.assertEqual(estado["actual"]["id"], "1.2")
         self.assertEqual(estado["actual"]["estado"], "pendiente")
 
+    def test_metodo_sin_claves_no_escribe_nada(self):
+        out = self.ok("metodo").stdout
+        self.assertIn("se crea al guardar la primera clave", out)
+        self.assertFalse(self.space.exists())
+        self.assertNotIn("aprendizaje", (self.project / ".git/info/exclude").read_text(encoding="utf-8"))
+
+    def test_metodo_prediccion_no_borra_la_regla_de_las_preguntas(self):
+        self.ok("metodo", "--prediccion", "sí")
+        metodo = self.read("METODO.md")
+        self.assertIn("| Preguntas | Solo sobre lo ya explicado o practicado |", metodo)
+        self.assertIn("| Predicción | sí |", metodo)
+
     def test_metodo_antes_de_init_crea_la_carpeta(self):
         self.ok("metodo", "--ritmo", "2 x 45 min")
         self.assertIn("| Ritmo | 2 x 45 min |", self.read("METODO.md"))
@@ -438,8 +450,8 @@ class CoachTest(unittest.TestCase):
         exam = next((self.space / "sql" / "examenes").glob("m1-*.md"))
         self.assertIn("- 1.1 Primera", exam.read_text(encoding="utf-8"))
         self.ok("nota", "sql", "M1", stdin="**P1.** ¿Qué hace WHERE? — tu respuesta: *filtra* ✔")
-        self.ok("examen", "sql", "M1", "--resultado", "4/6")
-        self.assertRegex(self.lesson_line_exam(), r"^- \[ \] \*\*Examen M1\*\* — 4/6 \(66 %\) el 2026-11-13 · repetir$")
+        self.ok("examen", "sql", "M1", "--resultado", "4/6", "--tarea", "si")
+        self.assertRegex(self.lesson_line_exam(), r"^- \[ \] \*\*Examen M1\*\* — 4/6 \(66 %\) · tarea hecha el 2026-11-13 · repetir$")
         self.ok("examen", "sql", "1", "--resultado", "5/6", "--tarea", "si")
         self.assertRegex(self.lesson_line_exam(), r"^- \[x\] \*\*Examen M1\*\* — 5/6 \(83 %\) · tarea hecha · aprobado")
         exam_text = exam.read_text(encoding="utf-8")
@@ -450,7 +462,7 @@ class CoachTest(unittest.TestCase):
         self.assertIn("**5/6 (83 %)** · tarea hecha · aprobado el 2026-11-13.", resultado)
         self.assertNotIn("Pendiente", resultado)
         self.assertTrue(self.estado()["examenes"][0]["hecho"])
-        self.assertIn("aciertos/total", self.fails("examen", "sql", "1", "--resultado", "7/6").stderr)
+        self.assertIn("aciertos/total", self.fails("examen", "sql", "1", "--resultado", "7/6", "--tarea", "si").stderr)
 
     def lesson_line_exam(self):
         return next(l for l in self.plan.read_text(encoding="utf-8").splitlines() if "**Examen M1**" in l)
@@ -461,6 +473,66 @@ class CoachTest(unittest.TestCase):
         lines = self.plan.read_text(encoding="utf-8").splitlines()
         i = next(i for i, l in enumerate(lines) if "**2.1 " in l)
         self.assertTrue(lines[i + 1].startswith("- [ ] **Examen M2**"))
+
+    def test_el_examen_exige_la_tarea_y_se_repite_tras_repasar_sus_huecos(self):
+        self.init_topic()
+        self.ok("completar", "sql", "1.1", "--convalidada")
+        self.ok("completar", "sql", "1.2", "--convalidada")
+        self.assertIn("--tarea si", self.fails("examen", "sql", "1", "--resultado", "5/6").stderr)
+        self.ok("examen", "sql", "1", "--resultado", "3/6", "--tarea", "si")
+        self.ok("hueco", "sql", "Filtros con OR", "--examen", "1")
+        gap = self.estado()["huecos"][0]
+        self.assertEqual((gap["detectado"], gap["intentos"]), ("Examen M1 (2026-11-13)", "1"))
+        self.assertNotEqual(self.siguiente()["tipo"], "examen")
+        self.day = DAY0 + timedelta(days=1)
+        self.ok("hueco", "sql", "H1", "--bien")
+        self.assertEqual(self.siguiente()["tipo"], "examen")
+
+    def test_el_repaso_tiene_un_limite_diario(self):
+        self.init_topic()
+        for i in range(8):
+            self.ok("hueco", "sql", "Hueco %d" % i)
+        self.day = DAY0 + timedelta(days=1)
+        self.assertEqual(len(json.loads(self.ok("repaso", "sql", "--json").stdout)["elementos"]), 6)
+        for i in range(1, 7):
+            self.ok("hueco", "sql", "H%d" % i, "--bien")
+        self.assertIn("Ya hiciste 6 repasos hoy", self.ok("repaso", "sql").stdout)
+        self.assertEqual(self.siguiente()["tipo"], "leccion")
+
+    def test_repaso_de_una_leccion_sin_completar_termina_con_codigo_2(self):
+        self.init_topic()
+        self.ok("leccion", "sql", "1.1")
+        self.assertIn("no está completada", self.fails("repaso", "sql", "1.1", "--bien").stderr)
+
+    def test_siguiente_avisa_de_un_espacio_en_el_home(self):
+        home = Path(self.tmp.name) / "home"
+        (home / "aprendizaje" / "ingles").mkdir(parents=True)
+        (home / "aprendizaje" / "ingles" / "PLAN.md").write_text("---\ntema: Inglés\n---\n", encoding="utf-8")
+        env = dict(ENV, SOURCE_DATE_EPOCH=epoch(self.day), HOME=str(home))
+        result = subprocess.run([sys.executable, str(SCRIPT), "siguiente"], cwd=str(self.project), env=env,
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("tiene: ingles", result.stdout)
+        self.assertFalse(self.space.exists())
+
+    def test_build_y_check_ignoran_el_material_de_practica(self):
+        self.init_topic()
+        junk = self.space / "sql" / "practica" / "node_modules" / "x"
+        junk.mkdir(parents=True)
+        (junk / "README.md").write_text("[roto](no.md)\n```\nsin cerrar\n", encoding="utf-8")
+        self.ok("build")
+        self.assertNotIn("practica/", (self.space / "cuaderno.html").read_text(encoding="utf-8"))
+        self.assertNotIn("practica", self.ok("check", "sql").stdout)
+
+    def test_check_entiende_vallas_anidadas(self):
+        self.init_topic()
+        with open(str(self.space / "sql/GLOSARIO.md"), "a", encoding="utf-8") as f:
+            f.write("\n````markdown\n```sql\nSELECT 1;\n```\n````\n")
+        self.assertNotIn("sin cerrar", self.ok("check", "sql").stdout)
+
+    def test_doble_guion_termina_las_opciones(self):
+        self.init_topic()
+        self.ok("glosario", "sql", "--", "--force", "Opción que fuerza la operación.")
+        self.assertIn("| **--force** |", self.read("sql/GLOSARIO.md"))
 
     def test_un_examen_suspendido_por_la_tarea_no_aprueba(self):
         self.init_topic()
@@ -527,8 +599,10 @@ class CoachTest(unittest.TestCase):
         self.assertEqual((estado["hechas"], estado["total"], estado["formato"]), (2, 25, 1))
         self.assertEqual([g["id"] for g in estado["huecos_abiertos"]], ["H1", "H2"])
         self.assertEqual(estado["examenes"], [])
-        self.assertIn("Sin errores", self.ok("check", "hilt").stdout)
-        self.assertNotIn("sin línea de examen", self.ok("check", "hilt").stdout)
+        check = self.ok("check", "hilt").stdout
+        self.assertIn("Sin errores", check)
+        self.assertNotIn("sin línea de examen", check)
+        self.assertIn("coach migrar --dry-run", check)
         self.ok("build")
 
     def test_migrar_anade_sin_borrar_con_respaldo_e_idempotente(self):
@@ -550,7 +624,7 @@ class CoachTest(unittest.TestCase):
         estado = json.loads(self.ok("estado", "hilt", "--json").stdout)["temas"][0]
         self.assertEqual(estado["formato"], 2)
         self.assertEqual([e["modulo"] for e in estado["examenes"]], ["1", "2", "3", "4", "5", "6"])
-        self.assertIn("repaso: 2026-09-18", after["hilt/lecciones/1.2-di-manual-constructor-contenedor-y-fabricas.md"])
+        self.assertIn("repaso: 2026-11-13", after["hilt/lecciones/1.2-di-manual-constructor-contenedor-y-fabricas.md"])
         self.assertIn("| Pasos |", after["METODO.md"])
         self.assertIn("no hay nada que migrar", self.ok("migrar").stdout)
         self.assertEqual(self.snapshot(), after)

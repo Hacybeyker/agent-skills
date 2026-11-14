@@ -34,11 +34,12 @@ aprendizaje/                      ← raíz (en un proyecto, excluida de git con
     ├── GLOSARIO.md · DUDAS.md
     ├── lecciones/<id>-<slug>.md  ← una nota por lección
     ├── examenes/m<n>-<slug>.md   ← una nota por examen de módulo
+    ├── practica/                 ← opcional: material de práctica (datos, scripts); no entra en el cuaderno
     ├── img/                      ← opcional: imágenes de las notas
     └── *.md                      ← opcional: otros documentos (chuletas, casos)
 ```
 
-El cuaderno lee **todos** los `.md` (menos los ocultos), así que cualquier documento extra del tema aparece en su menú.
+El cuaderno lee **todos** los `.md` (menos los ocultos y los de `practica/`, `node_modules/`, `build/` y carpetas de herramientas parecidas), así que cualquier documento extra del tema aparece en su menú.
 
 ## 2. Herramienta `coach`
 
@@ -46,26 +47,26 @@ Ejecuta `python3 <skill>/scripts/coach.py <comando>` desde la raíz del proyecto
 
 | Comando | Efecto |
 |---|---|
-| `siguiente [slug] [--json]` | Decide el paso: método pendiente → plan sin terminar → repasos vencidos → examen que toca → lección actual → proyecto final. Imprime la meta de hoy, los comandos exactos (con `--root` si hace falta) y qué leer. |
+| `siguiente [slug] [--json]` | Decide el paso: método pendiente → plan sin terminar → repasos vencidos (si hoy aún no se hicieron 6) → examen que toca (uno suspendido, cuando sus huecos llevan un repaso bien) → lección actual → proyecto final. Imprime la meta de hoy, los comandos exactos (con `--root` si hace falta), qué leer y, si no encuentra temas, si los hay en `~/aprendizaje`. |
 | `init <slug> --tema "…" [--area A] [--nivel-objetivo N] [--playground URL] [--mapa]` | Crea el tema desde las plantillas, `README.md` y `METODO.md` si faltan, y excluye la carpeta de git (`--versionar` no la excluye; `--gitignore` usa `.gitignore`; `--force` reemplaza un PLAN.md). |
-| `metodo [--<clave> "valor" …] [--motivo "…"]` | Funciona antes de `init` (crea la carpeta y `METODO.md`, y la excluye de git). Sin claves, muestra el acuerdo. Con claves (`orden`, `pasos`, `preguntas`, `correccion`, `mensajes`, `ejemplos`, `practica`, `verificacion`, `ritmo`, `profundidad`, `calentamiento`, `repasos`, `idioma`), actualiza las filas y anota el cambio con su fecha. |
+| `metodo [--<clave> "valor" …] [--motivo "…"]` | Sin claves, muestra el acuerdo y no escribe nada (si aún no existe, enseña los valores de partida). Con claves, lo guarda: si falta, crea la carpeta y `METODO.md` y la excluye de git, así que funciona antes de `init`. Claves: `orden`, `pasos`, `preguntas`, `prediccion`, `correccion`, `mensajes`, `ejemplos`, `practica`, `verificacion`, `ritmo`, `profundidad`, `calentamiento`, `repasos`, `idioma`), actualiza las filas y anota el cambio con su fecha. |
 | `leccion <slug> <id>` | Crea `lecciones/<id>-<título>.md`, fija `leccion_actual` y pone la nota en `en-curso`. Se niega si la ruta aún tiene marcadores. Si la lección estaba hecha, la abre como repaso. |
 | `nota <slug> <id\|Mn> …` | Inserta el Markdown (stdin o `--desde`) antes del cierre de la nota (Resumen con tus palabras, Fuentes, Historial; en un examen, antes de Tarea práctica). Las partes que empiezan por `## Objetivos`, `## Resumen con tus palabras`, `## Fuentes`, `## Tarea práctica` o `## Resultado` reemplazan esa sección. Con `--seccion objetivos\|resumen\|fuentes\|tarea`, el texto (sin encabezado) reemplaza esa sección. `--historial "texto"` añade una fila fechada. Avisa al momento de líneas de código largas y etiquetas Mermaid ilegibles. |
 | `glosario <slug> "T" "Def" […] [--leccion id]` | Inserta cada término en orden alfabético (o actualiza su definición) con enlace a la nota de la lección (por defecto, la actual). |
 | `duda <slug> "Pregunta" --respuesta "…" [--contexto] [--explicacion] [--leccion] [--fuente]` | Añade la duda arriba de `DUDAS.md`. |
-| `hueco <slug> "Descripción" [--leccion id] [--intentos n]` | Abre un hueco (`H1`, `H2`…) con su primer repaso mañana. `Intentos` empieza en 2 (se abre tras el segundo fallo); usa `--intentos 1` si viene del diagnóstico o de un examen. |
+| `hueco <slug> "Descripción" [--leccion id \| --examen n] [--intentos n]` | Abre un hueco (`H1`, `H2`…) con su primer repaso mañana. `Intentos` empieza en 2 (se abre tras el segundo fallo); con `--examen n` queda atribuido al examen y empieza en 1. |
 | `hueco <slug> Hn --bien\|--mal\|--cerrar` | Reprograma el hueco según el calendario o lo cierra (`repaso <slug> Hn` hace lo mismo con `--bien` o `--mal`). |
 | `completar <slug> <id> [--convalidada] [--forzar]` | Marca `[x]`, avanza `leccion_actual`, pone `estado`, `fin` y el primer repaso en la nota, y avisa si toca examen. Se niega si la nota tiene `[[COMPLETAR]]` o le faltan «Resumen con tus palabras» o «Fuentes» (`--forzar` lo salta). |
 | `reabrir <slug> <id>` | Vuelve a `[ ]`, quita `(convalidada)` y anula el repaso programado. |
-| `repaso <slug> [--json]` | Lo que vence hoy (huecos primero, luego lecciones, hasta 6), mezclado entre módulos, con las preguntas de cada nota. |
+| `repaso <slug> [--json]` | Lo que vence hoy (huecos primero, luego lecciones), mezclado entre módulos, con las preguntas de cada nota. Como mucho 6 al día: el resto queda para otro día. |
 | `repaso <slug> <id\|Hn> --bien\|--mal` | Registra el repaso de una lección (o hueco) y lo reprograma; lo anota en el Historial de la nota. |
 | `examen <slug> <n>` | Añade la línea del examen al plan si falta y crea `examenes/m<n>-….md` con lo que cubre. |
-| `examen <slug> <n> --resultado a/t [--tarea si\|no]` | Marca el examen como aprobado (≥ 80 % y tarea no fallida) o «repetir», y escribe el resultado en la nota. |
+| `examen <slug> <n> --resultado a/t --tarea si\|no` | Marca el examen como aprobado (≥ 80 % y la tarea hecha) o «repetir», y escribe el resultado en la nota. `--tarea` es obligatorio. |
 | `sesion <slug> --logros "…" [--lecciones "…"] [--siguiente "…"]` | Añade la fila de bitácora (el próximo paso, por defecto, el de `siguiente`), regenera el cuaderno, ejecuta `check` y muestra el siguiente paso. |
 | `estado [slug] [--json]` | Progreso, exámenes, repasos y huecos; con un slug, todas las lecciones. |
 | `build` · `check [slug]` · `vendor [--force]` · `migrar [--dry-run]` · `version` | Regenerar; validar (§9); descargar librerías (§12); migrar desde 3.0 (§13). |
 
-Los comandos que cambian algo regeneran el cuaderno (salvo con `--no-build`). Códigos de salida: 0 bien, 1 `check`/`vendor`/`sesion` con errores, 2 uso incorrecto (el mensaje dice cómo seguir).
+Los comandos que cambian algo regeneran el cuaderno (salvo con `--no-build`). Un argumento que empiece por `--` (un término de glosario como `--force`) va después de `--`: `coach glosario sql -- --force "…"`. Códigos de salida: 0 bien, 1 `check`/`vendor`/`sesion` con errores, 2 uso incorrecto (el mensaje dice cómo seguir).
 
 **Contenido por stdin.** `nota` lee el Markdown de un heredoc (`<<'EOF'` … `EOF`, con comillas para que la shell no expanda nada) o de un archivo con `--desde`. Una llamada por bloque: la primera puede llevar `## Objetivos` y el primer bloque; la de cierre, `## Resumen con tus palabras` y `## Fuentes`. Los comandos de un mismo momento se encadenan con `&&`.
 
@@ -157,7 +158,7 @@ SELECT title, year FROM videojuegos;
 **Para ampliar:** el método debe vivir en un módulo abstracto o en una interfaz.
 ```
 
-Deja una línea en blanco alrededor del contenido de cada `<details>`.
+Si falla y acierta en el segundo intento: `— tu respuesta: *…* ✘ → segundo intento: *…* ✔`. Deja una línea en blanco alrededor del contenido de cada `<details>`.
 
 ## 5. Nota de examen
 
@@ -223,6 +224,7 @@ Reglas para que renderice a la primera y se lea bien:
 | `quedan N marcador(es) [[COMPLETAR]]` | Rellénalos o borra la sección. |
 | `la nota está completada pero le faltan secciones` | Completa «Resumen con tus palabras» y «Fuentes». |
 | `«Reto …» no tiene **Resultado esperado**` / `no registra el intento ni el veredicto` | Añade lo que falta al reto. |
+| `plan de hb-coach 3.0` | `coach migrar --dry-run` y, si te convence, `coach migrar` (§13). |
 | `módulo(s) sin línea de examen` | `coach examen <slug> <n>` la añade (solo en planes de formato 2; el último módulo 🔴 o «Proyecto…» no la necesita). |
 | `hueco Hn con «Próximo repaso» sin fecha` | Repásalo con `coach hueco <slug> Hn --bien\|--mal`. |
 | `cuaderno.html desactualizado` | `coach build`. |
@@ -252,7 +254,7 @@ Si el entorno no permite ejecutar comandos, mantén los mismos archivos a mano:
 
 ## 12. Sin conexión
 
-El cuaderno carga sus librerías (Markdown, sanitizado, resaltado y Mermaid) en este orden: `aprendizaje/.vendor/`, jsDelivr y cdnjs. Con `coach vendor` se descargan una vez y funciona sin internet. Sin librerías, muestra el texto sin formato y un aviso. Las fuentes tipográficas caen a las del sistema. Lo único que guarda el navegador es el tema claro u oscuro elegido; el resultado de un «Repaso de hoy» en el navegador no se guarda: para que cuente, se hace con el coach.
+El HTML de las notas pasa por DOMPurify sin estilos, formularios ni campos (salvo las casillas de las listas de tareas): el texto copiado de la web no puede cambiar el aspecto del cuaderno ni pedir datos. El cuaderno carga sus librerías (Markdown, sanitizado, resaltado y Mermaid) en este orden: `aprendizaje/.vendor/`, jsDelivr y cdnjs. Con `coach vendor` se descargan una vez y funciona sin internet. Sin librerías, muestra el texto sin formato y un aviso. Las fuentes tipográficas caen a las del sistema. El navegador solo guarda el tema claro u oscuro elegido y el resultado del último «Repaso de hoy» de cada tema (siempre con try/catch: en una ventana privada no guarda nada). Ese resultado es orientativo: para que cuente en el plan, el repaso se hace con el coach.
 
 ## 13. Desde hb-coach 3.0
 

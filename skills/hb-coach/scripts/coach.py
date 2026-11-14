@@ -74,7 +74,7 @@ Durante la lección
   glosario <slug> "Término" "Definición" ["Término" "Definición" ...] [--leccion ID]
   duda <slug> "Pregunta" --respuesta "..." [--contexto ...] [--explicacion ...] [--leccion ID]
                                    [--fuente "[Título](https://...)"]
-  hueco <slug> "Descripción" [--leccion ID] [--intentos N]
+  hueco <slug> "Descripción" [--leccion ID | --examen N] [--intentos N]
                                    Abre un hueco (por defecto tras 2 fallos); se repasa mañana.
   hueco <slug> Hn --bien|--mal|--cerrar        Registra el repaso del hueco y lo reprograma.
   completar <slug> <id> [--convalidada] [--forzar]
@@ -831,6 +831,19 @@ def review_state(topic):
     return due, nxt
 
 
+def reviews_today(topic):
+    """Repasos registrados hoy en el tema (para no pasar de REVIEW_LIMIT al día)."""
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})\s+(\d+)$", fm_str(topic["plan"]["fm"], "repasos_hoy"))
+    return int(m.group(2)) if m and m.group(1) == today() else 0
+
+
+def count_review(plan_text):
+    fm, _ = parse_frontmatter(plan_text)
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})\s+(\d+)$", fm_str(fm, "repasos_hoy"))
+    n = int(m.group(2)) + 1 if m and m.group(1) == today() else 1
+    return set_fm(plan_text, "repasos_hoy", "%s %d" % (today(), n))
+
+
 def root_pending(root):
     metodo = root / "METODO.md"
     return bool(metodo.is_file() and PENDING_RE.search(prose_only(read_text(metodo))))
@@ -1000,10 +1013,14 @@ def render_template(name, values):
 
 # --------------------------------------------------------------------------- build
 
+# Material de práctica y carpetas de herramientas: no son notas (mismo criterio que SKIP_DIRS del visor).
+SKIP_DIRS = {"node_modules", "build", "dist", "Pods", "DerivedData", "target", "venv", "practica"}
+
+
 def collect_files(root):
     files = []
     for dirpath, dirnames, filenames in os.walk(str(root)):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS)
         for fn in filenames:
             full = Path(dirpath) / fn
             if fn.endswith(".md") and not fn.startswith(".") and full.is_file():
@@ -1109,6 +1126,7 @@ METODO_KEYS = [
     ("orden", "Orden de cada bloque"),
     ("pasos", "Pasos"),
     ("preguntas", "Preguntas"),
+    ("prediccion", "Predicción"),
     ("correccion", "Corrección"),
     ("mensajes", "Mensajes"),
     ("ejemplos", "Ejemplos"),
@@ -1139,6 +1157,35 @@ def metodo_rows(text):
 def cmd_metodo(pos, opts):
     root = root_dir(opts)
     path = root / "METODO.md"
+    changes = [(k, opts[k]) for k, _ in METODO_KEYS if k in opts]
+    unknown = [k for k in opts if k not in METODO_LABEL and k not in ("root", "motivo", "no-build", "json")]
+    if unknown:
+        raise CoachError("Clave(s) de método desconocida(s): %s. Usa: %s." % (
+            ", ".join(unknown), ", ".join(k for k, _ in METODO_KEYS)))
+    if not changes:
+        # Solo lectura: si aún no existe, muestra la plantilla sin crear nada (puede que la carpeta no sea la buena).
+        exists = path.is_file()
+        text = read_text(path) if exists else render_template("METODO.md", {"FECHA": today()})
+        pending = bool(PENDING_RE.search(prose_only(text)))
+        lines, tbl, rows = metodo_rows(text)
+        if opts.get("json"):
+            data = {k: (rows[fold(lbl)][1][1] if fold(lbl) in rows and len(rows[fold(lbl)][1]) > 1 else "")
+                    for k, lbl in METODO_KEYS}
+            out(json.dumps({"metodo": data, "pendiente": pending, "existe": exists}, ensure_ascii=False, indent=2))
+            return
+        if exists:
+            out("\U0001F91D Acuerdo de método (%s)" % rel(path))
+        else:
+            out("\U0001F91D Aún no hay acuerdo de método en %s: se crea al guardar la primera clave. Valores de partida:"
+                % rel(path))
+        for k, lbl in METODO_KEYS:
+            row = rows.get(fold(lbl))
+            val = row[1][1] if row and len(row[1]) > 1 else "—"
+            out("  %-13s %s" % (k, val))
+        if pending:
+            out("\u26A0 Quedan puntos por acordar: pregúntalos (3 o 4 a la vez) y guárdalos con "
+                "coach metodo --<clave> \"valor\".")
+        return
     if not path.is_file():
         if not root.is_dir():
             root.mkdir(parents=True, exist_ok=True)
@@ -1146,27 +1193,6 @@ def cmd_metodo(pos, opts):
             exclude_from_git(root, opts)
         write_text(path, render_template("METODO.md", {"FECHA": today()}))
     text = read_text(path)
-    changes = [(k, opts[k]) for k, _ in METODO_KEYS if k in opts]
-    unknown = [k for k in opts if k not in METODO_LABEL and k not in ("root", "motivo", "no-build", "json")]
-    if unknown:
-        raise CoachError("Clave(s) de método desconocida(s): %s. Usa: %s." % (
-            ", ".join(unknown), ", ".join(k for k, _ in METODO_KEYS)))
-    if not changes:
-        lines, tbl, rows = metodo_rows(text)
-        if opts.get("json"):
-            data = {k: (rows[fold(lbl)][1][1] if fold(lbl) in rows and len(rows[fold(lbl)][1]) > 1 else "")
-                    for k, lbl in METODO_KEYS}
-            out(json.dumps({"metodo": data, "pendiente": root_pending(root)}, ensure_ascii=False, indent=2))
-            return
-        out("\U0001F91D Acuerdo de método (%s)" % rel(path))
-        for k, lbl in METODO_KEYS:
-            row = rows.get(fold(lbl))
-            val = row[1][1] if row and len(row[1]) > 1 else "—"
-            out("  %-13s %s" % (k, val))
-        if root_pending(root):
-            out("\u26A0 Quedan puntos por acordar: pregúntalos (3 o 4 a la vez) y guárdalos con "
-                "coach metodo --<clave> \"valor\".")
-        return
     was_pending = root_pending(root)
     lines, tbl, rows = metodo_rows(text)
     if tbl is None:
@@ -1652,6 +1678,8 @@ def update_gap(topic, gid, opts, quiet=False):
         msg = "\u21BA Hueco %s fallado: vuelve al primer intervalo \u00b7 próximo repaso: %s" % (gap["id"], nxt)
     lines[gap["linea"]] = fmt_row(cells)
     text = set_fm("\n".join(lines), "actualizado", today())
+    if action != "cerrar":
+        text = count_review(text)
     write_text(topic["plan_path"], text)
     if not quiet:
         out(msg)
@@ -1671,7 +1699,12 @@ def cmd_hueco(pos, opts):
     lid = opts.get("leccion") or fm_str(topic["plan"]["fm"], "leccion_actual")
     if opts.get("leccion"):
         find_lesson(topic, lid)
-    detectado = "%s (%s)" % (lid, today()) if lid else "Repaso (%s)" % today()
+    if opts.get("examen"):
+        _, mod = find_module(topic, opts["examen"])
+        detectado = "Examen M%s (%s)" % (mod["id"], today())
+        opts.setdefault("intentos", "1")
+    else:
+        detectado = "%s (%s)" % (lid, today()) if lid else "Repaso (%s)" % today()
     nxt = in_days(GAP_INTERVALS[0])
     intentos = str(opts.get("intentos") or "2")  # un hueco se abre tras el segundo fallo
     if not intentos.isdigit():
@@ -1735,9 +1768,18 @@ def cmd_repaso(pos, opts):
         maybe_build(root, opts)
         return
     due, nxt = review_state(topic)
+    done_today = reviews_today(topic)
+    if due and done_today >= REVIEW_LIMIT:
+        if opts.get("json"):
+            out(json.dumps({"tema": topic["slug"], "hoy": today(), "elementos": [], "pendientes": len(due),
+                            "hechos_hoy": done_today, "proximo": nxt}, ensure_ascii=False, indent=2))
+        else:
+            out("\u2714 Ya hiciste %d repasos hoy en %s: lo demás (%d) queda para otro día." % (
+                done_today, topic["slug"], len(due)))
+        return
     gaps = sorted([d for d in due if d["tipo"] == "hueco"], key=lambda d: d["fecha"])
     lessons = sorted([d for d in due if d["tipo"] == "leccion"], key=lambda d: d["fecha"])
-    chosen = (gaps + lessons)[:REVIEW_LIMIT]
+    chosen = (gaps + lessons)[:REVIEW_LIMIT - done_today]
     # Intercalado: el orden se mezcla entre módulos con una semilla estable para el día y el tema.
     random.Random("%s:%s" % (today(), topic["slug"])).shuffle(chosen)
     items = []
@@ -1782,6 +1824,8 @@ def review_lesson(topic, lid, opts):
     note = topic["notes"].get(lesson["id"])
     if note is None:
         raise CoachError("La lección %s no tiene nota: no hay repaso que programar." % lesson["id"])
+    if not lesson["hecha"] or lesson["convalidada"]:
+        raise CoachError("La lección %s no está completada: los repasos espaciados empiezan al completarla." % lesson["id"])
     actions = [a for a in ("bien", "mal") if opts.get(a)]
     if len(actions) != 1:
         raise CoachError("Indica uno: --bien o --mal.")
@@ -1807,6 +1851,7 @@ def review_lesson(topic, lid, opts):
     text = set_fm_raw(text, "repasos", str(n))
     text = append_table_row(text, HISTORIAL_RE, "Historial", ["Fecha", "Qué pasó"], [today(), hist])
     write_text(note["path"], text)
+    write_text(topic["plan_path"], count_review(topic["text"]))
     out(msg)
 
 
@@ -1878,8 +1923,8 @@ def cmd_examen(pos, opts):
     ok, total = int(m.group(1)), int(m.group(2))
     pct = ok * 100 // total
     tarea = fold(opts.get("tarea") or "").strip()
-    if tarea and tarea not in ("si", "no"):
-        raise CoachError("--tarea admite si o no.")
+    if tarea not in ("si", "no"):
+        raise CoachError("Indica también la tarea práctica: --tarea si (hecha) o --tarea no.")
     passed = pct >= EXAM_PASS and tarea != "no"
     lines = text.split("\n")
     ln = mod["examen"]["linea"]
@@ -1905,17 +1950,16 @@ def cmd_examen(pos, opts):
         out("\U0001F389 Examen M%s aprobado: %d/%d (%d %%)." % (mod["id"], ok, total, pct))
     else:
         out("\u21BA Examen M%s: %d/%d (%d %%)%s. No llega al %d %%: abre un hueco por cada concepto fallado "
-            "(coach hueco %s \"…\") y repítelo cuando los repases." % (mod["id"], ok, total, pct,
+            "(coach hueco %s \"…\" --examen %s) y repítelo cuando los repases." % (mod["id"], ok, total, pct,
                                                                      " y tarea pendiente" if tarea == "no" else "",
-                                                                     EXAM_PASS, topic["slug"]))
+                                                                     EXAM_PASS, topic["slug"], mod["id"]))
     maybe_build(root, opts)
 
 
 # --------------------------------------------------------------------------- siguiente, sesión y estado
 
 def cmd_prefix(opts):
-    parts = ["python3", str(SCRIPT)]
-    return " ".join(parts)
+    return "python3 " + shell_quote(str(SCRIPT))
 
 
 def root_flag(opts):
@@ -1925,6 +1969,18 @@ def root_flag(opts):
 
 def shell_quote(s):
     return s if re.match(r"^[\w@%+=:,./-]+$", s) else "'" + s.replace("'", "'\\''") + "'"
+
+
+def exam_ready(topic, mod):
+    """Un examen suspendido se repite cuando sus huecos llevan un repaso bien (o, sin huecos, otro día)."""
+    detalle = mod["examen"]["detalle"]
+    if not re.search(r"repetir", detalle, re.I):
+        return True
+    gaps = [g for g in gap_rows(topic["text"])[2] if g["abierto"] and "Examen M%s" % mod["id"] in g["detectado"]]
+    if gaps:
+        return all(g["racha"] >= 1 for g in gaps)
+    failed = parse_date(detalle)
+    return failed is None or failed < today_date()
 
 
 def note_block_count(note):
@@ -1951,13 +2007,17 @@ def next_step(root, topic, opts):
     slug = topic["slug"]
     meta = []
     due = s["repasos"]["vencidos"]
-    if due:
-        ids = ", ".join(d["id"] for d in due[:REVIEW_LIMIT])
+    done_today = reviews_today(topic)
+    if due and done_today >= REVIEW_LIMIT:
+        meta.append("Repaso de hoy hecho (%d); lo vencido sigue otro día" % done_today)
+        due = []
+    elif due:
+        ids = ", ".join(d["id"] for d in due[:REVIEW_LIMIT - done_today])
         meta.append("Repaso (5–10 min): %s vencido(s) — %s" % (len(due), ids))
     if root_pending(root):
         return {"tipo": "metodo", "texto": "Acordar el método: 3 o 4 preguntas con opciones y guardarlo.",
                 "comandos": [c("metodo"), c("metodo", "--practica", "\"…\"", "--ritmo", "\"…\"", "--profundidad",
-                                            "\"…\"", "--calentamiento", "\"…\"")],
+                                            "\"…\"", "--calentamiento", "\"…\"", "--idioma", "\"<el de la conversación>\"")],
                 "lee": [], "meta": meta}
     if s["pendiente"]["plan"]:
         return {"tipo": "plan", "texto": "Terminar el plan: diagnóstico, ruta por módulos con examen, proyecto final y "
@@ -1971,6 +2031,9 @@ def next_step(root, topic, opts):
     for mi, mod in enumerate(topic["plan"]["modulos"]):
         ls = [l for l in topic["plan"]["lecciones"] if l["modulo"] == mi]
         if ls and all(l["hecha"] for l in ls) and mod["examen"] is not None and not mod["examen"]["hecho"]:
+            if not exam_ready(topic, mod):
+                meta.append("Examen M%s: repetirlo cuando sus huecos tengan un repaso bien" % mod["id"])
+                continue
             step = {"tipo": "examen", "texto": "Examen del módulo %s · %s." % (mod["id"], mod["titulo"]),
                     "comandos": [c("examen", slug, mod["id"])], "lee": ["references/pedagogia.md (§ Exámenes)"],
                     "meta": meta + ["Examen M%s (20–30 min)" % mod["id"]]}
@@ -1986,7 +2049,8 @@ def next_step(root, topic, opts):
         texto = "Seguir la lección %s · %s (lleva %s escritos)." % (cur["id"], cur["titulo"],
                                                                    plural(note_block_count(note), "bloque", "bloques"))
         cmds = [c("nota", slug, cur["id"], "<<'EOF'"), c("completar", slug, cur["id"])]
-        pista = "Cada bloque va a la nota cuando termina; el cierre lleva «## Resumen con tus palabras» y «## Fuentes»."
+        pista = ("Lee antes su nota (%s): dice qué bloques se dieron y dónde se quedó. Cada bloque va a la nota "
+                 "cuando termina; el cierre lleva «## Resumen con tus palabras» y «## Fuentes»." % rel(note["path"]))
     else:
         texto = "Empezar la lección %s · %s." % (cur["id"], cur["titulo"])
         cmds = [c("leccion", slug, cur["id"]), c("nota", slug, cur["id"], "<<'EOF'")]
@@ -1997,9 +2061,28 @@ def next_step(root, topic, opts):
     return main and dict(main, meta=step["meta"]) or step
 
 
+def s_formato(topic):
+    return fm_int(topic["plan"]["fm"] or {}, "formato", 1)
+
+
+def home_space():
+    """Un espacio de aprendizaje en ~/aprendizaje, si existe y tiene temas."""
+    try:
+        home = Path.home() / "aprendizaje"
+    except (KeyError, RuntimeError):
+        return None
+    return home if list_topics(home) else None
+
+
 def cmd_siguiente(pos, opts):
     root = root_dir(opts)
+    custom_root = bool(opts.get("root") or os.environ.get("COACH_ROOT"))
     topic = pick_topic(root, pos[0] if pos else None) if root.is_dir() else None
+    if topic is None and not custom_root:
+        home = home_space()
+        if home is not None and home.resolve() != root.resolve():
+            out("\u2139 Aquí no hay temas, pero %s tiene: %s. Si el estudiante habla de ese plan, usa --root %s."
+                % (home, ", ".join(list_topics(home)), shell_quote(str(home))))
     step = next_step(root, topic, opts)
     tema = fm_str(topic["plan"]["fm"], "tema") if topic else ""
     if opts.get("json"):
@@ -2020,7 +2103,10 @@ def cmd_siguiente(pos, opts):
         out("  Lee (si aún no lo hiciste en esta sesión): %s" % ", ".join(step["lee"]))
     if topic:
         out("")
-        out("\u21A9 Para retomar en otro chat: «Sigamos con mi plan de %s»" % (tema or topic["slug"]))
+        donde = (" (está en %s)" % root.resolve()) if custom_root else ""
+        out("\u21A9 Para retomar en otro chat: «Sigamos con mi plan de %s%s»" % (tema or topic["slug"], donde))
+        if s_formato(topic) < FORMATO:
+            out("\u2139 Plan de hb-coach 3.0: `coach migrar --dry-run` muestra qué añadiría (exámenes y calendario).")
         out("\U0001F4D3 Cuaderno: %s" % (root / "cuaderno.html").resolve())
 
 
@@ -2089,7 +2175,9 @@ def check_topic(topic, rep):
         rep("aviso", where, "leccion_actual '%s' no existe en el plan" % cur)
     if plan["modulos"] and not any(m["nivel"] for m in plan["modulos"]):
         rep("aviso", where, "ningún módulo indica nivel (Básico/Intermedio/Avanzado/Experto)")
-    if fm_int(fm, "formato", 1) >= 2:
+    if fm_int(fm, "formato", 1) < FORMATO:
+        rep("aviso", where, "plan de hb-coach 3.0: `coach migrar --dry-run` muestra qué añadiría (exámenes y calendario)")
+    else:
         sin_examen = [m["id"] for m in plan["modulos"] if m["examen"] is None and not m["proyecto"]]
         if sin_examen:
             rep("aviso", where, "módulo(s) sin línea de examen: %s (coach examen %s <n> la añade)"
@@ -2292,6 +2380,12 @@ MERMAID_TYPES = {
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 
 
+def closes_fence(line, fence):
+    """Una valla se cierra con el mismo carácter repetido al menos tantas veces como la abrió."""
+    s = line.strip()
+    return len(s) >= len(fence) and s == fence[0] * len(s)
+
+
 def prose_only(text):
     t = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     keep, fence = [], None
@@ -2299,10 +2393,10 @@ def prose_only(text):
         m = re.match(r"^\s*(```+|~~~+)", line)
         if fence is None:
             if m:
-                fence = m.group(1)[:3]
+                fence = m.group(1)
                 continue
             keep.append(re.sub(r"`[^`]*`", "", line))
-        elif line.strip().startswith(fence) and line.strip().strip(fence[0]) == "":
+        elif closes_fence(line, fence):
             fence = None
     return "\n".join(keep)
 
@@ -2323,7 +2417,7 @@ def lint_markdown(relp, text, root, report, check_links=True):
         m = re.match(r"^\s*(```+|~~~+)\s*([\w-]*)", line)
         if fence is None:
             if m:
-                fence = {"mark": m.group(1)[:3], "lang": m.group(2).lower()}
+                fence = {"mark": m.group(1), "lang": m.group(2).lower()}
                 block = []
                 continue
             hm = HEADING_RE.match(line)
@@ -2336,7 +2430,7 @@ def lint_markdown(relp, text, root, report, check_links=True):
                         if len(code) > 40:
                             table_code += 1
             continue
-        if line.strip().startswith(fence["mark"]) and line.strip().strip(fence["mark"][0]) == "":
+        if closes_fence(line, fence["mark"]):
             if fence["lang"] == "mermaid":
                 lint_mermaid(relp, block, report)
             else:
@@ -2453,14 +2547,22 @@ def migrate_topic(topic, changes):
     changes.append("%s: PLAN.md con formato: %d" % (topic["slug"], FORMATO))
     notes = []
     titles = {l["id"]: l for l in topic["plan"]["lecciones"]}
+    pending = []
     for nid, note in topic["notes"].items():
         l = titles.get(nid)
         if not l or not l["hecha"] or l["convalidada"] or fm_str(note["fm"], "repaso"):
             continue
         if norm_state(fm_str(note["fm"], "estado")) != "completada":
             continue
-        fin = parse_date(fm_str(note["fm"], "fin")) or today_date()
-        nxt = (fin + timedelta(days=LESSON_INTERVALS[0])).isoformat()
+        pending.append((parse_date(fm_str(note["fm"], "fin")) or today_date(), id_key(nid), nid, note))
+    per_day = {}
+    for fin, _, nid, note in sorted(pending, key=lambda x: (x[0], x[1])):
+        # Desde hoy como pronto y como mucho REVIEW_LIMIT por día: un espacio grande no vence entero a la vez.
+        day = max(fin + timedelta(days=LESSON_INTERVALS[0]), today_date())
+        while per_day.get(day, 0) >= REVIEW_LIMIT:
+            day += timedelta(days=1)
+        per_day[day] = per_day.get(day, 0) + 1
+        nxt = day.isoformat()
         ntext = set_fm(note["text"], "repaso", nxt)
         ntext = set_fm_raw(ntext, "repasos", "0")
         notes.append((note["path"], ntext))
@@ -2567,6 +2669,9 @@ def parse_args(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == "--":
+            pos.extend(argv[i + 1:])
+            break
         if a.startswith("--") and len(a) > 2:
             key = a[2:]
             if "=" in key:

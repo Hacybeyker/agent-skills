@@ -1444,8 +1444,21 @@ details.solution > summary { color: var(--accent); }
     return m ? m[1].toLowerCase() : "";
   }
   function stripFrontmatter(md) { return parseFrontmatter(md).body; }
+  // Las notas pueden traer texto copiado de la web: nada de estilos, formularios ni campos que no sean casillas.
+  var PURIFY = { USE_PROFILES: { html: true }, ADD_ATTR: ["target"],
+    FORBID_TAGS: ["style", "form", "textarea", "select", "option", "button", "dialog"],
+    FORBID_ATTR: ["action", "formaction", "style"] };
+  var purifyHooked = false;
   function sanitize(html) {
-    return window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, ADD_ATTR: ["target"] });
+    if (!purifyHooked && window.DOMPurify.addHook) {
+      window.DOMPurify.addHook("uponSanitizeElement", function (node, data) {
+        if (data.tagName === "input" && String(node.getAttribute && node.getAttribute("type") || "").toLowerCase() !== "checkbox" && node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      });
+      purifyHooked = true;
+    }
+    return window.DOMPurify.sanitize(html, PURIFY);
   }
   function inlineMarkdown(text) {
     var span = h("span");
@@ -2268,6 +2281,10 @@ details.solution > summary { color: var(--accent); }
       return { el: el, title: "Repaso · " + t.tema };
     }
     var idx = 0, results = [];
+    var last = (store.get("repaso." + t.slug) || "").split(" ");
+    if (last.length === 2 && parseDate(last[0])) {
+      el.append(h("p", { class: "muted" }, "Último repaso en este navegador: " + fmtDate(last[0]) + " · " + last[1] + " sabidas (solo aquí; el que cuenta es el que haces con el coach)."));
+    }
     var box = h("section", { class: "flash", "aria-live": "polite" });
     function show() {
       box.replaceChildren();
@@ -2294,6 +2311,7 @@ details.solution > summary { color: var(--accent); }
     function next(ok) { results.push({ card: cards[idx], ok: ok }); idx++; show(); }
     function summary() {
       var good = results.filter(function (r) { return r.ok; }).length;
+      store.set("repaso." + t.slug, todayISO() + " " + good + "/" + results.length);
       var weak = results.filter(function (r) { return !r.ok; });
       var list = h("ul");
       weak.forEach(function (r) { list.append(h("li", null, h("a", { href: R.lesson(t.slug, r.card.lesson.id) }, "Lección " + r.card.lesson.id), " · ", inlineText(r.card.q.q))); });
@@ -2557,7 +2575,7 @@ details.solution > summary { color: var(--accent); }
   }
 
   // ------------------------------------------------------------------ carpeta local
-  var SKIP_DIRS = { node_modules: 1, build: 1, dist: 1, Pods: 1, DerivedData: 1, ".git": 1, ".gradle": 1, ".idea": 1, ".vendor": 1 };
+  var SKIP_DIRS = { node_modules: 1, build: 1, dist: 1, Pods: 1, DerivedData: 1, target: 1, venv: 1, practica: 1, ".git": 1, ".gradle": 1, ".idea": 1, ".vendor": 1 };
   function normalizeRoot(files, name) {
     var keys = Object.keys(files);
     if (keys.some(function (k) { return /^[^/]+\/PLAN\.md$/.test(k); })) return { files: files, raiz: name };

@@ -76,8 +76,8 @@ Parte de la plantilla que crea `coach init` y reemplaza todos los `[[COMPLETAR: 
 tema: "Estadística para entender tests A/B"   # título visible
 slug: estadistica-ab                          # igual que la carpeta
 area: estadistica                             # android, backend, idiomas, estadistica, finanzas…
-nivel_actual: básico                          # según el diagnóstico
-nivel_objetivo: intermedio
+nivel_actual: básico                          # por-diagnosticar | básico | intermedio | avanzado | experto
+nivel_objetivo: intermedio                    # básico | intermedio | avanzado | experto
 leccion_actual: "1.2"                         # la mantiene coach; entre comillas
 playground: "https://…"                       # opcional: herramienta oficial para practicar
 formato: 2                                    # lo pone coach; no lo cambies
