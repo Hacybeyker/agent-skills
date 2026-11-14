@@ -881,38 +881,49 @@ details.solution > summary { color: var(--accent); }
 <script id="coach-formato">
 // Formato de las notas, sin DOM (los tests lo ejecutan con Node). Espejo de note_blocks() de coach.py:
 // limpia lo que no es para el estudiante y deduce el estado de cada bloque 📖/🛠/❓ de la lección.
+// Si cambias una regla aquí, cámbiala también en coach.py (hay un test de paridad).
 var CoachFormato = (function () {
   "use strict";
   var HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+  var H2_RE = /^##\s+(.+?)\s*#*\s*$/;
   var FENCE_OPEN_RE = /^\s*(```+|~~~+)/;
-  var BLOCK_HEAD_RE = /^##\s+(📖|🛠|❓)️?\s*(.*?)\s*#*\s*$/u;
-  var KIND = { "📖": "teoria", "🛠": "practica", "❓": "preguntas" };
+  var ICONS = { "📖": "teoria", "🛠": "practica", "❓": "preguntas" };
+  var WORDS = [["teoria", /^teor[ií]a\b/i], ["practica", /^pr[aá]ctica\b/i], ["preguntas", /^(?:preguntas|comprobaci[oó]n de dominio)\b/i]];
   var NUM_RE = /·\s*([0-9]+)\s*[.):]?\s*(.*)$/;
-  var Q_RE = /^\*\*P([0-9]+)\.?\*\*/;
-  var RETO_RE = /^###\s+(?:🧩\s*)?reto\b/iu;
-  var RETO_NUM_RE = /\breto\s+([0-9]+)/i;
-  var SOL_RE = /<summary>\s*soluci[oó]n/i;
-  var SUMMARY_RE = /<summary>\s*(.*?)\s*(?:<\/summary>|$)/i;
-  var ATTEMPT_RE = /\b(?:tu|segundo|tercer)\s+intento\**\s*:/i;
-  var ANSWER_RE = /\btu\s+respuesta\**\s*:|\bsegundo\s+intento\**\s*:/i;
-  var MAP_RE = /^\s*\*\*bloques(?: de esta lecci[oó]n)?\s*:?\s*\*\*\s*:?\s*(.*)$/i;
-  var MAP_ITEM_RE = /^\s*([0-9]+)[.)]\s+(.+?)\s*$/;
-  var OBSERVED_RE = /lo que observaste\**\s*:\**\s*(.*)$/i;
-  var NOT_Q_RE = /^(?:resumen con tus palabras|fuentes|historial|resultado|objetivos|resumen|qu[eé] cubre|qu[eé] toca hoy)\b/i;
   var MARKER_RE = /\[\[(?:COMPLETAR|pendiente)/i;
   var COMPLETAR_RE = /\[\[COMPLETAR/;
+  var Q_RE = /^(?:[-*+]\s+|[0-9]+[.)]\s+)?\*\*P([0-9]+)\.?\*\*/;
+  var RETO_RE = /^###\s+(?:🧩\s*)?reto\b/iu;
+  var RETO_NUM_RE = /\breto\s+([0-9]+)/i;
+  var SUMMARY_RE = /<summary>(.*?)(?:<\/summary>|$)/i;
+  var HINT_WORDS_RE = /^(?:pista|hint|ayuda|clue)\b/i;
+  var SOLUTION_WORDS_RE = /soluci[oó]n|solution|respuesta|answer/i;
+  var ATTEMPT_RE = /\*\*\s*(?:tu|segundo|tercer)\s+intento\s*:?\s*\*\*/i;
+  var ANSWER_RE = /—\s*tu\s+respuesta\s*:|→\s*segundo\s+intento\s*:|\*\*\s*(?:tu\s+respuesta|segundo\s+intento)\s*:?\s*\*\*/i;
+  var APLAZADO_RE = /\*\*\s*aplazad[oa]\s*:?\s*\*\*/i;
+  var MAP_RE = /^\s*\*\*bloques(?: de (?:esta|la) lecci[oó]n)?\s*:?\s*\*\*\s*:?\s*(.*)$/i;
+  var MAP_ITEM_RE = /^\s*([0-9]+)[.)]\s+(.+?)\s*$/;
+  var MAP_BULLET_RE = /^\s*[-*+]\s+(.+?)\s*$/;
+  var OBSERVED_RE = /lo que observaste\**\s*:\**\s*(.*)$/i;
+  var NOT_Q_RE = /^(?:resumen con tus palabras|fuentes|historial|resultado|objetivos|resumen|qu[eé] cubre|qu[eé] toca hoy)\b/i;
 
   function closesFence(line, fence) {
     var s = line.trim();
     return s.length >= fence.length && s === new Array(s.length + 1).join(fence.charAt(0));
   }
+  // Código (vallas incluidas) y comentarios HTML de varias líneas: ahí no se buscan bloques, retos ni preguntas.
   function codeMask(lines) {
-    var mask = [], fence = null;
+    var mask = [], fence = null, comment = false;
     lines.forEach(function (line, i) {
+      if (comment) { mask[i] = true; if (line.indexOf("-->") >= 0) comment = false; return; }
       if (fence === null) {
         var m = FENCE_OPEN_RE.exec(line);
         mask[i] = !!m;
         if (m) fence = m[1];
+        else {
+          var c = line.indexOf("<!--");
+          if (c >= 0 && line.indexOf("-->", c) < 0) { comment = true; mask[i] = true; }
+        }
       } else {
         mask[i] = true;
         if (closesFence(line, fence)) fence = null;
@@ -920,7 +931,23 @@ var CoachFormato = (function () {
     });
     return mask;
   }
-  // Quita comentarios HTML fuera del código (también los de `código` en línea se respetan).
+  function blockHead(line) {
+    var m = H2_RE.exec(line);
+    if (!m) return null;
+    var title = m[1].replace(/️/g, "").trim();
+    var first = Array.from(title)[0] || "";
+    if (ICONS[first]) return { icon: first, kind: ICONS[first], rest: title.slice(first.length).trim() };
+    for (var i = 0; i < WORDS.length; i++) if (WORDS[i][1].test(title)) return { icon: "", kind: WORDS[i][0], rest: title };
+    return null;
+  }
+  function summaryKind(line) {
+    var m = SUMMARY_RE.exec(line);
+    if (!m) return null;
+    var t = m[1].replace(/<[^>]+>/g, "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+    if (HINT_WORDS_RE.test(t)) return "pista";
+    return SOLUTION_WORDS_RE.test(t) ? "solucion" : "otro";
+  }
+  // Quita comentarios HTML fuera del código (los de `código` en línea se respetan).
   function stripComments(line, state) {
     var out = "", parts = line.split(/(`[^`]*`)/);
     parts.forEach(function (part) {
@@ -943,35 +970,59 @@ var CoachFormato = (function () {
     });
     return out;
   }
-  // Lo que nunca ve el estudiante: comentarios para el coach, marcadores [[COMPLETAR]] y secciones vacías.
+  // Lo que nunca ve el estudiante: comentarios para el coach, marcadores [[COMPLETAR]], secciones de la plantilla
+  // sin rellenar, desplegables y tablas que se quedaron vacíos, y secciones vacías.
   function limpiar(md) {
-    var lines = String(md || "").split("\n"), kept = [], fence = null, state = { open: false };
+    var lines = String(md || "").split("\n"), kept = [], fence = null, state = { open: false }, skipTo = 0;
     lines.forEach(function (line) {
-      if (fence !== null) { kept.push(line); if (closesFence(line, fence)) fence = null; return; }
+      if (fence !== null) { if (!skipTo) kept.push(line); if (closesFence(line, fence)) fence = null; return; }
       if (!state.open) {
         var fm = FENCE_OPEN_RE.exec(line);
-        if (fm) { fence = fm[1]; kept.push(line); return; }
+        if (fm) { fence = fm[1]; if (!skipTo) kept.push(line); return; }
+        var hm = HEADING_RE.exec(line);
+        if (hm && skipTo && hm[1].length <= skipTo) skipTo = 0;
+        if (hm && hm[1].length <= 2 && MARKER_RE.test(line)) { skipTo = hm[1].length; return; }
       }
+      if (skipTo) return;
       var had = state.open || line.indexOf("<!--") >= 0;
       var clean = stripComments(line, state);
       if (had && !clean.trim()) return;
       if (MARKER_RE.test(clean)) return;
       kept.push(clean);
     });
-    // Secciones ## que se quedaron sin nada (Resumen y Fuentes de una lección a medias, por ejemplo)
-    var out = [], mask = codeMask(kept), i = 0;
+    var mask = codeMask(kept), out = [], i = 0;
     while (i < kept.length) {
-      var hm = !mask[i] && HEADING_RE.exec(kept[i]);
-      if (hm && hm[1].length === 2) {
-        var j = i + 1;
-        while (j < kept.length && !(!mask[j] && /^#{1,2}\s/.test(kept[j]))) j++;
-        var empty = kept.slice(i + 1, j).every(function (l) { return !l.trim(); });
-        if (empty) { i = j; continue; }
+      // <details> sin nada más que su <summary>
+      if (!mask[i] && /^\s*<details\b/i.test(kept[i])) {
+        var j = i + 1, body = false;
+        while (j < kept.length && !/^\s*<\/details>/i.test(kept[j])) { if (kept[j].trim() && !/^\s*<summary/i.test(kept[j])) body = true; j++; }
+        if (j < kept.length && !body) { i = j + 1; continue; }
       }
+      // «**Bloques:**» sin ninguna entrada (todas eran de la plantilla)
+      if (!mask[i] && MAP_RE.test(kept[i]) && !MAP_RE.exec(kept[i])[1].trim()) {
+        var nx = i + 1;
+        while (nx < kept.length && !kept[nx].trim()) nx++;
+        if (nx >= kept.length || !(MAP_ITEM_RE.test(kept[nx]) || MAP_BULLET_RE.test(kept[nx]))) { i = nx; continue; }
+      }
+      // tabla con encabezado y separador, pero sin filas
+      if (!mask[i] && /^\s*\|/.test(kept[i]) && i + 1 < kept.length && /^\s*\|?\s*:?-{2,}/.test(kept[i + 1]) &&
+          !(i + 2 < kept.length && /^\s*\|/.test(kept[i + 2])) && !(i > 0 && /^\s*\|/.test(kept[i - 1]))) { i += 2; continue; }
       out.push(kept[i]);
       i++;
     }
-    return out.join("\n");
+    var final = [], m2 = codeMask(out);
+    i = 0;
+    while (i < out.length) {
+      var hd = !m2[i] && HEADING_RE.exec(out[i]);
+      if (hd && hd[1].length === 2) {
+        var k = i + 1;
+        while (k < out.length && !(!m2[k] && /^#{1,2}\s/.test(out[k]))) k++;
+        if (out.slice(i + 1, k).every(function (l) { return !l.trim(); })) { i = k; continue; }
+      }
+      final.push(out[i]);
+      i++;
+    }
+    return final.join("\n");
   }
   function mapTitle(raw) {
     var s = raw.trim(), m = /\*\*(.+?)\*\*/.exec(s);
@@ -980,7 +1031,7 @@ var CoachFormato = (function () {
       s = s.split(/\s*(?:→|->)\s*/)[0];
       s = s.split(/\s+[·—–|]\s+/)[0];
     }
-    s = s.replace(/[📖🛠❓🧩️]/gu, "").replace(/^[\s.:\-·]+|[\s.:\-·]+$/g, "");
+    s = s.replace(/[📖🛠❓🧩️]/gu, "").replace(/^[ .:\-·]+|[ .:\-·]+$/g, "");
     return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
   }
   function parseMap(lines, code) {
@@ -1002,8 +1053,9 @@ var CoachFormato = (function () {
           var s = lines[j];
           if (code[j] || HEADING_RE.test(s)) break;
           var pm2 = MAP_ITEM_RE.exec(s);
-          if (pm2 && !COMPLETAR_RE.test(s)) items.push({ n: +pm2[1], titulo: mapTitle(pm2[2]) });
-          else if (s.trim() && !/^[ \t]/.test(s) && !pm2) break;
+          var bm = pm2 || /^( {2}|\t)/.test(s) ? null : MAP_BULLET_RE.exec(s);
+          if ((pm2 || bm) && !COMPLETAR_RE.test(s)) items.push(pm2 ? { n: +pm2[1], titulo: mapTitle(pm2[2]) } : { n: items.length + 1, titulo: mapTitle(bm[1]) });
+          else if (s.trim() && !/^[ \t]/.test(s) && !pm2 && !bm) break;
         }
       }
       break;
@@ -1012,6 +1064,10 @@ var CoachFormato = (function () {
     return items.filter(function (it) { if (seen[it.n]) return false; seen[it.n] = true; return true; });
   }
   function count(text, re) { return (text.match(re) || []).length; }
+  function observed(line) {
+    var m = OBSERVED_RE.exec(line);
+    return !!(m && m[1].trim() && m[1].trim().indexOf("[[") !== 0);
+  }
   function itemStatus(kind, lines, code, a, b, k, n) {
     var marker = kind === "reto" ? ATTEMPT_RE : ANSWER_RE, first = -1, pos = 0, i;
     for (i = a; i < b; i++) {
@@ -1019,17 +1075,12 @@ var CoachFormato = (function () {
       var m = marker.exec(lines[i]);
       if (m) { first = i; pos = m.index; break; }
     }
-    var fin = false;
+    var fin = false, deferred = false;
     for (i = a; i < b; i++) {
       if (code[i]) continue;
-      if (kind === "reto") {
-        var om = OBSERVED_RE.exec(lines[i]);
-        if (om && om[1].trim() && om[1].trim().indexOf("[[") !== 0) fin = true;
-        if (SOL_RE.test(lines[i])) fin = true;
-      } else {
-        var sm = SUMMARY_RE.exec(lines[i]);
-        if (sm && !/^pista/i.test(sm[1])) fin = true;
-      }
+      if (kind === "reto" && observed(lines[i])) fin = true;
+      if (summaryKind(lines[i]) === "solucion") fin = true;
+      if (APLAZADO_RE.test(lines[i])) deferred = true;
     }
     var ok = 0, ko = 0;
     if (first >= 0) {
@@ -1041,8 +1092,8 @@ var CoachFormato = (function () {
     }
     var answered = first >= 0;
     var closed = fin || (answered && ok > 0 && ko === 0);
-    return { tipo: kind, k: k, n: n, linea: a, fin: b, intento: answered, final: fin,
-      estado: closed ? "cerrado" : (answered ? "segundo" : "pendiente") };
+    return { tipo: kind, k: k, n: n, linea: a, fin: b, intento: answered, final: fin, ok: ok, ko: ko,
+      estado: closed ? "cerrado" : deferred ? "aplazado" : (answered ? "segundo" : "pendiente") };
   }
   function idRange(ids) {
     ids = ids.slice().sort(function (x, y) { return x - y; });
@@ -1053,7 +1104,7 @@ var CoachFormato = (function () {
     var items = b.retos.concat(b.preguntas).sort(function (x, y) { return x.linea - y.linea; });
     for (var idx = 0; idx < items.length; idx++) {
       var it = items[idx];
-      if (it.estado === "cerrado") continue;
+      if (it.estado === "cerrado" || it.estado === "aplazado") continue;
       if (it.tipo === "reto") {
         var name = it.k ? "del reto " + it.k : "de la práctica " + it.n;
         if (it.estado === "pendiente") return { tipo: "reto", ids: [it.k], texto: "el intento " + name };
@@ -1082,11 +1133,11 @@ var CoachFormato = (function () {
       if (hd.lvl !== 2) return;
       var end = lines.length;
       for (var x = idx + 1; x < heads.length; x++) if (heads[x].lvl <= 2) { end = heads[x].i; break; }
-      var sec = { titulo: hd.title, linea: hd.i, fin: end, kind: null, n: null, sub: "" };
-      var bm = BLOCK_HEAD_RE.exec(lines[hd.i]);
-      if (bm) {
-        sec.kind = KIND[bm[1]];
-        var nm = NUM_RE.exec(bm[2]);
+      var sec = { titulo: hd.title, linea: hd.i, fin: end, kind: null, n: null, sub: "", plantilla: MARKER_RE.test(hd.title) };
+      var bh = blockHead(lines[hd.i]);
+      if (bh && !sec.plantilla) {
+        sec.kind = bh.kind;
+        var nm = NUM_RE.exec(bh.rest);
         if (nm) { sec.n = +nm[1]; sec.sub = nm[2].trim(); }
       }
       sections.push(sec);
@@ -1096,7 +1147,7 @@ var CoachFormato = (function () {
     function sectionAt(x) { return sections.filter(function (s) { return s.linea <= x && x < s.fin; })[0] || null; }
     var retos = [], preguntas = [];
     heads.forEach(function (hd, idx) {
-      if (hd.lvl !== 3 || !RETO_RE.test(lines[hd.i])) return;
+      if (hd.lvl !== 3 || !RETO_RE.test(lines[hd.i]) || MARKER_RE.test(hd.title)) return;
       var sec = sectionAt(hd.i);
       if (!sec || !sec.kind) return;
       var end = lines.length;
@@ -1115,7 +1166,7 @@ var CoachFormato = (function () {
     for (i = 0; i < lines.length; i++) if (!code[i] && Q_RE.test(lines[i].replace(/^\s+/, ""))) qlines.push(i);
     qlines.forEach(function (qi, idx) {
       var sec = sectionAt(qi);
-      if (!sec || NOT_Q_RE.test(sec.titulo)) return;
+      if (!sec || sec.plantilla || NOT_Q_RE.test(sec.titulo) || MARKER_RE.test(lines[qi])) return;
       var nextQ = idx + 1 < qlines.length ? qlines[idx + 1] : lines.length;
       var nextH = lines.length;
       for (var x = 0; x < heads.length; x++) if (heads[x].i > qi && heads[x].lvl <= 3) { nextH = heads[x].i; break; }
@@ -1148,7 +1199,7 @@ var CoachFormato = (function () {
     return { mapa: mapa, bloques: ordered, actual: actual, siguiente: siguiente,
       total: nums.length ? Math.max.apply(null, nums) : 0, retos: retos, preguntas: preguntas };
   }
-  return { limpiar: limpiar, bloques: bloques, idRange: idRange, BLOCK_HEAD_RE: BLOCK_HEAD_RE, NUM_RE: NUM_RE };
+  return { limpiar: limpiar, bloques: bloques, idRange: idRange, blockHead: blockHead, NUM_RE: NUM_RE, MARKER_RE: MARKER_RE };
 })();
 </script>
 <script>
@@ -1349,7 +1400,7 @@ var CoachFormato = (function () {
   var EXAM_RE = /^(\s*[-*+]\s+)\[([ xX])\](\s+\*\*Examen\s+M?([0-9]+)[^*]*\*\*)(.*)$/i;
   var PROJECT_RE = /\bproyecto\b|\bproject\b/i;
   var RETO_RE = /^(?:🧩\s*)?reto\b/iu;
-  var RETO_LABEL = { resuelto: "Resuelto", intentado: "Segundo intento", solucion: "Con solución", pendiente: "Sin resolver" };
+  var RETO_LABEL = { resuelto: "Resuelto", intentado: "Segundo intento", solucion: "Con solución", aplazado: "Aplazado", pendiente: "Sin resolver" };
   var EXAM_LABEL = { aprobado: "Aprobado", toca: "Toca", repetir: "Repetir", pendiente: "Pendiente" };
   var WORDS_PER_MINUTE = 200;  // lectura en pantalla; el código cuenta aparte (~12 líneas por minuto)
   var FM_KEY_RE = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/;
@@ -1488,6 +1539,7 @@ var CoachFormato = (function () {
         continue;
       }
       var m = LESSON_RE.exec(line);
+      if (m && CoachFormato.MARKER_RE.test(m[3])) { lastLesson = null; continue; }
       if (!m) {
         if (lastLesson && /^(\s{2,}|\t)\S/.test(line)) { lastLesson.detalle.push(line.replace(/^(\s{2}|\t)/, "")); continue; }
         if (line.trim()) lastLesson = null;
@@ -1499,7 +1551,7 @@ var CoachFormato = (function () {
         var mid = MOD_ID_RE.exec(htext), moduleId;
         if (mid) moduleId = mid[1];
         else { var mn = MOD_NUM_RE.exec(htext.trim()); moduleId = mn ? mn[1] : String(modules.length + 1); }
-        var mtitle = cleanModuleTitle(htext);
+        var mtitle = CoachFormato.MARKER_RE.test(htext) ? "Módulo " + moduleId : cleanModuleTitle(htext);
         modules.push({ index: modules.length, id: moduleId, titulo: mtitle, nivel: detectLevel(htext), meta: pendingMeta.join("\n").trim(),
           lessons: [], exam: null, proyecto: PROJECT_RE.test(mtitle) });
         headingUsed = true;
@@ -2365,6 +2417,13 @@ var CoachFormato = (function () {
     if (cta) nav.append(cta);
     return nav;
   }
+  // Pista, solución u otro desplegable: la misma regla que summary_kind() de coach.py.
+  function detailsKind(d) {
+    var sum = d.querySelector("summary");
+    var t = (sum ? sum.textContent : "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+    if (/^(?:pista|hint|ayuda|clue)\b/i.test(t)) return "pista";
+    return /soluci[oó]n|solution|respuesta|answer/i.test(t) ? "solucion" : "otro";
+  }
   // Retos: «### 🧩 Reto n · …» con «Resultado esperado», pistas y solución en <details>.
   function enhanceChallenges(prose) {
     var heads = $$("h3", prose).filter(function (hd) { return RETO_RE.test(hd.textContent.trim()); });
@@ -2374,13 +2433,17 @@ var CoachFormato = (function () {
       var sec = h("section", { class: "reto", "aria-label": "Reto " + (i + 1) + " de " + heads.length });
       hd.before(sec);
       var text = nodes.map(function (n) { return n.textContent; }).join(" ");
-      var attempted = /\b(?:tu|segundo|tercer)\s+intento\s*:/i.test(text);
-      var marks = text.match(/[✔✘]/g) || [];
+      // Las marcas cuentan desde su intento (el enunciado puede llevar ✔ o ✘ de ejemplo).
+      var from = -1;
+      nodes.forEach(function (n, k) { if (from < 0 && /^(?:tu|segundo|tercer)\s+intento\s*:/i.test(n.textContent.trim())) from = k; });
+      var attempted = from >= 0;
+      var marks = attempted ? (nodes.slice(from).map(function (n) { return n.textContent; }).join(" ").match(/[✔✘]/g) || []) : [];
       var last = marks.length ? marks[marks.length - 1] : "";
-      var hasSolution = nodes.some(function (n) { return n.tagName === "DETAILS" && /^\s*soluci[oó]n/i.test((n.querySelector("summary") || n).textContent); });
-      var st = !attempted && !last ? "pendiente"
-        : (last === "✔" && marks.indexOf("✘") < 0) || (hasSolution && last === "✔") ? "resuelto"
-        : hasSolution ? "solucion" : "intentado";
+      var hasSolution = nodes.some(function (n) { return n.tagName === "DETAILS" && detailsKind(n) === "solucion"; });
+      var deferred = /\baplazad[oa]\s*:/i.test(text);
+      var st = hasSolution ? (last === "✔" ? "resuelto" : "solucion")
+        : attempted ? (last === "✔" && marks.indexOf("✘") < 0 ? "resuelto" : deferred ? "aplazado" : "intentado")
+        : deferred ? "aplazado" : "pendiente";
       sec.append(h("div", { class: "reto-head" }, h("span", { class: "eyebrow" }, "Reto " + (i + 1) + " de " + heads.length),
         h("span", { class: "chip", dataset: { reto: st } }, RETO_LABEL[st])));
       var hints = [], solution = null;
@@ -2389,8 +2452,9 @@ var CoachFormato = (function () {
         if (n.tagName === "DETAILS") {
           var sum = n.querySelector("summary");
           var label = sum ? sum.textContent.trim() : "";
-          if (/^pista/i.test(label)) { n.classList.remove("qa"); n.classList.add("hint"); hints.push(n); }
-          else if (/^soluci[oó]n/i.test(label)) { n.classList.remove("qa"); n.classList.add("solution"); solution = n; }
+          var dk = detailsKind(n);
+          if (dk === "pista") { n.classList.remove("qa"); n.classList.add("hint"); hints.push(n); }
+          else if (dk === "solucion") { n.classList.remove("qa"); n.classList.add("solution"); solution = n; }
         }
         if (n.tagName === "P" && /^resultado esperado/i.test(n.textContent.trim())) n.classList.add("expected");
       });
@@ -2445,9 +2509,9 @@ var CoachFormato = (function () {
   // ------------------------------------------------------------------ bloques de la lección (el cuaderno es el aula)
   var BLOCK_LABEL = { ahora: "Ahora", pendiente: "Pendiente", terminado: "Terminado", bloqueado: "🔒 Pendiente" };
   function blockNumberOf(text, last) {
-    var m = /^(📖|🛠|❓)️?\s*(.*)$/u.exec(text.trim());
-    if (!m) return null;
-    var nm = CoachFormato.NUM_RE.exec(m[2]);
+    var bh = CoachFormato.blockHead("## " + text.trim());
+    if (!bh) return null;
+    var nm = CoachFormato.NUM_RE.exec(bh.rest);
     return nm ? +nm[1] : (last || 1);
   }
   function turnText(e) {
@@ -2754,15 +2818,16 @@ var CoachFormato = (function () {
   }
   // Repaso guiado: la nota del día que escribe el coach (preguntas, tus respuestas y la corrección).
   function guidedReview(t, fecha) {
-    var note = fecha ? t.reviewNotes.filter(function (r) { return r.fecha === fecha; })[0] : t.reviewNotes[0];
-    if (!note) return null;
+    var day = fecha || todayISO();
+    var note = t.reviewNotes.filter(function (r) { return r.fecha === day; })[0] || null;
     var others = t.reviewNotes.filter(function (r) { return r !== note; }).slice(0, 8);
-    return h("section", { class: "guided", "aria-label": "Repaso con el coach" },
+    var past = others.length ? h("p", { class: "muted" }, "Repasos con el coach: ", others.map(function (r, i) {
+      return [i ? " · " : "", h("a", { href: R.review(t.slug) + "/" + r.fecha }, fmtDate(r.fecha))];
+    })) : null;
+    if (!note) return past ? { el: past, nota: false } : null;
+    return { nota: true, el: h("section", { class: "guided", "aria-label": "Repaso con el coach" },
       h("h2", { class: "section-title", style: "margin-top:0" }, "Repaso con el coach", h("small", null, fmtDate(note.fecha))),
-      h("div", { class: "reading" }, h("article", null, renderMarkdown(note.raw, note.path, { hideTitle: true }))),
-      others.length ? h("p", { class: "muted" }, "Repasos anteriores: ", others.map(function (r, i) {
-        return [i ? " · " : "", h("a", { href: R.review(t.slug) + "/" + r.fecha }, fmtDate(r.fecha))];
-      })) : null);
+      h("div", { class: "reading" }, h("article", null, renderMarkdown(note.raw, note.path, { hideTitle: true }))), past) };
   }
   function reviewView(t, fecha) {
     if (fecha && !t.reviewNotes.some(function (r) { return r.fecha === fecha; })) return notFound("No hay repaso del " + fecha + " en " + t.tema + ".");
@@ -2782,11 +2847,11 @@ var CoachFormato = (function () {
         ? plural(due.length, "lección toca repaso", "lecciones tocan repaso") + ": preguntas mezcladas entre módulos."
         : "Nada vence hoy: repaso libre con lo ya completado.")));
     if (guided) {
-      el.append(guided);
-      el.append(h("h2", { class: "section-title" }, "Autoevaluación", h("small", null, "tarjetas; el resultado queda solo en este navegador")));
+      el.append(guided.el);
+      if (guided.nota) el.append(h("h2", { class: "section-title" }, "Autoevaluación", h("small", null, "tarjetas; el resultado queda solo en este navegador")));
     }
     var dueGaps = t.openGaps.filter(function (g) { return g.vencido; });
-    if (dueGaps.length && !guided) {
+    if (dueGaps.length) {
       var gapNote = h("blockquote", { class: "callout", dataset: { kind: "warning" } },
         h("div", { class: "callout-title" }, icon("alert"), "Huecos que tocan hoy"),
         h("p", null, dueGaps.map(function (g) { return g.id + " · " + g.hueco; }).join(" · ")),
@@ -3198,7 +3263,7 @@ var CoachFormato = (function () {
     var timer = null;
     window.coachLatido = function (huella) {
       if (!state.live) { state.live = true; updateChrome(); }
-      if (huella && huella !== data.huella) onNewVersion();
+      if (huella && huella !== data.huella) onNewVersion(huella);
     };
     function probe() {
       if (doc.hidden || state.pendingReload) return;
@@ -3211,14 +3276,19 @@ var CoachFormato = (function () {
     probe();
     timer = setInterval(probe, 3000);
   }
-  function onNewVersion() {
+  function onNewVersion(huella) {
     if (state.pendingReload) return;
     state.pendingReload = true;
-    // Con la autoevaluación a medias no se recarga sola: se ofrece el botón.
-    if (routeParts()[2] === "repaso" && $(".flash")) {
+    var tried = window.name === "coach-recarga:" + huella;
+    try { tried = tried || sessionStorage.getItem("coach.recarga") === huella; } catch (e) { /* sin almacenamiento */ }
+    // Nunca dos recargas por la misma versión (un cuaderno a medio regenerar no la trae): entonces, botón.
+    // Con la autoevaluación a medias tampoco se recarga sola.
+    if (tried || (routeParts()[2] === "repaso" && $(".flash"))) {
       showBanner("info", "El coach actualizó el cuaderno.", h("button", { class: "btn small", type: "button", onclick: reloadKeepingPlace }, icon("reload"), "Recargar"));
       return;
     }
+    window.name = "coach-recarga:" + huella;
+    try { sessionStorage.setItem("coach.recarga", huella); } catch (e) { /* sin almacenamiento */ }
     reloadKeepingPlace();
   }
   function reloadKeepingPlace() {

@@ -86,6 +86,7 @@ Indica la tabla de origen de las filas.
 
 
 FIXTURE_31 = ROOT / "tests" / "fixtures" / "hb-coach-3.1.0-a-medias" / "aprendizaje"
+FIXTURE_PLANTILLA = ROOT / "tests" / "fixtures" / "hb-coach-3.0.1-plantilla"
 
 # Cabecera y primer bloque de una lección en el modelo «el cuaderno es el aula»: se escriben antes de que
 # el estudiante lo intente (sin soluciones) y su intento y la corrección llegan después con `corregir`.
@@ -202,7 +203,7 @@ class CoachTest(unittest.TestCase):
 
     def lesson_with_note(self, lid="1.1"):
         self.ok("leccion", "sql", lid)
-        self.ok("nota", "sql", lid, stdin=BLOCK)
+        self.ok("nota", "sql", lid, "--forzar", stdin=BLOCK)
         self.ok("nota", "sql", lid, "--seccion", "objetivos", stdin="> **En una frase:** columnas.\n\n- Elegir columnas.")
         self.ok("nota", "sql", lid, "--seccion", "resumen", stdin="«SELECT elige columnas.»")
         self.ok("nota", "sql", lid, "--seccion", "fuentes", stdin="- [SELECT](https://sqlite.org/lang_select.html)")
@@ -311,7 +312,7 @@ class CoachTest(unittest.TestCase):
     def test_nota_inserta_el_bloque_antes_del_cierre(self):
         self.init_topic()
         self.ok("leccion", "sql", "1.1")
-        out = self.ok("nota", "sql", "1.1", stdin=BLOCK).stdout
+        out = self.ok("nota", "sql", "1.1", "--forzar", stdin=BLOCK).stdout
         self.assertIn("bloque añadido (📖 Teoría · 1. Qué devuelve SELECT)", out)
         text = self.note_path("1.1").read_text(encoding="utf-8")
         self.assertLess(text.index("## 📖 Teoría"), text.index("## Resumen con tus palabras"))
@@ -383,7 +384,7 @@ class CoachTest(unittest.TestCase):
     def test_nota_reemplaza_varias_secciones_en_una_llamada(self):
         self.init_topic()
         self.ok("leccion", "sql", "1.1")
-        out = self.ok("nota", "sql", "1.1", stdin="## Objetivos\n\n- Elegir columnas.\n\n" + BLOCK).stdout
+        out = self.ok("nota", "sql", "1.1", "--forzar", stdin="## Objetivos\n\n- Elegir columnas.\n\n" + BLOCK).stdout
         self.assertIn("sección «Objetivos» reemplazada", out)
         self.ok("nota", "sql", "1.1", stdin="## Resumen con tus palabras\n\n«Columnas.»\n\n## Fuentes\n\n- [SQLite](https://sqlite.org)")
         text = self.note_path("1.1").read_text(encoding="utf-8")
@@ -464,7 +465,7 @@ class CoachTest(unittest.TestCase):
     def test_bloque_no_escribe_soluciones_ni_se_salta_lo_pendiente(self):
         self.init_topic()
         sol = BLOQUE_1 + "\n<details>\n<summary>Solución</summary>\n\nSELECT title, year;\n\n</details>\n"
-        self.assertIn("Solución", self.fails("bloque", "sql", "1.1", stdin=sol).stderr)
+        self.assertIn("solución", self.fails("bloque", "sql", "1.1", stdin=sol).stderr)
         self.assertFalse(list((self.space / "sql" / "lecciones").glob("1.1-*")))
         self.assertIn("coach corregir", self.fails("bloque", "sql", "1.1", stdin=BLOQUE_1 + "\n**Tu intento:** x").stderr)
         self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
@@ -518,7 +519,7 @@ class CoachTest(unittest.TestCase):
 
     def test_completar_exige_el_cierre_con_contenido_y_nada_pendiente(self):
         self.init_topic()
-        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.ok("bloque", "sql", "1.1", stdin=HEADER.replace("2. **Filtrar con WHERE** — 📖 → 🛠\n", "") + BLOQUE_1)
         self.ok("nota", "sql", "1.1", stdin="## Resumen con tus palabras\n\n«Columnas.»\n\n## Fuentes\n\n"
                                               "- [SQLite](https://sqlite.org)")
         self.assertIn("el bloque 1 aún espera el intento del reto 1", self.fails("completar", "sql", "1.1").stderr)
@@ -532,6 +533,7 @@ class CoachTest(unittest.TestCase):
         reto = ("## 🛠 Práctica · 1. X\n\n### 🧩 Reto 1 · X\n\n**Resultado esperado**\n\nAlgo.\n\n"
                 "<details>\n<summary>Solución</summary>\n\nY\n\n</details>")
         self.assertIn("sin el intento", self.fails("nota", "sql", "1.1", stdin=reto).stderr)
+        self.assertIn("coach bloque", self.fails("nota", "sql", "1.1", stdin="## 📖 Teoría · 1. X\n\nAlgo.").stderr)
         self.ok("nota", "sql", "1.1", "--forzar", stdin=reto)
         self.assertIn("el reto 1 tiene la solución pero no el intento", self.ok("check", "sql").stdout)
 
@@ -553,7 +555,8 @@ class CoachTest(unittest.TestCase):
                                                        stdin="**P3.** x" + DETALLE % "y").stderr)
         out = self.ok("corregir", "sql", "repaso", stdin="**P1.** tu respuesta: *columnas* ✔\n\n"
                                                           "**P2.** tu respuesta: *columnas* ✘").stdout
-        self.assertIn("Quedan por corregir: P2", out)
+        self.assertNotIn("Quedan por corregir", out)
+        self.assertIn("el del primer intento", out)
         self.assertIn("solo hay preguntas", self.fails("corregir", "sql", "repaso", stdin="algo").stderr)
         self.ok("repaso", "sql", "1.1", "--bien")
         self.ok("repaso", "sql", "H1", "--mal")
@@ -591,6 +594,99 @@ class CoachTest(unittest.TestCase):
         self.assertEqual((self.space / ".cuaderno-version.js").read_text(encoding="utf-8"), latido)
         self.ok("glosario", "sql", "Tabla", "Conjunto de filas.")
         self.assertNotEqual((self.space / ".cuaderno-version.js").read_text(encoding="utf-8"), latido)
+
+    def test_bloque_rechaza_soluciones_con_otro_nombre_y_las_pistas_no_cierran(self):
+        self.init_topic()
+        for summary in ("💡 Ver solución", "Answer", "<b>Solución</b>", "Respuesta"):
+            texto = BLOQUE_1 + "\n<details>\n<summary>%s</summary>\n\nx\n\n</details>\n" % summary
+            self.assertIn("solución", self.fails("bloque", "sql", "1.1", stdin=texto).stderr, summary)
+        pista = BLOQUE_1 + "\n<details>\n<summary>💡 Pista</summary>\n\nMira FROM.\n\n</details>\n"
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + pista.replace("Formato", "Formato de tu respuesta: ") +
+                "\nFormato de tu respuesta: una línea.\n")
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** ok · **Veredicto:** ✔")
+        self.assertEqual(self.siguiente()["bloque"]["espera"], "las respuestas a P1–P2")
+
+    def test_bloque_exige_secciones_de_bloque_preguntas_nuevas_y_orden(self):
+        self.init_topic()
+        self.assertIn("no es una sección de bloque", self.fails("bloque", "sql", "1.1",
+                                                                stdin=BLOQUE_1 + "\n## Ejemplo\n\nAlgo.").stderr)
+        self.assertIn("no tiene preguntas", self.fails("bloque", "sql", "1.1",
+                                                       stdin="## ❓ Preguntas · 1. Nada\n\nPiensa.").stderr)
+        self.assertIn("el 1, no el 2", self.fails("bloque", "sql", "1.1", "2", stdin=BLOQUE_1.replace("· 1.", "· 2.")).stderr)
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** ok · **Veredicto:** ✔\n\n**P1.** tu respuesta: *a* ✔"
+                                                  "\n\n**P2.** tu respuesta: *2* ✔")
+        repetida = "## 🛠 Práctica · 2. X\n\n### 🧩 Reto 2 · X\n\n**Resultado esperado**\n\nAlgo.\n\n" \
+                   "## ❓ Preguntas · 2. Y\n\n- **P1.** ¿Otra vez?"
+        self.assertIn("la siguiente libre es P3", self.fails("bloque", "sql", "1.1", stdin=repetida).stderr)
+        self.ok("bloque", "sql", "1.1", stdin=repetida.replace("**P1.**", "**P3.**"))
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** y · **Veredicto:** ✔")
+        self.assertEqual(self.siguiente()["bloque"]["espera"], "la respuesta a P3")
+
+    def test_un_fallo_en_el_primer_intento_no_lleva_la_solucion(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        solucion = "\n\n<details>\n<summary>Solución</summary>\n\nz\n\n</details>"
+        self.assertIn("segundo intento", self.fails("corregir", "sql", "1.1",
+                                                    stdin="**Tu intento:** x · **Veredicto:** ✘" + solucion).stderr)
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** x · **Veredicto:** ✔" + solucion)
+        self.assertIn("segundo intento", self.fails("corregir", "sql", "1.1",
+                                                    stdin="**P1.** tu respuesta: *b* ✘" + DETALLE % "La tabla.").stderr)
+        self.ok("corregir", "sql", "1.1", "--forzar", stdin="**P1.** tu respuesta: *b* ✘" + DETALLE % "La tabla.")
+
+    def test_saltar_un_bloque_lo_deja_aplazado(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        out = self.ok("bloque", "sql", "1.1", "--forzar", stdin="## 🛠 Práctica · 2. W\n\n### 🧩 Reto 2 · W\n\n"
+                                                                  "**Resultado esperado**\n\nFilas.").stdout
+        self.assertIn("aplazado", out)
+        self.assertIn("**Aplazado:**", self.note_path("1.1").read_text(encoding="utf-8"))
+        self.assertEqual(self.siguiente()["bloque"]["n"], 2)
+        self.assertIn("reto 2 cerrado", self.ok("corregir", "sql", "1.1",
+                                                stdin="**Tu intento:** w · **Veredicto:** ✔").stdout)
+        self.ok("nota", "sql", "1.1", stdin="## Resumen con tus palabras\n\n«x»\n\n## Fuentes\n\n- [S](https://sqlite.org)")
+        self.assertIn("quedan aplazados: reto 1, P1, P2", self.fails("completar", "sql", "1.1").stderr)
+
+    def test_completar_pide_los_bloques_del_mapa_y_sin_mapa_se_puede_seguir(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1)
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** ok · **Veredicto:** ✔\n\n**P1.** tu respuesta: *a* ✔"
+                                                  "\n\n**P2.** tu respuesta: *2* ✔")
+        self.ok("nota", "sql", "1.1", stdin="## Resumen con tus palabras\n\n«x»\n\n## Fuentes\n\n- [S](https://sqlite.org)")
+        self.assertIn("faltan los bloques 2 del mapa", self.fails("completar", "sql", "1.1").stderr)
+        self.ok("bloque", "sql", "1.2", stdin=BLOQUE_1)
+        self.ok("corregir", "sql", "1.2", stdin="**Tu intento:** ok · **Veredicto:** ✔\n\n**P1.** tu respuesta: *a* ✔"
+                                                  "\n\n**P2.** tu respuesta: *2* ✔")
+        step = self.siguiente()
+        self.assertIn("no tiene mapa", step["texto"])
+        self.assertTrue(any(" bloque sql 1.2 2" in c for c in step["comandos"]))
+
+    def test_una_pregunta_dentro_de_un_comentario_no_cuenta(self):
+        self.init_topic()
+        self.ok("bloque", "sql", "1.1", stdin=HEADER + BLOQUE_1.replace(
+            "**P2.**", "<!-- para más adelante:\n**P9.** ¿Y JOIN?\n-->\n\n**P2.**"))
+        self.ok("corregir", "sql", "1.1", stdin="**Tu intento:** ok · **Veredicto:** ✔\n\n**P1.** tu respuesta: *a* ✔"
+                                                  "\n\n**P2.** tu respuesta: *2* ✔")
+        self.assertIn("bloque 1 terminado", self.siguiente()["texto"])
+
+    def test_una_nota_de_la_plantilla_30_no_cuenta_como_bloque(self):
+        self.copy_fixture()
+        plantilla = (FIXTURE_PLANTILLA / "2.1-primeros-pasos-con-hilt.md").read_text(encoding="utf-8")
+        path = self.space / "hilt" / "lecciones" / "2.1-configurar-hilt-con-ksp.md"
+        path.write_text(plantilla, encoding="utf-8")
+        text = self.plan_hilt().replace('leccion_actual: "1.3"', 'leccion_actual: "2.1"')
+        (self.space / "hilt" / "PLAN.md").write_text(text, encoding="utf-8")
+        step = json.loads(self.ok("siguiente", "hilt", "--json").stdout)
+        step = step.get("despues", step)
+        self.assertIn("la nota aún no tiene bloques", step["texto"])
+        out = self.ok("bloque", "hilt", "2.1", stdin=HEADER + BLOQUE_1).stdout
+        self.assertIn("Quitadas 3 sección(es) de la plantilla", out)
+        nota = path.read_text(encoding="utf-8")
+        self.assertNotIn("[[COMPLETAR: subtítulo]]", nota)
+        self.assertIn("## 📖 Teoría · 1. Qué devuelve SELECT", nota)
+
+    def plan_hilt(self):
+        return (self.space / "hilt" / "PLAN.md").read_text(encoding="utf-8")
 
     # ---------------------------------------------------------------- glosario y dudas
 
@@ -909,12 +1005,16 @@ class CoachTest(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_el_cuaderno_nunca_muestra_marcadores_ni_comentarios(self):
-        carlos = next((FIXTURE_31 / "algebra" / "lecciones").glob("1.3-*.md")).read_text(encoding="utf-8")
+        a_medias = next((FIXTURE_31 / "algebra" / "lecciones").glob("1.3-*.md")).read_text(encoding="utf-8")
         antigua = next((FIXTURE_301 / "hilt" / "lecciones").glob("1.3-*.md")).read_text(encoding="utf-8")
+        plantilla = (FIXTURE_PLANTILLA / "2.1-primeros-pasos-con-hilt.md").read_text(encoding="utf-8")
         codigo = "```html\n<!-- en el código se queda -->\n```\n\nTexto `<!-- en línea -->` y <!-- fuera --> fin."
-        limpia, vieja, cod = self.formato([{"op": "limpiar", "texto": t.split("\n---\n", 1)[-1]}
-                                           for t in (carlos, antigua)] + [{"op": "limpiar", "texto": codigo}])
-        for text in (limpia, vieja):
+        limpia, vieja, vacia, cod = self.formato([{"op": "limpiar", "texto": t.split("\n---\n", 1)[-1]}
+                                                  for t in (a_medias, antigua, plantilla)] + [{"op": "limpiar", "texto": codigo}])
+        for etiqueta in ("Ejemplo mínimo", "En tu proyecto", "<details>", "Bloques de esta lección", "## Fuentes"):
+            self.assertNotIn(etiqueta, vacia)
+        self.assertIn("Configurar Hilt en la app.", vacia)
+        for text in (limpia, vieja, vacia):
             self.assertNotIn("[[", text)
             self.assertNotIn("<!--", text)
         self.assertNotIn("## Resumen con tus palabras", limpia)
@@ -940,6 +1040,12 @@ class CoachTest(unittest.TestCase):
         for base in (FIXTURE_301 / "hilt", FIXTURE_31 / "algebra", SKILL / "assets" / "ejemplo" / "hilt",
                      SKILL / "assets" / "ejemplo" / "estadistica-ab"):
             notas += [p.read_text(encoding="utf-8") for p in sorted((base / "lecciones").glob("*.md"))]
+        notas += [p.read_text(encoding="utf-8") for p in sorted(FIXTURE_PLANTILLA.glob("*.md"))]
+        notas.append("## Objetivos\n\n**Bloques de la lección:**\n\n- **Uno** — 📖\n- **Dos** — 🛠\n\n"
+                     "## Teoría · 1. Sin emoji\n\nTexto.\n\n## ❓ Preguntas · 1. Lista\n\n- **P1.** ¿Qué?\n"
+                     "<!-- nota:\n**P7.** oculta\n-->\n\n<details>\n<summary>💡 Pista</summary>\n\nAlgo.\n\n</details>\n"
+                     "\n## 🛠 Práctica · 2. Aplazada\n\n### 🧩 Reto 2 · X\n\n**Resultado esperado**\n\nY.\n\n"
+                     "**Aplazado:** 2026-11-14\n")
 
         def resumen(info):
             return {"mapa": [[e["n"], e["titulo"]] for e in info["mapa"]],

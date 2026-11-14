@@ -113,7 +113,7 @@ Si se atasca, sube un peldaño cada vez y solo si hace falta (las pistas escrita
 4. **Esqueleto con huecos**.
 5. **Solución comentada**: solo si la pide o tras varios intentos; después, una variación para comprobar que la entendió.
 
-Anota en qué peldaño lo resolvió: es información para los repasos. El esqueleto no puede ser la solución con un hueco trivial: deja por hacer la idea de la lección. En el cuaderno las pistas se revelan de una en una y la solución pide confirmar que ya lo intentó.
+Anota en qué peldaño lo resolvió: es información para los repasos. El esqueleto no puede ser la solución con un hueco trivial: deja por hacer la idea de la lección. En el cuaderno las pistas se revelan de una en una; tras su intento quedan plegadas a la vista, igual que la solución cuando el reto se cierra.
 
 ## 5. Preguntas: lista de control, tipos y calibración
 

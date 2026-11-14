@@ -134,9 +134,13 @@ def read_text(p):
 
 
 def write_text(p, s):
-    Path(p).parent.mkdir(parents=True, exist_ok=True)
-    with open(str(p), "w", encoding="utf-8", newline="\n") as f:
+    """Escribe de forma atómica (temporal y os.replace): quien lea a la vez, como el cuaderno, nunca ve medio archivo."""
+    p = Path(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(".%s.%d.tmp" % (p.name, os.getpid()))
+    with open(str(tmp), "w", encoding="utf-8", newline="\n") as f:
         f.write(s)
+    os.replace(str(tmp), str(p))
 
 
 def rel(p):
@@ -386,14 +390,11 @@ FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 def find_section(lines, rx, level=2, start=0):
     """(línea del encabezado, línea donde termina) de la primera sección ## que coincide con rx."""
-    in_fence = False
+    code = code_mask(lines)
     head = None
     for i in range(start, len(lines)):
         line = lines[i]
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
+        if code[i]:
             continue
         h = HEADING_RE.match(line)
         if h and len(h.group(1)) <= level:
@@ -461,13 +462,10 @@ CLOSING_RE = re.compile(r"^##\s+(?:resumen con tus palabras|fuentes|historial|re
 def insert_before_closing(text, content):
     """Inserta un bloque de Markdown antes de las secciones de cierre (o al final)."""
     lines = text.split("\n")
-    in_fence = False
+    code = code_mask(lines)
     block = content.split("\n")
     for i, line in enumerate(lines):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if not in_fence and CLOSING_RE.match(line.strip()):
+        if not code[i] and CLOSING_RE.match(line.strip()):
             head = lines[:i]
             while head and head[-1].strip() == "":
                 head.pop()
@@ -1350,11 +1348,10 @@ def note_target(topic, ident):
 def replace_known_sections(text, content):
     """Reemplaza las secciones conocidas que vengan en el contenido (con su encabezado ##) y devuelve el resto."""
     lines = content.split("\n")
-    chunks, cur, in_fence = [], {"title": None, "lines": []}, False
-    for line in lines:
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-        h = None if in_fence else re.match(r"^##\s+(.+?)\s*$", line)
+    code = code_mask(lines)
+    chunks, cur = [], {"title": None, "lines": []}
+    for i, line in enumerate(lines):
+        h = None if code[i] else re.match(r"^##\s+(.+?)\s*$", line)
         if h:
             chunks.append(cur)
             cur = {"title": h.group(1), "lines": []}
@@ -1409,6 +1406,13 @@ def cmd_nota(pos, opts):
         if not (ATTEMPT_RE.search(prose) or ANSWER_RE.search(prose)):
             raise CoachError("El texto trae una «Solución» o una «Respuesta completa» sin el intento del estudiante. Se "
                              "escriben después de su intento, con coach corregir (si es otra cosa, usa --forzar).")
+    if content and label.startswith("lecci") and not opts.get("forzar"):
+        cl = content.split("\n")
+        cm = code_mask(cl)
+        if any(not cm[i] and block_head(l) for i, l in enumerate(cl)):
+            raise CoachError("Los bloques 📖/🛠/❓ se escriben con coach bloque %s %s (los numera, comprueba que el anterior "
+                             "terminó y no deja pasar soluciones). Si de verdad es un bloque ya terminado, usa --forzar."
+                             % (topic["slug"], pos[1]))
     text = read_text(path)
     did = []
     if content and not seccion:
@@ -1444,37 +1448,74 @@ def cmd_nota(pos, opts):
 
 # --------------------------------------------------------------------------- bloques: el cuaderno es el aula
 
-# Un bloque n son las secciones «## 📖 Teoría · n.», «## 🛠 Práctica · n.» y «## ❓ Preguntas · n.» de la nota.
-# Su estado se deduce del contenido (sirve igual para notas de la 3.0 y la 3.1 y para el modo manual):
-# un reto se cierra con su «Solución» (o con ✔ y sin ✘ tras el intento); una pregunta, con su respuesta completa.
-BLOCK_HEAD_RE = re.compile(r"^##\s+(\U0001F4D6|\U0001F6E0|\u2753)\uFE0F?\s*(.*?)\s*#*\s*$")
-BLOCK_KIND = {"\U0001F4D6": "teoria", "\U0001F6E0": "practica", "\u2753": "preguntas"}
-BLOCK_ICON = {"teoria": "\U0001F4D6", "practica": "\U0001F6E0", "preguntas": "\u2753"}
-BLOCK_NUM_RE = re.compile(r"\u00B7\s*([0-9]+)\s*[.):]?\s*(.*)$")
-Q_LINE_RE = re.compile(r"^\*\*P([0-9]+)\.?\*\*")
+# Un bloque n son las secciones «## 📖 Teoría · n.», «## 🛠 Práctica · n.» y «## ❓ Preguntas · n.» de la nota
+# (también sin el emoji). Su estado se deduce del contenido, así que sirve igual para notas de la 3.0 y la 3.1 y
+# para el modo manual: un reto se cierra con su solución (o con ✔ y sin ✘ tras el intento); una pregunta, con su
+# respuesta completa (o con ✔ y sin ✘). Las etiquetas de estructura van siempre en español. Las secciones cuyo
+# encabezado conserva un marcador [[COMPLETAR]] son restos de la plantilla de la 3.0 y no cuentan.
+# CoachFormato, en assets/cuaderno.html, replica estas reglas: si cambias una, cambia la otra (hay un test de paridad).
+VS16 = "\N{VARIATION SELECTOR-16}"
+BLOCK_ICONS = {"\N{OPEN BOOK}": "teoria", "\N{HAMMER AND WRENCH}": "practica", "\N{BLACK QUESTION MARK ORNAMENT}": "preguntas"}
+BLOCK_ICON = {v: k for k, v in BLOCK_ICONS.items()}
+BLOCK_WORDS = (("teoria", re.compile(r"^teor[ií]a\b", re.I)),
+               ("practica", re.compile(r"^pr[aá]ctica\b", re.I)),
+               ("preguntas", re.compile(r"^(?:preguntas|comprobaci[oó]n de dominio)\b", re.I)))
+H2_RE = re.compile(r"^##\s+(.+?)\s*#*\s*$")
+BLOCK_NUM_RE = re.compile("\N{MIDDLE DOT}" + r"\s*([0-9]+)\s*[.):]?\s*(.*)$")
+MARKER_RE = re.compile(r"\[\[(?:COMPLETAR|pendiente)", re.I)
+Q_LINE_RE = re.compile(r"^(?:[-*+]\s+|[0-9]+[.)]\s+)?\*\*P([0-9]+)\.?\*\*")
 RETO_NUM_RE = re.compile(r"\breto\s+([0-9]+)", re.I)
-SOL_RE = re.compile(r"<summary>\s*soluci[o\u00F3]n", re.I)
-FULL_RE = re.compile(r"<summary>\s*respuesta completa", re.I)
-SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*(?:</summary>|$)", re.I)
-ATTEMPT_RE = re.compile(r"\b(?:tu|segundo|tercer)\s+intento\**\s*:", re.I)
-ANSWER_RE = re.compile(r"\btu\s+respuesta\**\s*:|\bsegundo\s+intento\**\s*:", re.I)
-MAP_RE = re.compile(r"^\s*\*\*bloques(?: de esta lecci[o\u00F3]n)?\s*:?\s*\*\*\s*:?\s*(.*)$", re.I)
+SUMMARY_RE = re.compile(r"<summary>(.*?)(?:</summary>|$)", re.I)
+HINT_WORDS_RE = re.compile(r"^(?:pista|hint|ayuda|clue)\b", re.I)
+SOLUTION_WORDS_RE = re.compile(r"soluci[oó]n|solution|respuesta|answer", re.I)
+ATTEMPT_RE = re.compile(r"\*\*\s*(?:tu|segundo|tercer)\s+intento\s*:?\s*\*\*", re.I)
+ANSWER_RE = re.compile("\N{EM DASH}" + r"\s*tu\s+respuesta\s*:|" + "\N{RIGHTWARDS ARROW}" + r"\s*segundo\s+intento\s*:|"
+                       r"\*\*\s*(?:tu\s+respuesta|segundo\s+intento)\s*:?\s*\*\*", re.I)
+APLAZADO_RE = re.compile(r"\*\*\s*aplazad[oa]\s*:?\s*\*\*", re.I)
+MAP_RE = re.compile(r"^\s*\*\*bloques(?: de (?:esta|la) lecci[oó]n)?\s*:?\s*\*\*\s*:?\s*(.*)$", re.I)
+MAP_ITEM_RE = re.compile(r"^\s*([0-9]+)[.)]\s+(.+?)\s*$")
+MAP_BULLET_RE = re.compile(r"^\s*[-*+]\s+(.+?)\s*$")
 # Prácticas de la 3.0, sin «### Reto»: se dan por hechas cuando «Lo que observaste» tiene contenido.
 OBSERVED_RE = re.compile(r"lo que observaste\**\s*:\**\s*(.*)$", re.I)
+NOT_QUESTIONS_RE = re.compile(r"^(?:resumen con tus palabras|fuentes|historial|resultado|objetivos|resumen|"
+                              r"qu[eé] cubre|qu[eé] toca hoy)\b", re.I)
+OK_CHARS = "\N{HEAVY CHECK MARK}\N{WHITE HEAVY CHECK MARK}\N{CHECK MARK}"
+KO_CHARS = "\N{HEAVY BALLOT X}\N{BALLOT X}\N{CROSS MARK}"
 
 
 def observed(line):
     m = OBSERVED_RE.search(line)
     return bool(m and m.group(1).strip() and not m.group(1).strip().startswith("[["))
-MAP_ITEM_RE = re.compile(r"^\s*([0-9]+)[.)]\s+(.+?)\s*$")
-NOT_QUESTIONS_RE = re.compile(r"^(?:resumen con tus palabras|fuentes|historial|resultado|objetivos|resumen|"
-                              r"qu[e\u00E9] cubre|qu[e\u00E9] toca hoy)\b", re.I)
-OK_CHARS = "\u2714\u2705\u2713"
-KO_CHARS = "\u2718\u2717\u274C"
+
+
+def block_head(line):
+    """(icono, tipo, resto) si la línea es un encabezado ## de bloque, con o sin su emoji; si no, None."""
+    m = H2_RE.match(line)
+    if not m:
+        return None
+    title = m.group(1).replace(VS16, "").strip()
+    if title[:1] in BLOCK_ICONS:
+        return title[:1], BLOCK_ICONS[title[:1]], title[1:].strip()
+    for kind, rx in BLOCK_WORDS:
+        if rx.match(title):
+            return "", kind, title
+    return None
+
+
+def summary_kind(line):
+    """«pista», «solucion» u «otro» según el <summary> de la línea; None si no tiene."""
+    m = SUMMARY_RE.search(line)
+    if not m:
+        return None
+    t = re.sub(r"<[^>]+>", "", m.group(1))
+    t = re.sub(r"^[\W_]+", "", t).strip()
+    if HINT_WORDS_RE.match(t):
+        return "pista"
+    return "solucion" if SOLUTION_WORDS_RE.search(t) else "otro"
 
 
 def code_mask(lines):
-    """True en las líneas de código (vallas incluidas) y del frontmatter: ahí no se buscan bloques ni retos."""
+    """True en las líneas de código (vallas incluidas), del frontmatter y de los comentarios HTML de varias líneas."""
     mask = [False] * len(lines)
     if lines and lines[0].strip() == "---":
         for i in range(1, len(lines)):
@@ -1482,14 +1523,22 @@ def code_mask(lines):
                 for j in range(i + 1):
                     mask[j] = True
                 break
-    fence = None
+    fence, comment = None, False
     for i, line in enumerate(lines):
-        if mask[i] and fence is None:
+        if mask[i] and fence is None and not comment:
+            continue
+        if comment:
+            mask[i] = True
+            if "-->" in line:
+                comment = False
             continue
         m = re.match(r"^\s*(```+|~~~+)", line)
         if fence is None:
             if m:
                 fence = m.group(1)
+                mask[i] = True
+            elif "<!--" in line and "-->" not in line[line.index("<!--"):]:
+                comment = True
                 mask[i] = True
         else:
             mask[i] = True
@@ -1505,14 +1554,15 @@ def map_title(raw):
     if m:
         s = m.group(1)
     else:
-        s = re.split(r"\s*(?:\u2192|->)\s*", s)[0]
-        s = re.split(r"\s+[\u00B7\u2014\u2013|]\s+", s)[0]
-    s = re.sub("[\U0001F4D6\U0001F6E0\u2753\U0001F9E9\uFE0F]", "", s).strip(" .:-\u00B7")
+        s = re.split(r"\s*(?:" + "\N{RIGHTWARDS ARROW}" + r"|->)\s*", s)[0]
+        s = re.split(r"\s+[" + "\N{MIDDLE DOT}\N{EM DASH}\N{EN DASH}" + r"|]\s+", s)[0]
+    s = re.sub("[" + "".join(BLOCK_ICONS) + "\N{JIGSAW PUZZLE PIECE}" + VS16 + "]", "", s)
+    s = s.strip(" .:-" + "\N{MIDDLE DOT}")
     return (s[:1].upper() + s[1:]) if s else ""
 
 
 def parse_map(lines, code):
-    """Mapa de bloques («**Bloques:**» en Objetivos): lista numerada o, en notas de la 3.1, una sola línea."""
+    """Mapa de bloques («**Bloques:**» en Objetivos): lista numerada o de viñetas, o una sola línea (3.1)."""
     items = []
     for i, line in enumerate(lines):
         if code[i]:
@@ -1523,7 +1573,7 @@ def parse_map(lines, code):
         rest = m.group(1).strip()
         if rest:
             if not PENDING_RE.search(rest):
-                for part in re.split(r"(?:^|\s+\u00B7\s+)(?=[0-9]+[.)]\s)", rest):
+                for part in re.split(r"(?:^|\s+" + "\N{MIDDLE DOT}" + r"\s+)(?=[0-9]+[.)]\s)", rest):
                     pm = MAP_ITEM_RE.match(part)
                     if pm:
                         items.append({"n": int(pm.group(1)), "titulo": map_title(pm.group(2))})
@@ -1533,9 +1583,13 @@ def parse_map(lines, code):
                 if code[j] or HEADING_RE.match(s):
                     break
                 pm = MAP_ITEM_RE.match(s)
-                if pm and not PENDING_RE.search(s):
-                    items.append({"n": int(pm.group(1)), "titulo": map_title(pm.group(2))})
-                elif s.strip() and not s.startswith((" ", "\t")) and not pm:
+                bm = None if pm or s.startswith((" " * 2, "\t")) else MAP_BULLET_RE.match(s)
+                if (pm or bm) and not PENDING_RE.search(s):
+                    if pm:
+                        items.append({"n": int(pm.group(1)), "titulo": map_title(pm.group(2))})
+                    else:
+                        items.append({"n": len(items) + 1, "titulo": map_title(bm.group(1))})
+                elif s.strip() and not s.startswith((" ", "\t")) and not pm and not bm:
                     break
         break
     seen, out_items = set(), []
@@ -1557,17 +1611,14 @@ def item_status(kind, lines, code, a, b, k, n):
         if m:
             first, pos = i, m.start()
             break
-    final = False
+    final = deferred = False
     for i in range(a, b):
         if code[i]:
             continue
         if kind == "reto" and observed(lines[i]):
             final = True
-        if kind == "reto":
-            final = final or bool(SOL_RE.search(lines[i]))
-        else:
-            sm = SUMMARY_RE.search(lines[i])
-            final = final or bool(sm and not re.match(r"pista", sm.group(1), re.I))
+        final = final or summary_kind(lines[i]) == "solucion"
+        deferred = deferred or bool(APLAZADO_RE.search(lines[i]))
     ok = ko = 0
     if first is not None:
         tail = "\n".join([lines[first][pos:]] + [lines[i] for i in range(first + 1, b) if not code[i]])
@@ -1575,8 +1626,8 @@ def item_status(kind, lines, code, a, b, k, n):
         ko = sum(tail.count(c) for c in KO_CHARS)
     answered = first is not None
     closed = final or (answered and ok > 0 and ko == 0)
-    return {"tipo": kind, "k": k, "n": n, "linea": a, "fin": b, "intento": answered, "final": final,
-            "estado": "cerrado" if closed else ("segundo" if answered else "pendiente")}
+    estado = "cerrado" if closed else ("aplazado" if deferred else ("segundo" if answered else "pendiente"))
+    return {"tipo": kind, "k": k, "n": n, "linea": a, "fin": b, "intento": answered, "final": final, "estado": estado}
 
 
 def scan_note(text):
@@ -1594,11 +1645,12 @@ def scan_note(text):
         if lvl != 2:
             continue
         end = next((j for j, l2, _ in heads[idx + 1:] if l2 <= 2), len(lines))
-        sec = {"titulo": title, "linea": i, "fin": end, "kind": None, "n": None, "sub": ""}
-        bm = BLOCK_HEAD_RE.match(lines[i])
-        if bm:
-            sec["kind"] = BLOCK_KIND[bm.group(1)]
-            nm = BLOCK_NUM_RE.search(bm.group(2))
+        sec = {"titulo": title, "linea": i, "fin": end, "kind": None, "n": None, "sub": "",
+               "plantilla": bool(MARKER_RE.search(title))}
+        bh = block_head(lines[i])
+        if bh and not sec["plantilla"]:
+            sec["kind"] = bh[1]
+            nm = BLOCK_NUM_RE.search(bh[2])
             if nm:
                 sec["n"], sec["sub"] = int(nm.group(1)), nm.group(2).strip()
         sections.append(sec)
@@ -1614,7 +1666,7 @@ def scan_note(text):
 
     retos, preguntas = [], []
     for idx, (i, lvl, title) in enumerate(heads):
-        if lvl != 3 or not RETO_RE.match(lines[i]):
+        if lvl != 3 or not RETO_RE.match(lines[i]) or MARKER_RE.search(title):
             continue
         sec = section_at(i)
         if sec is None or not sec["kind"]:
@@ -1630,7 +1682,7 @@ def scan_note(text):
     qlines = [i for i, line in enumerate(lines) if not code[i] and Q_LINE_RE.match(line.lstrip())]
     for qi, i in enumerate(qlines):
         sec = section_at(i)
-        if sec is None or NOT_QUESTIONS_RE.match(sec["titulo"]):
+        if sec is None or sec["plantilla"] or NOT_QUESTIONS_RE.match(sec["titulo"]) or MARKER_RE.search(lines[i]):
             continue
         nxt_q = qlines[qi + 1] if qi + 1 < len(qlines) else len(lines)
         nxt_h = next((j for j, l2, _ in heads if j > i and l2 <= 3), len(lines))
@@ -1644,15 +1696,15 @@ def scan_note(text):
 def id_range(ids):
     ids = sorted(ids)
     if len(ids) > 1 and ids == list(range(ids[0], ids[-1] + 1)):
-        return "P%d\u2013P%d" % (ids[0], ids[-1])
+        return "P%d" % ids[0] + "\N{EN DASH}" + "P%d" % ids[-1]
     return ", ".join("P%d" % i for i in ids)
 
 
 def block_wait(block):
-    """Lo que espera el bloque del estudiante, o None si está terminado."""
+    """Lo que espera el bloque del estudiante, o None si está terminado (lo aplazado no lo detiene)."""
     items = sorted(block["retos"] + block["preguntas"], key=lambda x: x["linea"])
     for idx, it in enumerate(items):
-        if it["estado"] == "cerrado":
+        if it["estado"] in ("cerrado", "aplazado"):
             continue
         if it["tipo"] == "reto":
             name = ("del reto %d" % it["k"]) if it["k"] else ("de la práctica %d" % it["n"])
@@ -1708,7 +1760,8 @@ def note_blocks(text):
         top = max(b["n"] for b in ordered)
         siguiente = next((e for e in sc["mapa"] if e["n"] > top), None)
     return {"mapa": sc["mapa"], "bloques": ordered, "actual": actual, "siguiente": siguiente,
-            "total": max(nums) if nums else 0, "retos": sc["retos"], "preguntas": sc["preguntas"]}
+            "total": max(nums) if nums else 0, "retos": sc["retos"], "preguntas": sc["preguntas"],
+            "plantilla": [s for s in sc["secciones"] if s["plantilla"] and block_head(sc["lineas"][s["linea"]])]}
 
 
 def block_summary(block):
@@ -1717,14 +1770,14 @@ def block_summary(block):
         if kind not in block["tipos"]:
             continue
         if kind == "teoria":
-            parts.append("\U0001F4D6 teoría")
+            parts.append(BLOCK_ICON["teoria"] + " teoría")
         elif kind == "practica":
             ks = [r["k"] for r in block["retos"] if r["k"]]
-            parts.append("\U0001F6E0 " + (("reto %s" % ", ".join(str(k) for k in ks)) if ks else "práctica"))
+            parts.append(BLOCK_ICON["practica"] + " " + (("reto %s" % ", ".join(str(k) for k in ks)) if ks else "práctica"))
         else:
             ks = [q["k"] for q in block["preguntas"]]
-            parts.append("\u2753 " + (id_range(ks) if ks else "preguntas"))
-    return " \u00B7 ".join(parts)
+            parts.append(BLOCK_ICON["preguntas"] + " " + (id_range(ks) if ks else "preguntas"))
+    return (" " + "\N{MIDDLE DOT}" + " ").join(parts)
 
 
 def notebook_link(root, route=""):
@@ -1748,8 +1801,8 @@ def note_route(topic, ident):
 
 
 def has_solution(text):
-    prose = prose_only(text)
-    return bool(SOL_RE.search(prose) or FULL_RE.search(prose))
+    """¿Trae el texto un <details> de solución o de respuesta completa (en cualquier forma)?"""
+    return any(summary_kind(line) == "solucion" for line in prose_only(text).split("\n"))
 
 
 def block_numbers(content):
@@ -1757,33 +1810,33 @@ def block_numbers(content):
     code = code_mask(lines)
     nums = []
     for i, line in enumerate(lines):
-        bm = None if code[i] else BLOCK_HEAD_RE.match(line)
-        if bm:
-            nm = BLOCK_NUM_RE.search(bm.group(2))
+        bh = None if code[i] else block_head(line)
+        if bh:
+            nm = BLOCK_NUM_RE.search(bh[2])
             if nm:
                 nums.append(int(nm.group(1)))
     return nums
 
 
 def number_block_headings(content, n, title):
-    """Pone el número del bloque en los encabezados 📖/🛠/❓ que no lo traen. Devuelve (texto, secciones)."""
+    """Pone el número del bloque (y su emoji) en los encabezados 📖/🛠/❓ que no lo traen. Devuelve (texto, secciones)."""
     lines = content.split("\n")
     code = code_mask(lines)
     count = 0
     for i, line in enumerate(lines):
-        bm = None if code[i] else BLOCK_HEAD_RE.match(line)
-        if not bm:
+        bh = None if code[i] else block_head(line)
+        if not bh:
             continue
         count += 1
-        rest = bm.group(2)
-        if BLOCK_NUM_RE.search(rest):
-            continue
-        if "\u00B7" in rest:
-            head, tail = rest.split("\u00B7", 1)
-            rest = "%s\u00B7 %d. %s" % (head, n, tail.strip() or title)
-        else:
-            rest = "%s \u00B7 %d. %s" % (rest, n, title) if rest else "\u00B7 %d. %s" % (n, title)
-        lines[i] = ("## %s %s" % (bm.group(1), rest.strip())).rstrip(" .")
+        icon, kind, rest = bh
+        if not BLOCK_NUM_RE.search(rest):
+            dot = "\N{MIDDLE DOT}"
+            if dot in rest:
+                head, tail = rest.split(dot, 1)
+                rest = "%s%s %d. %s" % (head, dot, n, tail.strip() or title)
+            else:
+                rest = ("%s %s %d. %s" % (rest, dot, n, title)) if rest else "%s %d. %s" % (dot, n, title)
+        lines[i] = ("## %s %s" % (icon or BLOCK_ICON[kind], rest.strip())).rstrip(" .")
     return "\n".join(lines), count
 
 
@@ -1831,12 +1884,12 @@ def lesson_step(root, topic, cur, opts):
     slug, lid = topic["slug"], cur["id"]
     note = topic["notes"].get(lid)
     step = {"tipo": "leccion", "leccion": lid, "bloque": None, "plan": lesson_plan_detail(topic, cur)}
+    first = ("Una llamada: ## Objetivos (idea en una frase, objetivos y el mapa **Bloques:**) y el bloque 1 entero "
+             "(\U0001F4D6 teoría, \U0001F6E0 reto con resultado esperado y pistas, ❓ preguntas), sin soluciones. "
+             "En la terminal, solo el mensaje corto con el enlace.")
     if note is None:
         step.update(texto="Empezar la lección %s · %s." % (lid, cur["titulo"]),
-                    comandos=[command(opts, "bloque", slug, lid, "1", "<<'EOF'")],
-                    pista="Una llamada: ## Objetivos (idea en una frase, objetivos y el mapa **Bloques:**) y el "
-                          "bloque 1 entero (📖 teoría, 🛠 reto con resultado esperado y pistas, ❓ preguntas), sin "
-                          "soluciones. En la terminal, solo el mensaje corto con el enlace.")
+                    comandos=[command(opts, "bloque", slug, lid, "1", "<<'EOF'")], pista=first)
         return step
     info = note_blocks(note["text"])
     act = info["actual"]
@@ -1844,8 +1897,7 @@ def lesson_step(root, topic, cur, opts):
     if act is None:
         step.update(texto="Seguir la lección %s · %s: la nota aún no tiene bloques." % (lid, cur["titulo"]),
                     comandos=[command(opts, "bloque", slug, lid, "1", "<<'EOF'")],
-                    pista="Una llamada: ## Objetivos (reemplaza la de la plantilla, con el mapa **Bloques:**) y el "
-                          "bloque 1 entero, sin soluciones. En la terminal, solo el mensaje corto con el enlace.")
+                    pista=first + " ## Objetivos reemplaza la de la plantilla.")
         return step
     de = (" de %d" % total) if total else ""
     espera = act["espera"]
@@ -1853,6 +1905,8 @@ def lesson_step(root, topic, cur, opts):
                       "espera": espera["texto"] if espera else "", "lineas": [act["inicio"] + 1, act["fin"]],
                       "enlace": notebook_link(root, lesson_route(slug, lid, act["n"]))}
     nxt = info["siguiente"]
+    top = max(b["n"] for b in info["bloques"])
+    cierre = [command(opts, "nota", slug, lid, "<<'EOF'"), command(opts, "completar", slug, lid)]
     if espera and espera["tipo"] != "lectura":
         step.update(texto="Lección %s · bloque %d%s (%s): espera %s." % (lid, act["n"], de, act["titulo"],
                                                                         espera["texto"]),
@@ -1870,16 +1924,39 @@ def lesson_step(root, topic, cur, opts):
         step.update(texto=texto, comandos=[command(opts, "bloque", slug, lid, str(nxt["n"]), "<<'EOF'")],
                     pista="Adapta el bloque a lo que falló en el anterior. Entero al cuaderno y sin soluciones; en la "
                           "terminal, solo el mensaje corto con el enlace.")
+    elif not info["mapa"]:
+        step.update(texto="Lección %s · bloque %d terminado y la nota no tiene mapa de bloques: escribe el bloque %d o, "
+                          "si era el último, cierra la lección." % (lid, act["n"], top + 1),
+                    comandos=[command(opts, "bloque", slug, lid, str(top + 1), "<<'EOF'")] + cierre,
+                    pista="Añade el mapa (**Bloques:** en ## Objetivos) para que el cuaderno muestre lo que falta.")
     elif note_gaps(note["text"], blocks=False):
         step.update(texto="Lección %s · bloques terminados: pide su resumen con sus palabras y cierra la lección."
                           % lid,
-                    comandos=[command(opts, "nota", slug, lid, "<<'EOF'"), command(opts, "completar", slug, lid)],
+                    comandos=cierre,
                     pista="La llamada de cierre lleva ## Resumen con tus palabras y ## Fuentes. Completa solo si se "
                           "cumplió el criterio de dominio; después, coach sesion.")
     else:
         step.update(texto="Lección %s · lista para cerrar: comprueba el criterio de dominio y complétala." % lid,
                     comandos=[command(opts, "completar", slug, lid)], pista="")
     return step
+
+
+def defer_pending(text, block):
+    """Marca como aplazado lo que el bloque aún esperaba (al saltarlo con --forzar)."""
+    lines = text.split("\n")
+    items = [it for it in block["retos"] + block["preguntas"] if it["estado"] in ("pendiente", "segundo")]
+    for it in sorted(items, key=lambda x: x["linea"], reverse=True):
+        lines = insert_block(lines, chunk_end(lines, it["linea"], it["fin"]), ["**Aplazado:** %s" % today()])
+    return "\n".join(lines), len(items)
+
+
+def drop_template_blocks(text):
+    """Quita las secciones de bloque que quedaron de la plantilla de la 3.0 (encabezado con [[COMPLETAR]])."""
+    info = note_blocks(text)
+    lines = text.split("\n")
+    for sec in sorted(info["plantilla"], key=lambda s: s["linea"], reverse=True):
+        del lines[sec["linea"]:sec["fin"]]
+    return "\n".join(lines), len(info["plantilla"])
 
 
 def cmd_bloque(pos, opts):
@@ -1893,15 +1970,30 @@ def cmd_bloque(pos, opts):
     if not content:
         raise CoachError("Falta el contenido del bloque: pásalo por stdin (heredoc) o con --desde <archivo>.")
     if has_solution(content):
-        raise CoachError("El bloque trae una «Solución» o una «Respuesta completa». Se escriben después del intento del "
-                         "estudiante, con coach corregir: quítalas del bloque.")
-    if ATTEMPT_RE.search(prose_only(content)) or ANSWER_RE.search(prose_only(content)):
+        raise CoachError("El bloque trae una solución o una respuesta completa en un <details>. Se escriben después del "
+                         "intento del estudiante, con coach corregir: quítalas del bloque (las pistas sí van).")
+    prose = prose_only(content)
+    if ATTEMPT_RE.search(prose) or ANSWER_RE.search(prose):
         raise CoachError("El bloque se escribe antes de que lo intente: su intento y la corrección van después, con "
                          "coach corregir %s %s." % (topic["slug"], lesson["id"]))
+    cl = content.split("\n")
+    ccode = code_mask(cl)
+    for i, line in enumerate(cl):
+        hm = None if ccode[i] else H2_RE.match(line)
+        if hm and not block_head(line) and not OBJETIVOS_RE.match(hm.group(1)):
+            raise CoachError("«%s» no es una sección de bloque. Usa «## \U0001F4D6 Teoría · n. …», «## \U0001F6E0 "
+                             "Práctica · n. …» o «## ❓ Preguntas · n. …» (y ## Objetivos la primera vez); lo demás, "
+                             "con ### dentro de ellas." % line.strip())
+    piece = scan_note(content)
+    for sec in piece["secciones"]:
+        if sec["kind"] == "preguntas" and not any(sec["linea"] <= q["linea"] < sec["fin"] for q in piece["preguntas"]):
+            raise CoachError("La sección «%s» no tiene preguntas «**P1.** …»: escríbelas o quita la sección."
+                             % sec["titulo"])
     note = topic["notes"].get(lesson["id"])
     current = note_blocks(note["text"] if note else "")
     written = [b["n"] for b in current["bloques"]]
     nums = block_numbers(content)
+    expected = (max(written) + 1) if written else 1
     if len(pos) >= 3:
         if not re.match(r"^[0-9]+$", pos[2]):
             raise CoachError("El número de bloque debe ser un entero: %s" % pos[2])
@@ -1909,25 +2001,37 @@ def cmd_bloque(pos, opts):
     elif len(set(nums)) == 1:
         n = nums[0]
     else:
-        n = (max(written) + 1) if written else 1
+        n = expected
     if any(x != n for x in nums):
         raise CoachError("Los encabezados traen el número %s, pero estás escribiendo el bloque %d."
                          % (", ".join(str(x) for x in sorted(set(nums))), n))
     if n in written:
         raise CoachError("El bloque %d de la lección %s ya está escrito. Para añadirle algo, coach nota; para anotar "
                          "su intento, coach corregir." % (n, lesson["id"]))
+    if n != expected and not opts.get("forzar"):
+        raise CoachError("El siguiente bloque de la lección %s es el %d, no el %d (los bloques van en orden; --forzar "
+                         "lo salta)." % (lesson["id"], expected, n))
+    used = {q["k"] for q in current["preguntas"]}
+    dup = sorted(used & {q["k"] for q in piece["preguntas"]})
+    if dup:
+        raise CoachError("%s ya existe en la nota: las preguntas se numeran a lo largo de la lección (la siguiente libre "
+                         "es P%d)." % (", ".join("P%d" % k for k in dup), max(used) + 1))
     act = current["actual"]
-    if act is not None and act["espera"] and act["espera"]["tipo"] != "lectura" and not opts.get("forzar"):
+    pending = act is not None and act["espera"] and act["espera"]["tipo"] != "lectura"
+    if pending and not opts.get("forzar"):
         raise CoachError("El bloque %d aún espera %s. Anótalo con coach corregir %s %s o, si de verdad quiere saltarlo, "
-                         "usa --forzar." % (act["n"], act["espera"]["texto"], topic["slug"], lesson["id"]))
-    cl = content.split("\n")
-    title = next((e["titulo"] for e in current["mapa"] + parse_map(cl, code_mask(cl)) if e["n"] == n), "")
+                         "usa --forzar (lo pendiente quedará como aplazado)." % (act["n"], act["espera"]["texto"],
+                                                                                  topic["slug"], lesson["id"]))
+    title = next((e["titulo"] for e in current["mapa"] + piece["mapa"] if e["n"] == n), "")
     content, count = number_block_headings(content, n, title)
     if not count:
         raise CoachError("El bloque necesita al menos una sección «## \U0001F4D6 Teoría · %d. …», «## \U0001F6E0 Práctica · "
-                         "%d. …» o «## \u2753 Preguntas · %d. …»." % (n, n, n))
+                         "%d. …» o «## ❓ Preguntas · %d. …»." % (n, n, n))
     path = open_lesson(topic, lesson, quiet=True)
-    text = read_text(path)
+    text, dropped = drop_template_blocks(read_text(path))
+    deferred = 0
+    if pending:
+        text, deferred = defer_pending(text, act)
     content, replaced = replace_known_sections(text, content)
     text = insert_before_closing(replaced["text"], content)
     write_text(path, text)
@@ -1935,15 +2039,19 @@ def cmd_bloque(pos, opts):
     blk = next(b for b in info["bloques"] if b["n"] == n)
     de = (" de %d" % info["total"]) if info["total"] else ""
     extra = (" y %s" % ", ".join("«%s»" % s for s in replaced["secciones"])) if replaced["secciones"] else ""
-    out("\u270D Lección %s · bloque %d%s en el cuaderno%s: %s" % (lesson["id"], n, de, extra, block_summary(blk)))
+    out("✍ Lección %s · bloque %d%s en el cuaderno%s: %s" % (lesson["id"], n, de, extra, block_summary(blk)))
+    if dropped:
+        out("  ℹ Quitadas %d sección(es) de la plantilla de la 3.0 sin rellenar." % dropped)
+    if deferred:
+        out("  ℹ Bloque %d: %s marcado(s) como aplazado(s); `completar` lo recordará." % (act["n"], deferred))
     if not info["mapa"]:
-        out("  \u26A0 La nota no tiene mapa de bloques: añade «## Objetivos» con «**Bloques:**» y la lista numerada.")
+        out("  ⚠ La nota no tiene mapa de bloques: añade «## Objetivos» con «**Bloques:**» y la lista numerada.")
     lint_snippet(rel(path), content)
     maybe_build(root, opts)
     out("\U0001F517 %s" % notebook_link(root, lesson_route(topic["slug"], lesson["id"], n)))
     if blk["espera"]:
-        out("\u25B6 Espera: %s." % blk["espera"]["texto"])
-    out("\u2709 Terminal: 3 a 5 líneas y sin repetir la teoría: dónde leer (el enlace o «%s \u203A Bloque %d»), qué "
+        out("▶ Espera: %s." % blk["espera"]["texto"])
+    out("✉ Terminal: 3 a 5 líneas y sin repetir la teoría: dónde leer (el enlace o «%s › Bloque %d»), qué "
         "hacer, qué enviar y en qué formato, y que el cuaderno se actualiza solo (si no, que recargue)."
         % (lesson["id"], n))
 
@@ -1966,7 +2074,7 @@ def split_correction(content):
 
 
 def answer_head(first, already):
-    s = re.sub(r"^[\s\u2014\u2013\-:\u2192>]+", "", first)
+    s = re.sub(r"^[\s" + "\N{EM DASH}\N{EN DASH}" + r"\-:" + "\N{RIGHTWARDS ARROW}" + r">]+", "", first)
     m = re.match(r"^\**\s*(tu respuesta|segundo intento)\s*(?:\*\*\s*:|:\s*\*\*|:)?\s*", s, re.I)
     label = m.group(1).lower() if m else ("segundo intento" if already else "tu respuesta")
     if m:
@@ -1974,21 +2082,36 @@ def answer_head(first, already):
     return label, s.strip()
 
 
-def apply_answer(text, piece, where):
+def first_attempt_with_solution(item, verdict_text, solution_text, kind, opts):
+    """En una lección, un ✘ en el primer intento lleva pista, no la solución (escalera de pistas)."""
+    return (kind == "leccion" and not item["intento"] and not opts.get("forzar")
+            and any(c in verdict_text for c in KO_CHARS) and has_solution(solution_text))
+
+
+def apply_answer(text, piece, where, kind, opts):
     sc = scan_note(text)
     k = piece["k"]
-    q = next((x for x in sc["preguntas"] if x["k"] == k), None)
-    if q is None:
+    found = [x for x in sc["preguntas"] if x["k"] == k]
+    if not found:
         raise CoachError("No encuentro la pregunta P%d en %s: escríbela antes (coach bloque o coach nota)." % (k, where))
+    if len(found) > 1:
+        found = [x for x in found if x["estado"] != "cerrado"]
+        if len(found) != 1:
+            raise CoachError("Hay varias P%d sin cerrar en %s: renumera las preguntas de la nota." % (k, where))
+    q = found[0]
     label, ans = answer_head(piece["first"], q["intento"])
     if not ans:
-        raise CoachError("Falta su respuesta en la primera línea de P%d: «**P%d.** tu respuesta: *…* \u2714»." % (k, k))
+        raise CoachError("Falta su respuesta en la primera línea de P%d: «**P%d.** tu respuesta: *…* ✔»." % (k, k))
+    if first_attempt_with_solution(q, ans, piece["rest"], kind, opts):
+        raise CoachError("P%d: tras un ✘ en el primer intento va una pista y un segundo intento; la respuesta "
+                         "completa, después (--forzar si de verdad ya no hay segundo intento)." % k)
     lines = sc["lineas"]
     a, b = q["linea"], q["fin"]
     inline = bool(ANSWER_RE.search(lines[a])) or all(not lines[i].strip() for i in range(a + 1, b))
     new = []
     if inline:
-        sep = " \u2192 segundo intento: " if label == "segundo intento" else " \u2014 tu respuesta: "
+        sep = (" \N{RIGHTWARDS ARROW} segundo intento: " if label == "segundo intento"
+               else " \N{EM DASH} tu respuesta: ")
         lines[a] = lines[a].rstrip() + sep + ans
     else:
         new = ["**%s:** %s" % (label[:1].upper() + label[1:], ans)]
@@ -1998,8 +2121,11 @@ def apply_answer(text, piece, where):
         b = next((x["fin"] for x in scan_note("\n".join(lines))["preguntas"] if x["linea"] == a), b)
         lines = insert_block(lines, chunk_end(lines, a, b), new)
     text = "\n".join(lines)
-    after = next(x for x in scan_note(text)["preguntas"] if x["k"] == k)
-    state = {"cerrado": "corregida", "segundo": "espera el segundo intento", "pendiente": "sin respuesta"}
+    after = next(x for x in scan_note(text)["preguntas"] if x["linea"] == a)
+    if kind != "leccion":
+        return text, "P%d %s" % (k, "corregida" if after["intento"] else "sin respuesta")
+    state = {"cerrado": "corregida", "segundo": "espera el segundo intento", "pendiente": "sin respuesta",
+             "aplazado": "aplazada"}
     return text, "P%d %s" % (k, state[after["estado"]])
 
 
@@ -2021,21 +2147,24 @@ def apply_attempt(text, head, kind, opts, where):
         if target is None:
             raise CoachError("No encuentro el reto %s en %s." % (opts["reto"], where))
     else:
-        target = next((r for r in sc["retos"] if r["estado"] != "cerrado"), None)
+        target = next((r for r in sc["retos"] if r["estado"] in ("pendiente", "segundo")), None)
         if target is None:
-            raise CoachError("No hay ningún reto pendiente en %s. Si son respuestas, empieza cada una con «**Pn.**»; "
-                             "para añadir otra cosa, usa coach nota." % where)
+            raise CoachError("No hay ningún reto pendiente en %s (los aplazados se anotan con --reto k). Si son "
+                             "respuestas, empieza cada una con «**Pn.**»; para añadir otra cosa, usa coach nota." % where)
     prose = prose_only(head)
     if not target["intento"] and not ATTEMPT_RE.search(prose):
-        if SOL_RE.search(prose):
+        if has_solution(head):
             raise CoachError("La solución va después del intento: empieza por «**Tu intento:** …» (tal cual lo envió) "
                              "y su veredicto.")
-        out("  \u26A0 No veo «**Tu intento:**»; escríbelo tal cual lo envió el estudiante.")
+        out("  ⚠ No veo «**Tu intento:**»; escríbelo tal cual lo envió el estudiante.")
+    if first_attempt_with_solution(target, prose, head, kind, opts):
+        raise CoachError("Tras un ✘ en el primer intento va la pista y un segundo intento; la solución, al cerrar el "
+                         "reto (--forzar si de verdad ya no hay segundo intento).")
     lines = insert_block(lines, chunk_end(lines, target["linea"], target["fin"]), head.split("\n"))
     text = "\n".join(lines)
     after = next(r for r in scan_note(text)["retos"] if r["linea"] == target["linea"])
     a = "o" if target["k"] else "a"
-    state = {"cerrado": "cerrad" + a, "pendiente": "anotad%s (sin intento)" % a,
+    state = {"cerrado": "cerrad" + a, "pendiente": "anotad%s (sin intento)" % a, "aplazado": "aplazad" + a,
              "segundo": "intento registrado; queda el segundo intento (la solución, al cerrarlo)"}
     name = ("reto %d" % target["k"]) if target["k"] else ("práctica %d" % target["n"])
     return text, "%s %s" % (name, state[after["estado"]])
@@ -2043,8 +2172,8 @@ def apply_attempt(text, head, kind, opts, where):
 
 def cmd_corregir(pos, opts):
     if len(pos) < 2:
-        raise CoachError("Uso: coach corregir <slug> <id|Mn|repaso> [--reto K] [--historial \"…\"]  (la corrección "
-                         "llega por stdin o con --desde)")
+        raise CoachError("Uso: coach corregir <slug> <id|Mn|repaso> [--reto K] [--historial \"…\"] [--forzar]  (la "
+                         "corrección llega por stdin o con --desde)")
     root = root_dir(opts)
     topic = load_topic(root, pos[0])
     ident = pos[1].strip()
@@ -2060,13 +2189,13 @@ def cmd_corregir(pos, opts):
         text, msg = apply_attempt(text, head, kind, opts, where)
         done.append(msg)
     for piece in pieces:
-        text, msg = apply_answer(text, piece, where)
+        text, msg = apply_answer(text, piece, where, kind, opts)
         done.append(msg)
     if opts.get("historial"):
         text = append_table_row(text, HISTORIAL_RE, "Historial", ["Fecha", "Qué pasó"],
                                 [today(), cell(opts["historial"])])
     write_text(path, text)
-    out("\u270D %s: %s" % (where[:1].upper() + where[1:], " \u00B7 ".join(done)))
+    out("✍ %s: %s" % (where[:1].upper() + where[1:], " · ".join(done)))
     lint_snippet(rel(path), content)
     maybe_build(root, opts)
     slug = topic["slug"]
@@ -2078,29 +2207,35 @@ def cmd_corregir(pos, opts):
             out("\U0001F517 %s" % notebook_link(root, lesson_route(slug, lesson["id"], act["n"])))
         topic = load_topic(root, slug)
         step = lesson_step(root, topic, find_lesson(topic, ident), opts)
-        out("\u25B6 %s" % step["texto"])
+        out("▶ %s" % step["texto"])
         for c in step["comandos"]:
             out("  $ %s" % c)
         if step.get("pista") and "bloques terminados" in step["texto"]:
-            out("  \u2139 %s" % step["pista"])
-        out("\u2709 Terminal: el resumen (p. ej. «4/5 \u2714, el 3 falló por el signo; la corrección está en el "
+            out("  ℹ %s" % step["pista"])
+        out("✉ Terminal: el resumen (p. ej. «4/5 ✔, el 3 falló por el signo; la corrección está en el "
             "cuaderno») y el siguiente paso, sin repetir la corrección.")
         return
     sc = scan_note(text)
-    pend = [q["k"] for q in sc["preguntas"] if q["estado"] != "cerrado"]
+    # En un repaso o un examen cuenta el primer intento: una pregunta con veredicto ya está corregida.
+    pend = [q["k"] for q in sc["preguntas"] if not q["intento"]]
     if kind == "examen":
         _, mod = find_module(topic, ident)
         out("\U0001F517 %s" % notebook_link(root, "/t/%s/examen/%s" % (urllib.parse.quote(slug, safe=""), mod["id"])))
+        sin = [q["k"] for q in sc["preguntas"] if q["intento"] and not q["final"]
+               and any(c in "\n".join(sc["lineas"][q["linea"]:q["fin"]]) for c in KO_CHARS)]
+        if sin:
+            out("  ⚠ %s: un ✘ en el examen lleva la respuesta completa (no hay segundo intento)." % id_range(sin))
         if pend:
-            out("\u25B6 Quedan por corregir: %s." % id_range(pend))
+            out("▶ Quedan por corregir: %s." % id_range(pend))
         else:
-            out("\u25B6 Todo corregido: %s" % command(opts, "examen", slug, mod["id"], "--resultado", "<aciertos>/<total>",
+            out("▶ Todo corregido: %s" % command(opts, "examen", slug, mod["id"], "--resultado", "<aciertos>/<total>",
                                                     "--tarea", "si|no"))
     else:
         out("\U0001F517 %s" % notebook_link(root, "/t/%s/repaso" % urllib.parse.quote(slug, safe="")))
         if pend:
-            out("\u25B6 Quedan por corregir: %s." % id_range(pend))
-        out("\u25B6 Registra cada resultado: %s" % command(opts, "repaso", slug, "<id|Hn>", "--bien|--mal"))
+            out("▶ Quedan por corregir: %s." % id_range(pend))
+        out("▶ Registra cada resultado (el del primer intento): %s" % command(opts, "repaso", slug, "<id|Hn>",
+                                                                                   "--bien|--mal"))
 
 
 def command(opts, *parts):
@@ -2149,9 +2284,18 @@ def note_gaps(text, blocks=True):
     if pending:
         problems.append("quedan %d marcador(es) [[COMPLETAR]]" % pending)
     if blocks:
-        for b in note_blocks(text)["bloques"]:
+        info = note_blocks(text)
+        for b in info["bloques"]:
             if b["espera"] and b["espera"]["tipo"] != "lectura":
                 problems.append("el bloque %d aún espera %s" % (b["n"], b["espera"]["texto"]))
+        aplazados = [("P%d" % it["k"]) if it["tipo"] == "pregunta" else ("reto %d" % it["k"] if it["k"] else
+                     "la práctica %d" % it["n"]) for it in info["retos"] + info["preguntas"] if it["estado"] == "aplazado"]
+        if aplazados:
+            problems.append("quedan aplazados: %s" % ", ".join(aplazados))
+        escritos = {b["n"] for b in info["bloques"]}
+        faltan = [str(e["n"]) for e in info["mapa"] if e["n"] not in escritos]
+        if faltan:
+            problems.append("faltan los bloques %s del mapa" % ", ".join(faltan))
     return problems
 
 
