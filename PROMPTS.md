@@ -95,6 +95,7 @@ Sirve para cualquier tema: software (su punto fuerte) y también estadística, i
 | Curso nuevo | `Quiero aprender <tema>. Parto de <lo que ya sé>, tengo <tiempo por semana> y mi objetivo es <qué quiero poder hacer>.` |
 | Curso nuevo sin proyecto | `Quiero aprender <tema> (no es para este proyecto). Guárdalo en ~/aprendizaje.` |
 | Seguir el curso | `Sigamos con mi plan de <tema>.` |
+| Seguir una lección a medias | `Sigamos con la lección <id> de <tema>.` |
 | Duda rápida mientras trabajas | `Explícame <concepto o error>: <contexto en una línea>. Solo la duda, sin plan.` |
 | Repasar lo que toca | `Repasemos <tema>.` |
 | Examen de módulo | `Hazme el examen del módulo <n> de <tema>.` |
@@ -102,7 +103,7 @@ Sirve para cualquier tema: software (su punto fuerte) y también estadística, i
 | Ajustar el método | `Ajusta el plan de <tema>: <qué cambiar: ritmo, profundidad, más práctica>.` |
 | Curso creado con la 3.0 | `Migra mi aprendizaje de <tema> al formato nuevo de hb-coach.` |
 
-El cuaderno (`aprendizaje/cuaderno.html`) tiene la ruta con sus exámenes, cada lección con sus retos, tu progreso con el calendario de repasos y un «Repaso de hoy» con tarjetas.
+El cuaderno (`aprendizaje/cuaderno.html`) es el aula: el coach escribe ahí cada bloque de la lección (teoría, reto y preguntas) y su corrección, y en la terminal solo te dice qué leer, qué hacer y qué enviarle; la página se actualiza sola. También tiene la ruta con sus exámenes, tu progreso con el calendario de repasos y un «Repaso de hoy» con tarjetas.
 
 ## hb-stack-mobile-kotlin · el perfil
 

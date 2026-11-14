@@ -9,7 +9,7 @@ actualizado: 2026-09-15
 | Orden de cada bloque | 📖 Leer → 🛠 Hacer → ❓ Responder, anunciado en el mapa de la lección |
 | Preguntas | Solo sobre lo ya explicado o implementado. Sin preguntas de predicción antes de la explicación |
 | Corrección | Idea central correcta = ✔; los matices van en «Para ampliar» y no restan |
-| Mensajes | Un bloque por mensaje; el código largo va al cuaderno |
+| Mensajes | El contenido va al cuaderno; en la terminal, mensajes cortos: dónde leer, qué hacer y qué enviar |
 | Ejemplos | Tres por concepto: mínimo, en tu contexto y «lo que sale mal» |
 | Práctica | En su proyecto en los temas de software (lo que rompe cosas, en una copia: `/tmp/orders-hilt-spike`); con datos de su equipo y simulaciones en los demás |
 | Verificación | El coach prueba cada paso en la copia (con los avisos del compilador) y calcula cada cifra antes de pedírtela |

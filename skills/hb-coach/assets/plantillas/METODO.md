@@ -14,7 +14,7 @@ actualizado: {{FECHA}}
 | Preguntas | Solo sobre lo ya explicado o practicado |
 | Predicción | No (si las quieres: sí, etiquetadas «adivina, no cuenta» y nunca en la comprobación de dominio) |
 | Corrección | Idea central correcta = ✔; los matices van en «Para ampliar» y no restan |
-| Mensajes | Un bloque por mensaje, corto; lo largo va al cuaderno |
+| Mensajes | El contenido va al cuaderno; en la terminal, mensajes cortos: dónde leer, qué hacer y qué enviar |
 | Ejemplos | Tres por concepto: mínimo, en tu contexto y «lo que sale mal» |
 | Práctica | [[COMPLETAR: en su proyecto / en un proyecto aparte / problemas y casos / ambas]] |
 | Verificación | El coach comprueba cada paso, cálculo o dato antes de pedírtelo |

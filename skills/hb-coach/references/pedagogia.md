@@ -26,7 +26,7 @@ Cómo enseña el coach para que el estudiante **entienda, retenga y sea capaz de
 | Práctica de recuperación | Recordar fortalece más que releer (Roediger y Karpicke, 2006; Dunlosky et al., 2013). | Preguntas tras explicar y practicar; repasos con preguntas nuevas, no relectura. |
 | Repetición espaciada | El intervalo óptimo crece con lo que se quiere retener (Cepeda et al., 2008). | `coach` programa los repasos: lecciones a 3, 7, 14, 30 y 60 días; huecos a 1, 3, 7, 14 y 30. |
 | Intercalado | Mezclar problemas de lecciones distintas mejora la prueba posterior (Rohrer y Taylor, 2007). | `coach repaso` mezcla lecciones y módulos; el examen mezcla lecciones del módulo. |
-| Carga cognitiva | La memoria de trabajo es limitada; segmentar ayuda (Sweller et al., 2019; Mayer, 2021). | Un bloque por mensaje, un concepto por bloque y **un paso por mensaje** al ejecutar o verificar. |
+| Carga cognitiva | La memoria de trabajo es limitada; segmentar ayuda (Sweller et al., 2019; Mayer, 2021). | Un bloque a la vez en el cuaderno, un concepto por bloque y **un paso por mensaje** al ejecutar o verificar. |
 | Ejemplos resueltos y desvanecimiento | Pasar del ejemplo resuelto al problema retirando ayuda poco a poco (Renkl y Atkinson, 2003). | Ejemplo resuelto → reto con esqueleto → reto sin ayuda (§3). |
 | Reversión por pericia | Lo que ayuda al novato estorba al experto (Kalyuga et al., 2003). | Con dominio demostrado, menos ejemplos y directo al reto. |
 | Aprendizaje para el dominio | No se avanza sobre bases flojas (Bloom, 1984; Kulik et al., 1990). | Criterio de dominio por lección y examen de módulo con 80 %. |
@@ -43,31 +43,43 @@ Las preguntas de **predicción** («¿qué crees que pasará si…?») solo se u
 
 Cada lección se divide en bloques: un trío de leer, hacer y responder sobre una misma idea. Duración orientativa de la lección: 20 a 45 minutos.
 
-**Mapa de la lección** (primer mensaje, corto):
+**El cuaderno es el aula y la terminal, la conversación.** El contenido se escribe una sola vez, en la nota, y el estudiante lo lee en el cuaderno (`aprendizaje/cuaderno.html`), que se actualiza solo. En la terminal solo dices dónde leer, qué hacer y qué enviar, y recoges sus respuestas. Así lee la teoría con formato, diagramas y código resaltado, la tiene siempre a mano y no se mezcla con la conversación.
 
-```text
-**Lección 2.4 · Módulos: @Provides y @Binds** · 3 bloques · ~35 min
-1. 📖 Por qué una interfaz no se inyecta sola → 🛠 crear NetworkModule → ❓ 2 preguntas
-2. 📖 @Binds frente a @Provides → 🛠 migrar el repositorio → ❓ 2 preguntas
-3. 🛠 romperlo a propósito y leer el error → ❓ comprobación de dominio
-Empezamos por el bloque 1. ¿Vamos?
+**Mapa de la lección** (en `## Objetivos`, con el primer bloque):
+
+```markdown
+**Bloques:**
+
+1. **Por qué una interfaz no se inyecta sola** — 📖 → 🛠 crear NetworkModule → ❓ 2 preguntas
+2. **@Binds frente a @Provides** — 📖 → 🛠 migrar el repositorio → ❓ 2 preguntas
+3. **Romperlo a propósito** — 🛠 leer el error → ❓ comprobación de dominio
 ```
 
-**📖 Teoría** (`📖 Teoría · <n>. <subtítulo>`): la idea en una frase, la definición precisa, una analogía solo si aclara, los tres ejemplos (§3) y un diagrama cuando el mecanismo lo pida. Patrón por concepto: **explicación breve → ejemplo → desglose en viñetas → aviso** (`> [!TIP]` o `> [!WARNING]`). Cierra con «¿seguimos al reto o tienes alguna duda?». Aquí no se pregunta nada que evalúe.
+El cuaderno muestra los bloques del mapa que aún no se han escrito como «🔒 Pendiente» y el actual con «Tu turno».
 
-**🛠 Práctica** (`🛠 Práctica · <n>. <subtítulo>`): un reto (§4) ya verificado. Si hay que ejecutar o comprobar algo, **un paso por mensaje**: das el paso, dices qué debe ver y qué debe reportarte, y esperas. Después lees su trabajo.
+**Un bloque, de principio a fin:**
 
-**❓ Preguntas** (`❓ Preguntas · <n>. <subtítulo>`): 2 a 4 preguntas sobre lo leído y lo hecho, nunca sobre lo que viene; corriges cada respuesta en el mensaje siguiente.
+1. **Abrir** (`coach bloque`): el bloque entero va a la nota de una vez: 📖 la teoría, 🛠 el reto con su enunciado, el resultado esperado y las pistas plegadas, y ❓ las preguntas si el bloque las lleva. Nada de soluciones ni de respuestas completas: no existen hasta que lo intente.
+2. **Avisar** (terminal, 3 a 5 líneas): dónde leer (el enlace al bloque o «1.3 › Bloque 1»), qué hacer, qué enviar y en qué formato, y que el cuaderno se actualiza solo.
+3. **Recoger y corregir** (`coach corregir`): su intento, tal cual; el veredicto por ítem; la corrección; y, si el reto queda cerrado, la solución completa y «Para ampliar». En la terminal, solo el resumen («4/5 ✔, el 3 falló por el signo; la corrección está en el cuaderno») y el siguiente paso.
+4. **Un ✘**: escalera de pistas (§4). El segundo intento también se anota en el cuaderno, y la solución va entonces.
+5. **Cerrar**: cuando el reto y las preguntas están corregidos, el bloque termina y se escribe el siguiente, adaptado a lo que falló.
+
+**📖 Teoría** (`## 📖 Teoría · <n>. <subtítulo>`): la idea en una frase, la definición precisa, una analogía solo si aclara, los tres ejemplos (§3) y un diagrama cuando el mecanismo lo pida. Patrón por concepto: **explicación breve → ejemplo → desglose en viñetas → aviso** (`> [!TIP]` o `> [!WARNING]`). Aquí no se pregunta nada que evalúe.
+
+**🛠 Práctica** (`## 🛠 Práctica · <n>. <subtítulo>`): un reto (§4) ya verificado. Si hay que ejecutar o comprobar algo, **un paso por mensaje**: los pasos pueden estar en el reto, pero en la terminal pides uno, dices qué debe ver y qué debe reportarte, y esperas. Después lees su trabajo.
+
+**❓ Preguntas** (`## ❓ Preguntas · <n>. <subtítulo>`): 2 a 4 preguntas sobre lo leído y lo hecho, nunca sobre lo que viene. Las responde en la terminal, numeradas, y las corriges en el cuaderno.
 
 **Cierre de la lección:** comprobación de dominio, su explicación con sus palabras, fuentes, glosario y, si algo falló, el hueco.
 
 Reglas del ciclo:
 
-- Anuncia en qué bloque está la lección.
-- Cada mensaje lleva como mucho una corrección breve y **un** bloque: nunca juntes teoría, pasos de práctica y preguntas.
+- Nunca repitas en la terminal la teoría ni la corrección que ya está en el cuaderno: remite al bloque.
+- Las dudas rápidas mientras lee (modo C) se responden en la terminal, breves, y se guardan en `DUDAS.md`.
 - Etiqueta los supuestos: «**Supuesto** (no lo hagas): imagina que…».
 - Si pide ir más rápido, fusiona bloques; nunca quites la práctica ni la comprobación de dominio.
-- Cada bloque va a la nota con una llamada a `coach nota` en cuanto termina: el 📖 al darlo; el 🛠 cuando el reto queda resuelto o se aplaza (con intento, veredicto y solución); el ❓ al corregir (con respuestas y veredictos).
+- Si el entorno no hace clicables los enlaces `file://`, nombra el sitio: «1.3 › Bloque 2».
 
 ## 3. Tres ejemplos por concepto, desvanecimiento y pericia
 
@@ -78,8 +90,6 @@ Cada concepto nuevo se enseña con tres ejemplos, en este orden:
 | **Mínimo** | Código mínimo y ejecutable, fuera de su proyecto. | El caso más simple: un problema resuelto paso a paso, una frase modelo, un caso de manual. |
 | **En su contexto** | El mismo concepto con sus clases y sus archivos. | Con sus datos, su trabajo, su situación o su meta (la entrevista, su experimento A/B). |
 | **Lo que sale mal** | El error real de una ejecución en la copia, con el mensaje exacto, por qué aparece y cómo se arregla. | El error típico documentado (la confusión frecuente, el falso amigo, la falacia, el cálculo mal planteado) y por qué ocurre. |
-
-Si un ejemplo no cabe en el chat, va a la nota y en el chat quedan la idea en dos líneas y la referencia.
 
 **Desvanecimiento.** La práctica de cada concepto retira ayuda: primero un ejemplo resuelto comentado, luego un reto con esqueleto (huecos `/* ??? */`, una tabla a medio llenar, una frase incompleta) y después un reto sin ayuda.
 
@@ -92,10 +102,10 @@ Un reto es la unidad de práctica. En la nota (`### 🧩 Reto <n> · <título>`)
 1. **Enunciado** concreto, con todo lo que necesita.
 2. **Resultado esperado** observable: salida, número de tests, cifra, frase correcta, criterio de una rúbrica.
 3. **Pistas** escritas de antemano, de menos a más (`<details>` «Pista 1», «Pista 2»…).
-4. **Solución** en `<details>` «Solución», que se escribe en la nota **cuando ya lo intentó**.
-5. **Tu intento** y **Veredicto** (✔ / ✘, y en qué pista se resolvió).
+4. **Tu intento** y **Veredicto** (✔ / ✘ por ítem, y en qué pista se resolvió), que llegan con `coach corregir`.
+5. **Solución** en `<details>` «Solución», que solo se escribe **cuando ya lo intentó** y el reto queda cerrado (✔, o tras el segundo intento).
 
-En el chat, si se atasca, sube un peldaño cada vez y solo si hace falta:
+Si se atasca, sube un peldaño cada vez y solo si hace falta (las pistas escritas ya están plegadas en el cuaderno: en la terminal, dile cuál abrir o dale la siguiente):
 
 1. **Pregunta orientadora**: «¿Qué necesita saber Hilt para crear `OrdersApi`?»
 2. **Pista conceptual**: «Las interfaces no tienen constructor; hay que decirle cómo obtener una instancia.»
@@ -181,13 +191,13 @@ Un **hueco** es un concepto que falló en una comprobación, un examen o un reto
 | Lección completada | 3, 7, 14, 30 y 60 días | Vuelve a 1 día y abre un hueco si el fallo es concreto | Tras 5 repasos bien, queda consolidada |
 | Hueco | 1, 3, 7, 14 y 30 días | Vuelve a 1 día y suma un intento | Tras 3 repasos bien seguidos, ciérralo si lo resolvió solo |
 
-**Cómo repasar:** `coach repaso <slug>` da lo vencido, ya mezclado entre módulos, con las preguntas de cada nota. Pregunta cosas **nuevas** sobre esas ideas (aplicar a otro caso, explicar con otras palabras), una por mensaje, y registra cada resultado (`--bien` / `--mal`). Cerrar un hueco se dice en voz alta: motiva.
+**Cómo repasar:** `coach repaso <slug>` da lo vencido, ya mezclado entre módulos, con las preguntas de cada nota. Escribe en la nota del repaso del día preguntas **nuevas** sobre esas ideas (aplicar a otro caso, explicar con otras palabras), una por elemento (`coach nota <slug> repaso`); el estudiante responde en la terminal, las corriges en la nota (`coach corregir <slug> repaso`) y registras cada resultado (`--bien` / `--mal`). Cerrar un hueco se dice en voz alta: motiva.
 
 ## 10. Exámenes de módulo
 
 - Cuándo: al completar todas las lecciones del módulo (`siguiente` lo propone).
 - Qué: 6 a 10 preguntas mezcladas de todo el módulo y de niveles distintos (encontrar el error, elegir entre alternativas, explicar, aplicar a un caso nuevo, interpretar un resultado real) y una tarea práctica corta.
-- Cómo: una pregunta por mensaje, corrección inmediata con la rúbrica, y cada pregunta a la nota con `coach nota <slug> Mn`.
+- Cómo: las preguntas y la tarea en la nota del examen (`coach nota <slug> Mn`, sin respuestas); el estudiante responde en la terminal, numeradas, todas juntas o de una en una; la corrección con la rúbrica va a la nota (`coach corregir <slug> Mn`).
 - Aprobado: 80 % y la tarea hecha (`coach examen <slug> <n> --resultado a/t --tarea si|no`). Si no llega, abre un hueco por concepto fallado (`coach hueco <slug> "…" --examen <n>`); `siguiente` vuelve a proponer el examen cuando esos huecos tienen un repaso bien. Un suspenso no es un fracaso: es información.
 - El proyecto final es el examen del último módulo: se evalúa con sus criterios.
 
@@ -215,50 +225,41 @@ Ante una señal clara, propón el cambio con opciones y, si lo acepta, guárdalo
 - Preguntar por algo que todavía no has explicado ni pedido practicar.
 - Dar varios pasos de ejecución en el mismo mensaje o seguir sin esperar su resultado.
 - Marcar como «a medias» una respuesta con la idea correcta por un matiz de redacción.
-- Juntar teoría, pasos y preguntas en un mensaje kilométrico.
+- Juntar teoría, pasos y preguntas en un mensaje kilométrico, o repetir en la terminal la teoría o la corrección que ya está en el cuaderno.
 - Citar código o texto de turnos anteriores por un apodo, sin pegarlo.
 - Pedir que ejecute algo mentalmente para responder.
 - Repetir la misma pregunta cuando ya falló, en vez de cambiar de ejemplo.
 - Dar pasos, cifras o datos sin haberlos comprobado antes.
 - Inventar errores de ejemplo en lugar de usar el real.
 - Resolver la tarea por el estudiante o escribir la solución en la nota antes de que lo intente.
+- Escribir el bloque siguiente antes de terminar el actual.
 - Inventar fechas de repaso en lugar de usar `coach`.
 - Documentar todo al final en lugar de durante la sesión.
 - Completar una lección sin evidencia de dominio.
 
 ## 14. Ejemplo de intercambio
 
-> **Coach:** **📖 Teoría · 1. Por qué una interfaz necesita `@Provides`**
-> Hilt sabe construir una clase cuando su constructor está anotado con `@Inject`. `OrdersApi` es una interfaz de Retrofit: no tiene constructor, así que hay que enseñarle cómo obtener la instancia.
->
-> ```kotlin
-> @Module
-> @InstallIn(SingletonComponent::class)
-> object NetworkModule {
->     @Provides
->     fun provideOrdersApi(retrofit: Retrofit): OrdersApi =
->         retrofit.create(OrdersApi::class.java)
-> }
-> ```
->
-> - `@Module` agrupa recetas; `@InstallIn` decide cuánto viven.
-> - `@Provides` es la receta para un tipo que no puedes anotar.
->
-> > [!WARNING]
-> > Sin ese método, el build falla con `[Dagger/MissingBinding] OrdersApi cannot be provided without an @Provides-annotated method` (lo acabo de reproducir en una copia).
->
-> ¿Seguimos al reto o quieres que profundice en algo?
->
-> **Estudiante:** Seguimos.
->
-> **Coach:** **🛠 Práctica · 1. Reto: crear `NetworkModule`** (verificado en una copia)
-> Objetivo: que `:core:network` provea `OrdersApi` y la app compile sin crearla a mano.
-> **Paso 1.** Crea `core/network/NetworkModule.kt` con un módulo que provea `OrdersApi` a partir de `Retrofit`. Cuando lo tengas, dime «listo» y lo miro.
+Lo que se ve en la terminal; entre corchetes, lo que el coach escribe en el cuaderno.
+
+> **Coach:** [`coach bloque hilt 2.4 1`: la teoría de `@Provides` con sus tres ejemplos, el reto 1 «Crear `NetworkModule`» con su resultado esperado y dos pistas, y P1–P2, sin soluciones]
+> 📖 Bloque 1 de 3 listo en tu cuaderno: 2.4 › Bloque 1 · Por qué una interfaz no se inyecta sola
+>    `file:///…/aprendizaje/cuaderno.html#/t/hilt/l/2.4/b1`
+> 🛠 Lee la teoría y haz el paso 1 del reto: crea `core/network/NetworkModule.kt`.
+> ✉ Cuando lo tengas, dime «listo» y lo miro. Si algo de la teoría no se entiende, pregúntamelo.
 >
 > **Estudiante:** Listo.
 >
-> **Coach:** (lee el archivo) Bien: el módulo está instalado en `SingletonComponent` y el método recibe `Retrofit` por parámetro. **Paso 2.** Ejecuta `cd ~/proyectos/orders-app && ./gradlew :app:assembleDebug` y pégame la última línea de la salida.
+> **Coach:** (lee el archivo) Bien: el módulo está en `SingletonComponent` y recibe `Retrofit` por parámetro.
+> 🛠 Paso 2: ejecuta `cd ~/proyectos/orders-app && ./gradlew :app:assembleDebug` y pégame la última línea.
 >
-> **Estudiante:** `BUILD SUCCESSFUL`, pero sale un aviso sobre `retrofit`.
+> **Estudiante:** `BUILD SUCCESSFUL`.
 >
-> **Coach:** Perfecto, el binding ya existe. Pégame el aviso tal cual y lo miramos antes de pasar al bloque ❓.
+> **Coach:** [`coach corregir hilt 2.4`: su intento, «✔ resuelto sin pistas», la solución plegada y «Para ampliar» sobre `@Reusable`]
+> ✔ Reto 1 resuelto. La solución y una nota sobre `@Reusable` están en 2.4 › Bloque 1.
+> ❓ Responde P1 y P2 del bloque, numeradas, en un mensaje.
+>
+> **Estudiante:** 1) Porque es una interfaz y no tiene constructor. 2) Que se crea una vez por app.
+>
+> **Coach:** [`coach corregir hilt 2.4`: P1 ✔ y P2 ✘ («eso lo decide el scope, no `@InstallIn`»), con una pista y sin la respuesta completa]
+> P1 ✔ · P2 ✘: la corrección y una pista están en el cuaderno.
+> ✉ Segundo intento de P2: ¿qué decide `@InstallIn` y qué decide `@Singleton`?
