@@ -7,13 +7,15 @@
 Lo que el proyecto tiene hoy, literal y con versiones. Los agentes trabajan con este stack; ver `## Modernización`.
 
 - Perfil: <hb-stack-mobile-kotlin | ninguno>
-- Variante: <android | kmp>
-- UI: <Compose | Views con ViewBinding | Views con DataBinding | mixto: dónde cada uno>
-- Presentación: <MVVM con UDF | MVVM con LiveData | MVP | MVI>
-- Asincronía: <corrutinas y Flow | RxJava 2/3 | callbacks>
-- DI: <Hilt | Dagger 2 | Koin | manual>
-- Navegación, red, persistencia, serialización, imágenes, tests: <librerías y versiones>
-- Build: <AGP, Kotlin, Gradle, KSP o kapt, minSdk/targetSdk>
+- Variante: <android | kmp | quita la línea si el perfil no tiene variantes>
+- Lenguaje y runtime: <con versiones>
+- UI: <Compose | Views con ViewBinding | Views con DataBinding | el framework web o de escritorio | mixto: dónde cada uno | no aplica>
+- Presentación: <MVVM con UDF | MVVM con LiveData | MVP | MVI | el patrón del framework>
+- Asincronía: <corrutinas y Flow | RxJava 2/3 | async/await | callbacks>
+- DI: <Hilt | Dagger 2 | Koin | el contenedor del framework | manual>
+- Navegación o rutas, red, persistencia, serialización, imágenes, tests: <librerías y versiones>
+- Build: <herramienta y versiones: AGP, Kotlin, Gradle, KSP o kapt, minSdk/targetSdk | el gestor de paquetes y el bundler | el backend de build>
+- Versiones de fuera del repo: <"las define <catálogo, BOM o plugin publicado> (<coordenada o URL>); copia local en `<ruta>`" | quita la línea si todas están en el repo>
 
 ## Comandos
 
@@ -35,6 +37,17 @@ Antes de dar una tarea por terminada, en este orden:
 
 <Cómo está organizado el proyecto hoy: módulos, capas, features principales, dónde viven los contratos de presentación. Si coincide con el perfil, "sigue el perfil" y las excepciones con su motivo; si no, descríbela tal cual y los agentes la respetan.>
 
+### Repos relacionados
+
+<Quita esta subsección si el proyecto no depende de otros repos que se trabajen en local.>
+
+| Repo | Ruta | Qué contiene | Cómo se incluye en local |
+| --- | --- | --- | --- |
+| <nombre> | `<../ruta-relativa>` | <qué publica o aporta> | <el mecanismo que el proyecto ya usa, tal cual> |
+
+- El agente necesita **acceso a estas carpetas** además de la del proyecto (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene.
+- <Por cada dependencia publicada con código local> **<coordenada o nombre publicado>**: pasar a código local con <el comando o el cambio exacto>; volver con <el comando o el cambio exacto>. Es un cambio local: no se commitea.
+
 ## Modernización
 
 - <ninguna decidida | lista de decisiones tomadas por el usuario, cada una con alcance y fecha: "las pantallas nuevas van en Compose (2026-11)", "Rx se reemplaza por corrutinas solo al tocar una clase">
@@ -42,6 +55,8 @@ Antes de dar una tarea por terminada, en este orden:
 
 ## Reglas del proyecto
 
+- Contexto de IA: <versionado con el código | local, no se versiona: en `.git/info/exclude` | fuera del repo, en `<carpeta>`, con enlaces simbólicos excluidos en `.git/info/exclude`>. Lo extenso, en `<docs/ | contexto/docs/>`.
+- Carpeta de reportes: `reports`
 - <Reglas propias que el perfil no cubre, con su motivo.>
 
 ## Git
