@@ -29,6 +29,8 @@
 
 Marcas o código puestos solo para esta investigación (por ejemplo, una marca con `android.os.Trace` en un módulo que no ve `PerfHooks`) y las ediciones de cableado en código de `main` que no se van a commitear (el gancho de red donde se arma el cliente HTTP, por ejemplo). Se revierten antes de proponer un commit y, a más tardar, en el cierre.
 
+**Un archivo por fila**, con su ruta desde la raíz de su repo (sin `...`): así `perf.py cerrar` lo quita sin adivinar.
+
 | Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |
 | --- | --- | --- | --- | --- |
 

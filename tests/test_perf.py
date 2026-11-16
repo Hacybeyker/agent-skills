@@ -3383,7 +3383,7 @@ class Compat060Test(PerfBase):
         self.assertIn("| H2 | Frame largo al entrar | 48 ms en la corrida mediana · `hilo_principal_top` | — | sin veredicto "
                       "estadístico | no se pudo confirmar ni descartar con estos datos; sin acción |", initial)
         self.assertIn("| H3 | Jank en la lista | `jank_app_pct` 2 % | — | descartado | descartado: se investigó y no es la causa", initial)
-        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamadas | 0 llamadas | alta | bajo | bajo | "
+        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamada | 0 llamadas | alta | bajo | bajo | "
                       "aplicada |", initial)
         self.assertIn("- **H2** · causa sin verificar · falta una captura con muestreo de CPU", initial)
         self.assertNotIn("<3 a 5 líneas", initial)
@@ -3391,12 +3391,12 @@ class Compat060Test(PerfBase):
         out = self.ok("comparar", self.folder / "metricas.csv")
         self.assertIn("| detalle | lista_a_detalle_ms | e2e | 412 ms / 420 ms | 300 ms / 305 ms | -112 ms | -27.18 % | 0.24 % | "
                       "mejora |", out)
-        self.assertIn("| detalle | red_solapadas | app | 1 llamadas / 1 llamadas | 0 llamadas / 0 llamadas | -1 llamadas | "
+        self.assertIn("| detalle | red_solapadas | app | 1 llamada / 1 llamada | 0 llamadas / 0 llamadas | -1 llamada | "
                       "-100 % | 0 % | mejora |", out)
         self.assertIn("| detalle | hilo_max_ms | app | 48 ms / 50 ms | 48 ms / 49 ms | 0 ms | 0 % | 0 % | sin cambio |", out)
         self.assertNotIn("⚠", out)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
-        self.assertIn("| M1 | Una sola carga del detalle | red_solapadas | 1 llamadas | 0 llamadas | 0 llamadas | -100 % | mejora | "
+        self.assertIn("| M1 | Una sola carga del detalle | red_solapadas | 1 llamada | 0 llamadas | 0 llamadas | -100 % | mejora | "
                       "aplicada | ✔ funcionó |", state)
         self.assertNotIn("Cómo se recorre", state)  # el estado de 0.6.0 no tiene esa sección: no se agrega ni falla
         self.ok("reporte", "--carpeta", self.folder, "--html")
@@ -4774,12 +4774,12 @@ class SegmentNetworkTest(DeviceBase):
         self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
         initial = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("## Red por tramo", initial)
-        self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamadas | 1 llamadas |", initial)
+        self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamada | 1 llamada |", initial)
         self.assertNotIn("| pago | pago |", initial)  # el tramo sin métricas de red medidas no sale
         self.assertIn("Red por tramo", (folder / "reporte-inicial-dev.html").read_text(encoding="utf-8"))
         self.ok("reporte", "--carpeta", folder)
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamadas | 1 llamadas |", final)
+        self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamada | 1 llamada |", final)
         self.assertIn("| pago | consulta | despues | 2 llamadas | 500 ms | 150 ms | 0 llamadas | 0 llamadas |", final)
         self.assertIn("**Red por tramo (`<tramo> red_…`):**", final)
         self.assertEqual(perf.segment_network_md(perf.read_rows(folder / "metricas.csv"), {"flujos": {"pago": {}}}), "")
@@ -4930,7 +4930,7 @@ class Compat070Test(PerfBase):
         initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("| H2 | Frame largo al entrar al detalle, estable en las 5 corridas |", initial)
         self.assertIn("Una captura con muestreo de CPU o probar el cambio", initial)
-        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamadas | 0 llamadas | alta | bajo | bajo | "
+        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamada | 0 llamadas | alta | bajo | bajo | "
                       "aplicada |", initial)
         self.assertIn("Decodificar la imagen de cabecera fuera del hilo principal", initial)
         self.assertNotIn("Red por tramo", initial.split("## Cómo leer este reporte")[0])  # el CSV de 0.7.0 no la trae
@@ -4938,7 +4938,7 @@ class Compat070Test(PerfBase):
         self.assertIn("| detalle | lista_a_detalle_ms | e2e | 412 ms / 420 ms | 300 ms / 305 ms | -112 ms | -27.18 % | 0.24 % | "
                       "mejora |", out)
         self.assertIn("| detalle | detalle hilo_max_ms | app | 48 ms / 50 ms | 48 ms / 49 ms | 0 ms | 0 % | 0 % | sin cambio |", out)
-        self.assertIn("| detalle | red_solapadas | app | 1 llamadas / 1 llamadas | 0 llamadas / 0 llamadas | -1 llamadas | "
+        self.assertIn("| detalle | red_solapadas | app | 1 llamada / 1 llamada | 0 llamadas / 0 llamadas | -1 llamada | "
                       "-100 % | 0 % | mejora |", out)
         self.assertNotIn("⚠", out)
         self.ok("reporte", "--carpeta", self.folder, "--html")
@@ -7074,7 +7074,7 @@ class SectionNameLimitTest(DeviceBase):
         self.tp_outputs(GOOD + '"seccion",200000000,100000000,0,"%s"\n' % long_name)
         out = self.ok("capturar", "--plan", self.plan, "--prueba")
         self.assertIn("⚠ 1 nombres de sección llegan al límite de 127 caracteres de android.os.Trace y están cortados", out)
-        self.assertIn("perf.py instrumentar --actualizar", out)
+        self.assertIn("instrumentar --modulo", out)
         self.assertEqual([item["tipo"] for item in perf.test_warnings(self.plan.parent, "home")], ["nombre"])
         self.assertIn("Corrige antes de medir", self.ok("siguiente", "--carpeta", self.plan.parent))
         (self.dir / "tp.count").unlink()
@@ -7978,7 +7978,7 @@ class AudienceReportsTest(PerfBase):
         self.assertIn("## En resumen\n\nAl abrir la lista se pedían los datos dos veces.", text)
         self.assertIn("## Qué notaba el usuario\n\nLa lista tarda en aparecer", text)
         self.assertIn("## Qué se encontró\n\n- La lista tarda: Pide los clientes dos veces\n\nOtras causas posibles: 1 se "
-                      "investigó y se descartó y 1 quedó sin confirmar.", text)
+                      "investigó y se descartó y 1 quedó sin confirmar (", text)  # 0.12.0: dice cuál
         self.assertIn("## Qué se hizo\n\n- Pedir los clientes una sola vez", text)
         self.assertIn("- **Tiempo de \"lista\":** pasó de 1.8 s a 1.1 s (39 % menos) · mejora clara.", text)
         # R5 y R6: corridas en dos grupos (4–6 y 28–30) y sin "orientativo … (mejora clara)", que se contradice
@@ -8007,7 +8007,7 @@ class AudienceReportsTest(PerfBase):
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
         self.assertIn('no tiene la sección "## Resumen para gerencia"', out)
         text = self.read("reporte-inicial-gerencia.md")
-        self.assertIn("## En resumen\n\n_Sin completar: el resumen para este público todavía no se escribió.", text)
+        self.assertIn("## En resumen\n\nSin completar: el resumen para este público todavía no se escribió.", text)
         self.assertIn("## Qué se propone\n\n- Pedir los clientes una sola vez\n- Cargar las imágenes después", text)
         self.assertIn("- **Tiempo de \"lista\":** 1.8 s · estable entre mediciones.", text)
         self.assertIn("- **Cuadros que se ven trabados:** 6 % · orientativo: varía mucho entre corridas.", text)
@@ -8017,7 +8017,7 @@ class AudienceReportsTest(PerfBase):
                                                                   template.index("## Pendientes")])
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial")  # con el texto de la plantilla: avisa y no lo publica
         self.assertIn("Resumen para gerencia (de 3 a 5 líneas, sin términos técnicos)", out)
-        self.assertIn("_Sin completar:", self.read("reporte-inicial-gerencia.md"))
+        self.assertIn("Sin completar:", self.read("reporte-inicial-gerencia.md"))
         self.assertNotIn("lector no técnico", self.read("reporte-inicial-gerencia.md"))
 
     def test_las_etiquetas_del_plan_nombran_las_metricas_propias(self):
@@ -8499,8 +8499,10 @@ class BusinessJargonTest(PerfBase):
         for term in ("P90", "lista_ms", "Jank", "cargar()", "cargarClientes"):
             self.assertNotIn(term, text)
         self.assertIn("tiene términos técnicos y no se publica", text)
-        self.assertIn("## Qué notaba el usuario\n\n_sin completar_", text)
-        self.assertIn("- La lista tarda: _sin completar_", text)
+        # 0.12.0 (D5): en palabras, sin los guiones bajos
+        self.assertIn("## Qué notaba el usuario\n\nSin completar todavía: la investigación no lo anotó.", text)
+        self.assertIn("- La lista tarda: sin completar todavía", text)
+        self.assertNotIn("_sin completar_", text)
         self.assertIn("- Una mejora con el título sin completar\n- Cargar las imágenes después", text)
         # el reporte técnico no cambia: publica todo
         self.assertIn("cargarClientes", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))

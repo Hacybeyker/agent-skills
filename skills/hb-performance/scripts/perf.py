@@ -578,13 +578,23 @@ def compare(rows, cv_max=CV_MAX, trust=("ok", ""), plan=None):
 
 # ── Formato ──────────────────────────────────────────────────────────────────
 
+SINGULAR = {"llamadas": "llamada", "conexiones": "conexión", "frames": "frame", "cuadros": "cuadro", "veces": "vez",
+            "bloqueos": "bloqueo", "corridas": "corrida", "milisegundos": "milisegundo", "vistas": "vista",
+            "actividades": "actividad", "slices": "slice", "inflates": "inflate", "segundos": "segundo"}
+
+
+def counted(text, unit):
+    """"1 llamada", "2 llamadas": la unidad en singular cuando el número escrito es 1 (también "+1" o "−1")."""
+    return "%s %s" % (text, SINGULAR.get(unit, unit) if text.lstrip("+−-") == "1" else unit)
+
+
 def fmt(value, unit=""):
     if value is None:
         return "—"
     text = ("%.2f" % value).rstrip("0").rstrip(".")
     if text in ("-0", ""):
         text = "0"
-    return "%s %s" % (text, unit) if unit else text
+    return counted(text, unit) if unit else text
 
 
 def fmt_signed(value, unit=""):
@@ -3780,17 +3790,23 @@ def next_steps(folder, plan, flow=None):
     # cerrada, quitarlos es lo único que queda: va primero, y el final lo dice.
     if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
         notice = revert_notice(folder, project_root(folder).resolve())
+        dod = None if notice else dod_step(folder, project_root(folder).resolve(), read_close(folder))
         if notice and title.startswith(("investigación cerrada", "triage cerrado")):
             steps = [notice] + [dict(step, texto=DONE_AFTER_CLOSE) if step["tipo"] == "fin" else step for step in steps]
         elif notice:
             steps = steps + [notice]
+        elif dod and title.startswith(("investigación cerrada", "triage cerrado")):
+            # Sin el DoD después de quitar los cambios temporales, la investigación no está cerrada.
+            title = title + " · falta el DoD después de quitar los cambios temporales"
+            steps = [dod] + [dict(step, texto=DONE_AFTER_DOD) if step["tipo"] == "fin" else step for step in steps]
     return title, steps
 
 
 def scenario_steps(folder, plan, flow, steps):
     """Con escenarios (B3): cada fase que el flujo base ya midió se mide también en cada escenario que todavía no la
-    tiene, antes de los demás pasos (el reporte muestra el rango de la mejora por escenario). Sin escenarios, los pasos
-    quedan igual."""
+    tiene (el reporte muestra el rango de la mejora por escenario). Antes y control de un escenario se miden sin las
+    mejoras: si hay alguna aplicada y no está quitada, el paso es quitarlas con `lineabase` (la secuencia sigue de ahí).
+    Cada medición va junto a la del flujo base de esa fase o, si ya no está, al principio. Sin escenarios, igual."""
     flows = plan.get("flujos") or {}
     name = flow if flow in flows else next(iter(flows), None)
     family = scenario_flows(plan, name) if name else []
@@ -3802,27 +3818,46 @@ def scenario_steps(folder, plan, flow, steps):
     phases = read_phases(folder)
     triage = plan.get("profundidad") == "triage"
     base = (flows.get(name) or {}).get("escenario_de") or name
-    extra = []
+    applied = [m["id"] for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada"]
+    removed = read_lineabase(folder).get("estado") == "quitadas"
+    steps, blocked = list(steps), []
     for phase in FASES:
         if triage and phase == "control" or not phase_flow_record(phases, phase, base).get("corridas"):
             continue
         for other in family:
             if other == base or phase_flow_record(phases, phase, other).get("corridas"):
                 continue
+            if phase != "despues" and applied and not removed:
+                blocked.append("%s de %s" % (phase, other))
+                continue
             spec = flows[other]
             paused = has_human_pause(spec, folder)
             automatic = (bool(startup_spec(spec)) or spec.get("recorrido", "manual") != "manual") and not paused
             runs = 3 if triage else 10 if automatic else 5
-            extra.append(terminal(perf_command(root, "capturar", "--plan", rel / "plan.json", "--flujo", other, "--fase",
-                                               phase, "--corridas", runs),
-                                  "mide %s en el escenario %s (%s), como el flujo %s: el reporte muestra el rango de la "
-                                  "mejora por escenario" % (phase, other, scenario_label(plan, other), base),
-                                  "nada: el recorrido es automático (%d corridas)" % runs if automatic else
-                                  "recorre el flujo en cada una de las %d corridas (más 1 de calentamiento)" % runs))
-    if not extra:
-        return steps
-    lead = [step for step in steps if step["tipo"] == "avisos"]
-    return lead + extra + [step for step in steps if step["tipo"] != "avisos"]
+            step = terminal(perf_command(root, "capturar", "--plan", rel / "plan.json", "--flujo", other, "--fase",
+                                         phase, "--corridas", runs),
+                            "mide %s en el escenario %s (%s), como el flujo %s: el reporte muestra el rango de la mejora "
+                            "por escenario" % (phase, other, scenario_label(plan, other), base),
+                            "nada: el recorrido es automático (%d corridas)" % runs if automatic else
+                            "recorre el flujo en cada una de las %d corridas (más 1 de calentamiento)" % runs)
+            same = [i for i, item in enumerate(steps) if item["tipo"] == "terminal" and "--fase %s" % phase in item["texto"]]
+            if same:
+                steps.insert(same[-1] + 1, step)
+            else:
+                lead = 0
+                while lead < len(steps) and steps[lead]["tipo"] == "avisos":
+                    lead += 1
+                steps.insert(lead, step)
+    if blocked:
+        return [{"tipo": "avisos", "titulo": "Escenarios sin línea base", "lineas": [
+            "Faltan %s, y las mejoras %s están en el código: medido así, el escenario tendría la mejora en su línea base. "
+            "Primero se quitan con su parche; después `siguiente` da instalar, antes y control (también del flujo base, "
+            "con el mismo build), reaplicar y la prueba" % (", ".join(blocked), ", ".join(applied))]},
+                terminal(perf_command(root, "lineabase", "--carpeta", rel, "--quitar-mejoras"),
+                         "guarda el código de las mejoras %s en un parche (sin pisar otro), comprueba que revierte limpio y "
+                         "lo quita del repo; las marcas y los cambios temporales se quedan" % ", ".join(applied),
+                         "nada; si algo no revierte limpio, se detiene sin tocar nada y te dice por qué")]
+    return steps
 
 
 def before_capture(folder, plan, flow, steps):
@@ -4068,7 +4103,9 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
 
 
 DONE = "La investigación está completa y analizada: no queda nada por hacer."
-DONE_AFTER_CLOSE = "Con los cambios temporales quitados, la investigación queda completa: no queda nada más por hacer."
+DONE_AFTER_DOD = "Con el DoD en verde después de quitar los cambios temporales, la investigación queda completa."
+DONE_AFTER_CLOSE = ("Con los cambios temporales quitados y el DoD en verde (`cerrar` lo da al terminar), la investigación queda "
+                    "completa: no queda nada más por hacer.")
 
 
 def flow_env(spec, folder):
@@ -4468,6 +4505,7 @@ def code_span(text):
 def route_block(plan, root, folder=None):
     """La sección "Cómo se recorre" de estado.md: 'preparar' y 'recorrido' de cada flujo y el comando para verlos
     correr a mano, fuera de una captura."""
+    folder = pathlib.Path(folder) if folder is not None else None
     lines = []
     for name, flow in plan["flujos"].items():
         prepare = (flow.get("preparar") or "").strip()
@@ -4484,11 +4522,11 @@ def route_block(plan, root, folder=None):
                 lines.append("- Escenario de `%s`: el mismo recorrido con %s (perf.py las pasa a `preparar` y al recorrido)"
                              % (flow["escenario_de"], code_span(variables)))
             lines.append("- `recorrido` (el tramo medido): %s" % code_span(route))
+            by_hand = [part.replace("{{CARPETA}}", q(str(folder.resolve())) if folder is not None else "{{CARPETA}}")
+                       for part in (prepare, route) if part]
             lines.append("- Para verlo correr a mano, sin medir: %s" % code_span(
-                "cd %s && %s" % (q(root), " && ".join("%s%s" % ("export %s && " % variables if variables and index == 0
-                                                               else "", part)
-                                                      for index, part in enumerate(part for part in (prepare, route)
-                                                                                   if part)))))
+                "cd %s && %s" % (q(root), "( export %s && %s )" % (variables, " && ".join(
+                    by_hand)) if variables else " && ".join(by_hand))))
         if flow.get("requiere_env"):
             names = [str(v) for v in flow["requiere_env"] if ENV_NAME.fullmatch(str(v))]
             lines.append("- Variables de entorno que necesita: %s. Cárgalas en la terminal donde mides, antes de medir (las "
@@ -4771,7 +4809,20 @@ def cost_command(folder, session=None, model=None, effort=None, source=None):
                                        else "", option, value)
 
 
-def cost_total(folder, plan):
+SESSION_WORDS = {"0": "la preparación del proyecto", "1": "la ficha y el plan", "2": "el diagnóstico",
+                 "3": "la mejora %s", "4": "el cierre"}
+
+
+def session_words(label):
+    """El nombre de una sesión para un lector no técnico: "1 · ficha" → "la ficha y el plan", "3 · M1" → "la mejora M1"."""
+    number, _, rest = str(label).partition(" · ")
+    words = SESSION_WORDS.get(number.strip())
+    if not words:
+        return label
+    return words % rest.strip() if "%s" in words else words
+
+
+def cost_total(folder, plan, plain=False):
     """El total de la investigación en una línea: USD y tokens de las filas de "Consumo" que traen el dato, cuántas no
     lo traen y qué sesiones hechas faltan anotar. Un dato que falta se dice: no cuenta como cero."""
     try:
@@ -4801,7 +4852,7 @@ def cost_total(folder, plan):
     if missing:
         parts.append("faltan anotar %d %s (%s): el total es parcial" % (
             len(missing), "sesión hecha" if len(missing) == 1 else "sesiones hechas",
-            ", ".join(label for label, _, _ in missing)))
+            ", ".join(session_words(label) if plain else label for label, _, _ in missing)))
     if not rows and not missing:
         return "sin sesiones anotadas"
     return " · ".join(parts)
@@ -5274,22 +5325,25 @@ def save_change_diff(folder, improvement, files, repo=None, index=0):
             raise PerfError("%s no está dentro del repo %s: pasa --repo con el repo de ese archivo" % (name, top))
         tracked = subprocess.run(["git", "-C", str(top), "ls-files", "--error-unmatch", "--", str(inside)],
                                  capture_output=True, text=True).returncode == 0
+        # En bytes y con --binary: un archivo con fin de línea CRLF (o binario) queda tal cual, y `lineabase
+        # --quitar-mejoras` lo puede revertir con `git apply -R`.
         if tracked:
-            done = subprocess.run(["git", "-C", str(top), "diff", "--no-color", "HEAD", "--", str(inside)],
-                                  capture_output=True, text=True)
+            done = subprocess.run(["git", "-C", str(top), "diff", "--binary", "--no-color", "HEAD", "--", str(inside)],
+                                  capture_output=True)
         elif path.is_file():
-            done = subprocess.run(["git", "-C", str(top), "diff", "--no-color", "--no-index", "--", "/dev/null",
-                                   str(inside)], capture_output=True, text=True)
+            done = subprocess.run(["git", "-C", str(top), "diff", "--binary", "--no-color", "--no-index", "--",
+                                   "/dev/null", str(inside)], capture_output=True)
         else:
             raise PerfError("%s no existe ni está en git: revisa la ruta (es relativa a %s)" % (name, base))
         if done.returncode not in (0, 1):
-            raise PerfError("git diff falló con %s: %s" % (name, (done.stderr or "").strip()[:200]))
+            raise PerfError("git diff falló con %s: %s" % (name, done.stderr.decode("utf-8", "replace").strip()[:200]))
         chunks.append(done.stdout)
-    text = "".join(chunks)
+    data = b"".join(chunks)
+    text = data.decode("utf-8", "replace")
     safe = re.sub(r"[^\w.-]+", "-", str(improvement)).strip("-.") or "mejora"
     target = folder / CHANGES_DIR / ("%s%s.diff" % (safe, "-%d" % (index + 1) if index else ""))
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    target.write_bytes(data)
     lines = text.splitlines()
     return {"diff": "%s/%s" % (CHANGES_DIR, target.name), "repo": shown_path(top, root) if top.resolve() != root else ".",
             "archivos": list(files), "fecha": datetime.date.today().isoformat(),
@@ -5338,7 +5392,6 @@ def changes_md(folder, plan, results, findings_text):
 
     symptom_i, cause_i, evidence_i = column("síntoma", "sintoma"), column("causa"), column("evidencia")
     by_id = {row[0].strip(): row for row in rows if row}
-    by_metric = {r["metrica"]: r for r in results}
     blocks = ["> **Interno: contiene código.** Lo que cambió cada mejora aplicada, por qué y qué mejoró. El extracto "
               "muestra lo esencial (en verde lo agregado, en rojo lo quitado); el diff completo queda en la carpeta "
               "`cambios/` de la investigación. No va en el reporte para gerencia."]
@@ -5356,7 +5409,7 @@ def changes_md(folder, plan, results, findings_text):
                                                ". Evidencia: %s" % cell(evidence_i) if cell(evidence_i) else ""))
         if item.get("a_prueba") and item.get("hipotesis"):
             lines.append("- **Hipótesis que pone a prueba:** %s" % item["hipotesis"])
-        r = by_metric.get(item.get("metrica"))
+        r = improvement_metric(plan, item, results)
         lines.append("- **Qué mejoró:** %s" % (
             "`%s` %s: %s" % (r["metrica"], change_phrase(r), verdict_words(r)) if r else
             "su métrica (`%s`) no tiene antes y después" % item.get("metrica", "—")))
@@ -5372,7 +5425,7 @@ def changes_md(folder, plan, results, findings_text):
                 where, ", ".join("`%s`" % name for name in entry.get("archivos") or []), entry.get("agregadas", "—"),
                 entry.get("quitadas", "—"), entry["diff"]))
             try:
-                text = (folder / entry["diff"]).read_text(encoding="utf-8")
+                text = (folder / entry["diff"]).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 lines.append("- El diff guardado no está en la carpeta (`%s`): sin diff guardado." % entry["diff"])
                 continue
@@ -5523,9 +5576,158 @@ NEVER_DISCARD = ("Nunca quites un cambio temporal con `git checkout`, `git resto
                  "borran el archivo entero sin guardarlo, también lo que no es de esta investigación")
 
 
+def row_files(cell):
+    """Los archivos de una celda de "Cambios temporales": uno, o varios separados por comas o cada uno entre acentos
+    graves (como las anotan las sesiones de 0.10.0 y 0.11.0), sin el ":línea" del final. [] si no hay ninguno."""
+    cell = (cell or "").strip()
+    quoted = re.findall(r"`([^`]+)`", cell)
+    items = quoted if len(quoted) > 1 else re.split(r"\s*,\s*", cell.replace("`", ""))
+    out = []
+    for item in items:
+        path = re.sub(r":\d+(?:-\d+)?$", "", item.strip())
+        if path and path not in ("—", "-") and path not in out:
+            out.append(path)
+    return out
+
+
+CLOSE_FILE = "cierre.json"
+DOD_LOG = "dod-cierre.log"
+
+
+def dod_commands(root):
+    """Los comandos de `## DoD` del AGENTS.md del proyecto, en orden y listos para pegar: el primer código en línea de
+    cada viñeta o ítem numerado y las líneas de un bloque de código. Los que no empiezan con `cd ` van con cd a la raíz.
+    [] si no hay AGENTS.md o no tiene la sección."""
+    text = read_agents(root)
+    if text is None:
+        return []
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if DOD_HEADING.match(line)), None)
+    if start is None:
+        return []
+    level = len(re.match(r"^﻿?[ \t]{0,3}(#+)", lines[start]).group(1))
+    out, fence = [], None
+    for line in lines[start + 1:]:
+        mark = FENCE.match(line)
+        if fence is None and not mark:
+            heading = ANY_HEADING.match(line)
+            if heading and len(heading.group(1)) <= level:
+                break
+            item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*)?`([^`]+)`", line)  # la viñeta empieza con el comando
+            if item:
+                out.append(item.group(1).strip())
+        elif fence is None:
+            fence = mark.group(1)
+        elif mark and mark.group(1)[0] == fence[0]:
+            fence = None
+        elif line.strip() and not line.lstrip().startswith("#"):
+            text = line.strip().lstrip("$ ").strip()
+            if out and out[-1].endswith("\\"):  # una línea que sigue a la anterior
+                out[-1] = out[-1][:-1].rstrip() + " " + text
+            else:
+                out.append(text)
+    commands = []
+    for command in out:
+        if command.startswith("cd ") or not command:
+            commands.append(command)
+        else:
+            commands.append("cd %s && %s" % (q(root), command))
+    return [command for command in dict.fromkeys(commands) if command and not DISCARDING.search(command)]
+
+
+# Un DoD no descarta ni publica nada: si una línea de `## DoD` lo hace, no se corre.
+DISCARDING = re.compile(r"\bgit\s+(?:checkout|restore|reset|clean|push|commit|rebase|stash)\b|\brm\s+-[a-z]*[rf]", re.I)
+
+
+PLACEHOLDER_ARG = re.compile(r"<[^<>\s][^<>]*>")
+
+
+def dod_sets(root, tops=()):
+    """[(repo, [comandos])] del DoD que corresponde después de quitar cambios en esos repos: el de AGENTS.md de la raíz
+    (con la línea de los módulos de otros repos, si la tiene) y el de cada otro repo tocado que tenga su propio
+    AGENTS.md con `## DoD`. Los comandos con marcadores (<módulo>) no se pueden correr: quedan fuera."""
+    out = []
+    for top in [pathlib.Path(root)] + [pathlib.Path(t) for t in tops if pathlib.Path(t).resolve() != pathlib.Path(root).resolve()]:
+        commands = [command for command in dod_commands(top) if not PLACEHOLDER_ARG.search(command)]
+        if commands:
+            out.append((top, commands))
+    return out
+
+
+def read_close(folder):
+    try:
+        data = json.loads((pathlib.Path(folder) / CLOSE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_close(folder, record):
+    (pathlib.Path(folder) / CLOSE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                                                   encoding="utf-8")
+
+
+def run_dod(folder, root, tops=()):
+    """Corre el DoD después de quitar los cambios temporales (dod_sets), en una sola tanda, con la salida en
+    <carpeta>/logs/dod-cierre.log y al chat solo un ✔ o ✖ por comando (con las últimas líneas del log si falla). Lo deja
+    en cierre.json: `siguiente` no da la investigación por cerrada sin él."""
+    folder = pathlib.Path(folder)
+    record = read_close(folder)
+    sets = dod_sets(root, tops or record.get("repos") or ())
+    stamp = datetime.datetime.now().replace(microsecond=0).isoformat()
+    if not sets:
+        record.update(dod="sin DoD", dod_fecha=stamp)
+        save_close(folder, record)
+        print("· AGENTS.md no tiene `## DoD` con comandos que se puedan correr (o solo tiene marcadores como <módulo>): "
+              "corre a mano los tests del módulo que tocaron los cambios temporales y la compilación de la variante "
+              "medida. `siguiente` no lo puede comprobar.")
+        return True
+    log = folder / "logs" / DOD_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    failed = []
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("\n=== DoD después de cerrar · %s ===\n" % stamp)
+        for _, commands in sets:
+            for command in commands:
+                handle.write("\n$ %s\n" % command)
+                handle.flush()
+                started = time.time()
+                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT)
+                handle.flush()
+                if done.returncode == 0:
+                    print("✔ %s (%s)" % (command, elapsed_text(time.time() - started)))
+                else:
+                    failed.append(command)
+                    print("✖ %s: terminó con código %d" % (command, done.returncode))
+    record.update(dod="ok" if not failed else "falló", dod_fecha=stamp, dod_log=str(log))
+    save_close(folder, record)
+    if failed:
+        tail = [line for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()][-8:]
+        print("Últimas líneas de %s:\n%s" % (log, "\n".join("    " + line[:200] for line in tail)))
+        raise PerfError("el DoD falló después de quitar los cambios temporales (%s): algo del proyecto dependía de ellos o "
+                        "ya fallaba" % "; ".join(failed)).con(
+            guardado="los cambios temporales ya están quitados (con su parche) y la salida completa en %s" % log,
+            seguir=[("corrige lo que falla y repite el DoD", same_command())])
+    print("✔ DoD en verde después de quitar los cambios temporales (log: %s)" % log)
+    return True
+
+
+def dod_step(folder, root, record):
+    """El paso que corre el DoD después de cerrar, o None si no hace falta (nada quitado, o ya en verde)."""
+    if not record.get("quitados") or record.get("dod") in ("ok", "sin DoD"):
+        return None
+    failed = record.get("dod") == "falló"
+    return terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(pathlib.Path(folder), root), "--dod"),
+                    "corre el DoD del proyecto (los comandos de ## DoD de AGENTS.md, también los de los módulos de otros "
+                    "repos) después de quitar los cambios temporales, con la salida en logs/%s, y lo anota%s" % (
+                        DOD_LOG, " (la vez anterior falló: %s)" % record.get("dod_log", "") if failed else ""),
+                    "espera; si algo falla, te muestra las últimas líneas del log y no da la investigación por cerrada")
+
+
 def temp_changes(state_text):
     """Las filas de "Cambios temporales por revertir" de estado.md: [{"archivo", "repo", "que", "revertido"}], sin las
-    que siguen con el relleno de la plantilla."""
+    que siguen con el relleno de la plantilla. Una fila con varios archivos (separados por comas o cada uno entre acentos
+    graves, como las anotaban las sesiones de 0.10.0 y 0.11.0) da una entrada por archivo."""
     _, sections = state_sections(state_text)
     body = next((text for title, text in sections.items() if title.startswith("cambios temporales")), "")
     headers, rows = parse_table(body)
@@ -5542,11 +5744,11 @@ def temp_changes(state_text):
         def cell(index):
             return row[index].strip() if index is not None and index < len(row) else ""
 
-        path = re.sub(r":\d+(?:-\d+)?$", "", cell(where).strip("`").strip())
-        if not path or path in ("—", "-") or has_placeholder(cell(where)):
+        if has_placeholder(cell(where)):
             continue
-        out.append({"archivo": path, "repo": cell(repo).strip("`").strip(), "que": cell(what),
-                    "revertido": bool(REVERTED.match(cell(reverted)))})
+        for path in row_files(cell(where)):
+            out.append({"archivo": path, "repo": cell(repo).strip("`").strip(), "que": cell(what),
+                        "revertido": bool(REVERTED.match(cell(reverted)))})
     return out
 
 
@@ -5691,7 +5893,7 @@ def git_apply(top, patch, reverse=False, check=False):
     return done.returncode == 0, " ".join((done.stderr or "").split())[:300]
 
 
-def repo_candidates(root, hint, extra):
+def repo_candidates(root, hint, extra, only_hint=False):
     """Las carpetas donde puede estar un archivo de "Cambios temporales" o de una mejora: la del repo que dice la fila
     (una ruta, o el nombre de un repo incluido desde fuera por settings.gradle), la raíz y los repos incluidos."""
     root = pathlib.Path(root)
@@ -5709,6 +5911,8 @@ def repo_candidates(root, hint, extra):
             for other in extra:
                 if other.name == token and other not in out:
                     out.append(other)
+    if only_hint:  # solo las que da la fila
+        return out
     for base in [root] + list(extra) + [top for top in (git_toplevel(other) for other in extra) if top is not None]:
         if base not in out:
             out.append(base)
@@ -5723,14 +5927,29 @@ def resolve_repo_file(root, name, hint, extra):
         return None, "'%s' no es una ruta completa (tiene '...', '…' o un patrón): escribe en estado.md la ruta del " \
                      "archivo desde la raíz de su repo" % name
     candidates = repo_candidates(root, hint, extra)
-    for base in candidates:
+    if (hint or "").strip().strip("`").strip() == ".":  # la fila dice la raíz: manda, como cualquier repo de la fila
+        candidates = [pathlib.Path(root)] + [base for base in candidates if base != pathlib.Path(root)]
+        hinted = 1
+    else:
+        hinted = len(repo_candidates(root, hint, extra, only_hint=True))  # van primero
+    matches = []
+    for index, base in enumerate(candidates):
         path = pathlib.Path(os.path.expanduser(name))
         path = path if path.is_absolute() else base / path
         if path.is_file():
             top = git_toplevel(path.parent)
             if top is None:
                 return None, "%s no está en un repo de git" % path
-            return top.resolve(), os.path.relpath(str(path.resolve()), str(top.resolve()))
+            found = (top.resolve(), os.path.relpath(str(path.resolve()), str(top.resolve())))
+            if index < hinted or path.is_absolute() and pathlib.Path(name).is_absolute():
+                return found  # el repo que dice la fila manda
+            if found not in matches:
+                matches.append(found)
+    if len(matches) > 1:
+        return None, "'%s' existe en más de un repo (%s): escribe en la columna \"Repo o módulo\" de esa fila en cuál " \
+                     "es" % (name, ", ".join(str(top) for top, _ in matches))
+    if matches:
+        return matches[0]
     # Un archivo nuevo que ya se quitó no existe, pero su carpeta sí: no hay nada que quitar (git no lo ve).
     for base in candidates:
         path = pathlib.Path(os.path.expanduser(name))
@@ -5804,10 +6023,10 @@ def mark_temp_reverted(folder, notes):
             continue
         if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells if cell) or column is None or where is None:
             continue
-        path = re.sub(r":\d+(?:-\d+)?$", "", cells[where].strip("`").strip()) if where < len(cells) else ""
-        if path in notes:
+        paths = row_files(cells[where]) if where < len(cells) else []
+        if paths and all(path in notes for path in paths):  # una fila de varios archivos, cuando se quitaron todos
             cells += [""] * (column + 1 - len(cells))
-            cells[column] = notes[path].replace("|", "\\|")
+            cells[column] = " · ".join(dict.fromkeys(notes[path] for path in paths)).replace("|", "\\|")
             lines[index] = "| " + " | ".join(cells) + " |"
             marked += 1
     if marked:
@@ -5855,6 +6074,8 @@ def cmd_cerrar(args):
     pending = [change for change in temp_changes(state.read_text(encoding="utf-8")) if not change["revertido"]]
     if not pending:
         print("✔ No quedan cambios temporales por revertir en %s." % state)
+        if args.dod:
+            run_dod(folder, root)
         if plan:
             print_next(folder, plan)
         return
@@ -5958,6 +6179,26 @@ def cmd_cerrar(args):
         note = update_agents_state(root)
         if note:
             print(note)
+    if plans:
+        # Después de quitar, el DoD: un cambio temporal pudo tapar algo, o algo del proyecto dependía de él.
+        record = read_close(folder)
+        record.update(fecha=datetime.datetime.now().replace(microsecond=0).isoformat(),
+                      quitados=record.get("quitados", 0) + sum(len(item["archivos"]) for item in plans),
+                      repos=sorted(set(record.get("repos") or []) | {str(item["repo"]) for item in plans}), dod="pendiente")
+        save_close(folder, record)
+        if args.dod:
+            run_dod(folder, root, record["repos"])
+        else:
+            sets = dod_sets(root, record["repos"])
+            if sets:
+                print("DoD después de quitar (los comandos de ## DoD de AGENTS.md), para confirmar que el proyecto sigue en "
+                      "verde. Los corre y lo anota, con la salida en %s:\n    %s" % (
+                          folder.resolve() / "logs" / DOD_LOG, same_command() + " --dod"))
+                for _, commands in sets:
+                    for command in commands:
+                        print("      · %s" % command)
+            else:
+                run_dod(folder, root, record["repos"])  # sin DoD que correr: lo dice y lo anota
     if plan:
         print_next(folder, plan)
 
@@ -6154,14 +6395,14 @@ def cmd_lineabase(args):
                 "intermedio", "medio", "vuelve a guardar el diff de la mejora", plan), plan, root),
                 ("después, repite", same_command())]
             try:
-                text = source.read_text(encoding="utf-8")
+                data = source.read_bytes()  # en bytes: los CRLF del diff quedan tal cual
             except OSError:
                 raise PerfError("no encuentro el diff guardado de %s (%s)" % (item["id"], source)).con(
                     guardado="nada", seguir=fix)
-            if not text.strip():
+            if not data.strip():
                 raise PerfError("el diff guardado de %s está vacío (%s): no sé qué quitar" % (item["id"], source)).con(
                     guardado="nada", seguir=fix)
-            patches.append({"mejora": item["id"], "repo": repo, "texto": text.encode("utf-8"), "fuente": source.resolve(),
+            patches.append({"mejora": item["id"], "repo": repo, "texto": data, "fuente": source.resolve(),
                             "ruta": patches_dir(folder, root) / ("%s-mejora-%s-%s.patch" % (name, slug(item["id"]), stamp))})
     if args.simular:
         for patch in patches:
@@ -6814,9 +7055,10 @@ def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=Fals
         out.append(warning("nombre", "%d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están "
                                      "cortados (por ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno"
                            % (len(cut), SECTION_NAME_MAX, cut[0][-40:]),
-                           "hay nombres de sección cortados en %d caracteres: actualiza la instrumentación (perf.py "
-                           "instrumentar --actualizar) para que HttpSectionName acorte desde la izquierda"
-                           % SECTION_NAME_MAX))
+                           "hay nombres de sección cortados en %d caracteres: actualiza la instrumentación para que "
+                           "HttpSectionName acorte desde la izquierda" % SECTION_NAME_MAX,
+                           commands=[("actualiza la instrumentación generada (no pisa lo que editaste a mano)", command)
+                                     for command in [update_instrumentation_command(root)] if command]))
     return out
 
 
@@ -7117,7 +7359,14 @@ def dod_notice(root, plan):
     variante medida), sin agregar herramientas."""
     agents = read_agents(root)
     if agents is not None and has_dod(agents):
-        return None
+        missing = dod_missing_external(root)
+        if not missing:
+            return None
+        return {"tipo": "avisos", "crudo": True,
+                "titulo": "`## DoD` de AGENTS.md no trae los módulos de otros repos (%s): si la mejora cae en uno de "
+                          "ellos, la sesión 3 no sabría cómo validarlo. Agrega a la sección, con la tarea real del módulo"
+                          % ", ".join(name for name, _ in missing),
+                "lineas": [line for _, line in missing]}
     found = INSTALL_TASK.search(plan.get("instalar") or "")
     assemble = "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
     if found:  # del 'instalar' del plan: con su módulo si lo trae; sin módulo, la tarea sin ':' (la busca en todos)
@@ -7821,9 +8070,9 @@ def cmd_capturar(args, plan=None):
             if cut:
                 print("⚠ %d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están cortados (por "
                       "ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno. Actualiza la "
-                      "instrumentación entre investigaciones (perf.py instrumentar --actualizar): HttpSectionName acorta "
-                      "desde la izquierda y conserva el final de la ruta (setup.md · Nombres de endpoint largos)"
-                      % (len(cut), SECTION_NAME_MAX, cut[0][-40:]))
+                      "instrumentación entre investigaciones (%s): HttpSectionName acorta desde la izquierda y conserva "
+                      "el final de la ruta (setup.md · Nombres de endpoint largos)"
+                      % (len(cut), SECTION_NAME_MAX, cut[0][-40:], update_hint(root)))
             args.resultado = {"http": info.get("http", 0), "sin_red": bool(gap)}  # lo lee humo
             if args.plan:
                 save_test_record(folder, flow_name, [mark for mark, _, ok in info.get("marcas_plan") or [] if ok],
@@ -7849,8 +8098,9 @@ def cmd_capturar(args, plan=None):
                 print("Rutas reales de los servicios (log %s, fuera de la traza): %d" % (SERVICE_LOG_TAG, len(urls)))
             elif info.get("http"):
                 print("· Sin el log de rutas (%s): la instrumentación de red es anterior a 0.11.0, así que los reportes "
-                      "muestran el nombre corto de cada servicio. Para la ruta completa, `instrumentar --actualizar` entre "
-                      "investigaciones (no cambia el nombre de las secciones)." % SERVICE_LOG_TAG)
+                      "muestran el nombre corto de cada servicio. Para la ruta completa, actualiza la instrumentación "
+                      "entre investigaciones (no cambia el nombre de las secciones): %s" % (
+                          SERVICE_LOG_TAG, update_hint(root)))
             print("Traza: %s" % saved)
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
@@ -8865,6 +9115,24 @@ def logrado_rows(plan, results, readable=False):
     return out
 
 
+def improvement_metric(plan, item, results):
+    """El resultado de `comparar` de la métrica de una mejora en su flujo (el de su `flujo` o el primero del plan): con
+    escenarios, la misma métrica sale en varios flujos y cuenta la del flujo de la mejora. None si no hay."""
+    flow = improvement_flow(plan, item)
+    found = [r for r in results if r["metrica"] == item.get("metrica")]
+    return next((r for r in found if r["flujo"] == flow), None) or (found[0] if len(found) == 1 else None)
+
+
+def metric_results(results, plan):
+    """{métrica: resultado} con un resultado por métrica: si una métrica sale en varios flujos (escenarios), el del
+    flujo base."""
+    flows = plan.get("flujos") or {}
+    out = {}
+    for r in sorted(results, key=lambda r: bool((flows.get(r["flujo"]) or {}).get("escenario_de")), reverse=True):
+        out[r["metrica"]] = r
+    return out
+
+
 def improvement_result(item, r):
     """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica. En una mejora a prueba
     (a_prueba), la medición de después confirma o refuta su hipótesis."""
@@ -9185,15 +9453,15 @@ def flow_service_set(plan, flow, endpoints, by_improvement):
     return own
 
 
-def endpoint_changes(groups, flow, suffix="llamadas"):
-    """{servicio: (mediana de antes, mediana de después)} de `red <servicio> <suffix>` por corrida; 0 en una fase medida
-    donde no aparece."""
+def endpoint_changes(groups, flow, suffix="llamadas", prefix=""):
+    """{servicio: (mediana de antes, mediana de después)} de `<prefix>red <servicio> <suffix>` por corrida (con
+    `prefix` "<tramo> ", las de un tramo); 0 en una fase medida donde no aparece."""
     measured = {phase for (name, _), entry in groups.items() if name == flow for phase in entry["fases"]}
     if not {"antes", "despues"} <= measured:
         return {}
     out = {}
     for endpoint in flow_endpoints(groups, flow):
-        entry = groups.get((flow, "red %s %s" % (endpoint, suffix)))
+        entry = groups.get((flow, "%sred %s %s" % (prefix, endpoint, suffix)))
         values = entry["fases"] if entry else {}
         out[endpoint] = tuple(statistics.median(values[phase]) if values.get(phase) else 0.0
                               for phase in ("antes", "despues"))
@@ -9234,8 +9502,11 @@ def attribute_network(results, rows, plan, folder):
             if r["flujo"] != flow or r["veredicto"] != "regresión":
                 continue
             metric = r["metrica"]
-            if metric in NETWORK_COUNTS:
-                changes = endpoint_changes(groups, flow, NETWORK_COUNTS[metric])
+            segment = metric[:-len(" red_llamadas")] if metric.endswith(" red_llamadas") else None
+            if metric in NETWORK_COUNTS or segment:
+                # las de un tramo: sus llamadas por servicio (`<tramo> red <servicio> llamadas`)
+                changes = endpoint_changes(groups, flow, "llamadas", segment + " ") if segment else \
+                    endpoint_changes(groups, flow, NETWORK_COUNTS[metric])
                 up = {endpoint: (b, a) for endpoint, (b, a) in changes.items() if a > b}
                 foreign = sorted(endpoint for endpoint in up if endpoint not in own)
                 paid = sorted(endpoint for endpoint in up if endpoint in own and owners.get(endpoint))
@@ -9430,12 +9701,14 @@ def plain_tradeoffs(items, plan, problems):
         item = entry["mejora"]
         title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item["id"], problems)
         title = "Un cambio con el título sin completar" if title.startswith("_") else title
-        gains = ["%s %s: %s" % (plain_metric(r["metrica"], plan), change_phrase(r, plain=True), plain_verdict(r))
-                 for _, r in entry["gana"][:1]]
+        many = len({flow for flow, _ in entry["gana"]}) > 1
+        gains = ["%s%s %s: %s" % (plain_metric(r["metrica"], plan), " (%s)" % (
+            (plan.get("flujos") or {}).get(flow, {}).get("titulo") or flow) if many else "", change_phrase(r, plain=True),
+            plain_verdict(r)) for flow, r in entry["gana"][:1]]
         costs = []
         for endpoint, before, after in entry["llamadas"]:
             if after != before:
-                costs.append("consultar al servidor %s %s cada vez que se recorre (%s)" % (
+                costs.append("consultar al servidor %s %s cada vez que el usuario hace este recorrido (%s)" % (
                     plain_count(abs(after - before)), "más" if after > before else "menos", service_words(endpoint)))
         text, _ = entry["costo"]
         if text:
@@ -9757,9 +10030,10 @@ def nice(value, unit="", extra=0):
         return "sin dato"
     if unit == "ms":
         size = abs(value)
-        if size >= 10000:
+        if size >= 10000 or abs(float(trim(value / 1000, 2 + extra))) >= 10:
             return "%s s" % trim(value / 1000, 1 + extra)
-        if size >= 1000:
+        # una mediana de 999.7 ms no se escribe "1000 ms": al redondear ya es un segundo
+        if size >= 1000 or (size >= 10 and abs(float(trim(value, extra))) >= 1000):
             return "%s s" % trim(value / 1000, 2 + extra)
         if size >= 10:
             return "%s ms" % trim(value, extra)
@@ -9767,7 +10041,7 @@ def nice(value, unit="", extra=0):
     if unit in ("%", "MB"):
         return "%s %s" % (trim(value, 1 + extra), unit)
     text = trim(value, extra) if float(value).is_integer() or abs(value) >= 100 else trim(value, 1 + extra)
-    return "%s %s" % (text, unit) if unit else text
+    return counted(text, unit) if unit else text
 
 
 # Veredictos con los que dos valores iguales al redondear se dicen "se mantuvo en X", sin porcentaje.
@@ -10373,6 +10647,22 @@ def short_service(service, size=30):
     return "%s …%s" % (method, tail[-max(size - len(method) - 2, 4):])
 
 
+def lane_labels(services, size=30):
+    """{servicio: etiqueta} para la línea de tiempo: el nombre corto y, si dos variantes del mismo servicio (distinta
+    marca de la query, "#ab12") quedarían con la misma etiqueta, la marca al final para distinguirlas."""
+    shorts = {service: short_service(service, size) for service in services}
+    out = {}
+    for service, text in shorts.items():
+        tag = QUERY_TAG.search(service)
+        twins = [other for other, label in shorts.items() if label == text and other != service]
+        if tag and twins:
+            base = short_service(service, size - len(tag.group(0)))
+            out[service] = "%s%s" % (base, tag.group(0))
+        else:
+            out[service] = text
+    return out
+
+
 def short_name(text, size):
     """Un nombre largo acortado desde la izquierda (el final de una ruta es lo que la distingue)."""
     return text if len(text) <= size else "…" + text[-(size - 1):]
@@ -10500,6 +10790,7 @@ def timeline_chart(rows, plan, phase="antes", folder=None):
             continue
         calls.sort()
         lanes = list(dict.fromkeys(name for _, _, name in calls))
+        lane_names = lane_labels(lanes)
         total = mine.get("ventana_ms")
         left = min(0.0, min(start for start, _, _ in calls))
         right = max([end for _, end, _ in calls] + [total or 0] + [at for _, at in marks + screens])
@@ -10531,7 +10822,8 @@ def timeline_chart(rows, plan, phase="antes", folder=None):
         for lane, service in enumerate(lanes):
             y = top_pad + lane * row
             mine_calls = [(a, b) for a, b, name in calls if name == service]
-            parts.append('<text x="0" y="%d" class="bar-label">%s</text>' % (y + 11, e(short_service(service, 30))))
+            parts.append('<text x="0" y="%d" class="bar-label">%s<title>%s</title></text>' % (
+                y + 11, e(lane_names.get(service) or short_service(service, 30)), e(service)))
             for start, end in mine_calls:
                 parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="bar-after"><title>%s · %s</title>'
                              '</rect>' % (scale(start), y, max(scale(end) - scale(start), 2), e(service), e(nice(end - start, "ms"))))
@@ -10585,8 +10877,16 @@ def plain_time(value, unit="ms", extra=0):
     if unit != "ms":
         return fmt(value, unit)
     if 0 < abs(value) < 1:
-        return "menos de 1 milisegundo"
-    return "%s s" % trim(value / 1000, 2 + extra) if abs(value) >= 100 else "%s milisegundos" % trim(value, extra)
+        # con decimales de más (dos valores que se verían iguales), el valor: nunca "de menos de 1 a menos de 1"
+        if not extra:
+            return "menos de 1 milisegundo"
+        places = extra
+        while trim(value, places) in ("0", "-0") and places < 4:
+            places += 1
+        return "%s milisegundos" % trim(value, places)
+    if abs(value) >= 100 or abs(float(trim(value, extra))) >= 100:  # 99.7 ms ya es "0.1 s", no "100 milisegundos"
+        return "%s s" % trim(value / 1000, 2 + extra)
+    return counted(trim(value, extra), "milisegundos")
 
 
 def service_words(service):
@@ -10676,8 +10976,9 @@ PLAIN_VERDICT = {"mejora": "mejora clara", "regresión": "empeoró", "sin cambio
                  "costo conocido": "es el costo de una mejora, que se eligió a propósito",
                  "servicios ajenos al flujo": "viene de otra parte de la app, no de lo que se midió"}
 MANAGEMENT_SECTION = "resumen para gerencia"
-MANAGEMENT_MISSING = ("_Sin completar: el resumen para este público todavía no se escribió. Lo que sigue sale de los "
-                      "datos de la investigación._")
+MANAGEMENT_MISSING = ("Sin completar: el resumen para este público todavía no se escribió. Lo que sigue sale de los "
+                      "datos de la investigación.")
+UNFILLED_PLAIN = "sin completar todavía"  # en el reporte de gerencia, en palabras (sin los guiones bajos)
 
 
 def plain_metric(metric, plan):
@@ -10846,9 +11147,16 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
                  for what, part in (("el síntoma", cell(row, symptom_i)), ("la causa", cell(row, cause_i))) if part]
         if parts:  # sin ".:" al unir: el síntoma pierde su punto final
             found.append("- %s" % ": ".join([parts[0].rstrip(" .;:")] + parts[1:]))
+    unconfirmed = []
+    for row, kind in zip(findings, kinds):
+        if kind == "sin confirmar":
+            text = cell(row, symptom_i).rstrip(" .;:")
+            unconfirmed.append(text[0].lower() + text[1:] if text and not jargon(text) else "un punto técnico")
     other = [(one if count == 1 else many % count) for one, many, count in (
         ("1 se investigó y se descartó", "%d se investigaron y se descartaron", kinds.count("descartado")),
         ("1 quedó sin confirmar", "%d quedaron sin confirmar", kinds.count("sin confirmar"))) if count]
+    other = ["%s (%s)" % (item, "; ".join(unconfirmed)) if "sin confirmar" in item and unconfirmed else item
+             for item in other]
     found_md = "\n".join(found) if found else "Ningún problema confirmado." if findings else \
         "El diagnóstico no dejó hallazgos registrados."
     if other:
@@ -10917,9 +11225,8 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
             risks.append("- %s que no %s: el detalle está en el reporte técnico." % (
                 "Empeoró 1 medida" if others == 1 else "Empeoraron %d medidas" % others,
                 "es principal" if others == 1 else "son principales"))
-        by_metric = {r["metrica"]: r for r in results}
         risks += ["- %s: el cambio no dio el resultado esperado." % title(m) for m in applied
-                  if improvement_result(m, by_metric.get(m.get("metrica"))).startswith("✖")]
+                  if improvement_result(m, improvement_metric(plan, m, results)).startswith("✖")]
     level, _ = frames_trust(folder)
     if level != "ok":
         risks.append("- La fluidez se midió en un dispositivo que no representa uno real: esos valores son %s."
@@ -10927,9 +11234,11 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
     risks_md = "\n".join(risks) if risks else "Sin riesgos señalados."
 
     services = services_line(rows, plan, "despues" if final and any(r["fase"] == "despues" for r in rows) else "antes")
-    cost = "Sesiones de IA: %s. Las mediciones corren sin IA y no tienen costo de uso." % cost_total(folder, plan)
+    cost = "Sesiones de IA: %s. Las mediciones corren sin IA y no tienen costo de uso." % cost_total(folder, plan,
+                                                                                                    plain=True)
     kind = "final" if final else "inicial"
-    return [("En resumen", summary or MANAGEMENT_MISSING),
+    return [(name, plain_unfilled(body)) for name, body in [
+            ("En resumen", summary or MANAGEMENT_MISSING),
             ("Qué notaba el usuario", symptom or "_%s_" % UNFILLED),
             ("Qué se encontró", found_md),
             ("Qué se hizo" if final else "Qué se propone", done_md),
@@ -10939,7 +11248,15 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
             ("Riesgos", risks_md),
             ("Costo", cost),
             ("Más detalle", "El reporte técnico, con las mediciones completas y cómo leerlas, es el archivo "
-                            "reporte-%s-dev.html." % kind)]
+                            "reporte-%s-dev.html." % kind)]]
+
+
+def plain_unfilled(body):
+    """Un texto de gerencia sin "_sin completar_": en palabras, sin los guiones bajos de markdown."""
+    text = (body or "").replace("_%s_" % UNFILLED, UNFILLED_PLAIN)
+    if text == UNFILLED_PLAIN:
+        return "Sin completar todavía: la investigación no lo anotó."
+    return text
 
 
 def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
@@ -11138,10 +11455,9 @@ def result_md(findings_text, plan):
 
 def improvements_summary(plan, results, n_findings=None):
     """Para el reporte final: de los hallazgos a las mejoras y su resultado, en una tabla corta."""
-    by_metric = {r["metrica"]: r for r in results}
     rows = []
     for m in plan.get("mejoras", []):
-        r = by_metric.get(m.get("metrica"))
+        r = improvement_metric(plan, m, results)
         estado = m.get("estado", "propuesta")
         result = improvement_result(m, r)
         if estado != "aplicada":
@@ -11366,7 +11682,7 @@ def cmd_reporte(args):
          "se mantuvo" if moved(r)["igual"] else "%s (%s)" % (nice_signed(r["delta"], r["unidad"]), moved(r)["pct"] or "—"),
          r["veredicto"], verdict_words(r) + (" · depende del backend" if r["familia"] == "e2e" else "")]
         for r in primary]) if primary else ""
-    results_by_metric = {r["metrica"]: r for r in results}
+    results_by_metric = metric_results(results, plan)
     n_findings = len(parse_table(pick("hallazgos"))[1])
     logrado_md = markdown_table(LOGRADO_HEADERS, logrado_rows(plan, results, readable=True)) if plan.get("mejoras") else ""
     comparison_md = ("> La tabla técnica, igual a `comparacion.md`: todas las métricas medidas, con mediana y P90 por fase. "
@@ -11521,11 +11837,33 @@ def keyboard_shown(adb):
     return bool(re.search(r"\bmInputShown=true\b", adb.shell("dumpsys input_method").stdout))
 
 
+TYPING_PAUSE = "120-200"
+
+
+def typing_pause(plan_path=None, flow=None):
+    """La pausa entre teclas de `teclear` sin --pausa: `tecleo.pausa_ms` del flujo en el plan (el de --plan, o el que
+    `capturar` deja en HB_PERF_PLAN y HB_PERF_FLUJO para el recorrido); TYPING_PAUSE si no hay. Así recorrido.sh y el
+    plan no pueden divergir."""
+    plan_path = plan_path or os.environ.get("HB_PERF_PLAN")
+    flow = flow or os.environ.get("HB_PERF_FLUJO")
+    if not plan_path:
+        return TYPING_PAUSE
+    try:
+        plan = load_plan(plan_path)
+    except PerfError:
+        return TYPING_PAUSE
+    flows = plan.get("flujos") or {}
+    spec = flows.get(flow) if flow in flows else (next(iter(flows.values())) if len(flows) == 1 else {})
+    typing = (spec or {}).get("tecleo")
+    value = typing.get("pausa_ms") if isinstance(typing, dict) else None
+    return value if value is not None else TYPING_PAUSE
+
+
 def cmd_teclear(args):
     """Escribe un texto en el campo con foco, carácter por carácter y con una pausa entre teclas, como una persona. La
     secuencia de pausas sale del texto y de la pausa (siempre la misma), así que antes y después teclean igual. Va en
     `recorrido.sh`, dentro de la traza: el intervalo real entre teclas lo mide `tecleo` del plan."""
-    pause = pause_range(args.pausa)
+    pause = pause_range(args.pausa if args.pausa is not None else typing_pause(args.plan, args.flujo))
     if pause is None:
         raise PerfError("--pausa es un número de milisegundos o un rango, por ejemplo 150 o 120-200")
     if "%" in args.texto:
@@ -11829,6 +12167,9 @@ def cmd_humo(args):
     note = update_agents_state(root, humo="pasó el %s" % today, http=http)
     if note:
         print(note)
+    for name, line in dod_missing_external(root):  # S13 con un `## DoD` que ya existía (0.12.0)
+        print("⚠ `## DoD` de AGENTS.md no trae el módulo %s, que viene de otro repo: agrega a la sección, con la tarea "
+              "real del módulo:\n    %s" % (name, line))
     nuevo = ["nuevo", "--receta", "arranque-frio", "--paquete", args.paquete, "--serial", serial, "--carpeta",
              shlex.quote(shown_path(investigations_base(root) / "arranque-frio" / datetime.date.today().isoformat(),
                                     root))]
@@ -12705,6 +13046,63 @@ def find_instrumentation(root):
     return perf_set, hooks
 
 
+def update_instrumentation_command(root):
+    """El comando completo que actualiza la instrumentación generada: `instrumentar --modulo <módulo> --paquete <paquete
+    de PerfHooks.kt> --actualizar`, con cd a la raíz. None si no encuentro PerfHooks.kt o su paquete."""
+    root = pathlib.Path(root)
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = sorted(d for d in dirs if d not in ("build", "node_modules", "reports", "out") and not d.startswith("."))
+        if "PerfHooks.kt" not in files:
+            continue
+        path = pathlib.Path(current) / "PerfHooks.kt"
+        parts = path.relative_to(root).parts
+        if "src" not in parts:
+            continue
+        module = pathlib.Path(*parts[:parts.index("src")]) if parts.index("src") else pathlib.Path(".")
+        try:
+            found = re.search(r"^\s*package\s+([\w.]+)", path.read_text(encoding="utf-8", errors="ignore"), re.M)
+        except OSError:
+            found = None
+        if found:
+            return perf_command(root, "instrumentar", "--modulo", str(module), "--paquete", found.group(1), "--actualizar")
+    return None
+
+
+def update_hint(root):
+    """"(`<comando>`)" para actualizar la instrumentación, o la opción sola si no encuentro el comando completo."""
+    command = update_instrumentation_command(root)
+    return "`%s`" % command if command else "`perf.py instrumentar --modulo <módulo> --paquete <paquete> --actualizar` " \
+                                            "(setup.md)"
+
+
+def dod_missing_external(root):
+    """Los repos incluidos desde fuera por settings.gradle que `## DoD` de AGENTS.md no nombra (ni por su nombre ni por
+    su ruta), con la línea que propondría para cada uno: [(nombre, línea)]. [] sin DoD, sin repos externos o si todos
+    aparecen."""
+    text = read_agents(root)
+    if text is None or not has_dod(text):
+        return []
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if DOD_HEADING.match(line))
+    level = len(re.match(r"^﻿?[ \t]{0,3}(#+)", lines[start]).group(1))
+    body = []
+    for line in lines[start + 1:]:
+        heading = ANY_HEADING.match(line)
+        if heading and len(heading.group(1)) <= level:
+            break
+        body.append(line)
+    body = "\n".join(body)
+    out = []
+    for other in external_roots(root, read_no_leer(root))[0]:
+        top = git_toplevel(other) or other
+        if other.name in body or top.name in body or str(top) in body:
+            continue
+        out.append((other.name, "- `cd %s && ./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests de %s, que viene de "
+                                "otro repo (settings.gradle lo incluye desde fuera; si Gradle lo ve como módulo, el comando "
+                                "va desde la raíz)" % (shlex.quote(str(top)), other.name)))
+    return out
+
+
 def find_generated(root, name):
     """True si bajo la raíz del proyecto hay un archivo con ese nombre generado por `instrumentar`."""
     for current, dirs, files in os.walk(str(root)):
@@ -13143,6 +13541,9 @@ def main(argv=None):
                                    "parche aparte y AGENTS.md dice cómo ponerlo antes de medir.")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--simular", action="store_true", help="solo muestra qué quitaría y qué quedaría; no toca nada")
+    p.add_argument("--dod", action="store_true",
+                   help="después de quitar, corre el DoD de AGENTS.md (con la salida en <carpeta>/logs/%s) y lo anota; sin "
+                        "cambios por quitar, solo corre el DoD" % DOD_LOG)
     p.set_defaults(func=cmd_cerrar)
 
     p = sub.add_parser("lineabase", help="quita o reaplica el código de las mejoras para rehacer la línea base",
@@ -13299,7 +13700,11 @@ def main(argv=None):
                                    "texto: es la misma en todas las fases. El espacio se escribe como %s (adb input text "
                                    "no escribe '%').")
     p.add_argument("texto")
-    p.add_argument("--pausa", default="120-200", help="milisegundos entre teclas: un número o un rango (120-200)")
+    p.add_argument("--pausa", help="milisegundos entre teclas: un número o un rango (120-200). Sin ella, `tecleo.pausa_ms` "
+                                   "del flujo en el plan (--plan, o el que `capturar` pasa al recorrido); si no hay, "
+                                   "120-200")
+    p.add_argument("--plan", help="plan.json del que leer la pausa (por defecto, el de la captura en curso)")
+    p.add_argument("--flujo", help="flujo del plan (por defecto, el de la captura en curso)")
     p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
     p.set_defaults(func=cmd_teclear)
 
