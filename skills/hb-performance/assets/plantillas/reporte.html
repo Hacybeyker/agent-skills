@@ -117,6 +117,16 @@
     .chart, svg { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .chart { break-inside: avoid; }
     details > summary { display: none; }
     section { break-inside: avoid; border-color: #ccc; } .toc { display: none; }
+    /* En papel no hay scroll: la tabla entra en el ancho de la página, con letra más chica y celdas que parten. */
+    .table-wrap { overflow: visible; }
+    table { font-size: 10.5px; }
+    th, td { padding: 4px 5px; }
+    th { font-size: 9px; letter-spacing: 0; overflow-wrap: break-word; hyphens: auto; }
+    td:first-child, td.num { min-width: 0; }
+    td.num { white-space: normal; }
+    td, td:first-child, .verdict, .state { overflow-wrap: break-word; white-space: normal; }
+    td code { overflow-wrap: anywhere; }
+    pre { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }
   }
 </style>
 </head>

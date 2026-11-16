@@ -4631,8 +4631,9 @@ def cost_command(folder, session=None, model=None, effort=None, source=None):
     por llenar. Con `source` (una ruta de transcript o "auto"), sale completo del todo: lo lee del transcript."""
     root = project_root(folder).resolve()
     folder = relative_folder(folder, root)
-    head = "cd %s && python3 -I %s consumo --carpeta %s --sesion %s" % (
-        q(root), q(HERE / "perf.py"), q(folder), q(session) if session else "'<sesión>'")
+    head = "cd %s && python3 -I %s consumo --carpeta %s" % (q(root), q(HERE / "perf.py"), q(folder))
+    if session or not source:  # con un transcript y sin sesión, la sesión sale de su primer pedido
+        head += " --sesion %s" % (q(session) if session else "'<sesión>'")
     if source:
         return "%s --desde-transcript %s" % (head, q(source))
     option, value, _ = cost_option(root)
@@ -4719,8 +4720,9 @@ def cost_lines(folder, plan):
         "1 sesión hecha" if len(missing) == 1 else "%d sesiones hechas" % len(missing), value, note)]
     lines += ["  %s" % cost_command(folder, label, model, effort) for label, model, effort in missing]
     if ai_tool(root)[0] == "claude":
-        lines.append("  Con Claude Code, justo al cerrar el chat de una sesión y sin copiar nada (tokens y pasos del "
-                     "transcript local): %s" % cost_command(folder, missing[-1][0], source="auto"))
+        lines.append("  O, con Claude Code, justo al cerrar el chat de una sesión y sin copiar nada (tokens y pasos del "
+                     "transcript local; la sesión sale del primer pedido del chat y, si después anotas --costo, se suma "
+                     "en la misma fila): %s" % cost_command(folder, source="auto"))
     return lines
 
 
@@ -5469,10 +5471,12 @@ def revert_notice(folder, root):
     names = [change["archivo"] for change in pending]
     listed = ", ".join(names[:6]) + (" y %d más" % (len(names) - 6) if len(names) > 6 else "")
     return terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root)),
-                    "quita los %d cambios temporales que siguen puestos (%s): por repo, guarda un parche que no pisa "
-                    "otro, comprueba que revierte limpio, los quita, muestra git status y los marca revertidos en "
-                    "estado.md; las mejoras y lo que ya estaba modificado se quedan. Con --simular solo muestra qué haría"
-                    % (len(pending), listed),
+                    "quita %s (%s): por repo, guarda un parche que no pisa otro, comprueba que revierte limpio, %s, "
+                    "muestra git status y %s en estado.md; las mejoras y lo que ya estaba modificado se quedan. Con "
+                    "--simular solo muestra qué haría"
+                    % (("el cambio temporal que sigue puesto", listed, "lo quita", "lo marca revertido") if len(pending) == 1
+                       else ("los %d cambios temporales que siguen puestos" % len(pending), listed, "los quita",
+                             "los marca revertidos")),
                     "córrelo una vez; si algo no revierte limpio, se detiene sin tocar nada y te dice por qué. Nunca "
                     "quites un cambio temporal con git checkout, git restore, git reset --hard ni git clean")
 
@@ -9004,7 +9008,22 @@ def moved(r, plain=False):
             break
         first, second = render(before, unit, extra), render(after, unit, extra)
     pct = plain_pct(before, after).strip()[1:-1] if plain else change_pct(before, after)
+    first, second = same_decimals(first, second, before, after, unit)
     return {"antes": first, "despues": second, "pct": pct, "igual": False}
+
+
+def same_decimals(first, second, before, after, unit):
+    """Dos valores de la misma unidad, escritos con los mismos decimales a partir de su valor real (nunca ceros
+    inventados): 410 y 300 ms → "0.41 s" y "0.30 s"; 45.6 y 8.2 ms → "45.6 ms" y "8.2 ms"."""
+    pattern = re.compile(r"^(\d+)(?:\.(\d+))?( .+)$")
+    a, b = pattern.match(first), pattern.match(second)
+    if not a or not b or a.group(3) != b.group(3) or before is None or after is None or min(before, after) < 0:
+        return first, second
+    places = max(len(a.group(2) or ""), len(b.group(2) or ""))
+    if not places or len(a.group(2) or "") == len(b.group(2) or ""):
+        return first, second
+    factor = 1000.0 if unit == "ms" and a.group(3).strip() == "s" else 1.0  # el valor en la unidad que se muestra
+    return tuple("%.*f%s" % (places, value / factor, a.group(3)) for value in (before, after))
 
 
 def change_phrase(r, plain=False):
@@ -9550,13 +9569,18 @@ def services_chart(rows, plan, phase="antes"):
 
 
 def short_service(service, size=30):
-    """El nombre corto de un servicio para un gráfico: el método y los dos últimos tramos de la ruta ("GET …/clientes/{id}"),
-    acortado desde la izquierda si aun así no entra. El nombre completo va en la tabla."""
+    """El nombre corto de un servicio para un gráfico: el método y los dos últimos tramos de la ruta ("GET …/clientes/{id}");
+    si aun así no entra, la ruta se acorta desde la izquierda y el método se queda. El nombre completo va en la tabla."""
     method, _, path = QUERY_TAG.sub("", service).partition(" ")
+    if not path:
+        return short_name(service, size)
     parts = [part for part in re.split(r"(?<=.)/", path) if part]
-    tail = "/".join(parts[-2:]) if len(parts) > 2 else path
-    text = "%s %s%s" % (method, "…/" if len(parts) > 2 else "", tail.lstrip("/")) if path else service
-    return short_name(text, size)
+    cut = len(parts) > 2
+    tail = ("/".join(parts[-2:]) if cut else path).lstrip("/")
+    text = "%s %s%s" % (method, "…/" if cut else "", tail)
+    if len(text) <= size:
+        return text
+    return "%s …%s" % (method, tail[-max(size - len(method) - 2, 4):])
 
 
 def short_name(text, size):
@@ -9606,10 +9630,10 @@ def mark_groups(marks):
     return [(key if len(times) == 1 else "%s ×%d" % (key, len(times)), times[0], times) for key, times in groups.items()]
 
 
-def label_rows(labels, scale, limit=None):
+def label_rows(labels, scale, limit=None, rows=LABEL_ROWS):
     """[(fila, x)] de cada etiqueta, sin que se pisen ni se corten: cada una va en la primera fila donde no choca con la
     anterior de esa fila (un ancho estimado por carácter) y, si pasaría del borde derecho (`limit`), se corre a la
-    izquierda. None si alguna no entra en LABEL_ROWS filas."""
+    izquierda. None si alguna no entra en `rows` filas."""
     ends, out = [], []
     for text, at in labels:
         width = 6.2 * len(text) + 8
@@ -9618,7 +9642,7 @@ def label_rows(labels, scale, limit=None):
             x = max(0.0, limit - width)
         row = next((index for index, end in enumerate(ends) if end <= x), None)
         if row is None:
-            if len(ends) >= LABEL_ROWS:
+            if len(ends) >= rows:
                 return None
             ends.append(0)
             row = len(ends) - 1
@@ -9699,8 +9723,7 @@ def timeline_chart(rows, plan, phase="antes", folder=None):
         numbered = placed is None
         if numbered:
             labels = [(str(index), at) for index, (_, at, _) in enumerate(grouped, start=1)]
-            placed = label_rows(labels, probe, edge) or [(index % LABEL_ROWS, probe(at) + 2)
-                                                          for index, (_, at) in enumerate(labels)]
+            placed = label_rows(labels, probe, edge, rows=len(labels))  # los números, en las filas que hagan falta
         top_pad = 14 * (max(line for line, _ in placed) + 1 if placed else 0) + 8
         height = top_pad + row * len(lanes) + 44
         axis, scale = time_axis(x0, width, top_pad + 4 + row * len(lanes), left, right)
@@ -9723,7 +9746,7 @@ def timeline_chart(rows, plan, phase="antes", folder=None):
                 parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="bar-after"><title>%s · %s</title>'
                              '</rect>' % (scale(start), y, max(scale(end) - scale(start), 2), e(service), e(nice(end - start, "ms"))))
             label = nice(mine_calls[0][1] - mine_calls[0][0], "ms") if len(mine_calls) == 1 or not per_call else \
-                "%d llamadas" % len(mine_calls)
+                "%d llamadas" % len(mine_calls)  # aquí siempre son 2 o más
             if not per_call and mine.get("red %s llamadas" % service, 1) > 1:
                 label += " · %s llamadas" % trim(mine["red %s llamadas" % service], 0)
             parts.append('<text x="%.1f" y="%d" class="bar-value">%s</text>' % (

@@ -9863,6 +9863,59 @@ class ReportTruthMoreTest(PerfBase):
         self.assertEqual(perf.flow_fingerprints(with_title), perf.flow_fingerprints({"segmentos": [{"nombre": "carga"}]}))
 
 
+class FinalReviewTest(PerfBase):
+    """Lo que encontró la revisión final: tablas que entran en la hoja al imprimir, la misma precisión en "pasó de X a Y",
+    el método en el nombre corto de un servicio largo, los números de la línea de tiempo sin pisarse y el comando de
+    --desde-transcript sin una sesión fija."""
+
+    def test_tablas_que_entran_en_la_hoja_al_imprimir(self):
+        css = (perf.ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+        printing = css[css.index("@media print"):]
+        for rule in (".table-wrap { overflow: visible; }", "td:first-child, td.num { min-width: 0; }",
+                     "td.num { white-space: normal; }", "td, td:first-child, .verdict, .state { overflow-wrap: break-word;",
+                     "pre { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }"):
+            self.assertIn(rule, printing)
+
+    def test_misma_precision_y_nombre_corto_con_metodo(self):
+        self.assertEqual(perf.same_decimals("0.41 s", "0.3 s", 410, 300, "ms"), ("0.41 s", "0.30 s"))
+        self.assertEqual(perf.same_decimals("450 ms", "4.2 s", 450, 4200, "ms"), ("450 ms", "4.2 s"))  # otra unidad
+        # nunca ceros inventados: cada valor se escribe de nuevo desde el real, con la precisión mayor
+        for before, after, expected in ((45.6, 8.2, "pasó de 45.6 ms a 8.2 ms"), (12340, 9870, "pasó de 12.34 s a 9.87 s"),
+                                        (16.4, 9.8, "pasó de 16.4 ms a 9.8 ms")):
+            phrase = perf.change_phrase({"antes": {"mediana": before}, "despues": {"mediana": after}, "unidad": "ms",
+                                         "veredicto": "mejora"})
+            self.assertTrue(phrase.startswith(expected), phrase)
+        result = {"antes": {"mediana": 410.0}, "despues": {"mediana": 300.0}, "unidad": "ms", "veredicto": "mejora"}
+        self.assertTrue(perf.change_phrase(result, plain=True).startswith("pasó de 0.41 s a 0.30 s ("),
+                        perf.change_phrase(result, plain=True))  # gerencia, en segundos y con la misma precisión
+        name = perf.short_service("POST api/v1/clientes/{id}/preferencias/notificaciones")
+        self.assertTrue(name.startswith("POST …") and name.count("…") == 1 and len(name) <= 30, name)
+        self.assertEqual(perf.short_service("GET api/v1/clientes/{id}"), "GET …/clientes/{id}")
+
+    def test_numeros_de_la_linea_de_tiempo_sin_pisarse(self):
+        marks = [(str(index), 10 + 10 * index) for index in range(1, 7)]
+        placed = perf.label_rows(marks, lambda v: v / 3000 * 330, 660, rows=len(marks))
+        spans = [(line, x, x + 6.2 * len(text) + 8) for (text, _), (line, x) in zip(marks, placed)]
+        for i, (line, start, end) in enumerate(spans):
+            for other, first, last in spans[i + 1:]:
+                self.assertFalse(line == other and start < last and first < end, spans)
+
+    def test_cerrar_en_singular(self):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", STATE_COST % "| app/A.kt | app | marca | no |\n")
+        step = perf.revert_notice(folder, self.dir)
+        self.assertIn("quita el cambio temporal que sigue puesto (app/A.kt)", step["que"])
+        self.assertIn("lo quita, muestra git status y lo marca revertido", step["que"])
+
+    def test_desde_transcript_sin_sesion_fija(self):
+        folder = self.dir / "inv"
+        write(folder / "estado.md", "# x\n")
+        command = perf.cost_command(folder, source="auto")
+        self.assertNotIn("--sesion", command)
+        self.assertTrue(command.endswith("--desde-transcript auto"))
+        self.assertIn("--sesion '2 · diagnóstico'", perf.cost_command(folder, "2 · diagnóstico", source="auto"))
+
+
 class BusinessWordsTest(PerfBase):
     """R6: el reporte de gerencia sin ".:", sin rutas en formato de código, sin cantidades con decimales raros, sin
     nombres internos de tramos (con su título), con los puntos sin cerrar dichos y la duración del recorrido aclarada."""
