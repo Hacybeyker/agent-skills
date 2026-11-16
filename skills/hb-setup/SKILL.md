@@ -1,10 +1,11 @@
 ---
 name: hb-setup
-description: 'Prepara un proyecto para trabajar con agentes: detecta el stack, los comandos y las convenciones de git, y crea o actualiza su AGENTS.md con la estructura estándar (Stack, Comandos, DoD, Arquitectura, Reglas, Git, Versionado, Seguridad) más el CLAUDE.md que lo importa. Úsala al empezar un proyecto, cuando falte el AGENTS.md o para pasar uno existente al estándar ("crea el AGENTS.md", "configura el proyecto para los agentes", "actualiza el AGENTS.md", "migra el AGENTS.md al estándar", "/hb-setup").'
+description: 'Prepara un proyecto para trabajar con agentes: detecta el stack, los comandos, las convenciones de git y los repos relacionados, y crea o actualiza su AGENTS.md con la estructura estándar (Stack, Comandos, DoD, Arquitectura, Reglas, Git, Versionado, Seguridad). El CLAUDE.md que lo importa solo se crea si el proyecto usa Claude Code, y el contexto de IA puede ir versionado, local o en una carpeta fuera del repo. Úsala al empezar un proyecto, cuando falte el AGENTS.md o para pasar uno existente al estándar ("crea el AGENTS.md", "configura el proyecto para los agentes", "actualiza el AGENTS.md", "migra el AGENTS.md al estándar", "/hb-setup").'
 license: MIT
+compatibility: "Requiere git. Para preparar el contexto de IA, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools)."
 metadata:
   author: hacybeyker
-  version: "1.1.0"
+  version: "1.2.0"
   category: flow
 ---
 
@@ -14,7 +15,7 @@ Deja el proyecto listo para `hb-implement`, `hb-review`, `hb-commit` y `hb-relea
 
 **El `AGENTS.md` describe el proyecto tal como es**, no como debería ser: su stack, su arquitectura y sus librerías reales, aunque sean anteriores a lo que recomienda el perfil (Views y XML, MVP, RxJava, Dagger 2, LiveData). Los agentes trabajan con ese stack. Modernizar es una decisión del usuario, que se toma después, por partes, y queda registrada en `## Modernización`; nunca la toma el setup ni una tarea cualquiera.
 
-**Estándar:** [AGENTS.md](https://agents.md/), el formato abierto que leen Codex, Cursor, Copilot, Junie, Gemini CLI y otros. Claude Code lo lee a través de un `CLAUDE.md` que lo importa.
+**Estándar:** [AGENTS.md](https://agents.md/), el formato abierto que leen Codex, Cursor, Copilot, Junie, Gemini CLI y otros. Es el único archivo que el setup siempre escribe. Claude Code lo lee a través de un `CLAUDE.md` que lo importa, que se crea solo si el proyecto lo usa (sección 3).
 
 ## 1. Detecta
 
@@ -41,7 +42,9 @@ cd <raíz-del-proyecto> && grep -rhoE 'compose|viewbinding|databinding|appcompat
 cd <raíz-del-proyecto> && grep -rlE 'class \w+(Presenter|ViewModel|Interactor|Reducer|Store)\b' --include='*.kt' --include='*.java' . | sed -E 's/.*(Presenter|ViewModel|Interactor|Reducer|Store).*/\1/' | sort | uniq -c
 ```
 
-Con eso anota: UI (Compose, Views con ViewBinding, DataBinding o `findViewById`), patrón de presentación (MVVM, MVP, MVI), asincronía (corrutinas y Flow, RxJava, LiveData, callbacks), DI (Hilt, Dagger 2, Koin, manual), navegación, red, persistencia, serialización y tests. Si conviven dos (Compose y XML, Rx y corrutinas), di cuál domina y dónde está cada uno. El perfil se aplica **en lo que coincide** con el proyecto; lo demás lo describe `## Arquitectura` tal cual está.
+Con eso anota: UI (Compose, Views con ViewBinding, DataBinding o `findViewById`), patrón de presentación (MVVM, MVP, MVI), asincronía (corrutinas y Flow, RxJava, LiveData, callbacks), DI (Hilt, Dagger 2, Koin, manual), navegación, red, persistencia, serialización y tests. Si conviven dos (Compose y XML, Rx y corrutinas), di cuál domina y dónde está cada uno. El perfil se aplica **en lo que coincide** con el proyecto; lo demás lo describe `## Arquitectura` tal cual está. En otros stacks, la misma idea con sus archivos de dependencias (`package.json`, `pyproject.toml`, `go.mod`, `Package.swift`…).
+
+**Versiones que no están en el repo.** Si el stack toma sus versiones de una fuente remota (un catálogo o BOM publicado, un plugin de convenciones), léelas de una copia local si la hay (por ejemplo, el repo del catálogo clonado al lado) y anota de dónde salen. Si no hay copia, anota la fuente remota sin inventar valores.
 
 **Comandos y DoD.**
 - Gradle: tareas propias del build (busca `tasks.register` en los `build.gradle.kts`, como `formatAndAnalyze`), o las estándar (`lint`, `test`, `assembleDebug`; `ktlintCheck` y `detekt` si sus plugins están aplicados).
@@ -57,16 +60,36 @@ Con eso anota: UI (Compose, Views con ViewBinding, DataBinding o `findViewById`)
 - `CHANGELOG.md`: formato, secciones e idioma.
 - Dónde vive la versión (la misma tabla de `hb-release`), si hay notas de tienda y si un workflow crea tags o publica.
 
+**Contexto de IA y repos relacionados.** El script de esta skill (la ruta es relativa a la carpeta de la skill) dice si `AGENTS.md` está versionado, excluido o enlazado a otra carpeta, si hay señales de Claude Code (`CLAUDE.md` o `.claude/`), los submódulos y los repos hermanos que el proyecto nombra como `../<nombre>`:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py estado
+```
+
+Si el proyecto depende de otros repos que se trabajan en local, o consume dependencias publicadas que se pueden usar como código local, sigue [repos-relacionados.md](references/repos-relacionados.md): detecta el mecanismo que el proyecto ya usa, sin asumir ninguno.
+
 ## 2. Pregunta solo lo que no se puede deducir
 
 Haz todas las preguntas juntas y propone un valor por defecto:
 - ¿La IA puede hacer commits? Por defecto: **no**; deja los cambios y entrega el mensaje.
 - Si el historial mezcla idiomas: ¿en qué idioma van los commits y el changelog?
+- ¿Usas Claude Code? Por defecto: **sí** si el proyecto tiene `CLAUDE.md` o `.claude/`; si no, **no**. Igual con el archivo propio de cualquier otro agente.
+- ¿Se versiona el contexto de IA (`AGENTS.md`, sus docs y las salidas)? Por defecto: **sí**. Si no: **local** (en el repo, excluido de git) o en una **carpeta externa** que indicas ([contexto.md](references/contexto.md)).
+- ¿Dónde van los reportes de `hb-implement`? Por defecto: `reports`, o `contexto/reports` si el contexto no se versiona. Puede ser otra carpeta o una por tarea, `<carpeta>/{fecha}/{slug}`; en ese caso, ¿cómo se arma el slug? Por defecto, el título en minúsculas con guiones (otra convención: `<ticket>-<descripción-corta>`).
+- Si no se pudo deducir: ¿el proyecto depende de otros repos que trabajas en local, o de dependencias publicadas que a veces usas como código local? ¿Cuáles, dónde están y cómo pasas de una a otra?
 - Reglas propias que no aparecen en el código (datos sensibles, restricciones del negocio).
 
 ## 3. Escribe o actualiza
 
-**Proyecto sin `AGENTS.md`:** créalo desde [assets/AGENTS.template.md](assets/AGENTS.template.md). Completa cada sección con lo detectado, quita las que no apliquen (por ejemplo, notas de tienda) y no dejes ningún `<placeholder>`. `## Stack` y `## Arquitectura` son una foto del proyecto: ni un patrón ni una librería que no estén en el código. `## Modernización` arranca en "ninguna decidida".
+**Primero, el lugar del contexto.** Con las respuestas, prepara la estructura del modo elegido. El script no pisa ni borra nada: si algo lo impide (un `AGENTS.md` versionado o ya presente donde iría un enlace), no cambia nada y dice por qué.
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py preparar --modo <versionado|local|externo> [--externa <carpeta-fuera-del-repo>] [--reportes <ruta>] [--claude <si|no>]
+```
+
+Imprime dónde escribir `AGENTS.md` (en el modo externo, en la carpeta externa: escribe ahí, no sobre el enlace), dónde va lo extenso y las líneas `Contexto de IA` y `Carpeta de reportes` para `## Reglas del proyecto`.
+
+**Proyecto sin `AGENTS.md`:** créalo desde [assets/AGENTS.template.md](assets/AGENTS.template.md). Completa cada sección con lo detectado y las respuestas, quita las que no apliquen (por ejemplo, notas de tienda o `### Repos relacionados`) y no dejes ningún `<placeholder>`: el resultado tiene que quedar completo y usable sin otra pasada. `## Stack` y `## Arquitectura` son una foto del proyecto: ni un patrón ni una librería que no estén en el código; las versiones que vienen de fuera del repo, con su fuente. `## Modernización` arranca en "ninguna decidida".
 
 **Proyecto con `AGENTS.md`:** pásalo al estándar sin perder lo propio.
 1. Conserva lo específico del proyecto: descripción del producto, excepciones, reglas de negocio, decisiones y sus motivos.
@@ -75,12 +98,15 @@ Haz todas las preguntas juntas y propone un valor por defecto:
 4. Señala lo que se aparta de los estándares y propone el cambio sin aplicarlo: secciones de changelog no estándar (como `Enhancement`), tags sin `v`, commits sin Conventional Commits. Lo que se aparta del **perfil** (Views en vez de Compose, MVP, RxJava) no es un desvío: es el stack del proyecto; va en `## Stack` y, si el usuario quiere modernizarlo algún día, en `## Modernización` como candidato, sin plan ni fecha.
 
 En los dos casos:
-- **`CLAUDE.md`** con una sola línea, `@AGENTS.md`, salvo que tenga instrucciones propias de Claude que haya que conservar.
-- **`reports/`** (lo usa `hb-implement`) debe estar ignorado por git. No edites `.gitignore` por tu cuenta: si falta, inclúyelo en el diff que muestras para aprobar, o deja la línea en `.git/info/exclude` (local).
-- Mantén el `AGENTS.md` corto, idealmente por debajo de 150 líneas: los agentes lo cargan en cada sesión. Lo extenso va a `docs/` y se enlaza.
+- **`CLAUDE.md`, solo si corresponde:** si el proyecto ya tiene `CLAUDE.md` o `.claude/`, o el usuario confirmó que usa Claude Code. Una sola línea, `@AGENTS.md`, salvo que tenga instrucciones propias de Claude que haya que conservar. Si no corresponde, no se crea. El mismo criterio vale para el archivo propio de cualquier otro agente.
+- **`## Reglas del proyecto`** lleva las líneas `Contexto de IA` y `Carpeta de reportes` que imprimió el script. `hb-implement` lee `Carpeta de reportes` tal cual (con `{fecha}` y `{slug}`, si los tiene).
+- **Repos relacionados:** si los hay, la subsección `### Repos relacionados` de `## Arquitectura`, con la ruta relativa de cada uno, qué contiene, cómo se incluye en local, cómo pasar a su código y volver, y la nota de que el agente necesita acceso a esas carpetas ([repos-relacionados.md](references/repos-relacionados.md)).
+- **La carpeta de reportes queda fuera de git:** el script la deja en `.git/info/exclude` (local). No edites `.gitignore` por tu cuenta: si el equipo lo prefiere ahí, inclúyelo en el diff que muestras para aprobar.
+- Mantén el `AGENTS.md` corto, idealmente por debajo de 150 líneas: los agentes lo cargan en cada sesión. Lo extenso va a la carpeta de docs del modo (`docs/` si el contexto se versiona; `contexto/docs/` si no) y se enlaza desde `AGENTS.md`.
 
 ## 4. Verifica y entrega
 
 1. Pregunta si quieres correr el DoD una vez para confirmar que los comandos funcionan (puede tardar). Si alguno falla, anótalo en la entrega.
-2. Muestra el `AGENTS.md` final, o el diff si lo actualizaste, y la lista de desvíos de estándar encontrados. Si el stack es anterior al perfil, dilo en una línea y nada más: la modernización se conversa cuando el usuario la pida.
-3. No commitees: propone el commit con `hb-commit` (por ejemplo `docs: agregar AGENTS.md con el estándar de agentes`).
+2. Corre `contexto.py estado` otra vez: el modo debe ser el elegido y, en local o externo, `git status` no debe mostrar `AGENTS.md`, `CLAUDE.md` ni la carpeta de contexto.
+3. Muestra el `AGENTS.md` final, o el diff si lo actualizaste, y la lista de desvíos de estándar encontrados. Si el stack es anterior al perfil, dilo en una línea y nada más: la modernización se conversa cuando el usuario la pida.
+4. No commitees: propone el commit con `hb-commit` (por ejemplo `docs: agregar AGENTS.md con el estándar de agentes`). En los modos local y externo no hay nada del contexto que commitear: dilo.
