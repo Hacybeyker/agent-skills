@@ -8977,7 +8977,7 @@ class MarksAcrossPhasesTest(DeviceBase):
         phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
         record = phases["antes"]["flujos"]["home"]
         self.assertEqual(set(record["marcas"]), {"lista"})
-        self.assertEqual(set(record["plan"]), {"recorrido", "metricas"})
+        self.assertEqual(set(record["plan"]), {"recorrido", "metricas", "archivos"})  # archivos: 0.12.0
         self.assertEqual(self.capture("--prueba").returncode, 0)
         test = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["prueba"]["flujos"]["home"]
         self.assertTrue(test["marcas_ok"])

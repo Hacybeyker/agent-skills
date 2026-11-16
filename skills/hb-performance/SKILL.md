@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere adb, un dispositivo con Android 10 o superior (12 o superior para los frames), trace_processor de Perfetto y Python 3.8+ (solo librería estándar). Opcional: android-profiler para heap dumps; Maestro (viene con testigo) para llevar la app al punto de partida en flujos largos; retrace (Command-line Tools del SDK, con Java) para desofuscar con el mapping de R8."
 metadata:
   author: hacybeyker
-  version: "0.11.0"
+  version: "0.12.0"
   category: flow
 ---
 
@@ -25,7 +25,7 @@ Cada paso del agente reenvía **todo** el chat. Un chat que encadena sesiones ll
 ## Reglas
 
 1. **Alcance estricto.** Analiza y cambia solo lo indicado. Si la causa está fuera, repórtala con evidencia y pregunta.
-2. **Medir antes de cambiar**, con las mismas condiciones antes y después ([medicion.md](references/medicion.md)).
+2. **Medir antes de cambiar**, con las mismas condiciones antes y después ([medicion.md](references/medicion.md)). Después de medir antes, nadie cambia `preparar`, `recorrido` ni sus scripts sin decirlo: un cambio así es un escenario nuevo o una línea base nueva (`lineabase`). Que fue "igual contra igual" lo dice `perf.py` con las huellas de cada fase, nunca la sesión.
 3. **Evidencia o nada:** métrica + consulta o traza + `archivo:línea`. Lo que no se pueda confirmar va como **⚠ Por confirmar**. **Descartar también exige evidencia de la traza** (un slice, una marca o una ausencia medible), nunca el valor de una configuración estática: lo que se resuelve al ejecutarse (remote config, toggles por ambiente o por build type) se comprueba en la traza ([diagnostico.md](references/diagnostico.md)). **"No medido" no es "sin problema":** una consulta que `perf.py` marca `no medido` o `configuración desconocida` no prueba ausencia; solo `Medido y sin casos` sirve para descartar.
 4. **Los números con veredicto los calcula `perf.py`.** Nunca calcules medianas, porcentajes ni veredictos. Un valor que solo sale de una consulta se cita tal cual y rotulado "sin veredicto estadístico".
 5. **Salidas acotadas.** Nunca vuelques al chat salidas completas (`dumpsys`, logcat, SQL, Gradle, tests, diffs). Encadena los comandos de un mismo paso (el DoD entero) en **una** invocación, con el log en `<carpeta>/logs/` y al chat solo el resumen o `grep -m1 -A20`. No leas `perf.py` ni los archivos que genera: usa `--help` y lo que imprime. Lee archivos por rangos.

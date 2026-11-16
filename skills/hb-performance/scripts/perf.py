@@ -53,10 +53,10 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase.
-SAME_CAPTURE = ("0.9.0", "0.10.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -2917,8 +2917,9 @@ def write_phase(folder, phase, data, flow=None):
                 data.setdefault("avisos", [])
                 if note not in data["avisos"]:
                     data["avisos"].append(note)
-            if key == "plan" and earlier and isinstance(value, dict) and earlier.get("recorrido") != value.get("recorrido"):
-                note = "el recorrido del plan cambió entre tandas de la fase: repite la fase con --rehacer"
+            if key == "plan" and earlier and isinstance(value, dict) and route_changes(earlier, value):
+                note = "%s: repite la fase con --rehacer" % route_change_text(
+                    route_changes(earlier, value), "la primera tanda de la fase", "esta")
                 data.setdefault("avisos", [])
                 if note not in data["avisos"]:
                     data["avisos"].append(note)
@@ -3780,8 +3781,9 @@ def older(phases, phase, than):
 
 def baseline_changes(folder, plan, flow, phases):
     """Lo que cambió después de medir antes, según la huella que guarda fases.json: (marcas que cambiaron, si cambió el
-    recorrido del plan, si cambiaron solo sus métricas). Las marcas se comparan con las de la última corrida de prueba
-    y las de después medidas más tarde que antes. Sin huella en antes (una versión anterior), no detecta nada."""
+    recorrido del plan o sus archivos, si cambiaron solo sus métricas, los archivos del recorrido que cambiaron). Las
+    marcas se comparan con las de la última corrida de prueba y las de después medidas más tarde que antes; el
+    recorrido y sus archivos, con los de ahora. Sin huella en antes (una versión anterior), no detecta nada."""
     spec = (plan.get("flujos") or {}).get(flow) or {}
     before = phase_flow_record(phases, "antes", flow)
     t_before = phase_time(phases, "antes")
@@ -3797,10 +3799,11 @@ def baseline_changes(folder, plan, flow, phases):
     if older(phases, "antes", "despues") and not rebuilt:
         marks |= set(changed_marks(before.get("marcas"), phase_flow_record(phases, "despues", flow).get("marcas")))
     recorded = before.get("plan") if isinstance(before.get("plan"), dict) else {}
-    now = flow_fingerprints(spec)
-    route = bool(recorded.get("recorrido")) and recorded["recorrido"] != now["recorrido"]
+    now = flow_fingerprints(spec, folder if isinstance(recorded.get("archivos"), dict) else None)
+    files = [name for name in route_changes(recorded, now) if name != "el recorrido del plan"]
+    route = bool(recorded.get("recorrido")) and recorded["recorrido"] != now["recorrido"] or bool(files)
     metrics = not route and bool(recorded.get("metricas")) and recorded["metricas"] != now["metricas"]
-    return sorted(marks), route, metrics
+    return sorted(marks), route, metrics, files
 
 
 def server_metric(metric):
@@ -3842,6 +3845,8 @@ def closing_level(folder, plan):
         reasons.append("%d regresi%s" % (len(regressions), "ón" if len(regressions) == 1 else "ones"))
     if mark_change_notes(folder, plan):
         reasons.append("marcas que cambiaron entre fases")
+    if route_change_notes(folder, plan):
+        reasons.append("un recorrido que cambió entre fases")
     verdicts = {}
     for r in results:
         verdicts.setdefault(r["metrica"], []).append(r["veredicto"])
@@ -3894,7 +3899,7 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
             steps.append(measure("control", "mide el control de nuevo, con el mismo build sin las mejoras: el ruido del "
                                             "antes nuevo"))
         return "rehacer la línea base sin las mejoras (sin chat)", steps + [reapply, install_with, test]
-    marks, route, metrics = baseline_changes(folder, plan, flow, phases)
+    marks, route, metrics, files = baseline_changes(folder, plan, flow, phases)
     report = report_file(folder, "final")
     # Con el reporte final al día, se eligió cerrar con veredictos orientativos: no se vuelve a pedir la línea base.
     closed = report is not None and not reports_outdated(folder, report)
@@ -3902,7 +3907,10 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
         what = []
         if marks:
             what.append("las marcas %s cambiaron después de medir antes (el código que las emite es otro)" % ", ".join(marks))
-        if route:
+        if files:
+            what.append("%s cambi%s después de medir antes (la espera o los pasos pueden no ser los mismos)" % (
+                ", ".join(files), "ó" if len(files) == 1 else "aron"))
+        if route and not files:
             what.append("el recorrido del plan cambió después de medir antes")
         dependent = metrics_using_marks((plan.get("flujos") or {}).get(flow), marks) if marks else []
         lines = ["; ".join(what) + ": antes y después no miden lo mismo%s. Para un veredicto firme, la línea base se "
@@ -3933,6 +3941,7 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
                               "OPCIÓN, solo si decides no rehacer la línea base (en lugar de todo lo anterior): cierra "
                               "con esos veredictos como orientativos", plan))
         return "rehacer la línea base: %s (sin chat)" % ("cambiaron marcas del plan" if marks else
+                                                         "cambió %s" % ", ".join(files) if files else
                                                          "cambió el recorrido"),             [{"tipo": "avisos", "titulo": "La línea base ya no mide lo mismo", "lineas": lines}] + steps
     if metrics:
         return "recalcular las métricas del plan (sin chat)", [
@@ -4368,6 +4377,9 @@ def route_block(plan, root, folder=None):
                          "claves, con lectura oculta; el valor no se guarda): %s"
                          % (", ".join("`%s`" % v for v in flow["requiere_env"]),
                             "; ".join(code_span(command) for _, command in env_steps(names, root)) or "—"))
+        same = same_route_line(folder, name) if folder is not None else ""
+        if same:
+            lines.append(same)
         if folder is not None and has_human_pause(flow, folder):
             total, detail = human_runs(plan)
             lines.append("- Paso humano: el recorrido tiene una pausa (`perf.py pausa`), así que cada corrida la atiende una "
@@ -5824,6 +5836,46 @@ def cmd_cerrar(args):
         print_next(folder, plan)
 
 
+def improvements_in_tree(folder, plan):
+    """Los ids de las mejoras aplicadas cuyo código sigue en el repo: el diff que guardó `decidir --aplicada` revierte
+    limpio (`git apply --check -R`, sin commitear o ya commiteada) o, sin diff guardado, alguno de sus archivos tiene
+    cambios. Vacío si están quitadas con `lineabase --quitar-mejoras` o no hay ninguna aplicada."""
+    folder = pathlib.Path(folder)
+    if read_lineabase(folder).get("estado") == "quitadas":
+        return []
+    applied = [item for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
+    if not applied:
+        return []
+    root = project_root(folder).resolve()
+    extra = external_roots(root, read_no_leer(root))[0]
+    present = []
+    for item in applied:
+        entries = [entry for entry in item.get("cambios") or [] if isinstance(entry, dict)]
+        found = False
+        for entry in entries:
+            diff = folder / str(entry.get("diff") or "")
+            repo = pathlib.Path(os.path.expanduser(entry.get("repo") or "."))
+            repo = (repo if repo.is_absolute() else root / repo)
+            top = git_toplevel(repo) if repo.is_dir() else None
+            try:
+                usable = entry.get("diff") and diff.is_file() and diff.stat().st_size > 0
+            except OSError:
+                usable = False
+            if usable and top is not None:
+                found = git_apply(top, diff.resolve(), reverse=True, check=True)[0]
+            else:
+                for name in entry.get("archivos") or []:
+                    owner, rel = resolve_repo_file(root, name, entry.get("repo"), extra)
+                    if owner is not None and rel in git_changes(owner):
+                        found = True
+                        break
+            if found:
+                break
+        if found:
+            present.append(item["id"])
+    return present
+
+
 def read_lineabase(folder):
     try:
         data = json.loads((pathlib.Path(folder) / LINEABASE_FILE).read_text(encoding="utf-8"))
@@ -6295,11 +6347,13 @@ def mark_fingerprints(root, names, patterns=None):
             for name, places in found.items()}
 
 
-def flow_fingerprints(flow_spec):
+def flow_fingerprints(flow_spec, folder=None):
     """{"recorrido": huella, "metricas": huella} de lo que el plan de un flujo decide al medir: cómo se recorre
-    (recorrido, preparar, inicio, pausas) y qué se calcula de la traza (ventana, métricas de usuario, tramos). Si cambia
-    el recorrido después de medir antes, hay que medir de nuevo; si cambian solo las métricas, se pueden recalcular
-    sobre las trazas guardadas (`perf.py recalcular`)."""
+    (recorrido, preparar, inicio, pausas y las variables de un escenario) y qué se calcula de la traza (ventana,
+    métricas de usuario, tramos). Si cambia el recorrido después de medir antes, hay que medir de nuevo; si cambian solo
+    las métricas, se pueden recalcular sobre las trazas guardadas (`perf.py recalcular`). Con `folder` (0.12.0), también
+    "archivos": {archivo: huella} del contenido de los scripts y flows que nombran `recorrido` y `preparar`
+    (route_files): una espera de `preparar.sh` que cambia no cambia el texto del plan, pero sí lo que se mide."""
     spec = flow_spec or {}
 
     def digest(keys):
@@ -6309,8 +6363,189 @@ def flow_fingerprints(flow_spec):
                                  if isinstance(item, dict) else item for item in data["segmentos"]]
         return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
 
-    return {"recorrido": digest(("recorrido", "preparar", "inicio", "pausas", "duracion_max_s")),
-            "metricas": digest(("ventana", "metricas_usuario", "segmentos", "input_slices"))}
+    out = {"recorrido": digest(("recorrido", "preparar", "inicio", "pausas", "duracion_max_s", "variables")),
+           "metricas": digest(("ventana", "metricas_usuario", "segmentos", "input_slices"))}
+    if folder is not None:
+        out["archivos"] = script_fingerprints(spec, folder)
+    return out
+
+
+# ── Huella de los archivos del recorrido (0.12.0) ────────────────────────────
+# `recorrido` y `preparar` suelen ser `bash <carpeta>/recorrido.sh`: la huella del texto del plan no ve que el script
+# cambió (una espera de 2 a 5 s). Se guarda también el contenido de cada script o flow que nombran, y de los que esos
+# nombran a su vez (un nivel: el flow de Maestro que llama recorrido.sh). Se lee fuera de la traza.
+ROUTE_FILE_SUFFIXES = SCRIPT_SUFFIXES + (".py", ".js", ".kts")
+ROUTE_FILES_MAX = 20
+ROUTE_CHANGED = "recorrido cambiado entre fases"
+
+
+def route_files(spec, folder):
+    """[(nombre, ruta)] de los scripts y flows que el recorrido y `preparar` del flujo nombran y que existen: las rutas
+    absolutas, las relativas al directorio actual, a la carpeta de la investigación o a la raíz del proyecto, con
+    {{CARPETA}} resuelto; y, un nivel más, los que esos archivos nombran (relativos al archivo o a la carpeta). El
+    nombre es la ruta relativa a la carpeta de la investigación (o a la raíz) si está dentro: "preparar.sh"."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    bases = [pathlib.Path.cwd(), folder, root]
+    found = []
+
+    def words(text):
+        text = text.replace("{{CARPETA}}", str(folder))
+        try:
+            items = shlex.split(text, comments=True)
+        except ValueError:
+            items = text.split()
+        out = []
+        for item in items:
+            # `--flujo=flow.yaml`, `"$CARPETA/flow.yaml"`: la ruta va después del = o del último $VAR/
+            item = item.split("=", 1)[1] if item.startswith("-") and "=" in item else item
+            if item.lower().endswith(ROUTE_FILE_SUFFIXES):
+                out.append(item)
+        return out
+
+    def add(word, places):
+        candidates = []
+        if "$" in word:  # una variable del script: se busca el archivo por su nombre
+            candidates = [base / pathlib.Path(word).name for base in places]
+        else:
+            path = pathlib.Path(os.path.expanduser(word))
+            candidates = [path] if path.is_absolute() else [base / path for base in places]
+        for path in candidates:
+            try:
+                if path.is_file() and path.stat().st_size <= SCRIPT_MAX_BYTES:
+                    path = path.resolve()
+                    if all(path != known for _, known in found) and len(found) < ROUTE_FILES_MAX:
+                        found.append((shown_route_file(path, folder, root), path))
+                    return path
+            except OSError:
+                continue
+        return None
+
+    texts = [spec.get(key) for key in ("recorrido", "preparar") if isinstance(spec.get(key), str)]
+    first = []
+    for text in texts:
+        for word in words(text):
+            path = add(word, bases)
+            if path is not None and path not in first:
+                first.append(path)
+    for path in first:
+        if path.suffix not in (".sh", ".bash", ".py", ".js"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for word in words(line):
+                add(word, [path.parent, folder, root])
+    return found
+
+
+def shown_route_file(path, folder, root):
+    """El nombre de un archivo del recorrido para los avisos: relativo a la carpeta de la investigación o a la raíz si
+    está dentro; si no, la ruta tal cual."""
+    for base in (pathlib.Path(folder).resolve(), pathlib.Path(root).resolve()):
+        inside = under(pathlib.Path(path), base)
+        if inside is not None:
+            return str(inside)
+    return str(path)
+
+
+def script_fingerprints(spec, folder):
+    """{nombre: huella} del contenido de los archivos del recorrido (route_files). Los finales de línea y los espacios
+    al final de cada línea no cuentan; un comentario sí (es raro que cambie sin cambiar el script)."""
+    out = {}
+    for name, path in route_files(spec or {}, folder):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        text = "\n".join(line.rstrip() for line in data.decode("utf-8", "replace").splitlines())
+        out[name] = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return out
+
+
+def route_changes(old, new):
+    """Lo que cambió del recorrido entre dos huellas del plan de un flujo ({"recorrido", "archivos"}): los archivos cuyo
+    contenido cambió, que aparecieron o que ya no están, y "el recorrido del plan" si cambió su texto. Solo compara lo
+    que traen las dos: una fase medida con una versión sin la huella de los archivos no da avisos."""
+    old, new = old if isinstance(old, dict) else {}, new if isinstance(new, dict) else {}
+    out = []
+    if old.get("recorrido") and new.get("recorrido") and old["recorrido"] != new["recorrido"]:
+        out.append("el recorrido del plan")
+    first, second = old.get("archivos"), new.get("archivos")
+    if isinstance(first, dict) and isinstance(second, dict):
+        out += sorted(name for name in set(first) | set(second) if first.get(name) != second.get(name))
+    return out
+
+
+def route_change_text(changed, first, second):
+    """El aviso de un recorrido que cambió entre dos momentos, nombrando los archivos."""
+    files = [name for name in changed if name != "el recorrido del plan"]
+    parts = []
+    if files:
+        parts.append("%s cambi%s entre %s y %s: la espera o los pasos pueden no ser los mismos" % (
+            ", ".join(files), "ó" if len(files) == 1 else "aron", first, second))
+    if "el recorrido del plan" in changed:
+        parts.append("el recorrido del plan (recorrido, preparar, pausas o variables) cambió entre %s y %s" % (
+            first, second))
+    return "; ".join(parts)
+
+
+def route_change_notes(folder, plan):
+    """{flujo: [(fase, cambios)]} de los flujos cuyo recorrido (el plan o el contenido de sus scripts) cambió entre
+    antes y control o entre antes y después, según la huella que guarda fases.json."""
+    phases = read_phases(folder)
+    out = {}
+    for flow in (plan.get("flujos") or {}):
+        before = phase_flow_record(phases, "antes", flow).get("plan")
+        for phase in ("control", "despues"):
+            changed = route_changes(before, phase_flow_record(phases, phase, flow).get("plan"))
+            if changed:
+                out.setdefault(flow, []).append((phase, changed))
+    return out
+
+
+def flag_route_changes(results, folder, plan):
+    """Marca con ROUTE_CHANGED las métricas de los flujos cuyo recorrido cambió entre antes y después (o el control):
+    no se midió igual contra igual y el veredicto queda orientativo. Devuelve las líneas para `comparar` y el reporte."""
+    changes = route_change_notes(folder, plan)
+    if not changes:
+        return []
+    for r in results:
+        if r["flujo"] in changes:
+            r["avisos"] = sorted(set(r["avisos"]) | {ROUTE_CHANGED})
+    root = project_root(pathlib.Path(folder)).resolve()
+    return ["%s: %s. Las métricas del flujo son orientativas: no se midió igual contra igual. Para un veredicto firme, "
+            "rehaz la línea base con el recorrido de ahora: %s" % (
+                flow, "; ".join(route_change_text(changed, "antes", phase) for phase, changed in items),
+                perf_command(root, "siguiente", "--carpeta", relative_folder(pathlib.Path(folder), root)))
+            for flow, items in sorted(changes.items())]
+
+
+def same_route_line(folder, flow):
+    """La condición "igual contra igual" del flujo, escrita por perf.py desde las huellas de fases.json (nunca por la
+    IA): si el recorrido y sus archivos son los mismos en las fases medidas, qué cambió, o que no se puede afirmar."""
+    phases = read_phases(folder)
+    measured = [phase for phase in FASES if phase_flow_record(phases, phase, flow).get("corridas")]
+    if not measured:
+        return ""
+    prints = {phase: phase_flow_record(phases, phase, flow).get("plan") for phase in measured}
+    without = [phase for phase in measured if not isinstance((prints[phase] or {}).get("archivos"), dict)]
+    if without:
+        return ("- Igual contra igual (lo calcula perf.py): sin la huella de los archivos del recorrido en %s (medida con "
+                "una versión anterior a 0.12.0): no se puede afirmar que los scripts fueron los mismos" % ", ".join(without))
+    changed = [(phase, route_changes(prints[measured[0]], prints[phase])) for phase in measured[1:]]
+    changed = [(phase, items) for phase, items in changed if items]
+    if changed:
+        return "- Igual contra igual (lo calcula perf.py): **no**. %s" % "; ".join(
+            route_change_text(items, measured[0], phase) for phase, items in changed)
+    files = sorted((prints[measured[0]] or {}).get("archivos") or {})
+    return "- Igual contra igual (lo calcula perf.py): el recorrido del plan%s %s en %s%s" % (
+        " y sus archivos (%s)" % ", ".join(files) if files else "", "son los mismos" if files else "es el mismo",
+        ", ".join(measured), "" if len(measured) > 1 else " (una sola fase medida)")
 
 
 def changed_marks(old, new):
@@ -6922,6 +7157,22 @@ def cmd_capturar(args, plan=None):
                      same_command(corridas=target, sin=("--rehacer",)) + " --rehacer")])
 
     guide()
+    if phase == "antes" and args.rehacer and not args.prueba and not args.forzar and args.plan:
+        # Rehacer antes con las mejoras puestas no da una línea base: mediría la app con las mejoras. Se detiene antes
+        # de compilar y de tocar el dispositivo, con el camino guiado (lineabase quita las mejoras con su parche).
+        inside = improvements_in_tree(folder, plan)
+        if inside:
+            root = project_root(folder).resolve()
+            rel = relative_folder(folder, root)
+            raise Precondicion(
+                "las mejoras %s siguen en el código: medir antes de nuevo así no da una línea base (la app ya tiene las "
+                "mejoras). Quítalas primero con su parche; perf.py las reaplica antes de medir después" % ", ".join(inside)
+            ).con(guardado="nada: no compilé, no toqué el dispositivo ni la fase antes", seguir=[
+                ("guarda el código de las mejoras en un parche y lo quita del repo (las marcas y los cambios temporales "
+                 "se quedan); después te da, en orden, instalar, antes, control y reaplicar",
+                 perf_command(root, "lineabase", "--carpeta", rel, "--quitar-mejoras")),
+                ("o, solo si quieres medir antes con las mejoras puestas a sabiendas (no será la línea base), el mismo "
+                 "comando con --forzar", same_command() + " --forzar")])
     package = plan["paquete"]
     hz = args.hz or (plan.get("hz") if isinstance(plan.get("hz"), int) else None)
     route = None if startup else args.recorrido or flow.get("recorrido")
@@ -7144,7 +7395,7 @@ def cmd_capturar(args, plan=None):
     prints = {}
     if args.plan:
         root_dir = project_root(folder).resolve()
-        prints = {"marcas": mark_fingerprints(root_dir, mark_names(flow)), "plan": flow_fingerprints(flow)}
+        prints = {"marcas": mark_fingerprints(root_dir, mark_names(flow)), "plan": flow_fingerprints(flow, folder)}
     if not args.prueba:
         save_capture_warnings(folder, phase, flow_name, warnings + build_warnings)
 
@@ -8637,7 +8888,7 @@ def cmd_comparar(args):
     folder = pathlib.Path(args.csv).parent
     trust = frames_trust(folder)
     results, unmatched = compare(rows, trust=trust, plan=plan)
-    marks_moved = flag_mark_changes(results, folder, plan)
+    marks_moved = flag_mark_changes(results, folder, plan) + flag_route_changes(results, folder, plan)
     chosen = compact_compare(results, plan, everything=args.todo)
     table = markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen[:None if args.todo else MAX_ROWS]])
     print(table)
@@ -9950,6 +10201,8 @@ def plain_verdict(result):
         reasons = []
         if MARK_CHANGED in result["avisos"]:
             reasons.append("lo que se mide cambió entre antes y después")
+        elif ROUTE_CHANGED in result["avisos"]:
+            reasons.append("el recorrido no fue el mismo antes y después")
         if BIMODAL in result["avisos"]:
             reasons.append("las mediciones forman dos grupos")
         elif "inestable" in result["avisos"]:
@@ -10540,7 +10793,7 @@ def cmd_reporte(args):
         return
 
     results, unmatched = compare(rows, trust=frames_trust(folder), plan=plan)
-    marks_moved = flag_mark_changes(results, folder, plan)
+    marks_moved = flag_mark_changes(results, folder, plan) + flag_route_changes(results, folder, plan)
     principales = plan.get("principales") or []
     primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
     missing = [m for m in principales if m not in {r["metrica"] for r in results}]
