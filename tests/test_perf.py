@@ -404,6 +404,9 @@ if args == ["devices"]:
 if os.environ.get("FAKE_DESCONECTA") and os.environ["FAKE_DESCONECTA"] in " ".join(args):
     sys.stderr.write("adb: device 'emulator-5554' not found\n")  # el cable se soltó a mitad del comando
     sys.exit(1)
+if args[0] == "logcat" and "-s" in args:  # el log de rutas de la instrumentación de red (hb-perf)
+    print(os.environ.get("FAKE_LOGCAT_PERF", ""))
+    sys.exit(0)
 if args[0] == "pull":
     if os.environ.get("FAKE_PULL_FALLA"):
         sys.stderr.write("adb: error: failed to stat remote object '%s': No such file or directory\n" % args[1])
@@ -1873,7 +1876,7 @@ class VariantTest(PerfBase):
         self.assertIn("= ya existe, no se toca", out)
         self.assertNotIn('create("profiling")', out)
         self.assertNotIn('create("benchmark")', out)
-        self.assertIn('getByName("benchmark").kotlin.directories', out)
+        self.assertIn('matching { it.name == "benchmark" }.configureEach { kotlin.directories', out)
         self.assertIn('"benchmarkImplementation"', out)
         self.assertIn("installBenchmark", out)
         self.assertIn("assembleBenchmark", out)
@@ -1941,7 +1944,7 @@ class VariantTest(PerfBase):
         out = self.instrument(module, "--variante", "otra").stdout
         self.assertIn("Variante: otra (existente: declara <profileable>, sin verificar que no sea depurable", out)
         self.assertIn("⚠ otra declara <profileable> pero no pude verificar su build type", out)
-        self.assertIn('getByName("otra").kotlin.directories', out)
+        self.assertIn('matching { it.name == "otra" }.configureEach { kotlin.directories', out)
         self.assertNotIn('create("otra")', out)
         self.assertNotIn("initWith", out)
         self.assertNotIn("ya es profileable y no depurable", out)
@@ -3533,7 +3536,9 @@ android {
         self.assertIn("Alternativa recomendada: medir sobre un build type que ya existe, con -Pperf", out)
         self.assertIn('val perf = providers.gradleProperty("perf").isPresent', out)
         self.assertIn("isProfileable = true", out)
-        self.assertIn('getByName("<buildType>").manifest.srcFile("src/profiling/AndroidManifest.xml")', out)
+        self.assertIn('matching { it.name == "<buildType>" }.configureEach {', out)
+        self.assertIn('manifest.srcFile("src/profiling/AndroidManifest.xml")', out)
+        self.assertNotIn('getByName("<buildType>").kotlin', out)  # el source set, por matching (C4)
         self.assertNotIn("{{", out)
         self.assertEqual(len(perf.scan_gradle(self.dir, [])), 1)  # project.name no cuenta
         self.assertIn("confirma que cada línea decide por un build type, un sabor o una variante", out)
@@ -9547,3 +9552,104 @@ class DodExternalModulesTest(PerfBase):
         joined = "\n".join(notice["lineas"])
         self.assertIn("3. `cd %s && ./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests de pagos" % other.resolve(),
                       joined)
+
+
+# ── 0.11.0 · C: captura y salidas de la terminal ─────────────────────────────
+
+class CaptureOutputTest(DeviceBase):
+    """C1, C2 y C5: una sola numeración, el fallo de 'preparar' con una pantalla de error dicho en palabras y la ruta
+    real de cada servicio leída del log, fuera de la traza."""
+
+    def capture(self, *extra):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar",
+                         *extra)
+
+    def test_una_sola_numeracion_en_la_salida_el_csv_y_el_diagnostico(self):
+        self.tp_outputs(GOOD, LOGIN, GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✔ corrida 1 de 2", result.stdout)
+        self.assertIn("✖ intento 2 (inválido, buscaba la corrida 2 de 2)", result.stdout)
+        self.assertIn("✔ corrida 2 de 2", result.stdout)
+        with (self.plan.parent / "metricas.csv").open(newline="", encoding="utf-8") as f:
+            self.assertEqual(sorted({row["corrida"] for row in csv.DictReader(f)}), ["1", "2"])
+        self.assertIn("Patrón de los intentos inválidos (1 de 3 intentos)", result.stdout)
+        # completar la fase sigue la misma numeración
+        (self.dir / "tp.count").unlink()
+        self.tp_outputs(GOOD)
+        more = self.capture("--fase", "antes", "--corridas", "1")
+        self.assertIn("✔ corrida 3 de 3", more.stdout)
+
+    def test_preparar_que_falla_en_una_pantalla_de_error_lo_dice_en_palabras(self):
+        spec = json.loads(self.plan.read_text(encoding="utf-8"))
+        spec["flujos"]["home"]["preparar"] = "false"
+        self.plan.write_text(json.dumps(spec), encoding="utf-8")
+        self.env["FAKE_RESUMED"] = "com.ejemplo.app/.ui.ErrorActivity"
+        self.tp_outputs(GOOD)
+        result = self.capture("--fase", "antes", "--corridas", "1")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("La app mostró una pantalla de error (ErrorActivity): revisa el backend o el login", result.stdout)
+        self.assertIn("espera unos minutos antes de completar la fase", result.stdout)
+        self.assertEqual(perf.error_screen("com.ejemplo.app/.MainActivity"), "")
+        self.assertEqual(perf.error_screen("com.ejemplo.app/com.ejemplo.app.SinConexionActivity",
+                                           {"pantallas_error": ["SinConexion"]}), "SinConexionActivity")
+
+    def test_la_ruta_real_de_cada_servicio_sale_del_log(self):
+        self.env["FAKE_LOGCAT_PERF"] = (
+            "11-16 10:00:00.100  1234  1250 I hb-perf : servicio\tGET\tGET items/{id} #1a2b\t"
+            "https://api.example.com/base/v3/items/42\n")
+        self.tp_outputs(GOOD)
+        self.assertEqual(self.capture("--fase", "antes", "--corridas", "1").returncode, 0)
+        self.assertEqual(perf.service_urls(self.plan.parent),
+                         {"GET items/{id}": "https://api.example.com/base/v3/items/42"})
+        out = self.capture("--prueba")
+        self.assertIn("Rutas reales de los servicios (log hb-perf, fuera de la traza): 1", out.stdout)
+        md = perf.services_md(perf.read_rows(self.plan.parent / "metricas.csv"), json.loads(
+            self.plan.read_text(encoding="utf-8")), urls=perf.service_urls(self.plan.parent))
+        self.assertIn("`GET items/{id}` · ruta: `https://api.example.com/base/v3/items/42`", md)
+        self.env["FAKE_LOGCAT_PERF"] = ""  # una instrumentación anterior: sin log
+        out = self.capture("--prueba")
+        self.assertIn("Sin el log de rutas (hb-perf): la instrumentación de red es anterior a 0.11.0", out.stdout)
+
+
+class ServiceLogTemplateTest(unittest.TestCase):
+    """C5: la plantilla de red escribe la ruta real una vez por servicio, sin la query, fuera de las secciones."""
+
+    def test_la_plantilla_lleva_el_log_y_su_test(self):
+        template = (perf.ASSETS / "instrumentacion" / "TraceEventListener.kt").read_text(encoding="utf-8")
+        self.assertIn('const val LOG_TAG = "hb-perf"', template)
+        self.assertIn("if (LOGGED.add(endpoint.removeSuffix(HttpSectionName.queryTag(request))))", template)
+        self.assertIn("Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())", template)  # sin API 24
+        self.assertNotIn("= ConcurrentHashMap.newKeySet()", template)
+        self.assertIn("request.url.newBuilder().query(null).fragment(null).build()", template)
+        self.assertIn('log("servicio\\t${request.method}\\t$endpoint\\t$url")', template)
+        self.assertEqual(perf.SERVICE_LOG.search("I hb-perf : servicio\tPOST\tPOST pagos\thttps://x.example/pagos").groups(),
+                         ("POST", "POST pagos", "https://x.example/pagos"))
+        test = (perf.ASSETS / "instrumentacion" / "test" / "TraceEventListenerTest.kt").read_text(encoding="utf-8")
+        self.assertIn("eachServiceLogsItsRealUrlOnceWithoutTheQuery", test)
+        self.assertNotIn("TraceEventListener(call, tracer)\n", test)  # los tests no usan el Log de Android
+
+
+class FlavorsFragmentTest(PerfBase):
+    """C4: el fragmento de Gradle configura el source set de la variante con matching {}.configureEach, que funciona
+    aunque ese source set no exista al configurar (sabores); con sabores, además, una nota."""
+
+    def module(self, gradle):
+        module = self.dir / "app"
+        write(module / "build.gradle.kts", gradle)
+        (module / "src/main/kotlin").mkdir(parents=True, exist_ok=True)
+        return module
+
+    def test_con_y_sin_sabores(self):
+        plain = self.ok("instrumentar", "--modulo", self.module("android { }\ndependencies { }\n"), "--paquete",
+                        "com.example.app.perf", "--sin-fragments", "--sin-red")
+        self.assertIn('matching { it.name == "profiling" }.configureEach { kotlin.directories += "src/perf/kotlin" }', plain)
+        self.assertNotIn('getByName("profiling")', plain)
+        self.assertNotIn("El módulo tiene sabores", plain)
+        shutil.rmtree(str(self.dir / "app"))
+        flavored = self.ok("instrumentar", "--modulo", self.module(
+            'android {\n    flavorDimensions += "marca"\n    productFlavors { create("demo") { dimension = "marca" } }\n}\n'),
+            "--paquete", "com.example.app.perf", "--sin-fragments", "--sin-red")
+        self.assertIn("El módulo tiene sabores (productFlavors)", flavored)
+        self.assertIn("install<Sabor><BuildType>", flavored)
+        self.assertTrue(perf.has_flavors(self.dir / "app"))

@@ -865,6 +865,54 @@ def call_key(section_name):
     return section_name.split(" ", 1)[1] if " " in section_name else section_name
 
 
+# La ruta real de cada servicio: la instrumentación de red (0.11.0) la escribe una vez por servicio en logcat, con la
+# etiqueta SERVICE_LOG_TAG, y `capturar` la lee al terminar, fuera de la traza. Las secciones de la traza mantienen su
+# nombre corto, así que antes y después siguen siendo comparables.
+SERVICE_LOG_TAG = "hb-perf"
+SERVICE_LOG = re.compile(r"servicio\t([A-Z]+)\t([^\t]+)\t(\S+)")
+SERVICES_FILE = "servicios.json"
+
+
+def read_service_log(adb):
+    """{servicio (nombre corto, sin la marca de la query): URL real sin query} de las líneas del log hb-perf que hay en
+    el dispositivo (`adb logcat -d -s hb-perf`). {} si no hay (instrumentación anterior) o si adb falla."""
+    try:
+        done = adb.run("logcat", "-d", "-s", SERVICE_LOG_TAG, timeout=60)
+    except (PerfError, OSError, subprocess.SubprocessError):
+        return {}
+    out = {}
+    for line in (done.stdout or "").splitlines():
+        found = SERVICE_LOG.search(line)
+        if found:
+            out[QUERY_TAG.sub("", found.group(2).strip())] = found.group(3)
+    return out
+
+
+def service_urls(folder):
+    """{servicio: URL real} que guardó `capturar` en la carpeta ({} si no hay)."""
+    try:
+        data = json.loads((pathlib.Path(folder) / SERVICES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    found = data.get("servicios") if isinstance(data, dict) else None
+    return {str(k): str(v) for k, v in found.items()} if isinstance(found, dict) else {}
+
+
+def save_service_urls(folder, found):
+    """Suma a <carpeta>/servicios.json las rutas reales leídas del log. Devuelve cuántas son nuevas."""
+    if not found:
+        return 0
+    known = service_urls(folder)
+    new = sum(1 for key, value in found.items() if known.get(key) != value)
+    known.update(found)
+    try:
+        (pathlib.Path(folder) / SERVICES_FILE).write_text(json.dumps({"servicios": known}, ensure_ascii=False, indent=2)
+                                                           + "\n", encoding="utf-8")
+    except OSError:
+        return 0
+    return new
+
+
 def endpoint_of(section_name):
     """Método y plantilla, sin la marca de la query: la clave de las métricas por endpoint."""
     return QUERY_TAG.sub("", call_key(section_name))
@@ -6959,6 +7007,14 @@ def cmd_capturar(args, plan=None):
                 if pending:
                     print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` los lista con el texto para "
                           "un chat; una corrida de prueba sin avisos los da por resueltos" % (len(pending), folder / NOTES_FILE))
+            urls = read_service_log(adb)
+            if urls:
+                save_service_urls(folder, urls)
+                print("Rutas reales de los servicios (log %s, fuera de la traza): %d" % (SERVICE_LOG_TAG, len(urls)))
+            elif info.get("http"):
+                print("· Sin el log de rutas (%s): la instrumentación de red es anterior a 0.11.0, así que los reportes "
+                      "muestran el nombre corto de cada servicio. Para la ruta completa, `instrumentar --actualizar` entre "
+                      "investigaciones (no cambia el nombre de las secciones)." % SERVICE_LOG_TAG)
             print("Traza: %s" % saved)
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
@@ -6978,6 +7034,7 @@ def cmd_capturar(args, plan=None):
         guide()
     GUIA["al_fallar"] = None
     print_invalid_summary()
+    save_service_urls(folder, read_service_log(adb))  # la ruta real de cada servicio, fuera de la traza
     save_record()
     GUIA.update(guardado="las %d corridas válidas de %s en %s y su registro en fases.json" % (valid, phase, csv_path),
                 seguir=[("pide el paso siguiente", "cd %s && python3 -I %s siguiente --carpeta %s"
@@ -8856,7 +8913,13 @@ SERVICE_HEADERS = ["Servicio", "Veces por corrida", "Empieza (desde el inicio de
                    "Servidor (TTFB)", "En la app", "Repetidas (2 s)", "Solapadas"]
 
 
-def services_md(rows, plan, phases=("antes",)):
+def service_label(service, urls):
+    """La celda del servicio: el nombre corto (el de la traza) y, si el log de rutas lo trae, la ruta real completa."""
+    url = (urls or {}).get(service)
+    return "`%s`%s" % (service, " · ruta: `%s`" % url if url else "")
+
+
+def services_md(rows, plan, phases=("antes",), urls=None):
     """La sección "Servicios del flujo" del reporte: todos los servicios que el flujo llama, en el orden en que se
     invocan y agrupados por tramo si el plan los tiene, con sus veces por corrida, su duración (mediana y P90), el
     servidor frente a la app y las repetidas y solapadas; el total de espera de servicios y qué parte del flujo es; y,
@@ -8918,11 +8981,11 @@ def services_md(rows, plan, phases=("antes",)):
                     label = PHASE_WORDS.get(phase, phase) if len(phases) > 1 else None
                     if item is None:
                         measured = any(row["flujo"] == flow and row["fase"] == phase for row in rows)
-                        table.append(["`%s`" % service] + ([label] if label else []) +
+                        table.append([service_label(service, urls)] + ([label] if label else []) +
                                      ["no se llama" if measured else "sin dato"] + ["—"] * 7)
                         continue
                     count = item["por_tramo"].get(segment) if segment in segments else None
-                    table.append(service_cells(item, bool(segments), label, count))
+                    table.append([service_label(service, urls)] + service_cells(item, bool(segments), label, count)[1:])
             title = "" if segment is None else "**Tramo `%s`**\n\n" % segment if segment in segments else \
                 "**Fuera de los tramos**\n\n"
             tables.append(title + markdown_table(headers, table))
@@ -8948,7 +9011,12 @@ def services_md(rows, plan, phases=("antes",)):
         blocks.append("\n".join(lines))
     if not blocks:
         return ""
-    return SERVICES_NOTE + "\n\n".join(blocks)
+    routes = ("La ruta completa de cada servicio (host, base y versión, sin la query) sale del log de la instrumentación "
+              "de red; el nombre corto es el de la traza, con el que se comparan las fases.\n\n" if urls else
+              "Sin la ruta completa de los servicios: estas corridas no traen el log de rutas de la instrumentación de red "
+              "(es de hb-performance 0.11.0; `instrumentar --actualizar` entre investigaciones, sin cambiar el nombre de "
+              "las secciones). Se muestra el nombre corto de la traza.\n\n")
+    return SERVICES_NOTE + routes + "\n\n".join(blocks)
 
 
 def services_chart(rows, plan, phase="antes"):
@@ -9795,7 +9863,7 @@ def cmd_reporte(args):
              ("De los hallazgos al resultado", improvements_summary(plan, results, n_findings)),
              ("Métricas principales", primary_md),
              ("Servicios del flujo", services_md(rows, plan, ("antes", "despues") if any(
-                 row["fase"] == "despues" for row in rows) else ("antes",))),
+                 row["fase"] == "despues" for row in rows) else ("antes",), urls=service_urls(folder))),
              ("Red por tramo", segment_network_md(rows, plan, ("antes", "despues"))),
              ("Mejoras: esperado contra logrado", logrado_md),
              ("Hallazgos", findings_md(pick("hallazgos"), plan, results_by_metric)),
@@ -10505,7 +10573,9 @@ SNIPPETS = {
     // La variante "{{VARIANTE}}" {{ESTADO}}: no se crea otro build type.
     sourceSets {
         getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
-        getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
+        // matching {}.configureEach y no getByName: con sabores, un source set de variante (<sabor><BuildType>) todavía
+        // no existe al configurar y getByName falla; así se configura cuando aparece.
+        matching { it.name == "{{VARIANTE}}" }.configureEach { kotlin.directories += "{{FUENTE}}" }
     }
 }
 // Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): si la variante no las
@@ -10521,7 +10591,9 @@ SNIPPETS = {
     }
     sourceSets {
         getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
-        getByName("{{VARIANTE}}").kotlin.directories += "{{FUENTE}}"
+        // matching {}.configureEach y no getByName: con sabores, un source set de variante (<sabor><BuildType>) todavía
+        // no existe al configurar y getByName falla; así se configura cuando aparece.
+        matching { it.name == "{{VARIANTE}}" }.configureEach { kotlin.directories += "{{FUENTE}}" }
     }
 }
 // Dependencias que solo existen para release (releaseImplementation, p. ej. una librería no-op): repítelas como
@@ -10542,10 +10614,14 @@ android {
     sourceSets {
         getByName("debug").kotlin.directories += "{{FUENTE}}" // AGP 9+; en AGP 8: .java.srcDir("{{FUENTE}}")
         if (perf) {
-            getByName("<buildType>").kotlin.directories += "{{FUENTE}}"
-            // El <provider> de PerfInstaller está en el manifest que generó la skill. srcFile reemplaza el manifest de
-            // ese source set: si src/<buildType>/AndroidManifest.xml ya existe, copia antes su contenido a este.
-            getByName("<buildType>").manifest.srcFile("src/{{VARIANTE}}/AndroidManifest.xml")
+            // matching {}.configureEach y no getByName: con sabores, un source set de variante (<sabor><BuildType>)
+            // todavía no existe al configurar y getByName falla; así se configura cuando aparece.
+            matching { it.name == "<buildType>" }.configureEach {
+                kotlin.directories += "{{FUENTE}}"
+                // El <provider> de PerfInstaller está en el manifest que generó la skill. srcFile reemplaza el manifest
+                // de ese source set: si src/<buildType>/AndroidManifest.xml ya existe, copia antes su contenido a este.
+                manifest.srcFile("src/{{VARIANTE}}/AndroidManifest.xml")
+            }
         }
     }
 }
@@ -11208,6 +11284,25 @@ def resolve_variant(found, requested):
     return (chosen[0]["nombre"], True) if chosen else ("profiling", False)
 
 
+FLAVORS_NOTE = """
+// El módulo tiene sabores (productFlavors): el nombre del matching es el del build type (vale para todos los sabores)
+// o el de una variante (<sabor><BuildType>, por ejemplo "demoProfiling"). El build se instala con la tarea de la
+// variante: install<Sabor><BuildType> (con -Pperf en la alternativa)."""
+FLAVORS = re.compile(r"\bproductFlavors\b|\bflavorDimensions\b")
+
+
+def has_flavors(module):
+    """True si el build.gradle(.kts) del módulo declara sabores."""
+    for name in ("build.gradle.kts", "build.gradle"):
+        try:
+            text = (pathlib.Path(module) / name).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if FLAVORS.search(re.sub(r"//[^\n]*", "", text)):
+            return True
+    return False
+
+
 def cmd_instrumentar(args):
     module = pathlib.Path(args.modulo)
     if not (module / "build.gradle.kts").is_file() and not (module / "build.gradle").is_file():
@@ -11383,12 +11478,13 @@ def cmd_instrumentar(args):
                   len(debug_uses), "" if len(debug_uses) == 1 else "es", ", ".join("%s:%d" % use for use in debug_uses[:3]),
                   ", …" if len(debug_uses) > 3 else ""))
     print("\nFalta pegar, con el paquete ya puesto (references/setup.md explica cada pieza):\n")
+    flavors = FLAVORS_NOTE if has_flavors(module) else ""
     snippets = [("1. %s (build.gradle.kts del módulo)" % ("Source set y cobertura de la variante %s" % variant if existing
                                                            else "Build type %s, source set y cobertura" % variant),
-                 SNIPPETS["gradle_existente" if existing else "gradle"])]
+                 SNIPPETS["gradle_existente" if existing else "gradle"] + flavors)]
     if depends_on_name:
         snippets.append(("Alternativa recomendada: medir sobre un build type que ya existe, con -Pperf (sin crear \"%s\")"
-                         % variant, SNIPPETS["gradle_propiedad"]))
+                         % variant, SNIPPETS["gradle_propiedad"] + flavors))
     if network:
         missing, derived = unwired_builders(scan["cableado"])
         found = ["// Builders que todavía no llaman al gancho (%d): %s%s" % (
@@ -11428,7 +11524,7 @@ def cmd_instrumentar(args):
                                        if unverified else "ya es profileable y no depurable"), "   "))
         print()
     print("El `paquete` del plan es el applicationId de la variante %s (con su sufijo, si lo tiene); se instala con "
-          "install%s." % (variant, variant[:1].upper() + variant[1:]))
+          "install%s%s." % (variant, "<Sabor>" if has_flavors(module) else "", variant[:1].upper() + variant[1:]))
     print("Después: el formateador del proyecto en una invocación de Gradle aparte y, en otra, el DoD más assemble%s "
           "con el log en un archivo (setup.md · DoD)." % (variant[:1].upper() + variant[1:]))
 
