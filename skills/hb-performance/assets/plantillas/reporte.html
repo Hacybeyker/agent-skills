@@ -48,11 +48,13 @@
   .table-wrap { overflow-x: auto; margin: 10px 0; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; white-space: nowrap; font-size: 12.5px; text-transform: uppercase;
-       letter-spacing: .04em; background: var(--soft); }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em;
+       background: var(--soft); overflow-wrap: normal; hyphens: none; }
   tbody tr:nth-child(even) { background: var(--soft); }
-  td:first-child { font-weight: 600; white-space: nowrap; }
-  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* Un endpoint largo parte donde haga falta; las columnas numéricas no se aplastan y ningún encabezado se corta. */
+  td:first-child { font-weight: 600; overflow-wrap: anywhere; min-width: 9em; }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 5.5em; }
+  td code { overflow-wrap: anywhere; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--soft);
          padding: 1px 5px; border-radius: 4px; }
   pre { background: var(--soft); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; }
@@ -94,6 +96,7 @@
   .axis-label { fill: var(--muted); font-size: 11px; }
   .noise { fill: var(--warn-soft); stroke: var(--warn); stroke-dasharray: 3 2; opacity: .9; }
   .lane { stroke: var(--border); } .mark { stroke: var(--warn); stroke-dasharray: 4 3; }
+  .mark-dim { stroke: var(--border); stroke-dasharray: 2 3; } .mark-label { fill: var(--text); font-size: 11px; }
   .dot-before { fill: var(--before); stroke: var(--text); stroke-width: .6; }
   .dot-control { fill: var(--surface); stroke: var(--text); stroke-width: 1.2; }
   .chart-note { color: var(--muted); font-size: 13.5px; margin: 8px 0 0; }
@@ -114,6 +117,16 @@
     .chart, svg { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .chart { break-inside: avoid; }
     details > summary { display: none; }
     section { break-inside: avoid; border-color: #ccc; } .toc { display: none; }
+    /* En papel no hay scroll: la tabla entra en el ancho de la página, con letra más chica y celdas que parten. */
+    .table-wrap { overflow: visible; }
+    table { font-size: 10.5px; }
+    th, td { padding: 4px 5px; }
+    th { font-size: 9px; letter-spacing: 0; overflow-wrap: break-word; hyphens: auto; }
+    td:first-child, td.num { min-width: 0; }
+    td.num { white-space: normal; }
+    td, td:first-child, .verdict, .state { overflow-wrap: break-word; white-space: normal; }
+    td code { overflow-wrap: anywhere; }
+    pre { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }
   }
 </style>
 </head>

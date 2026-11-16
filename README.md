@@ -20,8 +20,8 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 
 | Skill | Tipo | Qué hace |
 | --- | --- | --- |
-| [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack y las convenciones del proyecto y crea o migra su `AGENTS.md` al estándar |
-| [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD, previews de UI (Compose) y reporte HTML |
+| [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack, las convenciones y los repos relacionados del proyecto y crea o migra su `AGENTS.md` al estándar, con el contexto de IA versionado, local o en una carpeta externa |
+| [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD, previews de UI (Compose) y reporte HTML (también de varios repos, con análisis y diagramas) |
 | [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments |
 | [`hb-performance`](skills/hb-performance) | Flujo | Investiga problemas de rendimiento en apps Android con cualquier stack (arranque en frío, jank, hilo principal, red, memoria): mide antes y después con scripts, arma el diagnóstico con consultas listas sobre las trazas, propone un plan que decides tú y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens |
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
@@ -46,7 +46,7 @@ Las skills externas y los plugins que las complementan están en [CATALOG.md](CA
 
 - `git` y `bash`, para instalar con un clon. En macOS vienen con las Command Line Tools (`xcode-select --install`); en Linux, con el gestor de paquetes.
 - Node.js y pnpm, para instalar sin clonar (detalle en esa sección).
-- `python3`, solo con su librería estándar, para los scripts de `hb-implement`, `hb-performance` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
+- `python3`, solo con su librería estándar, para los scripts de `hb-setup`, `hb-implement`, `hb-performance` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
 
 Hay dos formas. Usa **una sola** por máquina.
 
@@ -121,7 +121,7 @@ Cada push y cada PR pasan por el workflow `Validate`:
 - `agentskills validate` (de [skills-ref](https://pypi.org/project/skills-ref/), la referencia oficial) contra la especificación de Agent Skills.
 - `scripts/check_conventions.py` con las convenciones de este repo: prefijo `hb-`, metadata, SemVer, máximo de 500 líneas por `SKILL.md`, enlaces rotos, scripts ejecutables y con sintaxis válida, y que `README.md` y `CATALOG.md` estén al día.
 - `scripts/check_version_bump.py`, en cada PR: toda skill cambiada sube su `metadata.version` (SemVer) respecto de la rama base.
-- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `coach.py` de `hb-coach` y `check_version_bump.py`.
+- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `contexto.py` de `hb-setup`, `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `coach.py` de `hb-coach` y `check_version_bump.py`.
 - `scripts/test_install.sh`: test de contrato de `install.sh` en un `HOME` temporal (instala dos veces, desinstala y comprueba que no toca carpetas ni enlaces ajenos). Es la interfaz pública que usan los instaladores externos, así que no cambia.
 - `shellcheck` sobre los scripts de shell.
 
@@ -144,7 +144,7 @@ Son los mismos pasos del DoD de `AGENTS.md` y del workflow.
 
 ## Proyectos
 
-Cada proyecto necesita un `AGENTS.md` con las secciones `Stack` y `DoD` (lo crea `hb-setup`) y un `CLAUDE.md` con la línea `@AGENTS.md`. Las skills no se copian dentro de los proyectos.
+Cada proyecto necesita un `AGENTS.md` con las secciones `Stack` y `DoD` (lo crea `hb-setup`) y, si usas Claude Code, un `CLAUDE.md` con la línea `@AGENTS.md`. El `AGENTS.md` puede versionarse con el código, quedarse local o vivir en una carpeta fuera del repo. Las skills no se copian dentro de los proyectos.
 
 ## Licencia
 

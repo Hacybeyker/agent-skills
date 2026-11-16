@@ -11,6 +11,8 @@ Una regla para todas: **un pedido por chat**. Al terminar una tarea, abre otro c
 | Proyecto sin `AGENTS.md` | `Usa hb-setup: configura este proyecto para los agentes.` |
 | Ya tiene uno, pasarlo al estándar | `Usa hb-setup: migra el AGENTS.md al estándar sin perder lo propio del proyecto.` |
 | Solo refrescar el stack o los comandos | `Usa hb-setup: actualiza la sección Stack (y Comandos) del AGENTS.md con lo que tiene el proyecto hoy.` |
+| Sin subir el contexto de IA al repo | `Usa hb-setup: configura este proyecto para los agentes con el contexto fuera del repo, en <carpeta externa>.` |
+| Documentar los repos relacionados | `Usa hb-setup: documenta en el AGENTS.md los repos relacionados (<rutas>) y cómo pasar <dependencia> a código local y volver.` |
 | Decidir una modernización | `Agrega a ## Modernización del AGENTS.md: <qué se migra, con qué alcance: "las pantallas nuevas van en Compose">.` |
 
 El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o RxJava). Nadie migra nada hasta que lo anotes en `## Modernización`.
@@ -21,6 +23,8 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | --- | --- |
 | Feature | `Implementa la feature <nombre>: <qué hace, para quién, criterios de aceptación si los tienes>.` |
 | Bug | `Corrige el bug: <qué pasa, cómo reproducirlo, qué debería pasar>.` |
+| Bug complejo, en varias sesiones | `Corrige el bug: <qué pasa>. Lleva la bitácora y muéstrame el plan antes de tocar código.` (para seguir otro día: `Sigue el bug <slug> desde su bitácora.`) |
+| Cambio en varios repos | `Implementa <tarea> en este repo y en <../repo-relacionado>; un solo reporte con los dos.` |
 | Issue de GitHub | `Resuelve el issue #<n>.` |
 | Mejora acotada | `Mejora <qué> en <dónde>: <qué debe cambiar>. No toques nada más.` |
 | Refactor | `Refactoriza <clase o módulo>: <objetivo>. Sin cambiar el comportamiento; los tests existentes deben seguir en verde.` |
@@ -66,7 +70,7 @@ Tiene varias sesiones y comandos de terminal: su guía completa está en [skills
 
 Cada chat de hb-performance se abre nuevo, desde la terminal y en la raíz del proyecto, con el modelo y el esfuerzo de su sesión. Para empezar (modelo intermedio, esfuerzo medio): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después, `perf.py siguiente` imprime el comando de cada sesión y el texto para pegar.
 
-**Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo):
+**Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo). La primera vez, este pedido hace el setup (sesión 0) y guarda tu flujo, tal cual lo escribes, para la sesión 1: por eso te pide el flujo aunque todavía no lo mida.
 
 ```text
 Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>. No hagas commit ni push.
@@ -84,7 +88,7 @@ Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin contr
 Sigue hb-performance con <ruta absoluta>/estado.md. No hagas commit ni push.
 ```
 
-El diagnóstico y el cierre dejan cada reporte en dos versiones: `-dev` (técnico) y `-gerencia` (una página en palabras, para un equipo no técnico). Anotar el costo es opcional: `perf.py siguiente` imprime el comando ya completo por cada sesión.
+El diagnóstico y el cierre dejan cada reporte en dos versiones: `-dev` (técnico) y `-gerencia` (una página en palabras, para un equipo no técnico). Los comandos y los textos para pegar van siempre en un bloque de código: el texto confiable es el que imprime `perf.py siguiente`. El cierre termina con un solo comando, `perf.py cerrar`, que quita los cambios temporales con su parche. Anotar el costo es opcional: `perf.py siguiente` imprime el comando ya completo por cada sesión, con la opción de tu herramienta (`--costo` en USD con Claude Code, o `--desde-transcript auto` sin copiar nada; `--creditos` con GitHub Copilot CLI).
 
 ## hb-coach · aprender un tema
 

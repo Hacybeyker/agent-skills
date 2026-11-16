@@ -2,10 +2,10 @@
 name: hb-implement
 description: 'Implementa features, bugfixes, mejoras y refactors en proyectos con AGENTS.md: lee las reglas y el stack del proyecto, carga su perfil hb-stack-*, implementa por capas con tests, corre el DoD del proyecto y genera un reporte HTML desde git. Úsala cuando el usuario pida crear o implementar una feature, corregir un bug o un issue, mejorar algo o refactorizar ("crea la feature X", "implementa Y", "corrige el bug Z", "resuelve el issue #N", "mejora X", "refactoriza Y", "/hb-implement").'
 license: MIT
-compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose."
+compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose, y conexión al abrir un reporte con diagramas."
 metadata:
   author: hacybeyker
-  version: "1.4.0"
+  version: "1.5.0"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -20,10 +20,12 @@ El flujo es el mismo para cualquier stack. La arquitectura, los comandos y las r
 2. Toma de `AGENTS.md`:
    - `## Stack` y `## Arquitectura`: el perfil (`hb-stack-<familia>`), la variante y el stack **real** del proyecto; se implementa con ese stack. `## Modernización`: lo único que se puede migrar.
    - `## DoD`: los comandos de verificación, en orden.
-   - Las reglas propias: quién commitea, changelog, idioma, prohibiciones.
+   - Las reglas propias: quién commitea, changelog, idioma, prohibiciones, librerías y estilo de tests, `Carpeta de reportes` y la base contra la que se compara.
+   - `### Repos relacionados` (en `## Arquitectura`), si existe: los otros repos que se trabajan en local y cómo usar el código de una dependencia publicada.
 3. Carga el perfil y **solo** las referencias que la tarea necesita.
 4. Clasifica la tarea: `feature`, `bugfix`, `enhancement` o `refactor`.
-5. Revisa `git status`. El reporte compara contra `HEAD`, así que si ya hay cambios sin commitear que no son de esta tarea, avísalo antes de empezar.
+5. Revisa `git status`. El reporte compara contra la base que pida `AGENTS.md` (por ejemplo, el `merge-base` con la rama destino del PR: `git merge-base origin/<rama-destino> HEAD`) y, si no dice nada, contra `HEAD`: si ya hay cambios que no son de esta tarea, avísalo antes de empezar.
+6. **Si la tarea toca un repo relacionado** o el código de una dependencia publicada, comprueba que puedes leer su carpeta. Si no puedes, dile al usuario qué carpeta debe darte acceso y detente en ese punto: no supongas su contenido. Para usar el código local de una dependencia, sigue el mecanismo que documenta `AGENTS.md`; ese cambio de configuración es temporal ([varios-repos.md](references/varios-repos.md)).
 
 ## 1. Plan
 
@@ -57,15 +59,19 @@ De adentro hacia afuera, con la estructura del perfil:
 
 Una tarea a la vez. No toques código que no tenga que ver con ella.
 
+**Tests:** con las librerías y el estilo que fije `AGENTS.md`, que mandan sobre las preferencias del perfil `hb-stack-*` (por ejemplo, fakes o mocks). Si no fija nada, los del perfil.
+
 **Pantallas con estado.** Si la pantalla guarda estado (un formulario, un campo con error, una lista con scroll, un paso de un flujo), el DoD verde no basta: los fallos de recreación y de arranque en frío solo aparecían al ejecutar la app. Escribe tests **en la JVM** de la **recreación de la vista** y de la **muerte del proceso**: en Compose, `StateRestorationTester`; en Views, `recreate()` de `ActivityScenario` o Robolectric, y la restauración desde `savedInstanceState`. Recetas en [ciclo-de-vida.md](references/ciclo-de-vida.md).
 
 ### Bugfix
 
-1. **Reproduce:** pasos, comportamiento esperado y comportamiento actual.
+1. **Reproduce:** pasos, comportamiento esperado y comportamiento actual. Si el bug depende de un entorno que no controlas (un dispositivo, un navegador, un backend, datos reales), no ejecutes la app por tu cuenta en ese entorno: escribe la **reproducción manual** (precondiciones, el entorno que indique `AGENTS.md`, pasos numerados, esperado y actual) y entrégasela al usuario.
 2. **Escribe un test que falle** por el bug, antes de corregir.
 3. **Busca la causa raíz**, no el síntoma: pregunta "por qué" hasta llegar al origen.
 4. **Corrección mínima.** El test nuevo pasa y los existentes también.
 5. Revisa si el mismo defecto existe en código parecido y repórtalo.
+
+**Bug complejo.** Si toca varios módulos o repos, no se reproduce con un test o puede tomar más de una sesión (o `AGENTS.md` lo pide), lleva una **bitácora** en la carpeta del reporte (`report.py --folder <slug>` te dice dónde, sección 6) con la plantilla [assets/bitacora.md](assets/bitacora.md): clasificación, evidencia, reproducción, causa raíz, plan, estado y siguiente paso. Si ya existe, léela primero y sigue desde su estado; actualízala al cerrar cada paso. Presenta el plan y **espera confirmación antes de tocar código**, salvo con el alcance aprobado (sección 1).
 
 ### Refactor
 
@@ -110,7 +116,7 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XCont
    android preview list androidApp --all --format json
    ```
    Todo `@Preview` envuelve su contenido en `Surface` (o en el wrapper de tema del proyecto, si ya lo incluye): sin él, el tema no pinta el fondo y el render en modo oscuro sale con el fondo claro, inútil para revisar el contraste. Si falta en uno que escribiste o tocaste, agrégalo antes de dibujar.
-2. Dibújalos en `reports/previews` (cada `--fqn` es un nombre que devolvió `list`):
+2. Dibújalos en la carpeta de reportes, en `previews/` (`reports/previews` por defecto; con una carpeta por tarea, dentro de ella). Cada `--fqn` es un nombre que devolvió `list`:
    ```bash
    android preview render app --fqn <fqn> --fqn <otro-fqn> --format json -o reports/previews
    ```
@@ -123,12 +129,16 @@ Solo si se cumplen las tres condiciones: el cambio toca UI de Compose (un `XCont
 
 Se genera siempre, salvo que el usuario diga que no.
 
-1. Deja `reports/` fuera de git sin tocar el `.gitignore` del proyecto: si `git check-ignore -q reports/` falla, agrega `/reports/` a `.git/info/exclude` (local; con `git rev-parse --git-path info/exclude` si es un worktree). `report.py` lo hace solo al generar el reporte y lo dice; hazlo antes de escribir el meta para que no aparezca como archivo nuevo.
-2. Escribe un meta **por tarea**, `reports/<AAAA-MM-DD>-<slug>.meta.json` (el mismo prefijo que tendrá el reporte), con lo que git no sabe. Un `reports/meta.json` compartido lo pisa el siguiente bloque.
+1. Deja la carpeta de reportes fuera de git sin tocar el `.gitignore` del proyecto. Es la de la línea `Carpeta de reportes: <ruta>` de `AGENTS.md` o, si no la hay, `reports/`. Antes de escribir el meta, pídele al script la carpeta de la tarea (la ruta del script es relativa a la carpeta de la skill): la crea, la agrega a `.git/info/exclude` si git no la ignora (local; también en un worktree) y dice dónde van el meta y la bitácora.
+   ```bash
+   python3 -I <carpeta-de-la-skill>/scripts/report.py --folder <slug>
+   ```
+   El slug sigue la convención de `AGENTS.md`; si no hay, el título en minúsculas con guiones. Con `{fecha}` y `{slug}` en la ruta, cada tarea tiene su carpeta y, si ya existe una con ese slug de otro día, la tarea sigue ahí. Si la ruta pasa por un enlace simbólico (una carpeta de contexto fuera del repo), el script solo comprueba que git ignore el enlace y avisa si no. Detalle: [reporte.md](references/reporte.md).
+2. Escribe un meta **por tarea** donde dijo el script: `reports/<AAAA-MM-DD>-<slug>.meta.json` sin marcadores, `<carpeta-de-la-tarea>/meta.json` con ellos. Un `reports/meta.json` compartido lo pisa el siguiente bloque. Si el slug no es el título en minúsculas con guiones, ponlo en `slug`.
 
 ```json
 {
-  "project": "SnapDoc",
+  "project": "<nombre del proyecto>",
   "title": "Perfil de usuario",
   "type": "feature",
   "scope": "feature/profile",
@@ -136,14 +146,14 @@ Se genera siempre, salvo que el usuario diga que no.
   "date": "AAAA-MM-DD",
   "files": {
     "ruta/al/ArchivoNuevo.kt": { "why": "Qué aporta al diseño." },
-    "ruta/al/ArchivoModificado.kt": { "before": "Qué limitación había.", "after": "Qué mejora el cambio." },
-    "ruta/al/ArchivoEliminado.kt": { "why": "Por qué se elimina." }
+    "ruta/al/modulo_modificado.py": { "before": "Qué limitación había.", "after": "Qué mejora el cambio." },
+    "ruta/al/componente-eliminado.ts": { "why": "Por qué se elimina." }
   },
   "groups": [
-    { "match": "app/src/test/screenshots/", "why": "Goldens regrabados de las pantallas del perfil." }
+    { "match": "tests/screenshots/", "why": "Goldens regrabados de las pantallas del perfil." }
   ],
   "dod": [
-    { "icon": "🧪", "name": "Tests", "command": "./gradlew test", "status": "pass", "note": "", "output": "" }
+    { "icon": "🧪", "name": "Tests", "command": "<comando de tests del DoD>", "status": "pass", "note": "", "output": "" }
   ],
   "previews": [
     { "name": "ProfileContentPreview", "image": "reports/previews/…/ProfileContentPreview_0.png", "note": "Qué muestra y qué criterio verifica." }
@@ -154,11 +164,13 @@ Se genera siempre, salvo que el usuario diga que no.
    - Una explicación por archivo, sobre el impacto, no sobre el código. `output` solo en pasos que fallaron.
    - Los archivos masivos o generados (goldens, fixtures, snapshots) **no llevan una explicación cada uno**: se explican en grupo con `groups`. `match` es una carpeta (termina en `/`) o un patrón (`*.png`), y el grupo sale como una sola entrada con su lista de rutas. Un archivo con entrada propia en `files` se muestra aparte del grupo.
    - `previews` es opcional (sección 5). `image` es la ruta que devolvió `android preview render`, absoluta o relativa al repo: el script incrusta la imagen en el reporte.
-3. Genera el reporte con el script de esta skill (la ruta es relativa a la carpeta de la skill):
+   - **Análisis del cambio**, opcional: en un bugfix, `severity` y `root_cause`; si el cambio tiene un efecto que se puede contar, `impact`; si cambia un flujo o una arquitectura, un diagrama Mermaid en `diagrams`; y en los archivos que el revisor debe mirar con cuidado, `risk` (`critico`, `alto`, `medio`, `bajo`) con `pros` y `cons`. Solo se muestran si vienen ([reporte.md](references/reporte.md)).
+   - **Varios repos:** si la tarea cambió repos relacionados, lístalos en `repos` y explica sus archivos con la clave `<nombre>:<ruta>`. El cambio que usa el código local de una dependencia va en `temporary`, con cómo revertirlo: no cuenta como cambio ([varios-repos.md](references/varios-repos.md)).
+3. Genera el reporte con el script de esta skill, con la base de la sección 0 (sin `--base`, `HEAD`):
    ```bash
-   python3 -I <carpeta-de-la-skill>/scripts/report.py --meta reports/<AAAA-MM-DD>-<slug>.meta.json
+   python3 -I <carpeta-de-la-skill>/scripts/report.py --meta <ruta-del-meta> [--base <base>]
    ```
-   El script saca el antes, el después y el diff de git (contra `HEAD`, incluidos los archivos nuevos sin trackear): **no copies código en el meta**.
+   El script saca el antes, el después y el diff de git (contra la base, incluidos los archivos nuevos sin trackear): **no copies código en el meta**.
 4. Si el script avisa de archivos sin explicación, complétalos (o agrúpalos) y vuelve a generarlo.
 
 ## 7. Entrega
@@ -169,8 +181,10 @@ Se genera siempre, salvo que el usuario diga que no.
   - Un resumen de dos o tres líneas.
   - Los archivos creados, modificados y eliminados.
   - El resultado del DoD por paso.
-  - La ruta del reporte (con los previews de UI, si los hubo).
-  - Los commits propuestos, agrupados por unidad funcional y con mensajes según `hb-commit`.
+  - La ruta del reporte (con los previews de UI, si los hubo) y la de la bitácora, si la hubo.
+  - Los commits propuestos, agrupados por unidad funcional y con mensajes según `hb-commit`; con varios repos, por repo y en el orden en que se integran.
+  - Los **cambios temporales** (por ejemplo, pasar una dependencia a código local) y cómo revertirlos, o "revertido" si `AGENTS.md` pide revertirlos.
+  - La **reproducción manual**, si el bug depende de un entorno que no controlas (sección 2).
   - El texto para el PR: qué cambia, por qué y cómo se verificó.
   - **Riesgos:** lo que el DoD no cubre y no pudiste probar ("no probado en dispositivo", una dependencia de la plataforma, un caso del alcance que quedó fuera).
   - Los **ítems de verificación en el dispositivo**, si hay algo que el DoD no pueda ver (siguiente apartado).
@@ -186,17 +200,17 @@ Lista solo lo que el DoD y los tests no ven: el ciclo de vida real, los permisos
 
 ## Checklist
 
-- [ ] `AGENTS.md`, perfil y referencias necesarias leídos.
-- [ ] Criterios de aceptación claros; plan confirmado si hacía falta.
+- [ ] `AGENTS.md`, perfil y referencias necesarias leídos; acceso a los repos relacionados que toca la tarea.
+- [ ] Criterios de aceptación claros; plan confirmado si hacía falta (también en un bug complejo, con su bitácora).
 - [ ] Estructura y regla de dependencias del perfil respetadas.
-- [ ] Tests nuevos con fakes; en un bugfix, el test que reproduce el bug.
+- [ ] Tests nuevos con las librerías y el estilo de `AGENTS.md` (si no fija nada, los del perfil, con fakes); en un bugfix, el test que reproduce el bug o la reproducción manual.
 - [ ] Pantallas con estado: tests en la JVM de recreación de la vista y de muerte del proceso.
 - [ ] Patrones aplicados solo donde el problema los pedía.
 - [ ] Changelog actualizado si el proyecto lo usa.
 - [ ] Autorrevisión contra el alcance completo: estado y persistencia, `catch`, dependencias, casos pedidos y reglas del `AGENTS.md`.
 - [ ] DoD completo: cada paso en `pass` o `skipped` con motivo.
 - [ ] Si el cambio toca UI de Compose en Android y existe la CLI `android`: previews con `Surface`, dibujados, revisados e incluidos en el reporte.
-- [ ] Reporte generado y ruta entregada.
+- [ ] Reporte generado y ruta entregada; cambios temporales fuera del reporte y con cómo revertirlos.
 - [ ] Ítems de verificación en el dispositivo priorizados, con tope, y cada uno con su test o "sin test".
 - [ ] Entrega en el idioma del proyecto.
 - [ ] Sin commit automático.

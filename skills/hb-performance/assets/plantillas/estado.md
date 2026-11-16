@@ -108,7 +108,7 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 
 ## Consumo
 
-| Sesión | Modelo | Costo o tokens | Pasos |
-| --- | --- | --- | --- |
+| Sesión | Modelo | Costo o tokens |
+| --- | --- | --- |
 
 **Total de la investigación:** sin sesiones anotadas
