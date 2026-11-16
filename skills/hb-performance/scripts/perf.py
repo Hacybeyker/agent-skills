@@ -35,6 +35,7 @@ import json
 import math
 import os
 import pathlib
+import random
 import re
 import select
 import shlex
@@ -241,6 +242,9 @@ def guide_lines(error=None):
             lines += ["     Abrir (Terminal, %s): %s%s" % (tool, command, " · %s" % note if note else "")
                       for tool, command, note in step.get("abrir") or []]
             lines += ["     Texto para pegar (tal cual):", "     %s" % step["texto"]]
+            continue
+        if isinstance(step, dict):  # una acción sin comando listo (instalar sin 'instalar' en el plan)
+            lines += ["  %d. Terminal · %s: %s" % (index, step["que"][0].upper() + step["que"][1:], step["tu"])]
             continue
         what, command = step
         lines += ["  %d. Terminal · %s:" % (index, what[0].upper() + what[1:]), "     %s" % command]
@@ -614,6 +618,23 @@ def check_margin(spec):
         return False
 
 
+def pause_range(value):
+    """(mínimo, máximo) en ms de una pausa entre teclas: un número, [mín, máx] o "120-200"; None si no es válida."""
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            low = high = float(value)
+        elif isinstance(value, list) and len(value) == 2:
+            low, high = float(value[0]), float(value[1])
+        elif isinstance(value, str) and re.fullmatch(r"\s*\d+(?:\.\d+)?\s*(?:-\s*\d+(?:\.\d+)?\s*)?", value):
+            parts = [float(part) for part in value.split("-")]
+            low, high = parts[0], parts[-1]
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return (low, high) if 0 <= low <= high <= 10000 else None
+
+
 def load_plan(path):
     path = pathlib.Path(path)
     try:
@@ -722,6 +743,17 @@ def load_plan(path):
     foreign = plan.get("hilos_ajenos", [])
     if not isinstance(foreign, list):
         raise PerfError("%s: 'hilos_ajenos' es una lista de {\"nombre\", \"patron\"}" % path)
+    errors = plan.get("pantallas_error")
+    if errors is not None and (not isinstance(errors, list) or not all(isinstance(item, str) and item for item in errors)):
+        raise PerfError("%s: 'pantallas_error' es una lista de palabras o expresiones regulares del nombre de una actividad "
+                        "de error, por ejemplo [\"Error\", \"SinConexion\"]" % path)
+    for name, flow in plan["flujos"].items():
+        typing = flow.get("tecleo")
+        pause = typing.get("pausa_ms") if isinstance(typing, dict) else None
+        if typing is not None and (not isinstance(typing, dict) or not isinstance(typing.get("marca"), str)
+                                   or (pause is not None and not pause_range(pause))):
+            raise PerfError("%s: flujos.%s.tecleo es {\"marca\": \"MARK <la que sale en cada tecla>*\", \"pausa_ms\": "
+                            "[120, 200]} (pausa_ms, opcional: la pausa entre teclas de `perf.py teclear`)" % (path, name))
     names = set()
     for group_spec in foreign:
         if not isinstance(group_spec, dict) or not re.fullmatch(r"[A-Za-z][\w-]*", str(group_spec.get("nombre", ""))) \
@@ -1392,6 +1424,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     out += network_metrics(sections, known_endpoints, force="red_llamadas" in known)
     users, missing = user_metrics(markers, flow_spec.get("metricas_usuario", []))
     out += users
+    out += typing_metrics(sections, flow_spec.get("tecleo"), window)
     info["con_input"] = metrics_spanning_input(markers, flow_spec.get("metricas_usuario", []), inputs)
     specs = flow_spec.get("segmentos") or []
     segments, missing_segments = segment_metrics(markers, all_frames, all_main, specs)
@@ -1405,6 +1438,39 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     info["faltantes"] = missing + ["tramo %s" % name for name in missing_segments] \
         + (["ventana"] if info.get("ventana_faltante") else [])
     return with_families(out, flow_spec.get("familias")), None, info
+
+
+def typing_metrics(sections, spec, window=None):
+    """El ritmo real de tecleo de la corrida, si el plan declara `tecleo` con la marca que sale en cada tecla:
+    `tecleo_intervalo_ms` (la mediana entre teclas consecutivas) y `tecleo_teclas`, informativas. `adb input` no
+    garantiza el ritmo (un hilo principal bloqueado retrasa la entrega del texto): por eso se mide y no se supone."""
+    if not isinstance(spec, dict) or not spec.get("marca"):
+        return []
+    times = sorted(s[1] for s in sections if fnmatch.fnmatchcase(s[4], spec["marca"])
+                   and (not window or window[0] <= s[1] <= window[1]))
+    if len(times) < 2:
+        return []
+    gaps = [(later - earlier) / 1e6 for earlier, later in zip(times, times[1:])]
+    return [("tecleo_intervalo_ms", statistics.median(gaps), "ms", "info"), ("tecleo_teclas", len(times), "teclas", "info")]
+
+
+TYPING_CHANGE_MAX = 0.5  # cuánto puede cambiar la mediana del intervalo entre teclas de antes a después sin avisar
+
+
+def typing_notes(results):
+    """El aviso de `comparar` si el ritmo real de tecleo cambió mucho entre antes y después: las métricas de búsqueda
+    comparan entonces dos ritmos distintos."""
+    out = []
+    for r in results:
+        if r["metrica"] != "tecleo_intervalo_ms":
+            continue
+        before, after = r["antes"]["mediana"], r["despues"]["mediana"]
+        if before and abs(after - before) / before > TYPING_CHANGE_MAX:
+            out.append("%s: el ritmo real de tecleo cambió entre fases (intervalo entre teclas: antes %s, después %s). "
+                       "adb input no garantiza el ritmo (un hilo principal bloqueado retrasa la entrega del texto): las "
+                       "métricas de búsqueda o de escritura comparan dos ritmos distintos; dilo en la lectura"
+                       % (r["flujo"], fmt(before, "ms"), fmt(after, "ms")))
+    return out
 
 
 def sections_summary(names):
@@ -1672,8 +1738,10 @@ def select_device(serial):
     if len(devices) > 1:
         raise Precondicion("hay %d dispositivos conectados (%s): elige uno con --serial, o guárdalo en el plan con "
                            "'nuevo --serial'" % (len(devices), ", ".join(devices))).con(seguir=[
-            ("mira cuál es cuál (el serial es la primera columna)", "cd %s && adb devices -l" % shlex.quote(os.getcwd())),
-            ("repite el comando con el serial que corresponda", same_command() + " --serial <serial>")])
+            ("mira cuál es cuál (el serial es la primera columna; el modelo, model:)",
+             "cd %s && adb devices -l" % shlex.quote(os.getcwd()))]
+            + [("o repite el comando en %s" % device, same_command() + " --serial " + shlex.quote(device))
+               for device in devices])
     return devices[0]
 
 
@@ -2683,7 +2751,7 @@ def write_phase(folder, phase, data, flow=None):
     flows = dict(previous.get("flujos") or {})
     # La huella de las marcas y del plan (0.11.0) es del flujo. Si el flujo ya tenía corridas, vale la de su primera
     # tanda; una tanda con otra huella lo avisa (la fase mezclaría dos versiones de la marca o del plan).
-    prints = {key: data.pop(key) for key in ("marcas", "plan") if key in data}
+    prints = {key: data.pop(key) for key in ("marcas", "plan", "memoria") if key in data}
     if flow:
         before_flow = flows.get(flow) or {}
         flows[flow] = merge_run_data(before_flow, data)
@@ -2691,7 +2759,7 @@ def write_phase(folder, phase, data, flow=None):
             flows[flow]["depurable"] = data["depurable"]
         for key, value in prints.items():
             earlier = before_flow.get(key) if before_flow.get("corridas") else None
-            flows[flow][key] = earlier if earlier else value
+            flows[flow][key] = earlier if earlier is not None and key in before_flow else value
             if key == "marcas" and earlier and changed_marks(earlier, value):
                 note = "las marcas %s cambiaron entre tandas de la fase: sus corridas no miden lo mismo; repite la fase " \
                        "con --rehacer" % ", ".join(changed_marks(earlier, value))
@@ -2954,6 +3022,65 @@ def discard_phase(folder, csv_path, phase, flow):
         print("✔ --rehacer: trazas anteriores en %s-descartada-%s/" % (phase, stamp))
     old.mkdir(parents=True, exist_ok=True)
     forget_flow(folder, csv_path, phase, flow)
+
+
+def without_options(argv, with_value, flags):
+    """Los argumentos de un comando sin esas opciones (las de `with_value` con su valor, y las banderas de `flags`)."""
+    out, skip = [], False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg in with_value:
+            skip = True
+            continue
+        if any(arg.startswith(option + "=") for option in with_value) or arg in flags:
+            continue
+        out.append(arg)
+    return out
+
+
+def phase_config_mismatch(folder, phase, flow, name, redo=False):
+    """El motivo para no medir una fase con otra configuración de Perfetto que las demás fases del flujo, o None. `cpu`
+    y `completa` son de diagnóstico: alteran los tiempos y no se mezclan con las fases."""
+    phases = read_phases(folder)
+    used = {}
+    for other in FASES:
+        if other == phase and redo:
+            continue
+        record = phases.get(other) if isinstance(phases.get(other), dict) else {}
+        tracked = (record.get("flujos") or {}).get(flow) or {}
+        labels = tracked.get("configs") or record.get("configs") or []
+        names = {str(label).split("@", 1)[0] for label in labels if label and label != UNKNOWN_CONFIG}
+        if names:
+            used[other] = names
+    distinct = sorted({item for names in used.values() for item in names} - {name})
+    if not distinct:
+        return None
+    return ("las fases de '%s' se midieron con la configuración %s (%s) y esta captura usa %s: no se mezclan. cpu y "
+            "completa son capturas de diagnóstico (alteran los tiempos; completa no trae muestreo de CPU) y van con "
+            "--prueba, una corrida; para cambiar la configuración de todas las fases, repítelas con --rehacer y --forzar "
+            "(la primera que se rehace todavía no coincide con las otras)" % (
+                flow, ", ".join(distinct), "; ".join("%s: %s" % (other, ", ".join(sorted(names)))
+                                                     for other, names in used.items()), name))
+
+
+def memory_mismatch(folder, phase, flow, memory):
+    """Aviso si --memoria no está igual que en las otras fases del flujo (va en todas las fases o en ninguna), o ''."""
+    phases = read_phases(folder)
+    others = {}
+    for other in FASES:
+        record = phases.get(other) if isinstance(phases.get(other), dict) else {}
+        tracked = (record.get("flujos") or {}).get(flow) or {}
+        if other != phase and "memoria" in tracked:
+            others[other] = bool(tracked["memoria"])
+    differ = [other for other, value in others.items() if value != memory]
+    if not differ:
+        return ""
+    return ("--memoria tiene que estar en todas las fases o en ninguna: %s se midi%s %s y esta captura va %s (las "
+            "métricas de memoria quedarían sin comparar)" % (", ".join(differ), "ó" if len(differ) == 1 else "eron",
+                                                            "con --memoria" if others[differ[0]] else "sin --memoria",
+                                                            "con --memoria" if memory else "sin --memoria"))
 
 
 def resolve_config(plan, folder, override):
@@ -3269,6 +3396,26 @@ def terminal(command, what, you):
     return {"tipo": "terminal", "texto": command, "que": what, "tu": you}
 
 
+NO_INSTALL = ("sin comando listo: plan.json no tiene \"instalar\". Compila e instala con el comando de siempre (el de la "
+              "sección de rendimiento de AGENTS.md) y guárdalo como \"instalar\" en plan.json: desde ahí, cada paso lo "
+              "trae listo para pegar")
+
+
+def install_step(plan, root, what, you):
+    """El paso de instalar el build: el 'instalar' del plan como comando de terminal o, sin él, una acción que dice qué
+    hacer, sin un comando con marcadores que no se puede pegar."""
+    if plan.get("instalar"):
+        return terminal(install_command(plan, root), what, you)
+    return {"tipo": "accion", "que": what, "tu": NO_INSTALL}
+
+
+def install_guide(plan, root, what):
+    """Lo mismo, para la salida de un fallo (guide_lines): (para qué, comando) o una acción sin comando."""
+    if plan.get("instalar"):
+        return (what, install_command(plan, root))
+    return {"tipo": "accion", "que": what, "tu": NO_INSTALL}
+
+
 NO_COMMIT = "No hagas commit ni push."
 
 
@@ -3357,13 +3504,22 @@ def cli_model_id(plan, tier, tool):
     return text.replace(".", "-") if tool == "claude" else text
 
 
-def chat_openers(plan, root, tier, effort):
+def env_loads(names, root):
+    """Los comandos que cargan esas variables de entorno en la terminal (lectura oculta para las que parecen claves),
+    sin el cd: van en el mismo comando que abre un chat, antes de abrirlo, porque el agente solo ve las variables de
+    la terminal desde la que se abrió."""
+    return [command.split(" && ", 1)[1] for _, command in env_steps(names, root)]
+
+
+def chat_openers(plan, root, tier, effort, env=()):
     """[(herramienta, comando, nota)] para abrir un chat nuevo con el modelo y el esfuerzo del nivel: el de la
     herramienta de AGENTS.md o, si no está anotada (o es una que la skill no conoce y no trae su comando), los de todas
-    las que conoce. Cada comando empieza con cd a la raíz del proyecto."""
+    las que conoce. Cada comando empieza con cd a la raíz del proyecto y, con `env`, carga esas variables antes de abrir
+    el chat (el agente solo ve las de la terminal desde la que se abrió)."""
     tool, name, template = ai_tool(root)
     level = EFFORT_CLI.get(effort, effort)
-    where = "cd %s && " % shlex.quote(str(root))
+    names = [name for name in dict.fromkeys(env or ()) if ENV_NAME.fullmatch(str(name))]
+    where = "cd %s && " % shlex.quote(str(root)) + "".join("%s && " % load for load in env_loads(names, root))
     out = []
     if tool == "otra" and template:
         command = template.replace("{modelo}", shlex.quote(model_name(plan, tier))).replace("{esfuerzo}", level)
@@ -3383,10 +3539,13 @@ def next_steps(folder, plan, flow=None):
     temporales sin revertir, agrega cómo quitarlos sin perderlos (revert_notice)."""
     title, steps = plan_steps(folder, plan, flow)
     steps = before_capture(folder, plan, flow, steps)
-    # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos.
+    # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos. Con la investigación
+    # cerrada, quitarlos es lo único que queda: va primero, y el final lo dice.
     if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
         notice = revert_notice(folder, project_root(folder).resolve())
-        if notice:
+        if notice and title.startswith(("investigación cerrada", "triage cerrado")):
+            steps = [notice] + [dict(step, texto=DONE_AFTER_CLOSE) if step["tipo"] == "fin" else step for step in steps]
+        elif notice:
             steps = steps + [notice]
     return title, steps
 
@@ -3547,12 +3706,12 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
     def measure(phase, why):
         return terminal(command(*(capture + ["--fase", phase, "--corridas", runs, "--rehacer"])), why, you_run)
 
-    install_without = terminal(install_command(plan, root), "compila e instala el build de profiling sin las mejoras "
+    install_without = install_step(plan, root, "compila e instala el build de profiling sin las mejoras "
                                "(quitadas con su parche)", "espera")
     reapply = terminal(command("lineabase", "--carpeta", rel, "--reaplicar-mejoras"),
                        "vuelve a poner el código de las mejoras con su parche (comprueba antes que aplica limpio)",
                        "nada; si algo no aplica limpio, se detiene sin tocar nada y te dice por qué")
-    install_with = terminal(install_command(plan, root), "compila e instala el build de profiling con las mejoras",
+    install_with = install_step(plan, root, "compila e instala el build de profiling con las mejoras",
                             "espera")
     test = terminal(command(*(capture + ["--prueba"])), "una corrida de prueba con las mejoras: confirma que salen todas "
                     "las marcas del plan; si salen, te da el comando de la fase después", "revisa que todas las marcas "
@@ -3621,6 +3780,21 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
             measure("control", "mide el control de nuevo: antes se rehízo después del control, y el ruido tiene que "
                                "salir del mismo build y las mismas condiciones que el antes nuevo")]
     return None
+
+
+DONE = "La investigación está completa y analizada: no queda nada por hacer."
+DONE_AFTER_CLOSE = "Con los cambios temporales quitados, la investigación queda completa: no queda nada más por hacer."
+
+
+def flow_env(spec, folder):
+    """Las variables de entorno que necesita el flujo (requiere_env y las que usa 'preparar'): las que un chat que va a
+    correr una prueba tiene que ver."""
+    prepare = None if startup_spec(spec) else (spec.get("preparar") or "").strip() or None
+    try:
+        names = required_env(spec, prepare, pathlib.Path(folder))[0]
+    except (OSError, ValueError, PerfError):
+        names = list(spec.get("requiere_env") or [])
+    return [name for name in dict.fromkeys(names) if ENV_NAME.fullmatch(str(name))]
 
 
 def plan_steps(folder, plan, flow=None):
@@ -3722,13 +3896,13 @@ def plan_steps(folder, plan, flow=None):
         if business is not None:
             closed.append({"tipo": "archivo", "texto": str(business),
                            "que": "el mismo reporte para un público no técnico (gerencia)"})
-        return "investigación cerrada", closed
+        return "investigación cerrada", closed + [{"tipo": "fin", "texto": DONE}]
     initial = report_file(state.parent, "inicial") or state.parent / "reporte-inicial-dev.md"
     if triage and initial.is_file():
         closed = [{"tipo": "archivo", "texto": str(initial),
                    "que": "el reporte del triage (diagnóstico y plan, sin línea base ni medición después)"}]
         if not mejoras:  # sin mejoras propuestas no hay nada que pasar a riguroso
-            return "triage cerrado", closed
+            return "triage cerrado", closed + [{"tipo": "fin", "texto": DONE}]
         return "triage cerrado", closed + [
             terminal(command("decidir", "--carpeta", folder, "--profundidad", "riguroso"),
                      "solo si quieres aplicar una mejora: pasa la investigación a riguroso y te da, en orden, las capturas "
@@ -3780,11 +3954,12 @@ def plan_steps(folder, plan, flow=None):
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         missing_dod = dod_notice(root, plan)  # sin `## DoD` en AGENTS.md, la sesión 3 no sabría qué validar
         return "sesión 3 · %s" % first["id"], [
-            chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
+            dict(chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
                  "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada con sus "
                  "archivos (perf.py guarda el diff para el reporte)" % (
                      first["id"], " (a prueba: la medición de después confirma o refuta su hipótesis)"
-                     if first.get("a_prueba") else ""), plan)] + ([missing_dod] if missing_dod else [])
+                     if first.get("a_prueba") else ""), plan), env=flow_env(spec, root / folder))] + (
+            [missing_dod] if missing_dod else [])
     if "despues" in phases and not stale:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -3796,7 +3971,7 @@ def plan_steps(folder, plan, flow=None):
         tested = fecha_ts(test.get("fecha")) or 0
         applied_at = max(applied_at, phase_time(phases, "antes") or 0)  # una prueba anterior al último antes ya no vale
         fresh = bool(test.get("fecha")) and tested >= applied_at and (not reapplied or tested > reapplied)
-        install = terminal(install_command(plan, root), "compila e instala el build de profiling con la mejora",
+        install = install_step(plan, root, "compila e instala el build de profiling con la mejora",
                            "espera; si la mejora migra datos, abre la app una vez antes de medir")
         if not fresh:
             return "prueba de marcas con la mejora (sin chat)", [
@@ -3844,6 +4019,19 @@ def plan_steps(folder, plan, flow=None):
                           "sesión 4 corta: no hay mejoras que medir; escribe el resumen con el estado inicial y genera "
                           "el reporte final", plan))
         return "sesión 4 · cierre sin mejoras", steps
+    listed = pending_captures(state) if (state.parent / "diagnostico.md").is_file() else []
+    if listed:
+        # La sesión 2 dejó un hallazgo a medias con una captura de diagnóstico que lo cierra (diagnostico.md · Lo que
+        # se puede cerrar): la captura va primero y el chat retoma la sesión 2, que termina el hallazgo y el reporte.
+        todo = [pending for pending in listed if not capture_done(state.parent, pending)]
+        return "captura de diagnóstico para cerrar hallazgos (antes del reporte inicial)", [
+            terminal(full_command(pending), "la captura de diagnóstico que dejó la sesión 2 para cerrar un hallazgo antes "
+                     "del reporte inicial (una corrida; no cuenta como medición ni se mezcla con las fases)",
+                     "lo mismo que en una corrida de prueba; cuando termine, abre el chat") for pending in todo] + [
+            chat("%s: sesión 2, continúa: termina los hallazgos que dejaste a medias con la captura de diagnóstico (la "
+                 "traza más nueva de prueba/) y escribe el reporte inicial" % resume, "diagnostico", "alto",
+                 "sesión 2, continuación: cierra los hallazgos con esa traza, escribe los resúmenes y el reporte inicial "
+                 "y termina con el comando para que decidas", plan)]
     if (state.parent / "diagnostico.md").is_file():
         # Si el diagnóstico pidió una captura (el hilo principal espera en sus frames largos), va antes del chat y es
         # opcional: con ella, la sesión 2 puede decir por qué espera en vez de dejarlo sin confirmar.
@@ -3923,6 +4111,29 @@ def pending_captures(state):
         return []
     text = next((body for title, body in sections.items() if title.startswith("pendientes")), "")
     return [found.strip() for found in PENDING_CAPTURE.findall(without_placeholders(text)) if "<" not in found]
+
+
+def capture_done(folder, command):
+    """True si la captura de diagnóstico de un comando (`--config <nombre>` con --prueba) ya se hizo después del
+    diagnóstico: hay en prueba/ una traza grabada con esa configuración, más nueva que diagnostico.md."""
+    found = re.search(r"--config[ =]+(\S+)", command or "")
+    if not found:
+        return False
+    name = pathlib.Path(found.group(1).strip("'\"")).stem
+    folder = pathlib.Path(folder)
+    try:
+        since = (folder / "diagnostico.md").stat().st_mtime
+        data = json.loads((folder / "prueba" / CONFIG_FILE).read_text(encoding="utf-8"))
+        configs, traces = data["configuraciones"], data["trazas"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    for key, digest in traces.items():
+        if (configs.get(digest) or {}).get("nombre") != name:
+            continue
+        for path in (folder / "prueba").glob(key + ".perfetto-trace*"):
+            if path.stat().st_mtime > since:
+                return True
+    return False
 
 
 def diagnostic_captures(folder):
@@ -4032,11 +4243,22 @@ def render_steps(steps, markdown, root=None, plan=None):
             lines.append("%d. **Chat nuevo** · Modelo: %s · Esfuerzo: %s" % (i, step["modelo"], step["esfuerzo"]) if markdown
                          else "%d. Chat nuevo · Modelo: %s · Esfuerzo: %s" % (i, step["modelo"], step["esfuerzo"]))
             if root is not None and step.get("nivel"):
-                for tool, command, note in chat_openers(plan or {}, root, step["nivel"], step["esfuerzo"]):
+                for tool, command, note in chat_openers(plan or {}, root, step["nivel"], step["esfuerzo"],
+                                                        step.get("env") or ()):
                     lines.append("   Abrir (Terminal, %s): %s%s" % (tool, code(command), " · %s" % note if note else ""))
+                if step.get("env"):
+                    lines.append("   Antes de abrir el chat, ese comando te pide %s (las claves, con lectura oculta: lo "
+                                 "que escribes no se ve ni queda guardado): el chat va a correr una prueba que las "
+                                 "necesita." % ", ".join(step["env"]))
             lines.append("   Texto: \"%s\"" % step["texto"])
             lines.append("   Qué hace: %s." % step["que"])
             lines.append("   Tú: %s." % (step.get("tu") or CHAT_YOU))
+        elif step["tipo"] == "accion":
+            lines.append("%d. **Terminal** (sin chat) · %s" % (i, step["que"]) if markdown else
+                         "%d. Terminal (sin chat) · %s" % (i, step["que"]))
+            lines.append("   Tú: %s." % step["tu"])
+        elif step["tipo"] == "fin":
+            lines.append(("%d. **%s**" if markdown else "%d. %s") % (i, step["texto"]))
         else:
             lines.append("%d. %s: %s" % (i, step["que"][0].upper() + step["que"][1:], step["texto"]))
     return lines
@@ -4345,6 +4567,13 @@ def print_next(folder, plan, flow=None):
     update_warnings(folder, plan)
 
 
+def next_hint(folder, what="sigue con el paso que tenías"):
+    """La línea final de un comando que no cambia el paso siguiente: dónde está y el comando que lo repite."""
+    root = project_root(pathlib.Path(folder)).resolve()
+    return "Siguiente: %s; está en \"Siguiente paso\" de estado.md y este comando lo repite:\n    %s" % (
+        what, perf_command(root, "siguiente", "--carpeta", relative_folder(pathlib.Path(folder), root)))
+
+
 def cmd_siguiente(args):
     folder = pathlib.Path(args.carpeta)
     plan = load_plan(folder / "plan.json")
@@ -4417,6 +4646,7 @@ def cmd_consumo(args):
         plan = {}
     update_cost_total(folder, plan)
     print("  Total de la investigación: %s" % cost_total(folder, plan))
+    print(next_hint(folder))
 
 
 DECISIONS = (("aprobar", "aprobada", "aprobadas"), ("descartar", "descartada", "descartadas"),
@@ -5784,7 +6014,7 @@ def marks_fix_steps(folder, plan, flow, marks, phase, why):
             % (state, why, ", ".join(marks), " (dónde se emiten hoy: %s)" % ", ".join(places[:6]) if places else ""))
     return [chat(text, "intermedio", "medio", "ajusta las marcas que dejaron de salir, al mismo punto semántico; no "
                  "compila, no instala y no captura", plan),
-            terminal(install_command(plan, root), "compila e instala el build de profiling con las marcas ajustadas",
+            install_step(plan, root, "compila e instala el build de profiling con las marcas ajustadas",
                      "espera"),
             terminal(perf_command(root, *(capture_args(folder, plan, flow, root) + ["--prueba"])),
                      "una corrida de prueba: confirma que salen todas las marcas del plan; si salen, te da el comando de "
@@ -5817,7 +6047,7 @@ def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, 
                   "lo hago yo en mi terminal): %s." % (resume, flow, "; ".join(listed)))
         steps += [chat(prompt, "intermedio", "medio", "corrige en el código o en plan.json lo que dicen los avisos; no "
                        "compila, no instala y no captura", plan),
-                  terminal(install_command(plan, root), "compila e instala el build de profiling con las correcciones",
+                  install_step(plan, root, "compila e instala el build de profiling con las correcciones",
                            "espera; si solo cambió plan.json, salta este paso")]
     return steps + [
         terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente pasa "
@@ -6046,6 +6276,12 @@ def dod_notice(root, plan):
     assemble = "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
     if found:  # del 'instalar' del plan: con su módulo si lo trae; sin módulo, la tarea sin ':' (la busca en todos)
         assemble = "./gradlew -q %sassemble%s" % (":" + found.group(1) if found.group(1) else "", found.group(2))
+    extra = []
+    for index, other in enumerate(external_roots(root, read_no_leer(root))[0], start=3):
+        top = git_toplevel(other) or other
+        extra.append("%d. `cd %s && ./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests de %s, que viene de otro repo "
+                     "(settings.gradle lo incluye desde fuera; si Gradle lo ve como módulo, el comando va desde la raíz)"
+                     % (index, shlex.quote(str(top)), other.name))
     return {"tipo": "avisos", "crudo": True,
             "titulo": "%s: la sesión 3 corre \"los comandos de ## DoD\" y sin esa sección tendría que adivinar qué validar. "
                       "Agrégala a AGENTS.md antes de abrir el chat, con lo que el proyecto ya tiene (sin herramientas "
@@ -6054,7 +6290,7 @@ def dod_notice(root, plan):
             "lineas": ["## DoD", "",
                        "1. `./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests unitarios del módulo que cambie (la "
                        "tarea real: `./gradlew :<módulo>:tasks --all | grep UnitTest`)",
-                       "2. `%s`: compila la variante medida" % assemble]}
+                       "2. `%s`: compila la variante medida" % assemble] + extra}
 
 
 def performance_section(text):
@@ -6227,7 +6463,7 @@ def cmd_capturar(args, plan=None):
         stop = debuggable_stop(folder, phase, flow_name, build, plan, args.rehacer)
         if stop:
             raise Precondicion(stop).con(
-                seguir=[("instala el build de medición", install_command(plan, project_root(folder).resolve())),
+                seguir=[install_guide(plan, project_root(folder).resolve(), "instala el build de medición"),
                         ("y repite la medición", same_command())])
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
@@ -6247,7 +6483,7 @@ def cmd_capturar(args, plan=None):
         try:
             build_warnings = check_build(folder, phase, build, commit, args.forzar, flow_name, args.rehacer)
         except Precondicion as error:
-            raise error.con(seguir=[("instala el build con la mejora", install_command(plan, project_root(folder).resolve())),
+            raise error.con(seguir=[install_guide(plan, project_root(folder).resolve(), "instala el build con la mejora"),
                                     ("y repite la medición", same_command())])
     for text in warnings + build_warnings:
         print("⚠ " + text)
@@ -6257,6 +6493,25 @@ def cmd_capturar(args, plan=None):
         print("⚠ quedan %.1f GB libres: cada traza puede pesar decenas o cientos de MB" % free_gb)
     config_path = resolve_config(plan, folder, args.config)
     used_config = device_sources(config_record(config_path), sdk)
+    if not args.prueba:
+        mismatch = phase_config_mismatch(folder, phase, flow_name, used_config["nombre"], args.rehacer)
+        if mismatch and not args.forzar:
+            raise Precondicion(mismatch).con(seguir=[
+                ("la captura de diagnóstico, una corrida que no se mezcla con las fases",
+                 same_command(argv=without_options(GUIA["argv"], ("--fase", "--corridas", "--calentamiento"),
+                                                   ("--rehacer",)) + ["--prueba"])),
+                ("o la fase con la misma configuración que las otras",
+                 same_command(argv=without_options(GUIA["argv"], ("--config",), ())))])
+        if mismatch:
+            print("⚠ %s (sigo por --forzar)" % mismatch)
+        if used_config["nombre"] in ("cpu", "completa") and not mismatch:
+            print("⚠ --config %s en una fase: es una configuración de diagnóstico, altera los tiempos y todas las fases "
+                  "tendrán que usarla igual. Para diagnosticar, una corrida con --prueba --config %s" % (
+                      used_config["nombre"], used_config["nombre"]))
+        memory = memory_mismatch(folder, phase, flow_name, bool(args.memoria))
+        if memory:
+            print("⚠ " + memory)
+            build_warnings.append(memory)
     config = with_trace_cap(config_for_sdk(config_path.read_text(encoding="utf-8"), sdk).replace("{{PAQUETE}}", package),
                             flow.get("duracion_max_s"))
     input_glob = plan.get("input_slices") or INPUT_SLICES
@@ -6436,7 +6691,7 @@ def cmd_capturar(args, plan=None):
             "código movió dónde se emiten (o dejó de emitirlas). No es el entorno: repetir el comando no lo arregla. Las "
             "%d válidas quedan guardadas" % (consecutive, ", ".join(recent[0]), valid)).con(
             seguir=[with_openers(steps[0], plan, project_root(folder).resolve())]
-            + [(step["que"], step["texto"]) for step in steps[1:]]
+            + [step if step["tipo"] == "accion" else (step["que"], step["texto"]) for step in steps[1:]]
             + [("después, mide la fase %s de nuevo: lo medido antes del ajuste no se mezcla con lo de la marca ajustada"
                 % phase, same_command(corridas=start + target, sin=("--rehacer",)) + " --rehacer")
                if valid or start else ("después, mide la fase %s" % phase, same_command())])
@@ -6471,6 +6726,7 @@ def cmd_capturar(args, plan=None):
         if redo_marks:  # se cortó porque faltan siempre las mismas marcas: se rehace, no se completa
             record["rehacer_marcas"] = {flow_name: redo_marks}
         record.update(prints)  # la huella de las marcas y del plan, por flujo (write_phase)
+        record["memoria"] = bool(args.memoria)
         write_phase(folder, phase, record, flow_name)
 
     def mark_invalid(reason):
@@ -6666,7 +6922,12 @@ def cmd_capturar(args, plan=None):
                       "llama más de una vez por carga y una métrica con 'cual: ultima' terminaría en la última. Déjalo "
                       "en una vez por carga (setup.md · Contenido visible)" % (name, count))
             if startup and "ttfd_ms" not in {m[0] for m in metrics}:
-                print("⚠ Sin ttfd_ms: la app no llama a reportFullyDrawn() (ver setup.md · Contenido visible)")
+                # Solo importa para medir el arranque en frío: con un pedido de flujo es informativo, no un ⚠.
+                print("%s Sin ttfd_ms: la app no llama a reportFullyDrawn(). Solo afecta a la métrica de arranque en frío "
+                      "(TTFD)%s. Si vas a medir el arranque, va donde la primera pantalla con contenido termina su carga "
+                      "asíncrona (en una app con splash y login, decide cuál cuenta): setup.md · Contenido visible" % (
+                          ("·", ": para medir un flujo no hace falta") if getattr(args, "ttfd_informativo", False)
+                          else ("⚠", "")))
             root = project_root(folder).resolve()
             gap, unwired = ("", []) if getattr(args, "sin_red", False) else network_gap(root, plan, flow, info["nombres"],
                                                                                         detail=True)
@@ -7204,9 +7465,16 @@ def cmd_salidas(args):
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
     sdk = to_int(adb.shell("getprop ro.build.version.sdk").stdout.strip())
+
+    def finish():
+        if getattr(args, "carpeta", None) and (pathlib.Path(args.carpeta) / "plan.json").is_file():
+            print(next_hint(args.carpeta, "si una salida explica corridas inválidas, corrige la causa (backend, memoria) "
+                                          "y sigue con el paso que tenías"))
+
     if sdk < EXIT_MIN_SDK:
         print("Salidas de la app: no disponible (Android 11 o superior; el dispositivo tiene API %d). No quiere decir que "
               "la app no se haya cerrado: en este dispositivo solo queda el aviso de crash de `capturar`." % sdk)
+        finish()
         return
     dump = adb.shell("dumpsys activity exit-info %s" % package).stdout
     entries = parse_exit_info(dump)
@@ -7216,6 +7484,7 @@ def cmd_salidas(args):
     if not entries:
         print("Sin salidas registradas de %s%s. El sistema guarda un historial acotado por paquete y lo borra al "
               "desinstalar: una lista vacía no cubre lo que pasó antes." % (package, since))
+        finish()
         return
     shown = entries[:args.limite]
     print(markdown_table(["Hora", "pid", "Motivo", "Descripción", "PSS", "RSS"],
@@ -7242,6 +7511,7 @@ def cmd_salidas(args):
     if traced:
         print("Con traza del sistema (ANR o crash nativo): %s. Para leerlas, `anr-audit-and-fix` o `android-profiler`."
               % ", ".join("%s %s" % (entry["hora"][11:19], entry["motivo_texto"]) for entry in traced[:3]))
+    finish()
 
 
 # ── consulta y diagnostico ───────────────────────────────────────────────────
@@ -7609,9 +7879,13 @@ def cmd_resumen(args):
               "condiciones antes de comparar." % (len(flagged), fmt(CV_MAX)))
     if getattr(args, "solo_imprimir", False):
         print("· --solo-imprimir: no se escribió resumen.md ni la sección Métricas de estado.md")
+        if (pathlib.Path(args.csv).parent / "plan.json").is_file():
+            print(next_hint(pathlib.Path(args.csv).parent))
         return
     write_summary(args.csv, rows, plan)
     print("✔ %s escrito" % pathlib.Path(args.csv).with_name("resumen.md"))
+    if (pathlib.Path(args.csv).parent / "plan.json").is_file():
+        print(next_hint(pathlib.Path(args.csv).parent))
 
 
 def definition_notes(results):
@@ -7884,7 +8158,7 @@ def cmd_comparar(args):
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
-    notes += config_notes(folder, sorted({r["flujo"] for r in rows})) + marks_moved
+    notes += config_notes(folder, sorted({r["flujo"] for r in rows})) + marks_moved + typing_notes(results)
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -7899,6 +8173,10 @@ def cmd_comparar(args):
     if args.json:
         pathlib.Path(args.json).write_text(json.dumps({"resultados": results, "sin_comparar": unmatched},
                                                       ensure_ascii=False, indent=2), encoding="utf-8")
+    root = project_root(folder).resolve()
+    print("Siguiente (sesión 4, en este chat): escribe en estado.md la lectura de la comparación, el resumen ejecutivo y el "
+          "resumen para gerencia, y genera los reportes:\n    %s" % perf_command(
+              root, "reporte", "--carpeta", relative_folder(folder, root), "--html"))
 
 
 # ── har ──────────────────────────────────────────────────────────────────────
@@ -9653,6 +9931,28 @@ def keyboard_shown(adb):
     return bool(re.search(r"\bmInputShown=true\b", adb.shell("dumpsys input_method").stdout))
 
 
+def cmd_teclear(args):
+    """Escribe un texto en el campo con foco, carácter por carácter y con una pausa entre teclas, como una persona. La
+    secuencia de pausas sale del texto y de la pausa (siempre la misma), así que antes y después teclean igual. Va en
+    `recorrido.sh`, dentro de la traza: el intervalo real entre teclas lo mide `tecleo` del plan."""
+    pause = pause_range(args.pausa)
+    if pause is None:
+        raise PerfError("--pausa es un número de milisegundos o un rango, por ejemplo 150 o 120-200")
+    if "%" in args.texto:
+        raise PerfError("adb input text no escribe '%' (lo usa para el espacio): quítalo del texto")
+    if not args.texto:
+        raise PerfError("el texto está vacío")
+    adb = Adb(select_device(args.serial))
+    rng = random.Random("%s|%s|%s" % (args.texto, pause[0], pause[1]))
+    for index, char in enumerate(args.texto):
+        done = adb.shell("input text %s" % shlex.quote("%s" if char == " " else char))
+        if done.returncode != 0:
+            raise PerfError("adb input text falló en la tecla %d ('%s'): %s" % (index + 1, char,
+                                                                               (done.stderr or "").strip()[:160]))
+        if index < len(args.texto) - 1:
+            settle(rng.uniform(*pause) / 1000)
+
+
 def cmd_nodos(args):
     path = pathlib.Path(args.xml)
     if args.texto is None and args.id is None and args.desc is None:
@@ -9805,7 +10105,10 @@ def device_summary(serial, package, need_activity):
     activity = launcher_activity(adb, package) if need_activity else ""
     environment = device_environment(adb)
     kind = " · emulador%s" % (" con render por software" if environment["software"] else "") if environment["emulador"] or environment["software"] else ""
-    return "%s · Android %s (API %s)%s" % (model or "?", release or "?", sdk or "?", kind), activity, refresh_settings(adb)
+    # El modelo (ro.product.model) y el serial (adb devices) por separado y rotulados: un código de modelo con forma de
+    # serial no es el serial.
+    return "modelo %s · serial %s · Android %s (API %s)%s" % (model or "?", chosen, release or "?", sdk or "?", kind), \
+        activity, refresh_settings(adb)
 
 
 def ensure_ignored(folder):
@@ -9828,28 +10131,55 @@ def ensure_ignored(folder):
 
 
 def read_request(path):
-    """El flujo que el usuario pidió en la sesión 0 (reports/perf/setup/pedido.json): {"flujo", "llegar"}, o None."""
+    """El flujo que el usuario pidió en la sesión 0 (reports/perf/setup/pedido.json): {"texto" (el pedido literal),
+    "modo", "flujo", "llegar", "requiere_env"}, o None. "texto" y "modo" son de 0.11.0: un pedido anterior trae solo
+    "flujo" y "llegar"."""
     try:
         data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except OSError:
         return None  # no hay pedido guardado
     except ValueError:  # no es JSON, o no es UTF-8
         data = None
-    if not isinstance(data, dict) or not isinstance(data.get("flujo"), str) or not data["flujo"].strip() \
+    has_text = isinstance(data, dict) and isinstance(data.get("texto"), str) and data["texto"].strip()
+    if not isinstance(data, dict) or not (has_text or (isinstance(data.get("flujo"), str) and data["flujo"].strip())) \
             or not isinstance(data.get("llegar", ""), str):
-        print("⚠ %s no tiene la forma {\"flujo\": \"...\", \"llegar\": \"...\"}: no lo uso" % path)
+        print("⚠ %s no tiene la forma {\"texto\": \"...\", \"modo\": \"...\", \"flujo\": \"...\", \"llegar\": \"...\"}: "
+              "no lo uso" % path)
         return None
     return data
 
 
+REQUEST_ENV = re.compile(r"\$\{?([A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9])\b|\b(PERF_[A-Z0-9_]*[A-Z0-9])\b")
+
+
+def request_env(request):
+    """Las variables de entorno que nombra el pedido: su "requiere_env" o, si no lo trae, los nombres con forma de
+    variable (MAYÚSCULAS_CON_GUION_BAJO) que aparecen en su texto."""
+    declared = request.get("requiere_env")
+    if isinstance(declared, list):
+        return [str(name) for name in declared if ENV_NAME.fullmatch(str(name))]
+    text = " ".join(str(request.get(key) or "") for key in ("texto", "flujo", "llegar"))
+    # Solo lo que es una variable sin duda: `$NOMBRE`, `${NOMBRE}` o el prefijo PERF_ de la skill. "HTTP_GET" o "API_V1"
+    # en un pedido no son variables: para otras, el pedido trae `requiere_env`.
+    return list(dict.fromkeys(a or b for a, b in REQUEST_ENV.findall(text)))
+
+
 def session1_prompt(request, serial):
-    """El texto del chat de la sesión 1: el de "flujo largo" si para llegar al tramo hay login u otras pantallas. Dice
-    qué hay que pasar para llegar, no cómo recorrerlo: el modo de recorrido se elige en las preguntas de la sesión 1."""
+    """El texto del chat de la sesión 1. Con el pedido literal ("texto", 0.11.0), ese texto entero y el modo, sin
+    resumirlo; con un pedido anterior, el flujo y, si para llegar hay login u otras pantallas, "Para llegar ahí: …"
+    tal cual (sin armar una frase que dependa de cómo empieza). No fija cómo se recorre: eso es de la sesión 1."""
+    text = " ".join(str(request.get("texto") or "").replace(NO_COMMIT, " ").split())
+    mode = str(request.get("modo") or "").strip().lower()
+    if text:
+        if not text.endswith((".", "!", "?")):
+            text += "."
+        lead = "Usa hb-performance%s: sesión 1 (ficha y plan) con mi pedido del setup, tal cual: " % (
+            " en modo %s" % mode if mode in ("riguroso", "triage") else "")
+        return chat_text(lead + text + ("" if serial in text else " Dispositivo %s." % serial))
     flow = request["flujo"].strip().rstrip(".")
     reach = (request.get("llegar") or "").strip().rstrip(".")
     if reach:
-        # No fija cómo se recorre (adb, Maestro en preparar, deep link o manual): esa pregunta es de la sesión 1.
-        return chat_text("Usa hb-performance: medir %s. Para llegar ahí hay que %s. Dispositivo %s." % (flow, reach, serial))
+        return chat_text("Usa hb-performance: medir %s. Para llegar ahí: %s. Dispositivo %s." % (flow, reach, serial))
     return chat_text("Usa hb-performance: medir %s. Dispositivo %s." % (flow, serial))
 
 
@@ -9875,10 +10205,13 @@ def cmd_humo(args):
         print("⚠ " + missing_setup)
     folder.mkdir(parents=True, exist_ok=True)
     ensure_ignored(folder)
+    request = read_request(args.pedido)
     capture = argparse.Namespace(plan=None, prueba=True, paquete=args.paquete, carpeta=str(folder), flujo="humo", fase=None,
                                  hz=args.hz, recorrido=None, tp=args.tp, serial=serial, forzar=args.forzar, config=None,
                                  memoria=False, sin_compilar=False, compilacion=None, rehacer=False, calentamiento=0, preparar=None,
-                                 corridas=1, sin_comprimir=False, red_obligatoria=True, sin_red=args.sin_red)
+                                 corridas=1, sin_comprimir=False, red_obligatoria=True, sin_red=args.sin_red,
+                                 # con un pedido de flujo, el TTFD (solo del arranque) no hace falta: el aviso es informativo
+                                 ttfd_informativo=bool(request))
     root = project_root(folder).resolve()
     today = datetime.date.today().isoformat()
     try:
@@ -9910,24 +10243,27 @@ def cmd_humo(args):
              shlex.quote(shown_path(investigations_base(root) / "arranque-frio" / datetime.date.today().isoformat(),
                                     root))]
     if args.instalar:
-        nuevo += ["--instalar", json.dumps(args.instalar, ensure_ascii=False)]
-    recipe = "cd %s && python3 -I %s %s%s" % (q(root), q(HERE / "perf.py"), " ".join(nuevo),
-                                              " [--red si la primera pantalla carga de la red]")
-    request = read_request(args.pedido)
+        nuevo += ["--instalar", shlex.quote(args.instalar)]
+    recipe = "cd %s && python3 -I %s %s" % (q(root), q(HERE / "perf.py"), " ".join(nuevo))
     chat_line = "Chat nuevo · Modelo: %s · Esfuerzo: medio" % model_name(plan, "intermedio")
+    needed = request_env(request) if request else []
     openers = ["Abrir (Terminal, %s): %s%s" % (tool, command, " · %s" % note if note else "")
-               for tool, command, note in chat_openers(plan, root, "intermedio", "medio")]
+               for tool, command, note in chat_openers(plan, root, "intermedio", "medio", needed)]
     if missing_setup:
         print("⚠ Antes de seguir: %s" % missing_setup)
     if request:
         print("Siguiente · sesión 1 (ficha y plan) del flujo que pediste en el setup · %s" % chat_line)
         for line in openers:
             print("  " + line)
+        if needed:
+            print("  Antes de abrir el chat, ese comando te pide %s (las claves, con lectura oculta: lo que escribes no se "
+                  "ve ni queda guardado): la sesión 1 corre la prueba con ellas." % ", ".join(needed))
         print("  Texto: \"%s\"" % session1_prompt(request, serial))
-        print("  Tú: %s (el flujo sale de %s; es un chat nuevo, no el del setup)." % (CHAT_YOU, args.pedido))
+        print("  Tú: %s (el pedido sale de %s; es un chat nuevo, no el del setup)." % (CHAT_YOU, args.pedido))
         print("Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         print("  %s" % recipe)
-        print("  Tú: nada más; arma el plan e imprime los comandos para medir.")
+        print("  Tú: nada más; arma el plan e imprime los comandos para medir (agrega --red si la primera pantalla carga "
+              "de la red).")
     else:
         print("Siguiente, según lo que se va a investigar:")
         print("  · Una pantalla o un flujo · %s" % chat_line)
@@ -9937,7 +10273,8 @@ def cmd_humo(args):
         print("    Tú: completa el flujo entre <> y %s." % CHAT_YOU)
         print("  · Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):")
         print("    %s" % recipe)
-        print("    Tú: nada más; arma el plan e imprime los comandos para medir.")
+        print("    Tú: nada más; arma el plan e imprime los comandos para medir (agrega --red si la primera pantalla "
+              "carga de la red).")
 
 
 def default_folder(name):
@@ -11324,6 +11661,16 @@ def main(argv=None):
     p.add_argument("--serial", help="dispositivo para --volcar y para el comando de toque que imprime")
     p.add_argument("--limite", type=int, default=5)
     p.set_defaults(func=cmd_nodos)
+
+    p = sub.add_parser("teclear", help="escribe un texto carácter por carácter, con una pausa entre teclas (para recorrido.sh)",
+                       description="Escribe un texto en el campo con foco con `adb shell input text`, una tecla por vez y "
+                                   "con una pausa entre teclas como la de una persona. La secuencia de pausas sale del "
+                                   "texto: es la misma en todas las fases. El espacio se escribe como %s (adb input text "
+                                   "no escribe '%').")
+    p.add_argument("texto")
+    p.add_argument("--pausa", default="120-200", help="milisegundos entre teclas: un número o un rango (120-200)")
+    p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
+    p.set_defaults(func=cmd_teclear)
 
     p = sub.add_parser("pausa", help="desde un recorrido: muestra un texto en la terminal, con un pitido, y espera Enter "
                                      "(x + Enter descarta la corrida); sale con 1 si se descarta y con 3 si no hay terminal")

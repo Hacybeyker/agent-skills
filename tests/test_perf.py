@@ -55,7 +55,7 @@ def without_new(record):
     configuración, si el build era depurable y las opciones de desarrollador) y 0.11.0 (la huella de las marcas y del
     plan)."""
     return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes", "marcas",
-                                                                         "plan")}
+                                                                         "plan", "memoria")}
 
 
 class PerfBase(unittest.TestCase):
@@ -927,7 +927,8 @@ class CaptureTest(DeviceBase):
         self.assertIn("Secciones propias: HTTP ×2", out)
         self.assertIn("· Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
         self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/perf/arranque-frio/" % PKG, out)
-        self.assertIn('--instalar "./gradlew app:installProfiling"', out)
+        self.assertIn("--instalar './gradlew app:installProfiling'", out)
+        self.assertNotIn("[--red", out)  # la receta se pega tal cual: --red va en la explicación
         self.assertIn("· Una pantalla o un flujo · Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", out)
         self.assertIn("Dispositivo emulator-5554", out)
         self.assertLess(out.index("Una pantalla o un flujo"), out.index("arranque en frío (receta"))  # el flujo, primero
@@ -1292,7 +1293,7 @@ class NuevoTest(DeviceBase):
         self.assertNotIn("hz", plan)
         state = (folder / "estado.md").read_text(encoding="utf-8")
         self.assertIn("arranque en frío", state)
-        self.assertIn("Pixel Test · Android 14 (API 34)", state)
+        self.assertIn("modelo Pixel Test · serial emulator-5554 · Android 14 (API 34)", state)
         self.assertNotIn("{{", state)
         self.assertIn("--fase control --corridas 10", out)
         self.assertIn("1. **Terminal** (sin chat)", state)
@@ -1525,7 +1526,8 @@ class NextStepTest(PerfBase):
         self.plan["mejoras"][1]["estado"] = "aplicada"
         title, steps = self.step()
         self.assertEqual(title, "prueba de marcas con la mejora (sin chat)")  # X1: antes de después, la prueba
-        self.assertIn("guárdalo como 'instalar'", steps[0]["texto"])
+        self.assertEqual(steps[0]["tipo"], "accion")  # sin 'instalar' en el plan: una acción, nunca un comando con <…>
+        self.assertIn('guárdalo como "instalar" en plan.json', steps[0]["tu"])
         self.assertIn("--prueba", steps[1]["texto"])
         self.plan["instalar"] = "./gradlew :app:installProfiling"
         self.plan["serial"] = "ABC123"
@@ -1600,7 +1602,7 @@ class NextStepTest(PerfBase):
         title, steps = self.step()
         self.assertEqual(title, "triage cerrado")
         self.assertEqual(steps[0]["tipo"], "archivo")
-        self.assertEqual(len(steps), 1)  # sin mejoras propuestas no hay nada que pasar a riguroso
+        self.assertEqual([step["tipo"] for step in steps], ["archivo", "fin"])  # sin mejoras: nada que pasar a riguroso
         self.plan["profundidad"] = "riguroso"
         self.assertEqual(self.step()[0], "sesión 4 · cierre sin mejoras")  # sin mejoras, la sesión 2 no se repite
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}]
@@ -2580,7 +2582,7 @@ class RefreshRateTest(DeviceBase):
         self.assertEqual(json.loads((self.dir / "fija" / "plan.json").read_text(encoding="utf-8"))["hz"], 90)
         device = next(l for l in (self.dir / "fija" / "estado.md").read_text(encoding="utf-8").splitlines()
                       if l.startswith("| Dispositivo"))
-        self.assertEqual(device, "| Dispositivo | Pixel Test · Android 14 (API 34) · 90 Hz fijos |")
+        self.assertEqual(device, "| Dispositivo | modelo Pixel Test · serial emulator-5554 · Android 14 (API 34) · 90 Hz fijos |")
 
     def test_si_no_esta_fija_da_el_comando_que_la_fija_y_el_que_la_restaura(self):
         self.env.update({"FAKE_MIN_HZ": "null", "FAKE_PEAK_HZ": "120.0"})
@@ -3099,7 +3101,7 @@ class SmokeNextStepTest(DeviceBase):
         self.request(flujo="de la lista al detalle", llegar="iniciar sesión, aceptar términos e ir al tab Catálogo")
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
-        self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí hay que iniciar sesión, aceptar '
+        self.assertIn('Texto: "Usa hb-performance: medir de la lista al detalle. Para llegar ahí: iniciar sesión, aceptar '
                       'términos e ir al tab Catálogo. Dispositivo emulator-5554. No hagas commit ni push."', out)
         self.assertNotIn("Maestro", out)  # el prompt no fija cómo se recorre: lo pregunta la sesión 1
 
@@ -3107,7 +3109,8 @@ class SmokeNextStepTest(DeviceBase):
         write(self.dir / "reports/perf/setup/pedido.json", '{"flujo": ""}')
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
-        self.assertIn('⚠ reports/perf/setup/pedido.json no tiene la forma {"flujo": "...", "llegar": "..."}', out)
+        self.assertIn('⚠ reports/perf/setup/pedido.json no tiene la forma {"texto": "...", "modo": "...", "flujo": "...", '
+                      '"llegar": "..."}', out)
         self.assertIn("Siguiente, según lo que se va a investigar:", out)
         write(self.dir / "reports/perf/setup/pedido.json", "esto no es JSON")
         self.assertIn("pedido.json no tiene la forma", self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "h3"))
@@ -5100,7 +5103,7 @@ class TriageToRigorousTest(PerfBase):
         self.save()
         self.measured(3)
         title, steps = self.step()
-        self.assertEqual((title, [s["tipo"] for s in steps]), ("triage cerrado", ["archivo"]))
+        self.assertEqual((title, [s["tipo"] for s in steps]), ("triage cerrado", ["archivo", "fin"]))
         out = self.ok("decidir", "--carpeta", self.folder, "--profundidad", "riguroso")
         self.assertIn("profundidad riguroso (era triage)", out)
 
@@ -9286,3 +9289,261 @@ class StaleReportTest(PerfBase):
         self.assertIn("anteriores a la fase despues del %s" % now, steps[-1]["texto"])
         os.utime(str(folder / "reporte-final-dev.html"), None)  # un reporte nuevo
         self.assertEqual(perf.next_steps(folder, plan)[0], "investigación cerrada")
+
+
+# ── 0.11.0 · S: sesiones y guía ──────────────────────────────────────────────
+
+class EveryStateEndsWithAStepTest(PerfBase):
+    """S1: cada estado de `siguiente` termina diciendo qué hacer: un paso con su comando o su chat, o que la
+    investigación está completa. Ningún comando que imprime lleva un marcador <…> sin resolver y todos se pueden pegar."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "instalar": "./gradlew :app:installProfiling",
+                     "serial": "emulator-5554", "flujos": {"lista": {"recorrido": "true"}}, "mejoras": []}
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+
+    def states(self):
+        """(nombre, plan, archivos que se escriben antes) de cada estado por el que pasa una investigación."""
+        later = datetime.datetime.now().replace(microsecond=0).isoformat()
+        base = {"antes": {"fecha": "2026-11-09T10:00:00"}, "control": {"fecha": "2026-11-09T11:00:00"}}
+        applied = [{"id": "M1", "titulo": "a", "estado": "aplicada", "aplicada_en": "2026-11-10T10:00:00"}]
+        yield "sin medir", [], {}
+        yield "con prueba", [], {"prueba/lista_1.perfetto-trace.gz": "x"}
+        yield "antes medido", [], {"fases.json": json.dumps({"antes": base["antes"]})}
+        yield "diagnóstico", [], {"fases.json": json.dumps(base), "diagnostico.md": "x"}
+        yield "decisión", [{"id": "M1", "titulo": "a"}], {"fases.json": json.dumps(base), "diagnostico.md": "x"}
+        yield "sesión 3", [{"id": "M1", "titulo": "a", "estado": "aprobada"}], {"fases.json": json.dumps(base)}
+        yield "prueba con la mejora", applied, {"fases.json": json.dumps(base)}
+        yield "después", applied, {"fases.json": json.dumps(dict(base, prueba={"flujos": {"lista": {
+            "fecha": later, "marcas_ok": True, "faltan": []}}}))}
+        yield "cierre", applied, {"fases.json": json.dumps(dict(base, despues={"fecha": later}))}
+        yield "cerrada", applied, {"fases.json": json.dumps(dict(base, despues={"fecha": "2026-11-11T10:00:00"})),
+                                   "reporte-final-dev.html": "x"}
+        yield "sin mejoras", [{"id": "M1", "titulo": "a", "estado": "descartada"}], {
+            "fases.json": json.dumps(base), "reporte-inicial-dev.md": "x"}
+
+    def test_ningun_estado_termina_sin_paso(self):
+        for name, mejoras, files in self.states():
+            with self.subTest(name):
+                shutil.rmtree(str(self.folder))
+                write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+                for path, text in files.items():
+                    write(self.folder / path, text)
+                plan = dict(self.plan, mejoras=mejoras)
+                write(self.folder / "plan.json", json.dumps(plan))
+                title, steps = perf.next_steps(self.folder, plan)
+                actionable = [step for step in steps if step["tipo"] in ("terminal", "chat", "accion", "fin")]
+                self.assertTrue(actionable, (name, title, steps))
+                if title == "investigación cerrada":
+                    self.assertEqual(steps[-1]["tipo"], "fin")
+                    self.assertEqual(steps[-1]["texto"], perf.DONE)
+                for step in steps:
+                    if step["tipo"] == "terminal":
+                        self.assertNotRegex(step["texto"], r"<[^>]+>", (name, step["texto"]))
+                        shlex.split(step["texto"])
+                        self.assertEqual(subprocess.run(["bash", "-n", "-c", step["texto"]]).returncode, 0, step["texto"])
+                lines = perf.render_steps(steps, markdown=False, root=self.dir, plan=plan)
+                self.assertTrue(lines, name)
+
+    def test_comandos_que_no_cambian_el_paso_terminan_con_el_siguiente(self):
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [300] * 5))
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "1 · ficha", "--costo", "0.5 USD")
+        self.assertIn("Siguiente: sigue con el paso que tenías", out)
+        self.assertIn(" siguiente --carpeta ", out)
+        out = self.ok("resumen", self.folder / "metricas.csv")
+        self.assertIn(" siguiente --carpeta ", out)
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [300] * 5)
+              + rows("despues", "lista", "lista_ms", [200] * 5))
+        out = self.ok("comparar", self.folder / "metricas.csv")
+        self.assertIn("Siguiente (sesión 4, en este chat)", out)
+        self.assertIn(" reporte --carpeta ", out)
+
+
+class RequestAndEnvTest(DeviceBase):
+    """S3 y S5: el pedido del setup se guarda entero (con su modo) y `humo` lo reimprime tal cual; las variables que
+    nombra se cargan en el mismo comando que abre el chat, con lectura oculta para las claves."""
+
+    def request(self, **data):
+        write(self.dir / "reports/perf/setup/pedido.json", json.dumps(data, ensure_ascii=False))
+
+    def test_el_pedido_literal_y_el_modo_llegan_enteros_a_la_sesion_1(self):
+        text = ("Medir la búsqueda de clientes: toca el campo (id buscar_campo), escribe 'ana' y espera la lista. "
+                "Ejecuta todo con ADB y no corras las capturas. Usa PERF_USUARIO y PERF_CLAVE para el login.")
+        self.request(texto=text, modo="riguroso", flujo="la búsqueda", llegar="iniciar sesión")
+        self.tp_outputs(GOOD)
+        out = self.ok("humo", "--paquete", PKG)
+        line = next(line for line in out.splitlines() if line.strip().startswith("Texto:"))
+        self.assertIn("Usa hb-performance en modo riguroso: sesión 1 (ficha y plan) con mi pedido del setup, tal cual: "
+                      + text, line)
+        self.assertNotIn("Para llegar ahí", line)  # con el texto literal no se arma ninguna frase
+        self.assertTrue(line.rstrip('"').endswith(perf.NO_COMMIT))
+        opener = next(line for line in out.splitlines() if "Abrir (Terminal" in line)
+        self.assertIn("printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO", opener)
+        self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", opener)
+        self.assertLess(opener.index("PERF_CLAVE"), opener.index("claude --model"))  # antes de abrir el chat
+        command = opener.split("): ", 1)[1].split(" · ")[0]
+        self.assertEqual(subprocess.run(["bash", "-n", "-c", command]).returncode, 0, command)
+        self.assertIn("te pide PERF_USUARIO, PERF_CLAVE", out)
+
+    def test_un_pedido_anterior_sin_texto_sigue_funcionando(self):
+        self.assertEqual(perf.request_env({"flujo": "x", "requiere_env": ["PERF_PIN"]}), ["PERF_PIN"])
+        self.assertEqual(perf.request_env({"flujo": "el login con PERF_USUARIO", "llegar": ""}), ["PERF_USUARIO"])
+        self.assertEqual(perf.request_env({"texto": "mide HTTP_GET de API_V1 con $MI_CLAVE"}), ["MI_CLAVE"])
+        prompt = perf.session1_prompt({"flujo": "de la lista al detalle", "llegar": "La app ya tiene sesión"}, "emulator-5554")
+        self.assertIn("Para llegar ahí: La app ya tiene sesión. Dispositivo emulator-5554.", prompt)
+
+    def test_la_sesion_3_abre_el_chat_con_las_variables_del_flujo(self):
+        folder = self.plan.parent
+        spec = json.loads(self.plan.read_text(encoding="utf-8"))
+        spec["flujos"]["home"]["requiere_env"] = ["PERF_CLAVE"]
+        spec["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "aprobada"}]
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-09T10:00:00"},
+                                                 "control": {"fecha": "2026-11-09T11:00:00"}}))
+        title, steps = perf.next_steps(folder, spec)
+        self.assertEqual(steps[0]["env"], ["PERF_CLAVE"])
+        lines = "\n".join(perf.render_steps(steps, markdown=False, root=self.dir, plan=spec))
+        self.assertIn("read -r -s PERF_CLAVE && echo && export PERF_CLAVE && claude --model", lines)
+        self.assertIn("te pide PERF_CLAVE", lines)
+
+    def test_el_aviso_de_ttfd_dice_a_que_afecta_y_es_informativo_con_un_flujo(self):
+        no_ttfd = GOOD.replace('"seccion",10,5,0,"SCREEN MainActivity onResume"\n', "") + \
+            '"lanzamiento",0,456000000,0,"com.ejemplo.app"\n'
+        self.tp_outputs(no_ttfd)
+        out = self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "h1")
+        self.assertIn("⚠ Sin ttfd_ms: la app no llama a reportFullyDrawn(). Solo afecta a la métrica de arranque en frío", out)
+        self.request(flujo="de la lista al detalle", llegar="")
+        out = self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "h2")
+        self.assertIn("· Sin ttfd_ms: la app no llama a reportFullyDrawn(). Solo afecta a la métrica de arranque en frío "
+                      "(TTFD): para medir un flujo no hace falta", out)
+        self.assertIn("la primera pantalla con contenido termina su carga asíncrona", out)
+
+
+class NoInstallCommandTest(DeviceBase):
+    """S1: sin "instalar" en el plan, los pasos de instalar son una acción que dice qué hacer, también en la salida de
+    un corte por marcas que faltan siempre (nunca un comando con marcadores ni un error inesperado)."""
+
+    def test_el_corte_por_marcas_sin_instalar_entrega_el_chat_y_la_accion(self):
+        spec = json.loads(self.plan.read_text(encoding="utf-8"))
+        spec["principales"] = ["lista_ms"]
+        spec["flujos"]["home"]["metricas_usuario"] = [{"nombre": "lista_ms", "desde": {"marca": "SCREEN MainActivity*"},
+                                                       "hasta": {"marca": "MARK lista"}}]
+        self.plan.write_text(json.dumps(spec), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "5",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertNotIn("error inesperado", result.stderr)
+        self.assertIn("Chat nuevo", result.stderr)
+        self.assertIn('sin comando listo: plan.json no tiene "instalar"', result.stderr)
+        self.assertNotIn("<compila", result.stderr)
+
+
+class DiagnosticCaptureFirstTest(PerfBase):
+    """S6: si la sesión 2 dejó una captura de diagnóstico que cierra un hallazgo, `siguiente` la ofrece antes del
+    reporte inicial, con el chat que retoma la sesión 2."""
+
+    def test_la_captura_va_antes_del_reporte_y_despues_el_chat_que_retoma(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}}, "mejoras": []}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-09T10:00:00"},
+                                                 "control": {"fecha": "2026-11-09T11:00:00"}}))
+        write(folder / "diagnostico.md", "x")
+        state = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        state = re.sub(r"(## Pendientes\n\n).*?(\n## )", r"\1- H2 · cerrarlo con una captura · Captura pendiente: "
+                       r"`capturar --plan inv/plan.json --prueba --config cpu`\n\2", state, flags=re.S)
+        write(folder / "estado.md", state)
+        title, steps = perf.next_steps(folder, plan)
+        self.assertEqual(title, "captura de diagnóstico para cerrar hallazgos (antes del reporte inicial)")
+        self.assertIn("capturar --plan inv/plan.json --prueba --config cpu", steps[0]["texto"])
+        self.assertEqual(steps[-1]["tipo"], "chat")
+        self.assertIn("sesión 2, continúa", steps[-1]["texto"])
+        # hecha la captura (una traza de prueba con cpu, más nueva que el diagnóstico), queda solo el chat
+        write(folder / "prueba" / "lista_1.perfetto-trace.gz", "x")
+        perf.save_trace_config(folder / "prueba", "lista_1.perfetto-trace", {"nombre": "cpu", "hash": "abc", "fuentes": []})
+        os.utime(str(folder / "diagnostico.md"), (time.time() - 60, time.time() - 60))
+        title, steps = perf.next_steps(folder, plan)
+        self.assertEqual([step["tipo"] for step in steps], ["chat"])
+
+
+class PhaseConfigTest(DeviceBase):
+    """S7: `capturar --fase … --config <x>` distinta de la de las otras fases se detiene con el motivo y los dos caminos;
+    --memoria tiene que estar en todas las fases."""
+
+    def test_una_fase_con_otra_configuracion_se_detiene(self):
+        self.tp_outputs(GOOD)
+        common = ["capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar",
+                  "--corridas", "1"]
+        self.ok(*(common + ["--fase", "antes"]))
+        result = self.perf(*(common + ["--fase", "control", "--config", "cpu"]))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("se midieron con la configuración base", result.stderr)
+        self.assertIn("cpu y completa son capturas de diagnóstico (alteran los tiempos; completa no trae muestreo de CPU)",
+                      result.stderr)
+        self.assertRegex(result.stderr, r"capturar --plan \S+ --flujo home --sin-compilar --config cpu --prueba")
+        self.assertIn("O la fase con la misma configuración que las otras", result.stderr)
+        out = self.ok(*(common + ["--fase", "control", "--memoria"]))
+        self.assertIn("--memoria tiene que estar en todas las fases o en ninguna: antes se midió sin --memoria", out)
+
+
+class TypingRhythmTest(DeviceBase):
+    """S8: el ritmo real de tecleo se mide por fase cuando el plan declara la marca de cada tecla; `comparar` avisa si
+    cambió mucho; `teclear` escribe carácter por carácter con la misma secuencia de pausas en todas las fases."""
+
+    def test_intervalo_entre_teclas_y_aviso_de_comparar(self):
+        keys = [("seccion", ts * MS, 0, 0, "MARK busqueda_inicio %s" % text)
+                for ts, text in ((100, "a"), (250, "an"), (420, "ana"))]
+        got = {m[0]: m for m in perf.typing_metrics(keys, {"marca": "MARK busqueda_inicio*"})}
+        self.assertEqual(got["tecleo_intervalo_ms"][1:], (160.0, "ms", "info"))
+        self.assertEqual(got["tecleo_teclas"][1], 3)
+        self.assertEqual(perf.typing_metrics(keys[:1], {"marca": "MARK busqueda_inicio*"}), [])
+        self.assertEqual(perf.typing_metrics(keys, None), [])
+        results = [{"flujo": "buscar", "metrica": "tecleo_intervalo_ms", "antes": {"mediana": 30.0},
+                    "despues": {"mediana": 160.0}}]
+        self.assertIn("el ritmo real de tecleo cambió entre fases", perf.typing_notes(results)[0])
+        self.assertEqual(perf.pause_range("120-200"), (120.0, 200.0))
+        self.assertEqual(perf.pause_range([150, 150]), (150.0, 150.0))
+        self.assertIsNone(perf.pause_range("rápido"))
+
+    def test_teclear_escribe_una_tecla_por_vez(self):
+        self.ok("teclear", "ana p", "--pausa", "0-0")
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        typed = [line for line in log.splitlines() if "input text" in line]
+        self.assertEqual(len(typed), 5)
+        self.assertIn("input text %s", typed[3])  # el espacio
+        self.assertEqual(self.perf("teclear", "50%", "--pausa", "0").returncode, 2)
+
+
+class ClosingLevelTest(PerfBase):
+    """S10: el cierre sube al nivel intermedio si el resultado es mixto."""
+
+    def test_regresiones_o_mejoras_sin_objetivo_suben_el_nivel(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "a", "metrica": "lista_ms", "estado": "aplicada"}]}
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [300, 305, 298, 302, 300])
+              + rows("despues", "lista", "lista_ms", [200, 202, 199, 201, 200]))
+        self.assertEqual(perf.closing_level(folder, plan), ("economico", "bajo", ""))
+        write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [300, 305, 298, 302, 300])
+              + rows("despues", "lista", "lista_ms", [400, 402, 399, 401, 400]))
+        tier, effort, why = perf.closing_level(folder, plan)
+        self.assertEqual((tier, effort), ("intermedio", "medio"))
+        self.assertIn("1 regresión", why)
+        self.assertIn("mejoras que no llegaron a su objetivo (M1)", why)
+
+
+class DodExternalModulesTest(PerfBase):
+    """S13: la plantilla de `## DoD` trae una línea por cada módulo que settings.gradle incluye desde otro repo."""
+
+    def test_la_plantilla_nombra_el_repo_de_fuera(self):
+        other = self.dir / "otro-repo" / "pagos"
+        other.mkdir(parents=True)
+        root = self.dir / "app-repo"
+        write(root / "settings.gradle.kts", 'include(":pagos")\nproject(":pagos").projectDir = file("../otro-repo/pagos")\n')
+        notice = perf.dod_notice(root, {"instalar": "./gradlew :app:installProfiling"})
+        joined = "\n".join(notice["lineas"])
+        self.assertIn("3. `cd %s && ./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests de pagos" % other.resolve(),
+                      joined)

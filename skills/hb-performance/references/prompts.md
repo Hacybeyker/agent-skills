@@ -14,6 +14,8 @@ Para el usuario, no para el agente. Cada caso trae dónde va (un chat nuevo, con
 
 ### Una pantalla o un flujo (la primera vez en el proyecto, o con el setup listo)
 
+**La primera vez en el proyecto, este pedido hace el setup (sesión 0)** y guarda tu flujo, tal cual lo escribes, para la sesión 1: por eso te pide el flujo aunque todavía no lo mida. Al terminar el setup, la prueba de humo te da el chat de la sesión 1 con tu pedido entero. "Empieza por el setup" también sirve: hace lo mismo.
+
 **Dónde:** chat nuevo · Intermedio · medio
 
 **Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
@@ -271,6 +273,19 @@ Hazlo **entre** investigaciones, no en medio de una: una plantilla nueva puede n
 ```text
 Usa hb-performance: nueva investigación sobre <pendiente, con el H# del estado.md anterior en <ruta>>. Dispositivo <serial>. No hagas commit ni push.
 ```
+
+## Qué más se puede capturar
+
+Además de las fases, hay capturas que traen otros datos. Las de diagnóstico (`cpu`, `completa`) **alteran los tiempos**: van solas, con `--prueba`, y nunca se mezclan con las fases; `capturar --fase … --config <x>` distinta de la de las otras fases se detiene con ese motivo. Todas van en la terminal, sin chat.
+
+| Captura | Para qué sirve | Dónde va | Comando |
+| --- | --- | --- | --- |
+| `base` (por defecto) | Tiempos, frames, hilo principal, red y marcas | Fases (antes, control, después) | `cd <raíz> && python3 -I <skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --fase antes --corridas 10` |
+| `--memoria` | PSS, heaps, actividades y vistas vivas después de cada corrida (`dumpsys meminfo`, fuera de la traza) | En fases: **en todas o en ninguna** | El de la fase, con `--memoria` al final |
+| `--config cpu` | Qué funciones ocupan el hilo principal (muestreo de CPU; con R8, desofuscadas) | Solo diagnóstico, una corrida | `cd <raíz> && python3 -I <skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --prueba --config cpu` |
+| `--config completa` | Por qué espera o se bloquea el hilo principal (quién lo despierta, E/S, locks). **No trae muestreo de CPU**: para eso, `cpu` | Solo diagnóstico, una corrida | `cd <raíz> && python3 -I <skill>/scripts/perf.py capturar --plan <carpeta>/plan.json --prueba --config completa` |
+| `salidas` | Por qué se cerró la app (crash, ANR, poca memoria), según el sistema; Android 11 o superior | En cualquier momento, sin traza | `cd <raíz> && python3 -I <skill>/scripts/perf.py salidas --carpeta <carpeta>` |
+| `hilos_ajenos` (en el plan) | CPU y red de hilos del proceso que no son de la app (un servidor embebido) | Todas las capturas, si el plan los declara | Se declara en `plan.json` ([ficha.md](ficha.md)); no es un comando aparte |
 
 ## Reglas que te ahorran dinero
 
