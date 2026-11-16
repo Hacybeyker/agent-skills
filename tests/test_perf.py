@@ -2493,7 +2493,7 @@ class TrialImprovementTest(PerfBase):
         self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
                       "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (−75 %)", final)
         self.assertIn("| M3 | Precalcular el layout del texto (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el layout del texto largo · "
-                      "cierre hilo_max_ms: 37 ms → 37 ms", final)
+                      "cierre hilo_max_ms: se mantuvo en 37 ms", final)
         self.assertIn("| sin confirmar | ✔ M2: hipótesis confirmada (detalle hilo_max_ms mejora) |", final)
         self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (cierre hilo_max_ms sin cambio) |", final)
         self.assertIn("3 hallazgos → 3 mejoras propuestas → 3 aplicadas → 2 funcionaron", final)
@@ -7866,9 +7866,9 @@ class ServicesReportTest(PerfBase):
         self.assertIn("- En después, 3 servicios", section)
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
         # no todos traen el tiempo del servidor: suma la duración de las llamadas y lo dice así
-        self.assertIn("El recorrido llama a 3 servicios (3 llamadas en total). De los 1.3 s del recorrido, las llamadas "
-                      "suman 1.05 s (si van en paralelo, parte se solapa); el más lento es `GET api/v1/nuevo` (0.5 s por "
-                      "llamada). Es orientativo", business)
+        self.assertIn("El recorrido llama a 3 servicios (3 llamadas en total). De los 1.3 s del recorrido (con las esperas "
+                      "del guion de medición), las llamadas suman 1.05 s (si van en paralelo, parte se solapa); el más "
+                      "lento es el de \"nuevo\" (0.5 s por llamada). Es orientativo", business)
         self.assertNotIn("red get", business.lower())  # los tiempos de un servicio no salen como riesgo ni con su métrica
 
     def test_el_servidor_que_cambia_entre_fases_es_variacion_del_backend(self):
@@ -7901,9 +7901,10 @@ class ServicesReportTest(PerfBase):
               + service_rows("antes", "GET api/v1/clientes", 2, [400] * 5, 300)
               + rows("antes", "lista", "red_en_curso_ms", [450] * 5, family="info"))
         self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
-                         "El recorrido llama a 1 servicio (2 llamadas en total). De los 1.8 s del recorrido, durante "
-                         "0.45 s (25 %) se está esperando a algún servicio; el más lento es `GET api/v1/clientes` (0.4 s "
-                         "por llamada). Es orientativo: depende del servidor y de la red del momento.")
+                         "El recorrido llama a 1 servicio (2 llamadas en total). De los 1.8 s del recorrido (con las "
+                         "esperas del guion de medición), durante 0.45 s (25 %) se está esperando a algún servicio; el más "
+                         "lento es el de \"clientes\" (0.4 s por llamada). Es orientativo: depende del servidor y de la red "
+                         "del momento.")
 
 
     def test_las_filas_por_servicio_salen_de_la_traza_y_van_al_final(self):
@@ -7977,13 +7978,16 @@ class AudienceReportsTest(PerfBase):
                       "investigó y se descartó y 1 quedó sin confirmar.", text)
         self.assertIn("## Qué se hizo\n\n- Pedir los clientes una sola vez", text)
         self.assertIn("- **Tiempo de \"lista\":** pasó de 1.8 s a 1.1 s (39 % menos) · mejora clara.", text)
-        self.assertIn("- **Cuadros que se ven trabados:** pasó de 6 % a 1 % (83 % menos) · orientativo: varía mucho entre corridas "
-                      "(mejora clara).", text)
+        # R5 y R6: corridas en dos grupos (4–6 y 28–30) y sin "orientativo … (mejora clara)", que se contradice
+        self.assertIn("- **Cuadros que se ven trabados:** pasó de 6 % a 1 % (83 % menos) · mejoró, aunque las mediciones "
+                      "forman dos grupos: tómalo como orientativo.", text)
         self.assertIn("- **Mayor congelamiento de la pantalla:** pasó de 40 milisegundos a 90 milisegundos (125 % más) · empeoró.", text)
-        self.assertIn("## Lo que queda pendiente\n\n- Cargar las imágenes después (para más adelante)\n- 1 punto de la "
-                      "investigación sin cerrar", text)
+        # R6: el punto sin cerrar, dicho cuál es (en palabras), no solo "1 punto"
+        self.assertIn("## Lo que queda pendiente\n\n- Cargar las imágenes después (para más adelante)\n- Tirón estable "
+                      "(sin cerrar; el detalle está en el reporte técnico).", text)
         self.assertIn("- Pedir los clientes una sola vez: riesgo bajo.", text)
-        self.assertIn("- Mayor congelamiento de la pantalla: de 40 milisegundos a 90 milisegundos · empeoró.", text)
+        self.assertIn("- Mayor congelamiento de la pantalla: pasó de 40 milisegundos a 90 milisegundos (125 % más) · "
+                      "empeoró.", text)
         self.assertIn("- Empeoraron 2 medidas que no son principales: el detalle está en el reporte técnico.", text)
         self.assertNotIn("api/v1/lento", text)
         self.assertEqual(perf.plain_time(153, "MB"), "153 MB")
@@ -8020,10 +8024,10 @@ class AudienceReportsTest(PerfBase):
         self.assertIn("- **Tiempo en mostrar la lista de clientes:** pasó de 1.8 s a 1.1 s", self.read("reporte-final-gerencia.md"))
         self.assertEqual(perf.plain_metric("detalle hilo_max_ms", {}), 'Mayor congelamiento de la pantalla, en la parte "detalle"')
         # una métrica de un servicio elegida como principal también sale en palabras
-        self.assertEqual(perf.plain_metric("red GET api/v1/clientes ms", {}), "Duración del servicio `GET api/v1/clientes`")
-        self.assertEqual(perf.plain_metric("red GET api/v1/clientes llamadas", {}), "Llamadas al servicio `GET api/v1/clientes`")
+        self.assertEqual(perf.plain_metric("red GET api/v1/clientes ms", {}), 'Duración del servicio "clientes"')
+        self.assertEqual(perf.plain_metric("red GET api/v1/clientes llamadas", {}), 'Llamadas al servicio "clientes"')
         self.assertEqual(perf.plain_metric("carga red GET api/v1/clientes llamadas", {}),
-                         'Llamadas al servicio `GET api/v1/clientes`, en la parte "carga"')
+                         'Llamadas al servicio "clientes", en la parte "carga"')
         self.assertEqual(perf.plain_time(0.2), "menos de 1 milisegundo")
         self.plan["etiquetas"] = ["lista_ms"]
         write(self.folder / "plan.json", json.dumps(self.plan))
@@ -8349,9 +8353,9 @@ class FlowServicesOrderTest(PerfBase):
         self.assertIn("podrían ir en paralelo", page)
         self.assertIn("Servicios que más tiempo suman", page)
         business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
-        self.assertIn("El recorrido llama a 7 servicios (8 llamadas en total). De los 2.05 s del recorrido, durante 0.9 s "
-                      "(44 %) se está esperando a algún servicio; el más lento es `GET api/v1/clientes` (0.4 s por "
-                      "llamada).", business)
+        self.assertIn("El recorrido llama a 7 servicios (8 llamadas en total). De los 2.05 s del recorrido (con las esperas "
+                      "del guion de medición), durante 0.9 s (44 %) se está esperando a algún servicio; el más lento es el "
+                      "de \"clientes\" (0.4 s por llamada).", business)
 
     def test_en_el_final_el_backend_que_se_mueve_es_variacion_del_backend(self):
         after = rows("despues", "lista", "lista_ms", [1200] * 5) \
@@ -8422,7 +8426,9 @@ class ReadableReportsTest(PerfBase):
         final = pages["reporte-final-gerencia.md"]
         for section in ("Qué notaba el usuario", "Qué se hizo", "Resultado", "Lo que queda pendiente", "Riesgos", "Costo"):
             self.assertIn("## %s" % section, final)
-        self.assertRegex(final, r"pasó de [\d.]+ s a [\d.]+ s \(\d+ % menos\) · mejora clara")
+        self.assertRegex(final, r"pasó de [\d.]+ s a [\d.]+ s \(\d+ % menos\) · mejoró, aunque depende también del "
+                                r"servidor: tómalo como orientativo")
+        self.assertIn("se mantuvo en 48 milisegundos · sin cambio", final)  # R7: sin porcentaje entre dos valores iguales
         self.assertIn("Antes", pages["reporte-final-gerencia.html"])
         self.assertIn("Después", pages["reporte-final-gerencia.html"])
         self.assertNotIn("Control", pages["reporte-final-gerencia.html"])
@@ -9653,3 +9659,216 @@ class FlavorsFragmentTest(PerfBase):
         self.assertIn("El módulo tiene sabores (productFlavors)", flavored)
         self.assertIn("install<Sabor><BuildType>", flavored)
         self.assertTrue(perf.has_flavors(self.dir / "app"))
+
+
+# ── 0.11.0 · R: reportes que dicen la verdad y se leen bien ──────────────────
+
+class ReportTruthTest(PerfBase):
+    """R1–R8: línea de tiempo, servicios que más suman, tablas, red por tramo, dos grupos, gerencia sin tropiezos,
+    redondeo coherente y veredictos que no son de la app."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["busqueda_ms"], "flujos": {"buscar": {"recorrido": "true"}},
+                     "mejoras": []}
+
+    def timeline(self, marks, calls):
+        rows_text = HEADER + rows("antes", "buscar", "ventana_ms", [3000] * 3, family="info")
+        write(self.folder / "metricas.csv", rows_text)
+        for run in (1, 2, 3):
+            write(self.folder / "antes" / ("buscar_%d%s" % (run, perf.TIMELINE_SUFFIX)),
+                  json.dumps({"llamadas": calls, "marcas": marks}))
+        return perf.timeline_chart(perf.read_rows(self.folder / "metricas.csv"), self.plan, "antes", self.folder)
+
+    def test_linea_de_tiempo_desde_la_primera_llamada_solo_mark_y_sin_choques(self):
+        keys = [["MARK busqueda_inicio %s" % "ana"[:n], 500 + 120 * n] for n in range(1, 4)]
+        html = self.timeline(keys + [["SCREEN ListaActivity onResume", 100], ["MARK busqueda_resultado", 1400]],
+                             [["GET api/v1/sesion", -4000, 400], ["GET api/v1/clientes", 900, 1300]])
+        self.assertIn("busqueda_inicio ×3", html)
+        self.assertNotIn(">busqueda_inicio a<", html)  # las repetidas, agrupadas
+        self.assertIn('class="mark-dim"', html)  # SCREEN atenuada
+        self.assertIn("<details><summary>Marcas de pantalla (SCREEN y NAV)", html)
+        self.assertIn("empezó antes del inicio del flujo", html)
+        self.assertIn("−4", html)  # el eje empieza en la primera llamada
+        bar = re.search(r'<rect x="([\d.]+)" y="\d+" width="([\d.]+)" height="14" rx="2" class="bar-after"><title>GET '
+                        r'api/v1/sesion', html)
+        self.assertGreater(float(bar.group(2)), 100)  # 4.4 s de 7 s: proporcional, no 2 px
+        labels = re.findall(r'<text x="([\d.]+)" y="(\d+)" class="mark-label">([^<]+)</text>', html)
+        placed = sorted((int(y), float(x), len(text)) for x, y, text in labels)
+        for (y1, x1, n1), (y2, x2, _) in zip(placed, placed[1:]):
+            if y1 == y2:
+                self.assertGreaterEqual(x2, x1 + 6.2 * n1, labels)  # en la misma fila, no se pisan
+        late = self.timeline([["MARK resultado_con_un_nombre_bastante_largo", 2990]], [["GET api/v1/a", 0, 300]])
+        label = re.search(r'<text x="([\d.]+)" y="\d+" class="mark-label">([^<]+)<title>', late)
+        self.assertLessEqual(float(label.group(1)) + 6.2 * len(label.group(2)), 190 + 330 + 140)  # no se corta
+        self.assertLessEqual(len(label.group(2)), 28)
+        many = [["MARK m%02d_%s" % (i, "x" * 12), 100 + 10 * i] for i in range(12)]
+        html = self.timeline(many, [["GET api/v1/a", 0, 300]])
+        self.assertIn("Marcas: 1 = m00_", html)  # con choques que no entran en las filas: números y leyenda
+
+    def test_servicios_que_mas_suman_con_el_nombre_corto_y_la_cantidad_fuera(self):
+        text = HEADER + service_rows("antes", "GET api/v1/clientes/{id}/pedidos", 2, [400] * 5, 300, flow="buscar")
+        write(self.folder / "metricas.csv", text)
+        html = perf.services_chart(perf.read_rows(self.folder / "metricas.csv"), self.plan)
+        self.assertIn('class="bar-label">GET …/{id}/pedidos<title>', html)
+        self.assertIn("×2 · 800 ms", html)
+        self.assertEqual(perf.short_service("GET api/v1/clientes #ab12"), "GET …/v1/clientes")
+
+    def test_tablas_que_no_se_desbordan(self):
+        page = (perf.ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+        self.assertIn("td:first-child { font-weight: 600; overflow-wrap: anywhere;", page)
+        self.assertIn("td.num { white-space: nowrap; font-variant-numeric: tabular-nums; min-width:", page)
+        self.assertNotRegex(page, r"th \{[^}]*white-space: nowrap")
+
+    def test_red_por_tramo_sin_filas_vacias(self):
+        plan = {"flujos": {"buscar": {"segmentos": [{"nombre": "a", "desde": {"marca": "x"}, "hasta": {"marca": "y"}},
+                                                    {"nombre": "b", "desde": {"marca": "y"}, "hasta": {"marca": "z"}}]}}}
+        zero = rows("antes", "buscar", "a red_llamadas", [0] * 5, "llamadas", family="info") \
+            + rows("antes", "buscar", "b red_llamadas", [0] * 5, "llamadas", family="info")
+        self.assertEqual(perf.segment_network_md(read_rows_from(zero), plan),
+                         "Ninguna llamada a servicios empieza dentro de los tramos: todas quedan fuera de ellos (están "
+                         "en \"Servicios del flujo\").")
+        some = rows("antes", "buscar", "a red_llamadas", [2] * 5, "llamadas", family="info") \
+            + rows("antes", "buscar", "b red_llamadas", [0] * 5, "llamadas", family="info")
+        md = perf.segment_network_md(read_rows_from(some), plan)
+        self.assertIn("| buscar | a | antes | 2 llamadas |", md)
+        self.assertNotIn("| buscar | b |", md)
+        self.assertIn("Sin llamadas que empiecen dentro: b (antes).", md)
+
+    def test_dos_grupos_y_el_ruido(self):
+        values = [8.0, 8.1, 7.9, 17.0, 17.2, 16.9, 8.2, 17.1]
+        self.assertIn(perf.BIMODAL, perf.describe(values)["avisos"])
+        self.assertNotIn(perf.BIMODAL, perf.describe([9, 10, 9, 10, 9])["avisos"])  # valores discretos: no
+        self.assertNotIn(perf.BIMODAL, perf.describe([100, 101, 99, 100, 102])["avisos"])
+        data = rows("antes", "buscar", "lista frame_p90_ms", values) \
+            + rows("control", "buscar", "lista frame_p90_ms", [8.1, 17.0, 8.0, 17.1, 8.2, 16.9, 8.0, 17.0])
+        lines = perf.noise_lines(read_rows_from(data), {"principales": ["lista frame_p90_ms"]})
+        self.assertIn("las corridas de antes forman dos grupos (8.05 ms y 17.05 ms)", lines[0])
+        self.assertIn("subestima la variación", lines[0])
+
+    def test_redondeo_que_no_contradice_el_porcentaje(self):
+        def result(before, after, verdict, unit="ms"):
+            return {"antes": {"mediana": before}, "despues": {"mediana": after}, "unidad": unit, "veredicto": verdict,
+                    "avisos": [], "familia": "app"}
+        self.assertEqual(perf.change_phrase(result(741.2, 744.8, "sin cambio"), plain=True), "se mantuvo en 0.74 s")
+        self.assertEqual(perf.change_phrase(result(741.2, 744.8, "sin cambio")), "pasó de 741 ms a 745 ms (+0.5 %)")
+        self.assertEqual(perf.change_phrase(result(23.84, 23.61, "sin cambio")), "se mantuvo en 24 ms")
+        self.assertEqual(perf.change_phrase(result(23.84, 23.61, "mejora")), "pasó de 23.8 ms a 23.6 ms (−1 %)")
+        self.assertEqual(perf.change_phrase(result(23.84, 23.61, "dentro del ruido"), plain=True),
+                         "se mantuvo en 24 milisegundos")
+        self.assertEqual(perf.plain_value(5.5, "llamadas"), "5 o 6 llamadas")
+
+    def test_regresiones_que_no_son_de_la_app(self):
+        data = rows("antes", "buscar", "red_ttfb_ms", [100, 101, 99, 100, 100], family="e2e") \
+            + rows("despues", "buscar", "red_ttfb_ms", [300, 301, 299, 300, 300], family="e2e") \
+            + rows("antes", "buscar", "corto frames", [16] * 5, "frames", family="info") \
+            + rows("despues", "buscar", "corto frames", [9] * 5, "frames", family="info") \
+            + rows("antes", "buscar", "corto frame_p90_ms", [10, 10.5, 9.8, 10.2, 10]) \
+            + rows("despues", "buscar", "corto frame_p90_ms", [18, 18.2, 17.9, 18.1, 18]) \
+            + rows("antes", "buscar", "regreso frames", [3] * 5, "frames", family="info") \
+            + rows("despues", "buscar", "regreso frames", [2] * 5, "frames", family="info") \
+            + rows("antes", "buscar", "regreso jank_app_pct", [0] * 5, "%") \
+            + rows("despues", "buscar", "regreso jank_app_pct", [100] * 5, "%")
+        got = {r["metrica"]: r for r in perf.compare(read_rows_from(data))[0]}
+        self.assertEqual(got["red_ttfb_ms"]["veredicto"], "variación del backend")
+        self.assertEqual(got["corto frame_p90_ms"]["veredicto"], "no comparable")
+        self.assertIn("el tramo cambió de frames (16 → 9)", got["corto frame_p90_ms"]["avisos"])
+        self.assertEqual(got["regreso jank_app_pct"]["veredicto"], "informativa")
+        self.assertIn("pocos frames en el tramo (3 / 2): informativa", got["regreso jank_app_pct"]["avisos"])
+        self.assertTrue(perf.server_metric("red GET api/v1/a ttfb_ms"))
+
+
+class ReportTruthMoreTest(PerfBase):
+    """R: los caminos que completan R1–R8 (mínimo de frames configurable, tramo que cambia de duración, esperado contra
+    logrado sin contradecir el porcentaje, servidor sin veredicto en las mejoras y la tabla de capturas con comandos)."""
+
+    def test_minimo_de_frames_configurable_y_tramo_que_cambia_de_duracion(self):
+        data = rows("antes", "f", "a frames", [8] * 5, "frames", family="info") \
+            + rows("despues", "f", "a frames", [8] * 5, "frames", family="info") \
+            + rows("antes", "f", "a jank_app_pct", [0] * 5, "%") + rows("despues", "f", "a jank_app_pct", [50] * 5, "%")
+        self.assertEqual({r["metrica"]: r for r in perf.compare(read_rows_from(data))[0]}["a jank_app_pct"]["veredicto"],
+                         "informativa")
+        plan = {"min_frames_tramo": 5, "flujos": {"f": {"segmentos": [{"nombre": "a"}]}}}
+        self.assertEqual({r["metrica"]: r for r in perf.compare(read_rows_from(data), plan=plan)[0]}["a jank_app_pct"]
+                         ["veredicto"], "regresión")
+        plan["flujos"]["f"]["segmentos"][0]["min_frames"] = 9
+        self.assertEqual(perf.segment_min_frames(plan, "f", "a"), 9)
+        spans = rows("antes", "f", "a inicio_ms", [0] * 5, family="info") + rows("antes", "f", "a fin_ms", [1000] * 5, family="info") \
+            + rows("despues", "f", "a inicio_ms", [0] * 5, family="info") + rows("despues", "f", "a fin_ms", [400] * 5, family="info") \
+            + rows("antes", "f", "a frame_p90_ms", [10, 11, 10, 10, 10]) + rows("despues", "f", "a frame_p90_ms", [20] * 5)
+        got = {r["metrica"]: r for r in perf.compare(read_rows_from(spans))[0]}["a frame_p90_ms"]
+        self.assertEqual(got["veredicto"], "no comparable")
+        self.assertIn("el tramo cambió de duración (1 s → 400 ms)", got["avisos"])
+
+    def test_esperado_contra_logrado_y_servidor_sin_veredicto(self):
+        result = {"flujo": "f", "metrica": "m", "unidad": "ms", "antes": {"mediana": 23.84}, "despues": {"mediana": 23.61},
+                  "veredicto": "sin cambio", "avisos": [], "familia": "app", "delta_pct": -0.96}
+        plan = {"flujos": {"f": {}}, "mejoras": [{"id": "M1", "titulo": "a", "metrica": "m", "estado": "aplicada"}]}
+        row = perf.logrado_rows(plan, [result], readable=True)[0]
+        self.assertEqual((row[3], row[5], row[6]), ("24 ms", "24 ms", "se mantuvo"))
+        self.assertEqual(perf.improvement_result(plan["mejoras"][0], dict(result, veredicto="variación del backend")),
+                         "— sin veredicto")
+
+    def test_tabla_de_capturas_con_comandos_listos(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "flujos": {"lista": {"recorrido": "true"}}}
+        table = perf.capture_table("- H2 · Captura pendiente: `capturar --prueba --config cpu`", folder, plan)
+        self.assertIn("**Qué más se puede capturar**", table)
+        commands = re.findall(r"`(cd [^`]+)`", table)
+        self.assertEqual(len(commands), 3)  # cpu, completa y salidas: las de las fases las da `siguiente`
+        self.assertNotIn("--fase", table)
+        for command in commands:
+            self.assertNotIn("<", command)
+            self.assertEqual(subprocess.run(["bash", "-n", "-c", command]).returncode, 0, command)
+        self.assertIn("--prueba --config completa", table)
+        self.assertEqual(perf.capture_table("- sin capturas", folder, plan), "")
+
+    def test_nombres_en_palabras(self):
+        self.assertEqual(perf.service_words("GET api/v1/feed"), "feed")  # una palabra con letras hex no es un hash
+        self.assertEqual(perf.service_words("GET ~1a2b/clientes/{id}"), "clientes")
+        plan = {"flujos": {"f": {"segmentos": [{"nombre": "carga", "titulo": "la carga de la lista"}]}}}
+        self.assertEqual(perf.plain_metric("carga red GET api/v1/clientes ms", plan),
+                         'Duración del servicio "clientes", en la carga de la lista')
+        plan["principales"] = ["carga hilo_max_ms"]
+        self.assertEqual(perf.untitled_for_business(plan), [])  # con título, sin aviso
+        del plan["flujos"]["f"]["segmentos"][0]["titulo"]
+        self.assertIn("titulo", perf.untitled_for_business(plan)[0][1])
+        # agregar el título que pide el aviso no cambia la huella del plan (no pide recalcular)
+        with_title = {"segmentos": [{"nombre": "carga", "titulo": "la carga", "min_frames": 5}]}
+        self.assertEqual(perf.flow_fingerprints(with_title), perf.flow_fingerprints({"segmentos": [{"nombre": "carga"}]}))
+
+
+class BusinessWordsTest(PerfBase):
+    """R6: el reporte de gerencia sin ".:", sin rutas en formato de código, sin cantidades con decimales raros, sin
+    nombres internos de tramos (con su título), con los puntos sin cerrar dichos y la duración del recorrido aclarada."""
+
+    def test_gerencia_sin_tropiezos(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["b1 hilo_max_ms", "busqueda_ms"], "flujos": {"buscar": {
+            "recorrido": "true", "segmentos": [{"nombre": "b1", "titulo": "la búsqueda de un nombre corto",
+                                                "desde": {"marca": "MARK a"}, "hasta": {"marca": "MARK b"}}],
+            "metricas_usuario": [{"nombre": "busqueda_ms", "desde": {"marca": "MARK a"}, "hasta": {"marca": "MARK b"}}]}},
+            "mejoras": []}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "metricas.csv", HEADER + rows("antes", "buscar", "b1 hilo_max_ms", [90] * 5)
+              + rows("antes", "buscar", "busqueda_ms", [300] * 5)
+              + service_rows("antes", "GET api/v1/clientes", 5.5, [400] * 5, 300, flow="buscar"))
+        write(folder / "estado.md", (
+            "# Rendimiento · Búsqueda · 2026-11-09\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n| Síntoma | Se traba |\n\n"
+            "## Hallazgos\n\n| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n"
+            "| H1 | La búsqueda se siente trabada. | x | Filtra todo en cada letra | bug |\n\n"
+            "## Pendientes\n\n- H2 · Un tirón al volver · falta una captura\n- H3 · `cerrar()` en el hilo · sin probar\n\n"
+            "## Consumo\n\n| Sesión | Modelo | Costo o tokens |\n| --- | --- | --- |\n"))
+        out = self.ok("reporte", "--carpeta", folder, "--inicial")
+        text = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("- La búsqueda se siente trabada: Filtra todo en cada letra", text)
+        self.assertNotIn(".:", text)
+        self.assertNotIn("`", text)
+        self.assertIn("(5 o 6 llamadas en total)", text)
+        self.assertIn("Mayor congelamiento de la pantalla, en la búsqueda de un nombre corto", text)
+        self.assertIn("- Un tirón al volver (sin cerrar; el detalle está en el reporte técnico).", text)
+        self.assertIn("- Un punto técnico de la investigación (sin cerrar", text)
+        self.assertIn("con las esperas del guion de medición", text)
+        self.assertIn('⚠ Gerencia: "busqueda_ms" no tiene un nombre en palabras', out)  # sin etiqueta: lo dice y cómo
+        self.assertIn('"etiquetas": {"busqueda_ms": "<qué es, en palabras>"}', out)
