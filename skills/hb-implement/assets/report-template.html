@@ -395,6 +395,84 @@
           font-size: 13px;
           padding: 16px;
         }
+        .file-path { min-width: 0; overflow-wrap: anywhere; }
+
+        /* ─── Análisis del cambio (campos opcionales del meta) ───── */
+        .risk {
+          font-size: 10px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          padding: 2px 8px;
+          border-radius: 20px;
+          white-space: nowrap;
+        }
+        .risk-critico, .severity-critico { background: rgba(248,81,73,.25); color: #ff7b72; border: 1px solid rgba(248,81,73,.5); }
+        .risk-alto,    .severity-alto    { background: rgba(210,153,34,.22); color: #e3b341; border: 1px solid rgba(210,153,34,.45); }
+        .risk-medio,   .severity-medio   { background: rgba(47,129,247,.18); color: #79c0ff; border: 1px solid rgba(47,129,247,.4); }
+        .risk-bajo,    .severity-bajo    { background: rgba(63,185,80,.18);  color: #56d364; border: 1px solid rgba(63,185,80,.4); }
+
+        .analysis { display: flex; border-bottom: 1px solid var(--border); }
+        .analysis-item { flex: 1; padding: 10px 16px; font-size: 12px; color: var(--text-secondary); }
+        .analysis-item + .analysis-item { border-left: 1px solid var(--border); }
+        .analysis-item ul { padding-left: 18px; }
+        .analysis-pros .change-summary-label { color: var(--accent-green); }
+        .analysis-cons .change-summary-label { color: var(--accent-orange); }
+        .analysis-none { font-style: italic; color: var(--text-muted); }
+
+        .repo-tag {
+          background: rgba(163,113,247,.18);
+          color: #d2a8ff;
+          border: 1px solid rgba(163,113,247,.4);
+          border-radius: 4px;
+          padding: 1px 6px;
+          font-size: 11px;
+          font-family: monospace;
+          white-space: nowrap;
+        }
+        .table-wrap { overflow-x: auto; }
+        .repos-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .repos-table th, .repos-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
+        .repos-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+        .repos-table code { color: var(--text-secondary); }
+
+        .note-block {
+          background: var(--bg-secondary);
+          border: 1px solid var(--border);
+          border-left: 3px solid var(--accent-orange);
+          border-radius: var(--radius-md);
+          padding: 14px 18px;
+          white-space: pre-wrap;
+          color: var(--text-primary);
+        }
+        .impact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+        .impact-value { font-size: 15px; font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+
+        .diagram {
+          background: var(--bg-secondary);
+          border: 1px solid var(--border);
+          border-radius: var(--radius-lg);
+          margin: 0 0 16px;
+          overflow: hidden;
+        }
+        .diagram-title { padding: 10px 16px; font-weight: 600; background: var(--bg-card); border-bottom: 1px solid var(--border); }
+        .diagram-body { overflow-x: auto; padding: 16px; }
+        pre.mermaid { margin: 0; white-space: pre; color: var(--text-secondary); background: transparent; }
+        pre.mermaid[data-processed] { text-align: center; white-space: normal; }
+        pre.mermaid svg { max-width: 100%; height: auto; }
+        .diagram-desc { padding: 0 16px 14px; color: var(--text-secondary); font-size: 13px; }
+
+        .temp-intro { color: var(--text-secondary); margin-bottom: 12px; }
+        .temp-item {
+          background: var(--bg-secondary);
+          border: 1px dashed var(--border);
+          border-radius: var(--radius-md);
+          padding: 10px 16px;
+          margin-bottom: 10px;
+          color: var(--text-secondary);
+        }
+        .temp-item .file-path { display: block; margin-bottom: 4px; }
+        .temp-revert code { color: var(--accent-orange); overflow-wrap: anywhere; }
     </style>
 </head>
 <body>
