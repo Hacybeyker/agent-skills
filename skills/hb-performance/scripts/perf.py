@@ -232,7 +232,17 @@ def guide_lines(error=None):
     steps = getattr(error, "seguir", None) or GUIA["seguir"] or [(RETRY, same_command())]
     steps = list(GUIA["previos"]) + [step for step in steps if step not in GUIA["previos"]]
     lines = ["  Qué quedó guardado: %s." % saved.rstrip("."), "  Cómo seguir:"]
-    for index, (what, command) in enumerate(steps, start=1):
+    for index, step in enumerate(steps, start=1):
+        if isinstance(step, dict) and step.get("tipo") == "chat":
+            # Un paso que pide juicio (ajustar una marca en el código): un chat nuevo con su modelo, su esfuerzo, el
+            # comando que lo abre y el texto exacto, como los chats de `siguiente`.
+            lines.append("  %d. Chat nuevo · Modelo: %s · Esfuerzo: %s · %s:" % (
+                index, step["modelo"], step["esfuerzo"], step["que"][0].upper() + step["que"][1:]))
+            lines += ["     Abrir (Terminal, %s): %s%s" % (tool, command, " · %s" % note if note else "")
+                      for tool, command, note in step.get("abrir") or []]
+            lines += ["     Texto para pegar (tal cual):", "     %s" % step["texto"]]
+            continue
+        what, command = step
         lines += ["  %d. Terminal · %s:" % (index, what[0].upper() + what[1:]), "     %s" % command]
     return lines
 
@@ -1891,6 +1901,30 @@ def resumed_activity(adb):
     return match.group(1) if match else ""
 
 
+# Palabras que, en el nombre de la actividad al frente, delatan una pantalla de error de la app. El plan las cambia con
+# "pantallas_error" (una lista de palabras o expresiones regulares, sin distinguir mayúsculas).
+ERROR_SCREEN_WORDS = ("Error", "Fail", "Failure", "Problem", "Falla", "Fallo", "Problema", "Oops", "Unavailable",
+                      "Maintenance", "Mantenimiento")
+
+
+def error_screen(activity, plan=None):
+    """El nombre corto de la actividad al frente si parece una pantalla de error (ERROR_SCREEN_WORDS o
+    `pantallas_error` del plan), o ''."""
+    activity = (activity or "").strip()
+    if not activity:
+        return ""
+    words = (plan or {}).get("pantallas_error") or ERROR_SCREEN_WORDS
+    name = re.split(r"[/.$]", activity.split()[-1].rstrip("}"))[-1] or activity
+    for word in words:
+        try:
+            if re.search(str(word), name, re.I):
+                return name
+        except re.error:
+            if str(word).lower() in name.lower():
+                return name
+    return ""
+
+
 def launcher_activity(adb, package):
     out = adb.shell("cmd package resolve-activity --brief -a android.intent.action.MAIN "
                     "-c android.intent.category.LAUNCHER %s" % package).stdout
@@ -2612,6 +2646,34 @@ def save_phases(folder, phases):
                                                      encoding="utf-8")
 
 
+TEST_RECORD = "prueba"  # en fases.json: la última corrida de prueba de cada flujo (no es una fase: no tiene corridas)
+
+
+def save_test_record(folder, flow, seen, missing, marks=None, plan_prints=None):
+    """Registra en fases.json la última corrida de prueba del flujo: cuándo, qué marcas del plan salieron y cuáles no, y
+    la huella de las marcas. `siguiente` la usa para no ofrecer medir después sin una prueba con todas las marcas
+    posterior a la última mejora aplicada."""
+    phases = read_phases(folder)
+    record = phases.get(TEST_RECORD) if isinstance(phases.get(TEST_RECORD), dict) else {}
+    tracked = record.get("flujos") if isinstance(record.get("flujos"), dict) else {}
+    entry = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "skill": VERSION,
+             "marcas_ok": not missing, "vistas": list(seen), "faltan": list(missing)}
+    if marks:
+        entry["marcas"] = marks
+    if plan_prints:
+        entry["plan"] = plan_prints
+    tracked[flow] = entry
+    phases[TEST_RECORD] = {"flujos": tracked}
+    save_phases(folder, phases)
+
+
+def last_test(phases, flow):
+    """La última corrida de prueba registrada del flujo ({} si no hay)."""
+    record = phases.get(TEST_RECORD) if isinstance(phases.get(TEST_RECORD), dict) else {}
+    tracked = record.get("flujos") if isinstance(record.get("flujos"), dict) else {}
+    return tracked.get(flow) if isinstance(tracked.get(flow), dict) else {}
+
+
 def write_phase(folder, phase, data, flow=None):
     """Registra la fase sumando las corridas de otra tanda. El 'entorno' conserva el peor nivel de frames de las tandas:
     relanzar el emulador con la GPU del host o seguir en un dispositivo real no vuelve confiables las corridas de antes.
@@ -2619,17 +2681,42 @@ def write_phase(folder, phase, data, flow=None):
     phases = read_phases(folder)
     previous = phases.get(phase) or {}
     flows = dict(previous.get("flujos") or {})
+    # La huella de las marcas y del plan (0.11.0) es del flujo. Si el flujo ya tenía corridas, vale la de su primera
+    # tanda; una tanda con otra huella lo avisa (la fase mezclaría dos versiones de la marca o del plan).
+    prints = {key: data.pop(key) for key in ("marcas", "plan") if key in data}
     if flow:
         before_flow = flows.get(flow) or {}
         flows[flow] = merge_run_data(before_flow, data)
         if "depurable" in data:  # si el build con que se midió este flujo (su última tanda) era depurable
             flows[flow]["depurable"] = data["depurable"]
+        for key, value in prints.items():
+            earlier = before_flow.get(key) if before_flow.get("corridas") else None
+            flows[flow][key] = earlier if earlier else value
+            if key == "marcas" and earlier and changed_marks(earlier, value):
+                note = "las marcas %s cambiaron entre tandas de la fase: sus corridas no miden lo mismo; repite la fase " \
+                       "con --rehacer" % ", ".join(changed_marks(earlier, value))
+                data.setdefault("avisos", [])
+                if note not in data["avisos"]:
+                    data["avisos"].append(note)
+            if key == "plan" and earlier and isinstance(value, dict) and earlier.get("recorrido") != value.get("recorrido"):
+                note = "el recorrido del plan cambió entre tandas de la fase: repite la fase con --rehacer"
+                data.setdefault("avisos", [])
+                if note not in data["avisos"]:
+                    data["avisos"].append(note)
         if "skill" in data:
             # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
             flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
                 else data["skill"]
     # `faltan` ({flujo: corridas}): lo que dejó pendiente una tanda cortada. Esta tanda reemplaza lo de su flujo (o lo
     # quita, si terminó) y conserva lo de los demás.
+    redo = previous.get("rehacer_marcas") if isinstance(previous.get("rehacer_marcas"), dict) else {}
+    redo = {name: marks for name, marks in redo.items() if name != flow}
+    redo.update(data.pop("rehacer_marcas", None) or {})
+    if redo:
+        data["rehacer_marcas"] = redo
+    elif "rehacer_marcas" in previous:
+        previous = dict(previous)
+        previous.pop("rehacer_marcas")
     earlier = previous.get("faltan") if isinstance(previous.get("faltan"), dict) else {}
     pending = {name: count for name, count in earlier.items() if name != flow and to_int(count) > 0}
     pending.update(data.pop("faltan", None) or {})
@@ -2682,10 +2769,11 @@ def forget_flow(folder, csv_path, phase, flow):
         record.pop("flujos", None)
         if tracked:
             record["flujos"] = tracked
-        if isinstance(record.get("faltan"), dict):  # lo que faltaba del flujo que se rehace ya no vale
-            record["faltan"].pop(flow, None)
-            if not record["faltan"]:
-                record.pop("faltan")
+        for key in ("faltan", "rehacer_marcas"):  # lo que faltaba del flujo que se rehace ya no vale
+            if isinstance(record.get(key), dict):
+                record[key].pop(flow, None)
+                if not record[key]:
+                    record.pop(key)
     save_phases(folder, phases)
 
 
@@ -2855,7 +2943,8 @@ def discard_phase(folder, csv_path, phase, flow):
             writer.writerows(kept)
         print("✔ --rehacer: %d filas de '%s' fuera del CSV" % (dropped, phase))
     old = folder / phase
-    mine = re.compile(r"%s_\d+(?:(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?|\.linea\.json)" % re.escape(flow))
+    mine = re.compile(r"(?:[0-9a-f]{6}-)?%s_\d+(?:(?:_intento\d+)?(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?|\.linea\.json)"
+                      % re.escape(flow))
     traces = sorted(f for f in old.iterdir() if mine.fullmatch(f.name)) if old.is_dir() else []
     if traces:
         target = folder / ("%s-descartada-%s" % (phase, stamp))
@@ -2879,7 +2968,7 @@ def resolve_config(plan, folder, override):
 
 CONFIG_SOURCE = re.compile(r'\b(ftrace_events|atrace_categories|atrace_apps|name)[ \t]*:[ \t]*"([^"]*)"')
 CONFIG_PREFIX = {"ftrace_events": "ftrace:", "atrace_categories": "atrace:", "name": "ds:"}
-TRACE_KEY = re.compile(r"^(.+?_\d+)(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?$")
+TRACE_KEY = re.compile(r"^(.+?_\d+)(?:_intento\d+)?(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?$")
 CONFIG_FILE = "configuracion.json"
 SKILL_CONFIGS = ("base", "cpu", "completa")
 
@@ -3345,6 +3434,195 @@ def before_capture(folder, plan, flow, steps):
     return lead + first + steps
 
 
+def fecha_ts(text):
+    """El momento de una fecha de fases.json o de plan.json (AAAA-MM-DD[THH:MM:SS], hora local) como timestamp, o
+    None."""
+    try:
+        return datetime.datetime.fromisoformat(str(text)[:19]).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def phase_time(phases, phase):
+    record = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
+    return fecha_ts(record.get("fecha"))
+
+
+def older(phases, phase, than):
+    """True si `phase` está medida y es anterior a `than` (también medida): se rehízo `than` después de ella."""
+    first, second = phase_time(phases, phase), phase_time(phases, than)
+    return first is not None and second is not None and first < second
+
+
+def baseline_changes(folder, plan, flow, phases):
+    """Lo que cambió después de medir antes, según la huella que guarda fases.json: (marcas que cambiaron, si cambió el
+    recorrido del plan, si cambiaron solo sus métricas). Las marcas se comparan con las de la última corrida de prueba
+    y las de después medidas más tarde que antes. Sin huella en antes (una versión anterior), no detecta nada."""
+    spec = (plan.get("flujos") or {}).get(flow) or {}
+    before = phase_flow_record(phases, "antes", flow)
+    t_before = phase_time(phases, "antes")
+    marks = set()
+    removed = read_lineabase(folder)
+    rebuilt = removed.get("estado") == "reaplicadas" and t_before is not None and \
+        t_before > (fecha_ts(removed.get("fecha")) or 0)
+    test = last_test(phases, flow)
+    # Una línea base rehecha sin las mejoras ya tiene las marcas de ahora: las diferencias con la prueba o con después
+    # (medidas con las mejoras de vuelta) son del código de las mejoras, no de la marca.
+    if t_before is not None and (fecha_ts(test.get("fecha")) or 0) > t_before and not rebuilt:
+        marks |= set(changed_marks(before.get("marcas"), test.get("marcas")))
+    if older(phases, "antes", "despues") and not rebuilt:
+        marks |= set(changed_marks(before.get("marcas"), phase_flow_record(phases, "despues", flow).get("marcas")))
+    recorded = before.get("plan") if isinstance(before.get("plan"), dict) else {}
+    now = flow_fingerprints(spec)
+    route = bool(recorded.get("recorrido")) and recorded["recorrido"] != now["recorrido"]
+    metrics = not route and bool(recorded.get("metricas")) and recorded["metricas"] != now["metricas"]
+    return sorted(marks), route, metrics
+
+
+def server_metric(metric):
+    """True si la métrica depende solo del servidor: el TTFB (la espera hasta el primer byte de la respuesta), del flujo,
+    de un tramo o de un servicio. Una mejora de la app no lo mueve: no recibe veredicto de mejora ni de regresión."""
+    return str(metric).endswith("ttfb_ms")
+
+
+def reports_outdated(folder, report, plan=None):
+    """Las fases medidas (o rehechas) después del reporte final: ["la fase despues del 2026-11-13T10:00:00"]. Vacío si
+    el reporte es posterior a todas."""
+    try:
+        made = pathlib.Path(report).stat().st_mtime
+    except OSError:
+        return []
+    phases = read_phases(folder)
+    out = []
+    for phase in FASES:
+        record = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
+        if (phase_time(phases, phase) or 0) > made + 1:
+            out.append("la fase %s del %s" % (phase, record["fecha"]))
+        elif (fecha_ts(record.get("recalculada")) or 0) > made + 1:
+            out.append("el recálculo de %s del %s" % (phase, record["recalculada"]))
+    return out
+
+
+def closing_level(folder, plan):
+    """(nivel, esfuerzo, motivo) del chat de la sesión 4: el intermedio si el resultado es mixto (hay regresiones de la
+    app, marcas que cambiaron entre fases o mejoras que no llegaron a su objetivo); el económico en el caso simple."""
+    folder = pathlib.Path(folder)
+    reasons = []
+    try:
+        rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
+    except PerfError:
+        rows = []
+    results = compare(rows, trust=frames_trust(folder))[0] if rows else []
+    regressions = [r["metrica"] for r in results if r["veredicto"] == "regresión" and not server_metric(r["metrica"])]
+    if regressions:
+        reasons.append("%d regresi%s" % (len(regressions), "ón" if len(regressions) == 1 else "ones"))
+    if mark_change_notes(folder, plan):
+        reasons.append("marcas que cambiaron entre fases")
+    verdicts = {}
+    for r in results:
+        verdicts.setdefault(r["metrica"], []).append(r["veredicto"])
+    missed = [m["id"] for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada" and m.get("metrica") in verdicts
+              and "mejora" not in verdicts[m["metrica"]]]
+    if missed:
+        reasons.append("mejoras que no llegaron a su objetivo (%s)" % ", ".join(missed))
+    if reasons:
+        return "intermedio", "medio", "resultado mixto: %s" % ", ".join(reasons)
+    return "economico", "bajo", ""
+
+
+def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, triage):
+    """(título, pasos) cuando la línea base hay que rehacerla o recalcularla, o None. En orden: las mejoras quitadas con
+    `lineabase --quitar-mejoras` (la secuencia sigue hasta reaplicarlas); las marcas o el recorrido que cambiaron
+    después de medir antes (con mejoras aplicadas, primero se quitan con su parche); las métricas del plan que cambiaron
+    (se recalculan sobre las trazas guardadas); y un control más viejo que antes (se rehízo antes)."""
+    if "antes" not in phases:
+        return None
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    rel = relative_folder(folder, root)
+    mejoras = plan.get("mejoras") or []
+    applied = [m["id"] for m in mejoras if m.get("estado") == "aplicada"]
+    record = read_lineabase(folder)
+
+    def measure(phase, why):
+        return terminal(command(*(capture + ["--fase", phase, "--corridas", runs, "--rehacer"])), why, you_run)
+
+    install_without = terminal(install_command(plan, root), "compila e instala el build de profiling sin las mejoras "
+                               "(quitadas con su parche)", "espera")
+    reapply = terminal(command("lineabase", "--carpeta", rel, "--reaplicar-mejoras"),
+                       "vuelve a poner el código de las mejoras con su parche (comprueba antes que aplica limpio)",
+                       "nada; si algo no aplica limpio, se detiene sin tocar nada y te dice por qué")
+    install_with = terminal(install_command(plan, root), "compila e instala el build de profiling con las mejoras",
+                            "espera")
+    test = terminal(command(*(capture + ["--prueba"])), "una corrida de prueba con las mejoras: confirma que salen todas "
+                    "las marcas del plan; si salen, te da el comando de la fase después", "revisa que todas las marcas "
+                    "salgan con ✔")
+    if record.get("estado") == "quitadas":
+        # La secuencia está en curso: sigue donde va, y siempre termina reaplicando las mejoras antes de medir después.
+        t_removed = fecha_ts(record.get("fecha")) or 0
+        steps = [{"tipo": "avisos", "titulo": "Línea base sin las mejoras", "lineas": [
+            "Las mejoras %s están quitadas con su parche (%s) desde %s: antes y control se miden sin ellas; después se "
+            "reaplican y se mide después" % (", ".join(record.get("mejoras") or applied), ", ".join(
+                item.get("parche", "?") for item in record.get("parches") or []), record.get("fecha", "—"))]}]
+        if (phase_time(phases, "antes") or 0) < t_removed:
+            steps += [install_without, measure("antes", "mide antes de nuevo, sin las mejoras y con las marcas de ahora")]
+        if not triage and (phase_time(phases, "control") or 0) < max(t_removed, phase_time(phases, "antes") or 0):
+            steps.append(measure("control", "mide el control de nuevo, con el mismo build sin las mejoras: el ruido del "
+                                            "antes nuevo"))
+        return "rehacer la línea base sin las mejoras (sin chat)", steps + [reapply, install_with, test]
+    marks, route, metrics = baseline_changes(folder, plan, flow, phases)
+    report = report_file(folder, "final")
+    # Con el reporte final al día, se eligió cerrar con veredictos orientativos: no se vuelve a pedir la línea base.
+    closed = report is not None and not reports_outdated(folder, report)
+    if (marks or route) and not closed:
+        what = []
+        if marks:
+            what.append("las marcas %s cambiaron después de medir antes (el código que las emite es otro)" % ", ".join(marks))
+        if route:
+            what.append("el recorrido del plan cambió después de medir antes")
+        dependent = metrics_using_marks((plan.get("flujos") or {}).get(flow), marks) if marks else []
+        lines = ["; ".join(what) + ": antes y después no miden lo mismo%s. Para un veredicto firme, la línea base se "
+                 "mide de nuevo con lo de ahora" % (" en %s" % ", ".join(dependent[:6]) if dependent else "")]
+        steps = []
+        if applied:
+            lines.append("Las mejoras %s están en el código: primero se quitan con un parche (se reaplican al final), "
+                         "para que antes y control se midan sin ellas" % ", ".join(applied))
+            steps += [terminal(command("lineabase", "--carpeta", rel, "--quitar-mejoras"),
+                               "guarda el código de las mejoras %s en un parche (sin pisar otro), comprueba que revierte "
+                               "limpio y lo quita del repo; las marcas y los cambios temporales se quedan" % ", ".join(applied),
+                               "nada; si algo no revierte limpio, se detiene sin tocar nada y te dice por qué"),
+                      install_without]
+        steps.append(measure("antes", "mide antes de nuevo, con las marcas y el recorrido de ahora"))
+        if not triage:
+            steps.append(measure("control", "mide el control de nuevo, con el mismo build: el ruido del antes nuevo"))
+        if applied:
+            steps += [reapply, install_with, test]
+            if "despues" not in phases:
+                steps.append(terminal(command(*(capture + ["--fase", "despues", "--corridas", runs])),
+                                      "OPCIÓN, solo si decides no rehacer la línea base (en lugar de todo lo anterior): "
+                                      "mide después igual; el veredicto de las métricas que dependen de esas marcas será "
+                                      "orientativo", you_run))
+        if "despues" in phases and not older(phases, "despues", "antes"):
+            steps.append(chat("Sigue hb-performance con %s: sesión 4 con las marcas cambiadas entre fases (%s): los "
+                              "veredictos de las métricas que dependen de ellas son orientativos"
+                              % (folder.resolve() / "estado.md", ", ".join(marks) or "recorrido"), "intermedio", "medio",
+                              "OPCIÓN, solo si decides no rehacer la línea base (en lugar de todo lo anterior): cierra "
+                              "con esos veredictos como orientativos", plan))
+        return "rehacer la línea base: %s (sin chat)" % ("cambiaron marcas del plan" if marks else
+                                                         "cambió el recorrido"),             [{"tipo": "avisos", "titulo": "La línea base ya no mide lo mismo", "lineas": lines}] + steps
+    if metrics:
+        return "recalcular las métricas del plan (sin chat)", [
+            terminal(command("recalcular", "--carpeta", rel),
+                     "recalcula las métricas del plan sobre las trazas guardadas de cada fase medida: las métricas o los "
+                     "tramos del plan cambiaron después de medir (las marcas que usan ya están en las trazas)",
+                     "nada; si una marca no está en las trazas, te lo dice y te da el comando para medir de nuevo")]
+    if not triage and older(phases, "control", "antes"):
+        return "rehacer el control (sin chat)", [
+            measure("control", "mide el control de nuevo: antes se rehízo después del control, y el ruido tiene que "
+                               "salir del mismo build y las mismas condiciones que el antes nuevo")]
+    return None
+
+
 def plan_steps(folder, plan, flow=None):
     """(título, [pasos]) del paso que sigue según fases.json, plan.json y los archivos de la carpeta.
 
@@ -3384,6 +3662,15 @@ def plan_steps(folder, plan, flow=None):
     mejoras = plan.get("mejoras", [])
     estados = [m.get("estado", "propuesta") for m in mejoras]
     for phase in FASES:
+        # Una tanda que se cortó porque faltaban siempre las mismas marcas: primero se ajusta la marca y la fase se rehace.
+        redo = (phases.get(phase) or {}).get("rehacer_marcas") if isinstance(phases.get(phase), dict) else None
+        if isinstance(redo, dict) and redo.get(flow):
+            return "la fase %s se cortó porque faltan siempre las mismas marcas" % phase, marks_fix_steps(
+                root / folder, plan, flow, list(redo[flow]), phase, "la fase %s se cortó porque en todos los intentos "
+                "faltaban las mismas marcas" % phase) + [
+                terminal(command(*(capture + ["--fase", phase, "--corridas", runs, "--rehacer"])),
+                         "con la marca ajustada y la prueba en ✔, mide la fase %s de nuevo (lo medido con la marca vieja "
+                         "no se mezcla)" % phase, you_run)]
         # Una tanda que se cortó (Ctrl+C, inválidas seguidas) dejó sus corridas válidas y cuántas faltan: la fase no se
         # da por medida hasta completarla.
         cut = (phases.get(phase) or {}).get("faltan") if isinstance(phases.get(phase), dict) else None
@@ -3395,17 +3682,35 @@ def plan_steps(folder, plan, flow=None):
                          "están guardadas" % (phase, missing),
                          "lo mismo que en la tanda anterior; si cambió el build o las condiciones, agrega --rehacer y pide "
                          "las corridas completas")]
+    triage = plan.get("profundidad") == "triage"
+    baseline = baseline_steps(root / folder, plan, flow, phases, command, capture, runs, you_run, triage)
+    if baseline:
+        return baseline
     resume = "Sigue hb-performance con %s" % state
     session2 = chat(resume, "diagnostico", "alto", "sesión 2: lee diagnostico.md y el código, escribe los hallazgos y el "
                     "plan de mejoras; termina con el comando para que decidas", plan)
-    session4 = chat(resume, "economico", "bajo", "sesión 4: compara, escribe la lectura y el resumen y genera el reporte", plan)
-    triage = plan.get("profundidad") == "triage"
-    # Una mejora aplicada después de medir "después" deja esa fase vieja: hay que medirla de nuevo (--rehacer).
+    tier, effort, mixed = closing_level(root / folder, plan) if "despues" in phases else ("economico", "bajo", "")
+    session4 = chat(resume, tier, effort, "sesión 4: compara, escribe la lectura y el resumen y genera el reporte%s" % (
+        " (nivel intermedio: %s)" % mixed if mixed else ""), plan)
+    # Una mejora aplicada después de medir "después" deja esa fase vieja: hay que medirla de nuevo (--rehacer). También
+    # un antes rehecho después de medir "después".
     measured = phases.get("despues", {}).get("fecha", "")
-    stale = "despues" in phases and any(m.get("estado") == "aplicada" and m.get("aplicada_en", "") > measured for m in mejoras)
+    stale = "despues" in phases and (any(m.get("estado") == "aplicada" and m.get("aplicada_en", "") > measured
+                                         for m in mejoras) or older(phases, "despues", "antes"))
     # Los reportes con el nombre de esta versión (reporte-<tipo>-dev y -gerencia) o de las anteriores.
     report = report_file(state.parent, "final")
-    if report is not None and "aprobada" not in estados and not stale:
+    outdated = reports_outdated(state.parent, report, plan) if report is not None else []
+    if report is not None and outdated and "aprobada" not in estados and not stale and "despues" in phases:
+        # Los reportes finales son de antes de la última medición: la investigación no está cerrada con estos datos.
+        return "sesión 4 de nuevo · los reportes son anteriores a la última medición", [
+            {"tipo": "avisos", "titulo": "Reportes viejos", "lineas": [
+                "%s y los demás reportes finales se generaron antes de %s: no muestran los datos de ahora"
+                % (report.name, "; ".join(outdated))]},
+            chat("%s: sesión 4 de nuevo: los reportes finales son anteriores a %s; compara de nuevo, actualiza la "
+                 "lectura y los resúmenes y genera los reportes" % (resume, "; ".join(outdated)), tier, effort,
+                 "sesión 4: compara con los datos de ahora, actualiza la lectura y los dos resúmenes y genera los "
+                 "reportes de nuevo", plan)]
+    if report is not None and "aprobada" not in estados and not stale and not outdated:
         try:
             internal = "interno: contiene código" in report.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -3483,12 +3788,39 @@ def plan_steps(folder, plan, flow=None):
     if "despues" in phases and not stale:
         return "sesión 4 · cierre", [session4]
     if "aplicada" in estados and "aprobada" not in estados:
+        # Antes de medir después, una corrida de prueba con la mejora confirma que salen todas las marcas del plan: una
+        # mejora puede cambiar dónde o cuándo se emiten (otro hilo, otro callback) y la fase entera saldría inválida.
+        applied_at = max((fecha_ts(m.get("aplicada_en")) or 0) for m in mejoras if m.get("estado") == "aplicada")
+        reapplied = fecha_ts(read_lineabase(root / folder).get("reaplicadas")) or 0
+        test = last_test(phases, flow)
+        tested = fecha_ts(test.get("fecha")) or 0
+        applied_at = max(applied_at, phase_time(phases, "antes") or 0)  # una prueba anterior al último antes ya no vale
+        fresh = bool(test.get("fecha")) and tested >= applied_at and (not reapplied or tested > reapplied)
+        install = terminal(install_command(plan, root), "compila e instala el build de profiling con la mejora",
+                           "espera; si la mejora migra datos, abre la app una vez antes de medir")
+        if not fresh:
+            return "prueba de marcas con la mejora (sin chat)", [
+                install,
+                terminal(command(*(capture + ["--prueba"])), "una corrida de prueba con la mejora: confirma que siguen "
+                         "saliendo todas las marcas del plan antes de medir después; si salen, te da el comando de la "
+                         "fase después", "revisa que todas las marcas del plan salgan con ✔; si falta alguna, el paso "
+                         "siguiente es ajustarla")]
+        if not test.get("marcas_ok"):
+            missing = [mark for mark in test.get("faltan") or [] if not str(mark).startswith("(")]
+            if missing:
+                return "la mejora rompió marcas del plan (antes de medir después)", marks_fix_steps(
+                    root / folder, plan, flow, missing, "despues", "la corrida de prueba con la mejora (%s) no emitió "
+                    "las marcas que en antes sí salían" % test.get("fecha", "—"))
+            return "la corrida de prueba con la mejora fue inválida (antes de medir después)", [
+                {"tipo": "avisos", "titulo": "Corrida de prueba inválida", "lineas": [
+                    "La última corrida de prueba (%s) no llegó a procesarse: %s" % (
+                        test.get("fecha", "—"), "; ".join(str(m) for m in test.get("faltan") or []) or "sin detalle")]},
+                install, terminal(command(*(capture + ["--prueba"])), "repite la corrida de prueba con la mejora",
+                                  "revisa que todas las marcas del plan salgan con ✔")]
         return "medición después (sin chat)", [
-            terminal(install_command(plan, root), "compila e instala el build de profiling con la mejora",
-                     "espera; si la mejora migra datos, abre la app una vez antes de medir"),
             terminal(command(*(capture + ["--fase", "despues", "--corridas", runs] + (["--rehacer"] if stale else []))),
-                     "mide la fase después con las mismas condiciones que antes"
-                     + (" (de nuevo: hay una mejora aplicada después de la medición anterior)" if stale else ""), you_run),
+                     "mide la fase después con las mismas condiciones que antes y el build de la corrida de prueba"
+                     + (" (de nuevo: la medición anterior de después es vieja)" if stale else ""), you_run),
             session4]
     if "propuesta" in estados:
         ids = ",".join(m["id"] for m in mejoras if m.get("estado", "propuesta") == "propuesta")
@@ -4429,10 +4761,10 @@ def untracked(root, path):
 
 
 def revert_notice(folder, root):
-    """En el cierre: cómo quitar los cambios temporales que siguen puestos sin perderlos. Primero el parche fuera del
-    repo, comprobado, y después `git apply -R`; nunca un comando que descarte el archivo. Si otra investigación
-    abierta del proyecto declara el mismo archivo, va en un parche aparte y no se quita entero. None si no queda
-    ninguno."""
+    """En el cierre: el paso que quita los cambios temporales que siguen puestos, sin perderlos: un solo comando,
+    `perf.py cerrar`, que resuelve el repo de cada archivo, guarda el parche sin pisar otro, comprueba que revierte
+    limpio, quita, muestra `git status --short` y marca las filas en estado.md. Nunca un comando que descarte el
+    archivo. None si no queda ninguno."""
     folder = pathlib.Path(folder)
     try:
         pending = [change for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8"))
@@ -4441,8 +4773,167 @@ def revert_notice(folder, root):
         return None
     if not pending:
         return None
+    root = pathlib.Path(root)
+    names = [change["archivo"] for change in pending]
+    listed = ", ".join(names[:6]) + (" y %d más" % (len(names) - 6) if len(names) > 6 else "")
+    return terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root)),
+                    "quita los %d cambios temporales que siguen puestos (%s): por repo, guarda un parche que no pisa "
+                    "otro, comprueba que revierte limpio, los quita, muestra git status y los marca revertidos en "
+                    "estado.md; las mejoras y lo que ya estaba modificado se quedan. Con --simular solo muestra qué haría"
+                    % (len(pending), listed),
+                    "córrelo una vez; si algo no revierte limpio, se detiene sin tocar nada y te dice por qué. Nunca "
+                    "quites un cambio temporal con git checkout, git restore, git reset --hard ni git clean")
+
+
+# ── Parches: guardar sin pisar, comprobar, quitar y reaplicar (cerrar y lineabase) ──
+LINEABASE_FILE = "lineabase.json"
+PATH_GUESS = re.compile(r"\.\.\.|…|[*?<>]")
+SETUP_ROW = re.compile(r"\bsetup\b", re.I)
+
+
+def patches_dir(folder, root):
+    """La carpeta de los parches: la de AGENTS.md o, sin ella, parches/ dentro de la investigación (que git ignora)."""
+    configured = perf_folders(root)["parches"]
+    return pathlib.Path(os.path.normpath(str(configured))) if configured else pathlib.Path(folder).resolve() / "parches"
+
+
+def git_changes(top):
+    """{ruta relativa al repo: estado de dos letras de `git status --porcelain`} de los archivos con cambios (también los
+    nuevos que git no sigue). Los nombres salen tal cual (-z), sin comillas."""
+    done = subprocess.run(["git", "-C", str(top), "status", "--porcelain", "-z", "--untracked-files=all"],
+                          capture_output=True, text=True, timeout=120)
+    if done.returncode != 0:
+        raise PerfError("git status falló en %s: %s" % (top, (done.stderr or "").strip()[:200]))
+    out, items = {}, done.stdout.split("\0")
+    index = 0
+    while index < len(items):
+        entry = items[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        code, path = entry[:2], entry[3:]
+        if code[0] in "RC":  # un renombre trae la ruta de origen en el campo siguiente
+            index += 1
+        out[path] = code
+    return out
+
+
+def file_patch(top, rel, code):
+    """El parche de un archivo contra HEAD; uno nuevo que git no sigue entra completo (sin tocar el índice)."""
+    if code == "??":
+        done = subprocess.run(["git", "diff", "--binary", "--no-color", "--no-index", "--", "/dev/null", rel],
+                              cwd=str(top), capture_output=True, timeout=120)
+        ok = done.returncode in (0, 1)
+    else:
+        done = subprocess.run(["git", "-C", str(top), "diff", "--binary", "--no-color", "HEAD", "--", rel],
+                              capture_output=True, timeout=120)
+        ok = done.returncode == 0
+    if not ok:
+        raise PerfError("git diff falló con %s en %s: %s" % (rel, top, done.stderr.decode("utf-8", "replace").strip()[:200]))
+    return done.stdout  # en bytes: los finales de línea (CRLF) quedan tal cual
+
+
+def write_new(path, data):
+    """Escribe un archivo nuevo (texto o bytes) sin pisar uno que ya exista (como `set -C`): si el nombre está tomado,
+    usa <nombre>-2, -3… Devuelve la ruta escrita."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = data.encode("utf-8") if isinstance(data, str) else data
+    candidate, index = path, 1
+    while True:
+        try:
+            with open(str(candidate), "xb") as handle:
+                handle.write(data)
+            return candidate
+        except FileExistsError:
+            index += 1
+            candidate = path.with_name("%s-%d%s" % (path.stem, index, path.suffix))
+
+
+def git_apply(top, patch, reverse=False, check=False):
+    """(ok, error) de `git apply [--check] [-R] <parche>` en el repo."""
+    command = ["git", "-C", str(top), "apply"] + (["--check"] if check else []) + (["-R"] if reverse else []) + [str(patch)]
+    done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    return done.returncode == 0, " ".join((done.stderr or "").split())[:300]
+
+
+def repo_candidates(root, hint, extra):
+    """Las carpetas donde puede estar un archivo de "Cambios temporales" o de una mejora: la del repo que dice la fila
+    (una ruta, o el nombre de un repo incluido desde fuera por settings.gradle), la raíz y los repos incluidos."""
+    root = pathlib.Path(root)
+    out = []
+    text = (hint or "").strip().strip("`").strip()
+    if text and text not in (".", "—", "-"):
+        for token in [text] + re.split(r"[\s(),;]+", text):
+            token = token.strip("`'\"")
+            if not token or token in (".", "—", "-"):
+                continue
+            path = pathlib.Path(os.path.expanduser(token))
+            path = path if path.is_absolute() else root / path
+            if path.is_dir() and path not in out:
+                out.append(path)
+            for other in extra:
+                if other.name == token and other not in out:
+                    out.append(other)
+    for base in [root] + list(extra) + [top for top in (git_toplevel(other) for other in extra) if top is not None]:
+        if base not in out:
+            out.append(base)
+    return out
+
+
+def resolve_repo_file(root, name, hint, extra):
+    """(repo, ruta relativa al repo) de un archivo, o (None, motivo). El archivo tiene que existir (o haber sido nuevo
+    y ya no estar: entonces no hay nada que quitar)."""
+    name = (name or "").strip().strip("`").strip()
+    if not name or PATH_GUESS.search(name):
+        return None, "'%s' no es una ruta completa (tiene '...', '…' o un patrón): escribe en estado.md la ruta del " \
+                     "archivo desde la raíz de su repo" % name
+    candidates = repo_candidates(root, hint, extra)
+    for base in candidates:
+        path = pathlib.Path(os.path.expanduser(name))
+        path = path if path.is_absolute() else base / path
+        if path.is_file():
+            top = git_toplevel(path.parent)
+            if top is None:
+                return None, "%s no está en un repo de git" % path
+            return top.resolve(), os.path.relpath(str(path.resolve()), str(top.resolve()))
+    # Un archivo nuevo que ya se quitó no existe, pero su carpeta sí: no hay nada que quitar (git no lo ve).
+    for base in candidates:
+        path = pathlib.Path(os.path.expanduser(name))
+        path = path if path.is_absolute() else base / path
+        top = git_toplevel(path.parent) if path.parent.is_dir() else None
+        if top is not None:
+            return top.resolve(), os.path.relpath(str(path.parent.resolve() / path.name), str(top.resolve()))
+    return None, "no encuentro '%s'%s: revisa la ruta en estado.md (es relativa a la raíz de su repo)" % (
+        name, " (repo '%s')" % hint if hint else "")
+
+
+def improvement_files(folder, root, plan, extra):
+    """{(repo, ruta relativa): id de la mejora} de los archivos de las mejoras aplicadas (lo que guardó `decidir
+    --aplicada --archivos`)."""
+    out = {}
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") != "aplicada":
+            continue
+        for entry in item.get("cambios") or []:
+            if not isinstance(entry, dict):
+                continue
+            for name in entry.get("archivos") or []:
+                top, rel = resolve_repo_file(root, name, entry.get("repo"), extra)
+                if top is not None:
+                    out[(top, rel)] = item["id"]
+    return out
+
+
+def shared_temp_files(folder, root):
+    """{archivo: [investigaciones]} de los cambios temporales de esta investigación que otra abierta también declara."""
+    folder = pathlib.Path(folder)
+    try:
+        mine = {change["archivo"] for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8"))
+                if not change["revertido"]}
+    except OSError:
+        return {}
     shared = {}
-    mine = {change["archivo"] for change in pending}
     for other in open_investigations(folder, root):
         try:
             theirs = temp_changes((other / "estado.md").read_text(encoding="utf-8"))
@@ -4451,54 +4942,396 @@ def revert_notice(folder, root):
         for change in theirs:
             if not change["revertido"] and change["archivo"] in mine:
                 shared.setdefault(change["archivo"], []).append(shown_path(other, root))
-    patches = perf_folders(root)["parches"]
-    name = slug("-".join(lexical(folder).parts[-2:]))
+    return shared
 
-    def patch_path(suffix, at_root):
-        """(ruta del parche para el comando, `mkdir` previo): relativa a la raíz si el comando corre ahí; si corre en
-        otro repo, absoluta, para que el parche no quede dentro de ese repo."""
-        if not patches:
-            return "<carpeta-fuera-del-repo>/%s%s.patch" % (name, suffix), ""
-        base = shown_path(patches, root) if at_root else str(lexical(patches))
-        return shlex.quote("%s/%s%s.patch" % (base, name, suffix)), "mkdir -p %s && " % shlex.quote(base)
 
-    names = ["`%s`" % change["archivo"] for change in pending]
-    lines = ["Sin revertir (%d): %s%s" % (len(pending), ", ".join(names[:6]),
-                                         " y %d más (en estado.md)" % (len(names) - 6) if len(names) > 6 else "")]
-    groups = {}
-    for change in pending:
-        if change["archivo"] in shared:
+def mark_temp_reverted(folder, notes):
+    """Marca como revertidas en "Cambios temporales por revertir" de estado.md las filas de esos archivos ({archivo:
+    texto para la columna ¿Revertido?}). Devuelve cuántas marcó."""
+    state = pathlib.Path(folder) / "estado.md"
+    text = state.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    start = next((i for i, line in enumerate(lines) if line.lower().startswith("## cambios temporales")), None)
+    if start is None:
+        return 0
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    headers, column, where, marked = None, None, None, 0
+    for index in range(start + 1, end):
+        line = lines[index]
+        if not line.lstrip().startswith("|"):
+            if headers is not None:
+                break
             continue
-        # En la raíz si el archivo (o su carpeta: un archivo nuevo ya quitado no existe) está en el repo de la raíz.
-        here = (pathlib.Path(root) / change["archivo"]).exists() or (pathlib.Path(root) / change["archivo"]).parent.is_dir()
-        groups.setdefault(str(root) if here else "<repo de %s>" % (change["repo"] or change["archivo"]), []).append(
-            change["archivo"])
-    for index, (repo, files) in enumerate(groups.items(), start=1):
-        patch, ready = patch_path("" if len(groups) == 1 else "-%d" % index, repo == str(root))
-        new = [path for path in files if repo == str(root) and untracked(root, path)]
-        quoted = " ".join(shlex.quote(path) for path in files)
-        added = " ".join(shlex.quote(path) for path in new)
-        # `[ -s parche ] ||`: un parche que ya existe no se pisa. Repetir el paso después de quitar lo dejaría vacío.
-        lines.append("Primero guarda el parche fuera del repo y comprueba que revierte limpio (si el parche ya existe no "
-                     "lo pisa): `cd %s && %s%s{ [ -s %s ] || git diff --binary -- %s > %s; } && git apply --check -R %s`%s"
-                     % (q_repo(repo), ready, "git add -N -- %s && " % added if new else "", patch, quoted, patch, patch,
-                        "" if new or repo == str(root) else " (un archivo nuevo entra en el parche después de `git add "
-                                                            "-N <archivo>`)"))
-        lines.append("Después quítalos con el parche: `cd %s && git apply -R %s%s`%s" % (
-            q_repo(repo), patch, " && git reset -q -- %s" % added if new else "",
-            "" if new or repo == str(root) else " (y `git reset -q -- <archivo>` por cada archivo nuevo)"))
-    for path, others in sorted(shared.items()):
-        here = (pathlib.Path(root) / path).exists()
-        patch, ready = patch_path("-compartido-%s" % slug(pathlib.PurePath(path).name), here)
-        lines.append("`%s` también es un cambio temporal de otra investigación abierta (%s): guárdalo en un parche "
-                     "aparte (`cd %s && %s{ [ -s %s ] || git diff --binary -- %s > %s; } && git apply --check -R %s`) y "
-                     "no lo quites entero: quita a mano solo lo de esta investigación, o déjalo hasta que cierre la otra"
-                     % (path, ", ".join(others), q(root) if here else "<su repo>", ready, patch, shlex.quote(path), patch,
-                        patch))
-    lines.append(NEVER_DISCARD)
-    lines.append("Marca cada fila como revertida en estado.md cuando `git status --short` lo confirme")
-    return {"tipo": "avisos", "titulo": "Cambios temporales por revertir (primero el parche, después quitar)",
-            "lineas": lines}
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if headers is None:
+            headers = [cell.lower().lstrip("¿") for cell in cells]
+            column = next((i for i, name in enumerate(headers) if name.startswith("revertido")), None)
+            where = next((i for i, name in enumerate(headers) if name.startswith("archivo")), None)
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells if cell) or column is None or where is None:
+            continue
+        path = re.sub(r":\d+(?:-\d+)?$", "", cells[where].strip("`").strip()) if where < len(cells) else ""
+        if path in notes:
+            cells += [""] * (column + 1 - len(cells))
+            cells[column] = notes[path].replace("|", "\\|")
+            lines[index] = "| " + " | ".join(cells) + " |"
+            marked += 1
+    if marked:
+        state.write_text("\n".join(lines), encoding="utf-8")
+    return marked
+
+
+def note_setup_patch(root, patches):
+    """En la sección de rendimiento de AGENTS.md, la línea que dice que el setup de medición está en un parche y cómo
+    ponerlo y quitarlo; la reemplaza si ya estaba. Devuelve lo que se le dice al usuario."""
+    path = pathlib.Path(root) / "AGENTS.md"
+    text = read_agents(root)
+    if text is None:
+        return "· No hay AGENTS.md en %s: anota a mano que el setup quedó en %s" % (root, ", ".join(map(str, patches)))
+    section = performance_section(text)
+    if section is None:
+        return "· AGENTS.md no tiene una sección de rendimiento: anota a mano que el setup quedó en %s" % ", ".join(
+            map(str, patches))
+    eol = "\r\n" if "\r\n" in text else "\n"
+    apply = " y ".join("`git -C %s apply %s`" % (q(top), q(patch)) for top, patch in patches)
+    back = " y ".join("`git -C %s apply -R %s`" % (q(top), q(patch)) for top, patch in patches)
+    line = "- Setup listo, en parche: %s antes de medir; %s al terminar (lo escribió `perf.py cerrar`)." % (apply, back)
+    start, end = section
+    body = text[start:end]
+    found = re.search(r"^[ \t]*[-*][ \t]+\**setup listo, en parche:.*$", body, re.I | re.M)
+    if found:
+        body = body[:found.start()] + line + body[found.end():]
+    else:
+        body = eol + line + eol + body.lstrip("\r\n") if body.strip() else eol + line + eol
+    try:
+        with open(str(path), "w", encoding="utf-8", newline="") as handle:
+            handle.write(text[:start] + body + text[end:])
+    except OSError as error:
+        return "⚠ No pude escribir %s (%s): anota a mano que el setup quedó en el parche" % (path, error.strerror or error)
+    return "✔ AGENTS.md: la sección de rendimiento dice que el setup está en un parche y cómo ponerlo y quitarlo"
+
+
+def cmd_cerrar(args):
+    folder = pathlib.Path(args.carpeta)
+    state = folder / "estado.md"
+    if not state.is_file():
+        raise PerfError("no existe %s" % state)
+    plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
+    root = project_root(folder).resolve()
+    pending = [change for change in temp_changes(state.read_text(encoding="utf-8")) if not change["revertido"]]
+    if not pending:
+        print("✔ No quedan cambios temporales por revertir en %s." % state)
+        if plan:
+            print_next(folder, plan)
+        return
+    extra = external_roots(root, read_no_leer(root))[0]
+    mine = improvement_files(folder, root, plan, extra)
+    shared = shared_temp_files(folder, root)
+    problems, kept, groups = [], [], {}
+    for change in pending:
+        top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
+        if top is None:
+            problems.append(rel)
+            continue
+        if (top, rel) in mine:
+            kept.append("%s: también es un archivo de la mejora %s; un parche llevaría las dos. Quita a mano solo lo "
+                        "temporal y marca la fila en estado.md" % (change["archivo"], mine[(top, rel)]))
+            continue
+        if change["archivo"] in shared:
+            kept.append("%s: otra investigación abierta (%s) también lo declara; quita a mano solo lo de esta, o déjalo "
+                        "hasta que cierre la otra" % (change["archivo"], ", ".join(shared[change["archivo"]])))
+            continue
+        kind = "setup" if SETUP_ROW.search(change["que"] or "") else "temporales"
+        known = [item for items in groups.get(top, {}).values() for item in items if item[0] == rel]
+        if known:  # dos filas del mismo archivo (la original y la del ajuste): un solo diff, las dos filas se marcan
+            known[0][2].append(change["archivo"])
+            continue
+        groups.setdefault(top, {}).setdefault(kind, []).append((rel, change["archivo"], []))
+    if problems:
+        raise PerfError("no puedo cerrar sin saber dónde está cada archivo; no toqué nada:\n  - %s" % "\n  - ".join(
+            problems)).con(guardado="nada: no guardé ni quité nada",
+                           seguir=[("cuando corrijas las rutas en \"Cambios temporales por revertir\" de estado.md, "
+                                    "repite", same_command())])
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    target_dir = patches_dir(folder, root)
+    name = slug("-".join(lexical(folder).parts[-2:]))
+    plans, notes = [], {}
+    for top, kinds in groups.items():
+        changes = git_changes(top)
+        temp_rels = {rel for items in kinds.values() for rel, _, _ in items}
+        print("Repo %s:" % top)
+        for kind, items in kinds.items():
+            present = [(rel, label, more) for rel, label, more in items if rel in changes]
+            for rel, label, more in items:
+                if rel not in changes:
+                    for row_name in [label] + more:
+                        notes[row_name] = "sí · sin cambios al cerrar (%s)" % datetime.date.today().isoformat()
+            if not present:
+                continue
+            print("  Quita (%s): %s" % ("setup de medición" if kind == "setup" else "cambios temporales",
+                                       ", ".join(rel for rel, _, _ in present)))
+            text = b"".join(file_patch(top, rel, changes[rel]) for rel, _, _ in present)
+            label = "perf-setup" if kind == "setup" else "%s-temporales" % name
+            plans.append({"repo": top, "tipo": kind, "archivos": present, "texto": text,
+                          "ruta": target_dir / ("%s-%s-%s.patch" % (label, slug(top.name), stamp))})
+        own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
+               for path in (investigations_base(root), target_dir)]
+        own = [str(path) for path in own if path is not None]  # la carpeta de la investigación y la de los parches
+        stay = ["%s (mejora %s)" % (rel, mine[(top, rel)]) if (top, rel) in mine else rel
+                for rel in sorted(changes) if rel not in temp_rels
+                and not any(rel == path or rel.startswith(path.rstrip("/") + "/") for path in own)]
+        print("  Quedan (no se tocan): %s" % (", ".join(stay) if stay else "nada más con cambios"))
+    for line in kept:
+        print("  Queda sin quitar: %s" % line)
+    if args.simular:
+        for item in plans:
+            print("· Simulación: guardaría %s en %s y lo quitaría con git apply -R." % (
+                ", ".join(rel for rel, _, _ in item["archivos"]), item["ruta"]))
+        print("· Simulación: no guardé ni quité nada. Para hacerlo, el mismo comando sin --simular:")
+        print("    %s" % same_command(sin=("--simular",)))
+        return
+    for item in plans:
+        item["ruta"] = write_new(item["ruta"], item["texto"])
+        print("✔ Parche guardado (no pisa ninguno): %s" % item["ruta"])
+    failed = []
+    for item in plans:
+        ok, error = git_apply(item["repo"], item["ruta"], reverse=True, check=True)
+        if not ok:
+            failed.append("%s: %s" % (item["repo"], error or "git apply --check -R falló"))
+    if failed:
+        raise PerfError("un parche no revierte limpio, así que no quité nada:\n  - %s" % "\n  - ".join(failed)).con(
+            guardado="los parches, como copia (no se aplicaron): %s" % ", ".join(str(item["ruta"]) for item in plans),
+            seguir=[("revisa esos archivos (un cambio a medias o un archivo que otro proceso modificó) y repite",
+                     same_command())])
+    for item in plans:
+        ok, error = git_apply(item["repo"], item["ruta"], reverse=True)
+        if not ok:  # comprobado justo antes: no debería pasar
+            raise PerfError("git apply -R falló en %s después de comprobarlo: %s" % (item["repo"], error)).con(
+                guardado="los parches en %s" % ", ".join(str(entry["ruta"]) for entry in plans))
+        for _, label, more in item["archivos"]:
+            for row_name in [label] + more:
+                notes[row_name] = "sí · perf.py cerrar %s · parche: %s" % (datetime.date.today().isoformat(),
+                                                                         item["ruta"])
+    for top in groups:
+        status = subprocess.run(["git", "-C", str(top), "status", "--short"], capture_output=True, text=True, timeout=120)
+        print("git status --short en %s:" % top)
+        print("\n".join("    " + line for line in status.stdout.splitlines()) or "    (sin cambios)")
+    if notes:
+        print("✔ estado.md: %d filas de \"Cambios temporales\" marcadas como revertidas" % mark_temp_reverted(folder, notes))
+    setup = [(item["repo"], item["ruta"]) for item in plans if item["tipo"] == "setup"]
+    if setup:
+        print(note_setup_patch(root, setup))
+        note = update_agents_state(root)
+        if note:
+            print(note)
+    if plan:
+        print_next(folder, plan)
+
+
+def read_lineabase(folder):
+    try:
+        data = json.loads((pathlib.Path(folder) / LINEABASE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def cmd_lineabase(args):
+    folder = pathlib.Path(args.carpeta)
+    plan = load_plan(folder / "plan.json")
+    root = project_root(folder).resolve()
+    record = read_lineabase(folder)
+    rel = relative_folder(folder, root)
+    follow = [("pide el paso que sigue", perf_command(root, "siguiente", "--carpeta", rel))]
+    if args.reaplicar_mejoras:
+        if record.get("estado") != "quitadas":
+            raise PerfError("no hay mejoras quitadas con `perf.py lineabase --quitar-mejoras` en %s: no hay nada que "
+                            "reaplicar" % folder).con(guardado="nada", seguir=follow)
+        # Se reaplican en el orden inverso al que se quitaron; si una no aplica, las que ya se pusieron se vuelven a quitar.
+        patches = [(pathlib.Path(item["repo"]), pathlib.Path(item["parche"])) for item in record.get("parches") or []]
+        patches.reverse()
+        if args.simular:
+            ok, error = git_apply(patches[0][0], patches[0][1], check=True) if patches else (True, "")
+            print("· Simulación: el primer parche %s; no reapliqué nada." % (
+                "aplica limpio" if ok else "no aplica limpio (%s)" % error))
+            return
+        done = []
+        for top, patch in patches:
+            ok, error = git_apply(top, patch, check=True)
+            if ok:
+                ok, error = git_apply(top, patch)
+            if not ok:
+                for earlier_top, earlier in reversed(done):
+                    git_apply(earlier_top, earlier, reverse=True)
+                raise PerfError("el parche %s no aplica limpio (%s): no reapliqué nada (lo que alcancé a poner lo volví a "
+                                "quitar)" % (patch, error or "sin detalle")).con(
+                    guardado="los parches siguen en %s" % ", ".join(str(p) for _, p in patches),
+                    seguir=[("revisa ese archivo (¿cambió mientras las mejoras estaban quitadas?) y repite", same_command())])
+            done.append((top, patch))
+            print("✔ Mejoras reaplicadas en %s con %s" % (top, patch))
+        record.update(estado="reaplicadas", reaplicadas=datetime.datetime.now().replace(microsecond=0).isoformat())
+        (folder / LINEABASE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print_next(folder, plan)
+        return
+    if args.registrar:
+        # Las mejoras se quitaron a mano (un archivo tenía también marcas): se registra el parche para reaplicarlo.
+        applied_ids = [item["id"] for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
+        tops = [root] + [top for top in (git_toplevel(other) for other in external_roots(root, read_no_leer(root))[0])
+                         if top is not None]
+        patches = []
+        for raw in args.registrar:
+            patch = pathlib.Path(os.path.expanduser(raw)).resolve()
+            if not patch.is_file():
+                raise PerfError("no existe el parche %s" % patch).con(guardado="nada")
+            top = next((top for top in tops if git_apply(top, patch, check=True)[0]), None)
+            if top is None:
+                raise PerfError("%s no se puede volver a aplicar en ningún repo del proyecto: ¿las mejoras siguen puestas, "
+                                "o el parche no es de ellas?" % patch).con(guardado="nada")
+            patches.append({"mejora": ", ".join(applied_ids), "repo": str(pathlib.Path(top).resolve()),
+                            "parche": str(patch)})
+        record = {"estado": "quitadas", "fecha": datetime.datetime.now().replace(microsecond=0).isoformat(),
+                  "mejoras": applied_ids, "parches": patches}
+        (folder / LINEABASE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print("✔ %s: las mejoras quedan registradas como quitadas hasta `--reaplicar-mejoras`" % (folder / LINEABASE_FILE))
+        print_next(folder, plan)
+        return
+    if not args.quitar_mejoras:
+        raise PerfError("usa --quitar-mejoras (antes de rehacer antes y control) o --reaplicar-mejoras (después)").con(
+            guardado="nada", seguir=follow)
+    if record.get("estado") == "quitadas":
+        raise PerfError("las mejoras ya están quitadas (%s): para volver a ponerlas, --reaplicar-mejoras" % ", ".join(
+            item.get("parche", "?") for item in record.get("parches") or [])).con(
+            guardado="nada", seguir=[("vuelve a poner las mejoras",
+                                      perf_command(root, "lineabase", "--carpeta", rel, "--reaplicar-mejoras"))] + follow)
+    applied = [item for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
+    if not applied:
+        raise PerfError("no hay mejoras aplicadas en plan.json: no hay nada que quitar").con(guardado="nada", seguir=follow)
+    without = [item["id"] for item in applied if not [e for e in item.get("cambios") or [] if isinstance(e, dict)
+                                                       and e.get("diff")]]
+    if without:
+        raise PerfError("%s no tiene%s su diff guardado (`decidir --aplicada <id> --archivos …`): sin él no sé qué quitar"
+                        % (", ".join(without), "" if len(without) == 1 else "n")).con(
+            guardado="nada", seguir=[with_openers(chat(
+                "Sigue hb-performance con %s: guarda el diff de %s con `perf.py decidir --carpeta %s --aplicada <id> "
+                "--archivos <los archivos que cambió cada una, relativos a su repo>` (y --repo si están en otro repo); no "
+                "compiles, no instales ni captures" % (folder.resolve() / "estado.md", ", ".join(without), rel),
+                "intermedio", "medio", "busca qué archivos cambió cada mejora y guarda su diff", plan), plan, root),
+                ("después, repite", same_command())])
+    extra = external_roots(root, read_no_leer(root))[0]
+    temp = set()
+    try:
+        for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8")):
+            if not change["revertido"]:
+                top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
+                if top is not None:
+                    temp.add((top, rel))
+    except OSError:
+        pass
+    overlap = sorted("%s (%s)" % (rel, ident) for (top, rel), ident in improvement_files(folder, root, plan, extra).items()
+                     if (top, rel) in temp)
+    if overlap:
+        raise PerfError("estos archivos tienen la mejora y también cambios temporales (marcas): %s. El diff de la mejora "
+                        "llevaría las marcas, y quitarlo las quitaría. Separarlo pide criterio" % ", ".join(overlap)).con(
+            guardado="nada", seguir=[with_openers(chat(
+                "Sigue hb-performance con %s: quita temporalmente el código de las mejoras %s para rehacer la línea base, "
+                "sin tocar las marcas ni los cambios temporales: guárdalo en un parche nuevo en %s (con set -C, sin pisar "
+                "otro), comprueba con git apply --check -R y quítalo. Termina registrándolo, para que perf.py sepa que "
+                "hay que reaplicarlo antes de medir después: `%s`. No compiles, no instales ni captures"
+                % ((folder.resolve() / "estado.md"), ", ".join(item["id"] for item in applied), patches_dir(folder, root),
+                   perf_command(root, "lineabase", "--carpeta", relative_folder(folder, root), "--registrar",
+                                "<ruta del parche>")),
+                "intermedio", "medio", "separa el código de la mejora de las marcas y lo quita con un parche", plan),
+                plan, root)])
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    name = slug("-".join(lexical(folder).parts[-2:]))
+    patches = []
+    # Lo normal: el código de las mejoras sigue sin commitear. Se guarda tal como está hoy, un parche por repo con los
+    # archivos de todas las mejoras (dos mejoras pueden tocar el mismo archivo, y sus diffs se pisarían).
+    files = improvement_files(folder, root, plan, extra)
+    by_repo = {}
+    for (top, rel_file), ident in files.items():
+        by_repo.setdefault(top, {}).setdefault(rel_file, set()).add(ident)
+    for top, entries in sorted(by_repo.items()):
+        changes = git_changes(top)
+        present = [rel_file for rel_file in sorted(entries) if rel_file in changes]
+        if not present:
+            continue
+        idents = sorted({ident for rel_file in present for ident in entries[rel_file]})
+        patches.append({"mejora": ", ".join(idents), "repo": top,
+                        "texto": b"".join(file_patch(top, rel_file, changes[rel_file]) for rel_file in present),
+                        "fuente": None, "ruta": patches_dir(folder, root) / ("%s-mejoras-%s-%s.patch" % (
+                            name, slug(top.name), stamp))})
+    covered = {ident for patch in patches for ident in patch["mejora"].split(", ")}
+    # Una mejora ya commiteada no tiene cambios contra HEAD: se quita con el diff que guardó `decidir --aplicada`, de la
+    # más nueva a la más vieja.
+    for item in sorted(applied, key=lambda item: item.get("aplicada_en") or "", reverse=True):
+        if item["id"] in covered:
+            continue
+        for entry in item.get("cambios") or []:
+            if not isinstance(entry, dict) or not entry.get("diff"):
+                continue
+            repo = pathlib.Path(os.path.expanduser(entry.get("repo") or "."))
+            repo = (repo if repo.is_absolute() else root / repo).resolve()
+            source = folder / entry["diff"]
+            fix = [with_openers(chat(
+                "Sigue hb-performance con %s: guarda de nuevo el diff de %s con `perf.py decidir --carpeta %s --aplicada "
+                "%s --archivos <los archivos que cambió, relativos a su repo>` (y --repo si están en otro repo); no "
+                "compiles, no instales ni captures" % (folder.resolve() / "estado.md", item["id"], rel, item["id"]),
+                "intermedio", "medio", "vuelve a guardar el diff de la mejora", plan), plan, root),
+                ("después, repite", same_command())]
+            try:
+                text = source.read_text(encoding="utf-8")
+            except OSError:
+                raise PerfError("no encuentro el diff guardado de %s (%s)" % (item["id"], source)).con(
+                    guardado="nada", seguir=fix)
+            if not text.strip():
+                raise PerfError("el diff guardado de %s está vacío (%s): no sé qué quitar" % (item["id"], source)).con(
+                    guardado="nada", seguir=fix)
+            patches.append({"mejora": item["id"], "repo": repo, "texto": text.encode("utf-8"), "fuente": source.resolve(),
+                            "ruta": patches_dir(folder, root) / ("%s-mejora-%s-%s.patch" % (name, slug(item["id"]), stamp))})
+    if args.simular:
+        for patch in patches:
+            ok, error = git_apply(patch["repo"], patch["fuente"], reverse=True, check=True) if patch["fuente"] else (
+                True, "")  # un parche armado con lo que hay hoy en el repo revierte por construcción
+            print("· Simulación: guardaría la mejora %s en %s y la quitaría de %s (%s)." % (
+                patch["mejora"], patch["ruta"], patch["repo"], "revierte limpio" if ok else "no revierte limpio: %s" % error))
+        print("· Simulación: no guardé ni quité nada. Para hacerlo, el mismo comando sin --simular:")
+        print("    %s" % same_command(sin=("--simular",)))
+        return
+    if not patches:
+        raise PerfError("el código de las mejoras %s no está en el repo (ni sin commitear ni con su diff guardado): no hay "
+                        "nada que quitar" % ", ".join(item["id"] for item in applied)).con(guardado="nada", seguir=follow)
+    for patch in patches:
+        patch["ruta"] = write_new(patch["ruta"], patch["texto"])
+        print("✔ Parche de %s guardado (no pisa ninguno): %s" % (patch["mejora"], patch["ruta"]))
+    # Uno por vez, comprobando cada uno contra lo que dejó el anterior; si uno no revierte limpio, lo ya quitado se
+    # vuelve a poner y no queda nada a medias.
+    done = []
+    for patch in patches:
+        ok, error = git_apply(patch["repo"], patch["ruta"], reverse=True, check=True)
+        if ok:
+            ok, error = git_apply(patch["repo"], patch["ruta"], reverse=True)
+        if not ok:
+            for earlier in reversed(done):
+                git_apply(earlier["repo"], earlier["ruta"])
+            raise PerfError("el código de %s no revierte limpio en %s (¿cambió desde que se marcó aplicada, o ya no está?): "
+                            "no quité nada (lo que alcancé a quitar lo volví a poner): %s" % (
+                                patch["mejora"], patch["repo"], error or "sin detalle")).con(
+                guardado="los parches, como copia: %s" % ", ".join(str(p["ruta"]) for p in patches),
+                seguir=[("revisa esos archivos y repite", same_command())])
+        done.append(patch)
+        print("✔ Mejora %s quitada de %s" % (patch["mejora"], patch["repo"]))
+    for top in sorted({patch["repo"] for patch in patches}):
+        status = subprocess.run(["git", "-C", str(top), "status", "--short"], capture_output=True, text=True, timeout=120)
+        print("git status --short en %s:" % top)
+        print("\n".join("    " + line for line in status.stdout.splitlines()) or "    (sin cambios)")
+    record = {"estado": "quitadas", "fecha": datetime.datetime.now().replace(microsecond=0).isoformat(),
+              "mejoras": [item["id"] for item in applied if item["id"] in covered or any(
+                  item["id"] in patch["mejora"].split(", ") for patch in patches)],
+              "parches": [{"mejora": p["mejora"], "repo": str(p["repo"]), "parche": str(p["ruta"])} for p in patches]}
+    (folder / LINEABASE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print("✔ %s: las mejoras quedan quitadas hasta `--reaplicar-mejoras` (también en estado.md)" % (folder / LINEABASE_FILE))
+    print_next(folder, plan)
 
 
 def report_file(folder, kind):
@@ -4621,6 +5454,39 @@ def count_invalid(folder, phase, flow, reason):
     save_notes(folder, data)
 
 
+# Una marca que falta en más de esta parte de los intentos de una tanda es inestable: se nombra y se sugiere revisarla
+# entre investigaciones. El tope de intentos (max_attempts) es uno solo para cualquier motivo: separar "marca inestable"
+# de "entorno" dejaría a una marca que falla gastar más corridas del dispositivo, y las válidas ya quedan guardadas para
+# completar la fase con --corridas (medicion.md · Corridas inválidas).
+UNSTABLE_MARK_SHARE = 0.3
+
+
+def invalid_summary(failures, attempts):
+    """Las líneas que resumen el patrón de los intentos inválidos de una tanda: cuántas veces faltó cada marca del plan y
+    cuántas veces se repitió cada otro motivo. Si una misma marca faltó en más del 30 % de los intentos, la nombra y
+    sugiere revisar esa marca o ese paso del recorrido entre investigaciones. [] sin intentos inválidos."""
+    if not failures:
+        return []
+    marks, reasons = {}, {}
+    for reason, missing in failures:
+        if missing:
+            for mark in missing:
+                marks[mark] = marks.get(mark, 0) + 1
+        else:
+            key = one_line(reason)[:100]
+            reasons[key] = reasons.get(key, 0) + 1
+    parts = ["faltó %s en %d" % (mark, count) for mark, count in sorted(marks.items(), key=lambda kv: (-kv[1], kv[0]))]
+    parts += ["%d × %s" % (count, reason) for reason, count in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))]
+    lines = ["Patrón de los intentos inválidos (%d de %d intentos): %s" % (len(failures), attempts, " · ".join(parts))]
+    for mark, count in sorted(marks.items(), key=lambda kv: (-kv[1], kv[0])):
+        if attempts and count / attempts > UNSTABLE_MARK_SHARE:
+            lines.append("⚠ La marca %s faltó en %d de %d intentos (%d %%): es inestable. Revisa esa marca, o el paso del "
+                         "recorrido que lleva a ella, entre investigaciones y no a mitad de una (cambiarla ahora mezclaría "
+                         "corridas medidas con dos marcas distintas)" % (mark, count, attempts,
+                                                                         round(count * 100 / attempts)))
+    return lines
+
+
 def save_capture_warnings(folder, phase, flow, warnings):
     """Los avisos con los que arrancó una captura de esa fase y ese flujo (build depurable, dispositivo tibio, batería,
     build o versión distintos), sin repetir."""
@@ -4674,6 +5540,145 @@ def find_mark_sources(root, mark, patterns=None):
                 start = text.find(needle, start + 1)
             if len(out) >= MARK_SOURCES_MAX:
                 return out
+    return out
+
+
+# ── Huella de las marcas ─────────────────────────────────────────────────────
+# Una mejora puede cambiar dónde o cuándo se emite una marca del plan (otro hilo, otro callback), y quien la arregla
+# puede moverla. Cada fase guarda una huella de cada marca `MARK <nombre>` del plan: si cambia entre fases, las métricas
+# que dependen de esa marca ya no miden lo mismo y su veredicto es orientativo.
+MARK_WINDOW = 1  # líneas antes y después de cada lugar donde se emite la marca que entran en su huella
+
+
+def mark_names(flow_spec):
+    """Los nombres fijos de las marcas `MARK <nombre>` que usa el plan de un flujo, en orden y sin patrones."""
+    out = []
+    for mark, _ in plan_marks(flow_spec or {}):
+        found = MARK_LITERAL.fullmatch(mark or "")
+        if found and found.group(1) not in out:
+            out.append(found.group(1))
+    return out
+
+
+def mark_fingerprints(root, names, patterns=None):
+    """{marca: huella o None} de las marcas `MARK <nombre>` del plan. Por cada lugar del código donde aparece el nombre
+    entre comillas (`PerfHooks.mark("x")` o `"MARK x"`), en los .kt y .java del proyecto y de los módulos que
+    settings.gradle incluye desde fuera, entran el archivo y las MARK_WINDOW líneas de cada lado, sin espacios. Mover la
+    marca o cambiar el código que la rodea cambia la huella; un cambio lejos de ella, no. None: no la encontré (un nombre
+    armado al ejecutarse). Una sola pasada por los archivos, siempre fuera de la traza."""
+    names = [name for name in names if name]
+    if not names:
+        return {}
+    root = pathlib.Path(root)
+    patterns = read_no_leer(root) if patterns is None else patterns
+    needles = {}
+    for name in names:
+        needles['"%s"' % name] = name
+        needles['"MARK %s"' % name] = name
+    found = {name: [] for name in names}
+    for base in [root] + list(external_roots(root, patterns)[0]):
+        for path in walk_files(base, patterns, (".kt", ".java"), root):
+            try:
+                if path.stat().st_size > SCAN_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if not any(needle in text for needle in needles):
+                continue
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                for needle, name in needles.items():
+                    # "nombre" solo cuenta en una línea que emite una marca (PerfHooks.mark, MarkTrace.mark): el mismo
+                    # texto en otra parte (una ruta de navegación) no es la marca.
+                    if needle in line and (needle.startswith('"MARK ') or "mark" in line.lower()):
+                        window = lines[max(0, index - MARK_WINDOW):index + MARK_WINDOW + 1]
+                        found[name].append("%s\n%s" % (relative_to_root(path, root),
+                                                       "\n".join("".join(item.split()) for item in window)))
+    return {name: hashlib.sha1("\n--\n".join(sorted(set(places))).encode("utf-8")).hexdigest()[:12] if places else None
+            for name, places in found.items()}
+
+
+def flow_fingerprints(flow_spec):
+    """{"recorrido": huella, "metricas": huella} de lo que el plan de un flujo decide al medir: cómo se recorre
+    (recorrido, preparar, inicio, pausas) y qué se calcula de la traza (ventana, métricas de usuario, tramos). Si cambia
+    el recorrido después de medir antes, hay que medir de nuevo; si cambian solo las métricas, se pueden recalcular
+    sobre las trazas guardadas (`perf.py recalcular`)."""
+    spec = flow_spec or {}
+
+    def digest(keys):
+        data = {key: spec.get(key) for key in keys if spec.get(key) not in (None, [], {}, "")}
+        return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+
+    return {"recorrido": digest(("recorrido", "preparar", "inicio", "pausas", "duracion_max_s")),
+            "metricas": digest(("ventana", "metricas_usuario", "segmentos", "input_slices"))}
+
+
+def changed_marks(old, new):
+    """Las marcas cuya huella cambió entre dos registros ({marca: huella}): solo las que tienen huella en los dos."""
+    old, new = old if isinstance(old, dict) else {}, new if isinstance(new, dict) else {}
+    return sorted(name for name in old if old.get(name) and new.get(name) and old[name] != new[name])
+
+
+def phase_flow_record(phases, phase, flow):
+    """Lo que fases.json guarda de un flujo en una fase ({} si no hay)."""
+    record = phases.get(phase) if isinstance(phases.get(phase), dict) else {}
+    tracked = record.get("flujos") if isinstance(record.get("flujos"), dict) else {}
+    return tracked.get(flow) if isinstance(tracked.get(flow), dict) else {}
+
+
+def metrics_using_marks(flow_spec, marks):
+    """Las métricas del plan de un flujo que empiezan o terminan en alguna de esas marcas (`MARK <nombre>`): las de
+    usuario, las de cada tramo y, si la marca es de la ventana, "todas las de la ventana"."""
+    wanted = {"MARK %s" % name for name in marks}
+    spec = flow_spec or {}
+
+    def uses(item):
+        return isinstance(item, dict) and any(isinstance(item.get(side), dict) and item[side].get("marca") in wanted
+                                              for side in ("desde", "hasta"))
+
+    out = []
+    if uses(spec.get("ventana")):
+        out.append("todas las de la ventana del flujo")
+    out += [item["nombre"] for item in spec.get("metricas_usuario") or [] if uses(item) and item.get("nombre")]
+    for segment in spec.get("segmentos") or []:
+        if uses(segment) and segment.get("nombre"):
+            out += ["%s %s" % (segment["nombre"], metric) for metric in SEGMENT_METRICS + SEGMENT_NETWORK]
+    return out
+
+
+MARK_CHANGED = "marca cambiada entre fases"
+
+
+def flag_mark_changes(results, folder, plan):
+    """Marca con el aviso MARK_CHANGED las métricas que dependen de una marca que cambió entre antes y después: su
+    veredicto queda orientativo. Devuelve las líneas para `comparar` y el reporte."""
+    changes = mark_change_notes(folder, plan)
+    if not changes:
+        return []
+    window = {flow for flow, (_, metrics) in changes.items() if "todas las de la ventana del flujo" in metrics}
+    for r in results:
+        _, metrics = changes.get(r["flujo"], ((), ()))
+        if r["flujo"] in window or r["metrica"] in metrics:
+            r["avisos"] = sorted(set(r["avisos"]) | {MARK_CHANGED})
+    return ["las marcas cambiaron entre fases (%s): el veredicto de las métricas que dependen de ellas es orientativo "
+            "(%s). Para un veredicto firme, rehaz la línea base con las marcas nuevas: `perf.py siguiente` da la "
+            "secuencia (quitar las mejoras con su parche, medir antes y control, reaplicarlas y medir después)" % (
+                "; ".join("%s: %s" % (flow, ", ".join(marks)) for flow, (marks, _) in sorted(changes.items())),
+                "; ".join(", ".join(metrics[:6]) or "ninguna del plan" for _, metrics in changes.values()))]
+
+
+def mark_change_notes(folder, plan):
+    """{flujo: (marcas que cambiaron entre antes y después, métricas que dependen de ellas)} según la huella que guarda
+    fases.json; vacío si no cambió ninguna o si las fases no traen huella (una versión anterior)."""
+    phases = read_phases(folder)
+    out = {}
+    for flow, spec in (plan.get("flujos") or {}).items():
+        before = phase_flow_record(phases, "antes", flow).get("marcas")
+        after = phase_flow_record(phases, "despues", flow).get("marcas")
+        changed = changed_marks(before, after)
+        if changed:
+            out[flow] = (changed, metrics_using_marks(spec, changed))
     return out
 
 
@@ -4744,6 +5749,46 @@ def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=Fals
                            "instrumentar --actualizar) para que HttpSectionName acorte desde la izquierda"
                            % SECTION_NAME_MAX))
     return out
+
+
+def perf_command(root, *parts):
+    """Un comando de perf.py listo para pegar: cd a la raíz del proyecto y cada argumento citado."""
+    return "cd %s && python3 -I %s %s" % (q(root), q(HERE / "perf.py"), " ".join(q(part) for part in parts))
+
+
+def capture_args(folder, plan, flow, root):
+    """El comienzo de un comando `capturar` del flujo: el plan relativo a la raíz y --flujo si el plan tiene varios."""
+    rel = relative_folder(pathlib.Path(folder), root)
+    return ["capturar", "--plan", rel / "plan.json"] + (["--flujo", flow] if len(plan.get("flujos") or {}) > 1 else [])
+
+
+def with_openers(step, plan, root):
+    """Un paso de chat con los comandos que lo abren (para la salida de un fallo, que no pasa por render_steps)."""
+    return dict(step, abrir=chat_openers(plan, root, step["nivel"], step["esfuerzo"]))
+
+
+def marks_fix_steps(folder, plan, flow, marks, phase, why):
+    """Los pasos cuando el código dejó de emitir marcas del plan (una mejora cambió el hilo o el momento): un chat que
+    ajusta cada marca al mismo punto semántico, sin compilar, instalar ni capturar; instalar; y la corrida de prueba que
+    lo confirma. Nunca "repite el comando": con las mismas marcas faltando siempre, repetir no lo arregla."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    state = folder.resolve() / "estado.md"
+    places = []
+    for mark in marks:
+        places += [place for place in find_mark_sources(root, mark) if place not in places]
+    text = ("Sigue hb-performance con %s: %s: no salen las marcas %s del plan, probablemente porque el cambio de código "
+            "movió dónde o cuándo se emiten%s. Ajusta cada una al mismo punto semántico que en las fases ya medidas (el "
+            "mismo momento para el usuario: no midas otra cosa), sin agregar esperas ni condiciones, y anota el ajuste en "
+            "'Cambios temporales por revertir'. No compiles, no instales ni captures: eso lo hago yo en mi terminal"
+            % (state, why, ", ".join(marks), " (dónde se emiten hoy: %s)" % ", ".join(places[:6]) if places else ""))
+    return [chat(text, "intermedio", "medio", "ajusta las marcas que dejaron de salir, al mismo punto semántico; no "
+                 "compila, no instala y no captura", plan),
+            terminal(install_command(plan, root), "compila e instala el build de profiling con las marcas ajustadas",
+                     "espera"),
+            terminal(perf_command(root, *(capture_args(folder, plan, flow, root) + ["--prueba"])),
+                     "una corrida de prueba: confirma que salen todas las marcas del plan; si salen, te da el comando de "
+                     "la fase %s" % phase, "revisa que todas las marcas del plan salgan con ✔")]
 
 
 def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, capture_before, you_run):
@@ -4909,6 +5954,12 @@ def warnings_lines(folder, plan):
         lines += altering_changes((folder / "estado.md").read_text(encoding="utf-8"))
     except OSError:
         pass
+    removed = read_lineabase(folder)
+    if removed.get("estado") == "quitadas":
+        lines.append("Mejoras quitadas para rehacer la línea base (%s) desde %s, con su parche (%s): `perf.py lineabase "
+                     "--reaplicar-mejoras` las vuelve a poner antes de medir después" % (
+                         ", ".join(removed.get("mejoras") or []), removed.get("fecha", "—"),
+                         ", ".join(item.get("parche", "?") for item in removed.get("parches") or [])))
     out = []
     for line in lines:
         if line not in out:
@@ -5262,9 +6313,18 @@ def cmd_capturar(args, plan=None):
                 # En cada fallo, no solo en el primero: un 'preparar' intermitente puede volver a fallar después de funcionar.
                 GUIA["previos"] = [("corre 'preparar' a mano para ver por qué falla (si manda su salida a /dev/null, "
                                     "quítale esa parte para verla)", by_hand)]
-                failure = Precondicion("'preparar' terminó con código %d: no dejó la app en el punto de partida (un "
-                                       "login que no entró, una pantalla que no cargó a tiempo o el backend caído)" % code)
-                failure.corto = "'preparar' terminó con código %d" % code
+                screen = error_screen(resumed_activity(adb), plan)
+                if screen:
+                    # La app quedó en una pantalla de error: casi siempre es el backend o el login, no el recorrido.
+                    print("✖ La app mostró una pantalla de error (%s): revisa el backend o el login. Si es el backend, "
+                          "espera unos minutos antes de completar la fase: medir con el servidor fallando da corridas "
+                          "inválidas o tiempos que no son los de siempre." % screen)
+                failure = Precondicion("'preparar' terminó con código %d: no dejó la app en el punto de partida (%s)" % (
+                    code, "la app mostró una pantalla de error, %s: revisa el backend o el login y espera un momento "
+                          "antes de completar la fase" % screen if screen else
+                    "un login que no entró, una pantalla que no cargó a tiempo o el backend caído"))
+                failure.corto = "'preparar' terminó con código %d%s" % (
+                    code, " (pantalla de error: %s)" % screen if screen else "")
                 raise failure
             GUIA["previos"] = []  # este 'preparar' funcionó: un corte posterior ya no pide correrlo a mano
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
@@ -5328,11 +6388,67 @@ def cmd_capturar(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
+    # Una sola numeración: la de la fase ("corrida 6 de 10"), la misma de metricas.csv, del diagnóstico y del reporte.
+    # Un intento inválido no gasta un número de corrida: va como "intento N (inválido)".
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
+    start = 0 if args.prueba else (measured_runs(folder, read_phases(folder), phase, flow_name) or 0)
+    failures = []  # por intento inválido: (motivo, marcas del plan que faltaron) para resumir el patrón (invalid_summary)
+    # La huella de las marcas del plan y del plan del flujo, fuera de toda traza: queda en fases.json por fase (y en la
+    # corrida de prueba), para que `comparar` sepa si una marca cambió entre fases.
+    prints = {}
+    if args.plan:
+        root_dir = project_root(folder).resolve()
+        prints = {"marcas": mark_fingerprints(root_dir, mark_names(flow)), "plan": flow_fingerprints(flow)}
     if not args.prueba:
         save_capture_warnings(folder, phase, flow_name, warnings + build_warnings)
 
-    def save_record(partial=False):
+    def run_label():
+        label = "corrida %d de %d" % (start + valid + 1, start + target)
+        return label if n == start + valid + 1 else "%s (n.º %d en metricas.csv)" % (label, n)
+
+    def note_invalid(reason, info=None):
+        """Anota el intento inválido: su motivo y, si fue por marcas que faltaron, las marcas del plan que no salieron.
+        Con otro motivo (una pantalla que invalida, un recorrido que falló) las marcas que faltan son consecuencia."""
+        unseen = tuple(sorted(mark for mark, _, seen in (info or {}).get("marcas_plan") or [] if not seen)) \
+            if str(reason).startswith("sin marcas para") else ()
+        failures.append((reason, unseen))
+
+    def stop_if_same_marks():
+        """Con las inválidas seguidas faltando siempre las mismas marcas, la falla es del código, no del entorno:
+        repetir el comando no la arregla. Se detiene con el paso real (un chat que ajusta la marca y la prueba)."""
+        recent = [missing for _, missing in failures[-consecutive:]]
+        if len(recent) < MAX_CONSECUTIVE_INVALID or not recent[0] or any(item != recent[0] for item in recent):
+            return
+        print_invalid_summary()
+        if args.plan:  # para `siguiente`: la última evidencia es que esas marcas no salen
+            save_test_record(folder, flow_name, [], list(recent[0]), prints.get("marcas"), prints.get("plan"))
+        if valid:  # lo medido en esta tanda no se completa: se rehace con la marca ajustada
+            GUIA["al_fallar"] = lambda: save_record(partial=True, redo_marks=list(recent[0]))
+        elif start and not args.prueba:  # la fase ya tenía corridas con la marca vieja: tampoco se completa
+            phases_now = read_phases(folder)
+            if isinstance(phases_now.get(phase), dict):
+                phases_now[phase].setdefault("rehacer_marcas", {})[flow_name] = list(recent[0])
+                save_phases(folder, phases_now)
+        steps = marks_fix_steps(folder, plan, flow_name, list(recent[0]), phase, "en la fase %s, %d intentos seguidos "
+                                "sin las mismas marcas" % (phase, consecutive))
+        raise CorridasInsuficientes(
+            "%d corridas inválidas seguidas y en todas faltan siempre las mismas marcas (%s): probablemente el cambio de "
+            "código movió dónde se emiten (o dejó de emitirlas). No es el entorno: repetir el comando no lo arregla. Las "
+            "%d válidas quedan guardadas" % (consecutive, ", ".join(recent[0]), valid)).con(
+            seguir=[with_openers(steps[0], plan, project_root(folder).resolve())]
+            + [(step["que"], step["texto"]) for step in steps[1:]]
+            + [("después, mide la fase %s de nuevo: lo medido antes del ajuste no se mezcla con lo de la marca ajustada"
+                % phase, same_command(corridas=start + target, sin=("--rehacer",)) + " --rehacer")
+               if valid or start else ("después, mide la fase %s" % phase, same_command())])
+
+    def print_invalid_summary():
+        lines = invalid_summary(failures, attempts)
+        for line in lines:
+            print(line)
+        if lines and not args.prueba:  # también para la sesión 2: queda en "Advertencias para el diagnóstico"
+            save_capture_warnings(folder, phase, flow_name, [line.lstrip("⚠ ") for line in lines])
+
+    def save_record(partial=False, redo_marks=None):
         """El registro de la fase en fases.json con las corridas válidas de esta tanda. También cuando la tanda se
         corta (Ctrl+C, inválidas seguidas): lo que ya está en el CSV queda con su build, su commit y su configuración."""
         seen_hz = {h for h in run_hz if h}
@@ -5352,6 +6468,9 @@ def cmd_capturar(args, plan=None):
         record.update(build)
         if partial:  # la tanda se cortó: `siguiente` ofrece completar la fase antes de darla por medida
             record["faltan"] = {flow_name: target - valid}
+        if redo_marks:  # se cortó porque faltan siempre las mismas marcas: se rehace, no se completa
+            record["rehacer_marcas"] = {flow_name: redo_marks}
+        record.update(prints)  # la huella de las marcas y del plan, por flujo (write_phase)
         write_phase(folder, phase, record, flow_name)
 
     def mark_invalid(reason):
@@ -5365,13 +6484,16 @@ def cmd_capturar(args, plan=None):
     GUIA["al_fallar"] = on_failure  # lo llama main() si la tanda se corta: las válidas no quedan sin su registro
     while valid < target:
         if consecutive >= MAX_CONSECUTIVE_INVALID:
+            stop_if_same_marks()
+            print_invalid_summary()
             raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
-                                        "suerte. Revisa el recorrido, 'preparar' o el backend y vuelve a correr; las "
-                                        "%d válidas quedan guardadas" % (consecutive, last_invalid, valid))
+                                        "suerte. Revisa el recorrido, 'preparar' o el backend; las %d válidas quedan "
+                                        "guardadas" % (consecutive, last_invalid, valid))
         if attempts >= max_attempts(target):
+            print_invalid_summary()
             raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones (el "
-                                        "recorrido, 'preparar', el backend); los motivos de cada corrida inválida están "
-                                        "más arriba" % (valid, target, attempts))
+                                        "recorrido, 'preparar', el backend); el patrón de los intentos inválidos está "
+                                        "justo arriba" % (valid, target, attempts))
         attempts += 1
         try:
             prepare()
@@ -5386,15 +6508,15 @@ def cmd_capturar(args, plan=None):
             # para el tope de inválidas seguidas.
             consecutive, last_invalid = consecutive + 1, getattr(error, "corto", str(error))
             mark_invalid(last_invalid)
-            print("✖ corrida %d inválida: %s (se repite)" % (n, last_invalid))
-            n += 1
+            note_invalid(last_invalid)
+            print("✖ intento %d (inválido, buscaba la %s): %s (se repite)" % (attempts, run_label(), last_invalid))
             continue
         if sdk < 31:
             adb.shell("dumpsys gfxinfo %s reset" % package)
         local = out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))
         if not args.prueba:
             set_aside_orphan(folder, out_dir, phase, flow_name, n, csv_path)
-        label = "prueba" if args.prueba else "corrida %d de %d (%s, %s)" % (valid + 1, target, flow_name, phase)
+        label = "prueba" if args.prueba else "%s (%s, %s)" % (run_label(), flow_name, phase)
         # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida nueva
         # del proceso medido dentro de la corrida la invalida.
         exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
@@ -5403,10 +6525,11 @@ def cmd_capturar(args, plan=None):
             if args.prueba:
                 raise CorridasInsuficientes("la corrida de prueba se cortó a mano (x + Enter): su traza se descartó sin "
                                             "procesarla")
-            print("✖ corrida %d inválida: %s (x + Enter): su traza se descartó sin procesarla; se repite" % (n, CUT_REASON))
+            print("✖ intento %d (inválido, buscaba la %s): %s (x + Enter): su traza se descartó sin procesarla; se "
+                  "repite" % (attempts, run_label(), CUT_REASON))
             mark_invalid(CUT_REASON)
+            note_invalid(CUT_REASON)
             consecutive, last_invalid = consecutive + 1, CUT_REASON
-            n += 1
             continue
         save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
@@ -5433,7 +6556,7 @@ def cmd_capturar(args, plan=None):
                     "✖" if entry in unexpected else "·", entry["hora"][11:19], entry["pid"], exit_text(entry)))
         if not invalid:
             print("… procesando la traza %s (%.0f MB)" % (
-                "de prueba" if args.prueba else "%d de %d" % (valid + 1, target), local.stat().st_size / 1e6), flush=True)
+                "de prueba" if args.prueba else "de la %s" % run_label(), local.stat().st_size / 1e6), flush=True)
             results = run_tp_batch(tp, local, queries)
             if not results["metricas"]:
                 raise PerfError("trace_processor no devolvió las filas de metricas.sql")
@@ -5488,6 +6611,9 @@ def cmd_capturar(args, plan=None):
                 print("\n".join(marks_report(info)))
             if args.plan:
                 unseen = [mark for mark, _, seen in info.get("marcas_plan") or [] if not seen]
+                save_test_record(folder, flow_name, [mark for mark, _, seen in info.get("marcas_plan") or [] if seen],
+                                 unseen or ["(la corrida no llegó a procesarse: %s)" % one_line(invalid)[:120]],
+                                 prints.get("marcas"), prints.get("plan"))
                 save_test_warnings(folder, flow_name, [warning(
                     "invalida", "la corrida de prueba fue inválida: %s%s" % (
                         invalid, " (marcas del plan que no salieron: %s)" % ", ".join(unseen) if unseen else ""),
@@ -5498,15 +6624,20 @@ def cmd_capturar(args, plan=None):
             if not info:  # el recorrido terminó mal (o la app se cayó): la traza igual dice hasta dónde llegó
                 info = partial_info(tp, local, queries, hz, flow, known, sdk)
             reached = reach_text(info)
-            target_name = local.with_name("%s_%d_invalida_%s.perfetto-trace" % (flow_name, n, slug(invalid)))
+            # El intento no gasta el número de la corrida: su traza lleva el número de intento, y no pisa otra.
+            target_name = local.with_name("%s_%d_intento%d_invalida_%s.perfetto-trace" % (flow_name, n, attempts,
+                                                                                         slug(invalid)))
+            if target_name.exists() or target_name.with_name(target_name.name + ".gz").exists():
+                target_name = target_name.with_name("%s-%s" % (uuid.uuid4().hex[:6], target_name.name))
             local.rename(target_name)
             if not args.sin_comprimir:
                 compress(target_name)
-            print("✖ corrida %d inválida: %s (traza guardada para auditoría)" % (n, invalid))
+            print("✖ intento %d (inválido, buscaba la %s): %s (traza guardada para auditoría)" % (
+                attempts, run_label(), invalid))
             print("  Hasta dónde llegó: %s" % reached)
             mark_invalid(invalid)
+            note_invalid(invalid, info)
             consecutive, last_invalid = consecutive + 1, invalid
-            n += 1
             continue
         consecutive = 0
         saved = local if args.sin_comprimir else compress(local)
@@ -5550,6 +6681,9 @@ def cmd_capturar(args, plan=None):
                       % (len(cut), SECTION_NAME_MAX, cut[0][-40:]))
             args.resultado = {"http": info.get("http", 0), "sin_red": bool(gap)}  # lo lee humo
             if args.plan:
+                save_test_record(folder, flow_name, [mark for mark, _, ok in info.get("marcas_plan") or [] if ok],
+                                 [mark for mark, _, ok in info.get("marcas_plan") or [] if not ok],
+                                 prints.get("marcas"), prints.get("plan"))
                 seen = info.get("http", 0) > 0
                 if seen or gap:  # una prueba que ve la red, o que la esperaba y no la vio, deja el estado al día
                     agents = read_agents(root)
@@ -5573,7 +6707,7 @@ def cmd_capturar(args, plan=None):
         append_rows(csv_path, [metric_row(phase, flow_name, n, m[0], m[1], m[2], m[3]) for m in metrics])
         save_timeline(out_dir, flow_name, n, info.get("linea"))
         known |= {m[0] for m in metrics}
-        print(run_line("%d/%d" % (valid + 1, target), size_mb, metrics))
+        print(run_line(run_label()[len("corrida "):], size_mb, metrics))
         if info.get("faltantes"):
             print("  ⚠ sin marcas para: %s" % ", ".join(info["faltantes"]))
         run_hz.append(info.get("hz_traza"))
@@ -5582,6 +6716,7 @@ def cmd_capturar(args, plan=None):
         progress["validas"] = valid
         guide()
     GUIA["al_fallar"] = None
+    print_invalid_summary()
     save_record()
     GUIA.update(guardado="las %d corridas válidas de %s en %s y su registro en fases.json" % (valid, phase, csv_path),
                 seguir=[("pide el paso siguiente", "cd %s && python3 -I %s siguiente --carpeta %s"
@@ -6621,12 +7756,110 @@ def config_notes(folder, flows):
     return notes
 
 
+def cmd_recalcular(args):
+    """Vuelve a calcular las métricas de la traza (las del plan: ventana, métricas de usuario y tramos) sobre las trazas
+    guardadas de cada corrida válida, sin capturar. Sirve cuando el plan cambió después de medir y las marcas que usa ya
+    están en las trazas; si una no está, lo dice y da el comando para medir de nuevo."""
+    folder = pathlib.Path(args.carpeta)
+    plan = load_plan(folder / "plan.json")
+    csv_path = folder / "metricas.csv"
+    rows = read_rows(csv_path)
+    phases = read_phases(folder)
+    root = project_root(folder).resolve()
+    wanted = [normalize_phase(item) for item in (args.fase or "").split(",") if item.strip()] or \
+        [phase for phase in FASES if phase in phases]
+    flows = [args.flujo] if args.flujo else list(plan["flujos"])
+    tp = find_tp(args.tp)
+    queries = [("metricas", fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), plan["paquete"],
+                                     {"INPUT_GLOB": plan.get("input_slices") or INPUT_SLICES}))]
+    replaced, absent, missing_traces, done, totals = {}, {}, [], [], {}
+    for phase in wanted:
+        for flow_name in flows:
+            spec = plan["flujos"].get(flow_name)
+            if spec is None:
+                raise PerfError("el flujo '%s' no está en el plan (flujos: %s)" % (flow_name, ", ".join(plan["flujos"])))
+            runs = sorted({to_int(r["corrida"]) for r in rows if r["fase"] == phase and r["flujo"] == flow_name})
+            if not runs:
+                continue
+            known = {r["metrica"] for r in rows if r["flujo"] == flow_name}
+            hz = plan.get("hz") if isinstance(plan.get("hz"), int) else None  # sin el del plan, la tasa de cada traza
+            print("… recalculando %s (%s): %d corridas" % (phase, flow_name, len(runs)), flush=True)
+            for run in runs:
+                try:
+                    trace = trace_of(folder, phase, flow_name, run)
+                except PerfError:
+                    missing_traces.append("%s %s corrida %d" % (phase, flow_name, run))
+                    continue
+                results = run_tp_batch(tp, trace, queries)
+                if not results["metricas"]:
+                    raise PerfError("trace_processor no devolvió las filas de metricas.sql para %s" % trace)
+                # sdk 30: la corrida ya se validó al capturarla; aquí no se descarta por no tener frames (con frames, se
+                # calculan igual).
+                metrics, _, info = trace_metrics(trace_rows(*results["metricas"][-1]), hz, spec, known, 30)
+                for mark, _, seen in info.get("marcas_plan") or []:
+                    if not seen:
+                        absent.setdefault((phase, flow_name, mark), []).append(run)
+                totals[(phase, flow_name)] = len(runs)
+                replaced[(phase, flow_name, run)] = {m[0]: m for m in with_families(metrics, spec.get("familias"))}
+            done.append((phase, flow_name))
+    if not replaced:
+        raise PerfError("no hay corridas con traza que recalcular en %s (fases: %s)" % (folder, ", ".join(wanted) or "ninguna"))
+    out, seen = [], set()
+    for row in rows:
+        key = (row["fase"], row["flujo"], to_int(row["corrida"]))
+        fresh = replaced.get(key)
+        if fresh is not None and row["metrica"] in fresh:
+            name, value, unit, family = fresh[row["metrica"]]
+            out.append(dict(row, valor=fmt(value), unidad=unit, familia=family))
+            seen.add(key + (row["metrica"],))
+        else:
+            out.append(row)
+    added = 0
+    for key, fresh in replaced.items():
+        for name, (metric, value, unit, family) in fresh.items():
+            if key + (name,) not in seen:
+                out.append(metric_row(key[0], key[1], key[2], metric, value, unit, family))
+                added += 1
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        fieldnames = next(csv.reader(handle))
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(out)
+    print("✔ %s: %d corridas recalculadas, %d métricas nuevas" % (csv_path, len(replaced), added))
+    for item in missing_traces[:10]:
+        print("⚠ sin traza guardada: %s (queda con sus valores de antes)" % item)
+    # La huella del plan de las fases recalculadas: sus métricas ya son las del plan de ahora.
+    now = read_phases(folder)
+    stamp_now = datetime.datetime.now().replace(microsecond=0).isoformat()
+    for phase, _ in done:
+        if isinstance(now.get(phase), dict):
+            now[phase]["recalculada"] = stamp_now  # un reporte anterior ya no muestra estos valores (X3)
+    for phase, flow_name in done:
+        record = now.get(phase)
+        if isinstance(record, dict) and isinstance((record.get("flujos") or {}).get(flow_name), dict):
+            prints = record["flujos"][flow_name].get("plan") or {}
+            prints["metricas"] = flow_fingerprints(plan["flujos"][flow_name])["metricas"]
+            record["flujos"][flow_name]["plan"] = prints
+    save_phases(folder, now)
+    if absent:
+        for (phase, flow_name, mark), runs in sorted(absent.items()):
+            print("✖ La marca %s no está en las trazas de %s (%s, corridas %s): las métricas que la usan no se pueden "
+                  "recalcular; hay que medir de nuevo con ella:" % (mark, phase, flow_name, ", ".join(map(str, runs[:10]))))
+            print("    %s" % perf_command(root, *(capture_args(folder, plan, flow_name, root)
+                                               + ["--fase", phase, "--corridas", totals.get((phase, flow_name),
+                                                                                             len(runs)), "--rehacer"])))
+    write_summary(csv_path, read_rows(csv_path), plan)
+    print_next(folder, plan)
+
+
 def cmd_comparar(args):
     rows = read_rows(args.csv)
     plan = load_plan_beside(args.csv)
     folder = pathlib.Path(args.csv).parent
     trust = frames_trust(folder)
     results, unmatched = compare(rows, trust=trust)
+    marks_moved = flag_mark_changes(results, folder, plan)
     chosen = compact_compare(results, plan, everything=args.todo)
     table = markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen[:None if args.todo else MAX_ROWS]])
     print(table)
@@ -6651,7 +7884,7 @@ def cmd_comparar(args):
         print("✖ %d regresiones: repórtalas aunque no sean métricas principales." % len(regressions))
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
-    notes += config_notes(folder, sorted({r["flujo"] for r in rows}))
+    notes += config_notes(folder, sorted({r["flujo"] for r in rows})) + marks_moved
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -8259,6 +9492,7 @@ def cmd_reporte(args):
         return
 
     results, unmatched = compare(rows, trust=frames_trust(folder))
+    marks_moved = flag_mark_changes(results, folder, plan)
     principales = plan.get("principales") or []
     primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
     missing = [m for m in principales if m not in {r["metrica"] for r in results}]
@@ -9930,6 +11164,43 @@ def main(argv=None):
     p.add_argument("--esfuerzo", help="esfuerzo de razonamiento del chat (bajo, medio, alto)")
     p.add_argument("--pasos", help="requests o pasos del agente, si tu herramienta los muestra")
     p.set_defaults(func=cmd_consumo)
+
+    p = sub.add_parser("cerrar", help="quita los cambios temporales de la investigación con un parche por repo, sin perderlos",
+                       description="Por cada repo de 'Cambios temporales por revertir' (estado.md): muestra qué archivos "
+                                   "quita y cuáles quedan (las mejoras y lo que ya estaba modificado), guarda el parche "
+                                   "sin pisar otro (en la carpeta de parches de AGENTS.md o en <carpeta>/parches), "
+                                   "comprueba que revierte limpio, quita, muestra git status y marca las filas en "
+                                   "estado.md. Nunca usa checkout, restore, reset --hard ni clean; si algo no revierte "
+                                   "limpio, se detiene sin tocar nada. Las filas cuyo 'Qué es' dice 'setup' van en un "
+                                   "parche aparte y AGENTS.md dice cómo ponerlo antes de medir.")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--simular", action="store_true", help="solo muestra qué quitaría y qué quedaría; no toca nada")
+    p.set_defaults(func=cmd_cerrar)
+
+    p = sub.add_parser("lineabase", help="quita o reaplica el código de las mejoras para rehacer la línea base",
+                       description="Para medir antes y control de nuevo sin las mejoras aplicadas (por ejemplo, porque "
+                                   "cambiaron las marcas): --quitar-mejoras guarda el diff de cada mejora en un parche "
+                                   "(sin pisar otro), comprueba que revierte limpio y lo quita; --reaplicar-mejoras lo "
+                                   "vuelve a poner. `siguiente` da la secuencia completa.")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--quitar-mejoras", dest="quitar_mejoras", action="store_true")
+    p.add_argument("--reaplicar-mejoras", dest="reaplicar_mejoras", action="store_true")
+    p.add_argument("--registrar", action="append", metavar="PARCHE",
+                   help="registra un parche de mejoras que se quitó a mano (se repite por parche): `siguiente` lo reaplica "
+                        "antes de medir después")
+    p.add_argument("--simular", action="store_true", help="solo comprueba y muestra qué haría")
+    p.set_defaults(func=cmd_lineabase)
+
+    p = sub.add_parser("recalcular", help="recalcula las métricas del plan sobre las trazas guardadas, sin capturar",
+                       description="Cuando el plan cambió después de medir (una métrica o un tramo nuevos) y las marcas "
+                                   "que usa ya están en las trazas: vuelve a calcular las métricas de la traza de cada "
+                                   "corrida válida y actualiza metricas.csv. Si una marca no está en las trazas, lo dice "
+                                   "y da el comando para medir de nuevo.")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--fase", help="antes, control o despues (separadas por coma); por defecto, todas las medidas")
+    p.add_argument("--flujo")
+    p.add_argument("--tp", help="ruta de trace_processor")
+    p.set_defaults(func=cmd_recalcular)
 
     p = sub.add_parser("decidir", help="registra la decisión del usuario sobre las mejoras del plan")
     p.add_argument("--carpeta", required=True)

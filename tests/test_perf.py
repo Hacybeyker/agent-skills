@@ -10,6 +10,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import shutil
 import signal
 import stat
@@ -51,8 +52,10 @@ MS = 1_000_000
 
 def without_new(record):
     """Un registro de fases.json sin los campos opcionales que agregan 0.9.0 y 0.10.0 (la versión de la skill, la
-    configuración, si el build era depurable y las opciones de desarrollador)."""
-    return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes")}
+    configuración, si el build era depurable y las opciones de desarrollador) y 0.11.0 (la huella de las marcas y del
+    plan)."""
+    return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes", "marcas",
+                                                                         "plan")}
 
 
 class PerfBase(unittest.TestCase):
@@ -686,7 +689,7 @@ class CaptureTest(DeviceBase):
         self.tp_outputs(GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
         self.assertIn("compilación de ART fijada", out)
-        self.assertIn("corrida 2/2", out)
+        self.assertIn("corrida 2 de 2", out)
         data = {(k[0], k[1], k[2]): v for k, v in self.read_csv_at(self.plan.parent / "metricas.csv").items()}
         self.assertEqual(data[("antes", "jank_app_pct", "1")]["valor"], "10")
         self.assertEqual(data[("antes", "red_solapadas", "2")]["valor"], "1")
@@ -761,7 +764,7 @@ class CaptureTest(DeviceBase):
         # detienen la captura con el motivo, sin gastar los 15 intentos.
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         self.assertIn("⚠ calentamiento: 'preparar' terminó con código 1", result.stdout)
-        self.assertEqual(result.stdout.count("inválida: 'preparar' terminó con código 1 (se repite)"), 3)
+        self.assertEqual(result.stdout.count("(inválido, buscaba la corrida 1 de 10): 'preparar' terminó con código 1 (se repite)"), 3)
         self.assertIn("3 corridas inválidas seguidas (última: 'preparar' terminó con código 1)", result.stderr)
 
     def test_tres_corridas_invalidas_seguidas_detienen_la_captura(self):
@@ -769,13 +772,13 @@ class CaptureTest(DeviceBase):
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
                            "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("inválida"), 3)
+        self.assertEqual(result.stdout.count("(inválido"), 3)
         self.assertIn("3 corridas inválidas seguidas", result.stderr)
         self.assertIn("las 0 válidas quedan guardadas", result.stderr)
         self.tp_outputs(GOOD, LOGIN, LOGIN, GOOD, LOGIN, GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "3",
                       "--calentamiento", "0", "--sin-compilar", "--rehacer")
-        self.assertIn("corrida 3/3", out)  # dos inválidas seguidas no detienen: el contador se reinicia con una válida
+        self.assertIn("corrida 3 de 3", out)  # dos inválidas seguidas no detienen: el contador se reinicia con una válida
 
     def test_el_tope_de_intentos_crece_con_las_corridas_pedidas(self):
         self.assertEqual([perf.max_attempts(n) for n in (1, 5, 6, 10, 20)], [4, 8, 9, 15, 30])
@@ -785,8 +788,8 @@ class CaptureTest(DeviceBase):
         self.tp_outputs(GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, GOOD, GOOD, GOOD, GOOD, GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
                       "--calentamiento", "0", "--sin-compilar")
-        self.assertEqual(out.count("✖ corrida"), 4)
-        self.assertIn("corrida 10/10", out)
+        self.assertEqual(out.count("✖ intento"), 4)
+        self.assertIn("corrida 10 de 10", out)
 
     def test_con_pocas_corridas_el_tope_sigue_siendo_tres_intentos_de_mas(self):
         self.tp_outputs(LOGIN, GOOD, LOGIN, GOOD, LOGIN, GOOD, LOGIN)
@@ -806,7 +809,7 @@ class CaptureTest(DeviceBase):
         self.tp_outputs(GOOD, marks, marks)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
         self.assertIn("sin marcas para detalle_ms, ventana: el recorrido no completó el flujo", out)
-        self.assertIn("corrida 2/2", out)
+        self.assertIn("corrida 2 de 2", out)
         self.assertTrue(list((self.plan.parent / "antes").glob("*_invalida_*")))
         data = self.read_csv_at(self.plan.parent / "metricas.csv")
         self.assertEqual(len({k[2] for k in data}), 2)  # la inválida no entra al CSV
@@ -828,10 +831,11 @@ class CaptureTest(DeviceBase):
         self.tp_outputs(LOGIN, GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
                       "--calentamiento", "0", "--sin-compilar")
-        self.assertIn("inválida", out)
+        self.assertIn("✖ intento 1 (inválido, buscaba la corrida 1 de 1)", out)
         files = sorted(p.name for p in (self.plan.parent / "antes").iterdir())
-        self.assertTrue(any("invalida" in f for f in files), files)
-        self.assertEqual({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}, {"2"})
+        self.assertTrue(any(name.startswith("home_1_intento1_invalida_") for name in files), files)
+        # el intento inválido no gasta un número: la corrida válida es la 1, como dice la salida
+        self.assertEqual({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}, {"1"})
 
     def test_sin_corridas_validas_sale_con_codigo_5(self):
         self.tp_outputs(LOGIN)
@@ -875,7 +879,7 @@ class CaptureTest(DeviceBase):
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
                       "--calentamiento", "0", "--sin-compilar", stdin="x\n\n")
         self.assertIn("descartada por el usuario", out)
-        self.assertEqual({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}, {"2"})
+        self.assertEqual({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}, {"1"})
 
     def test_falta_trace_processor(self):
         (self.dir / "bin" / "trace_processor").unlink()
@@ -1520,15 +1524,19 @@ class NextStepTest(PerfBase):
         self.assertEqual(step["esfuerzo"], "medio")
         self.plan["mejoras"][1]["estado"] = "aplicada"
         title, steps = self.step()
-        self.assertEqual(title, "medición después (sin chat)")
+        self.assertEqual(title, "prueba de marcas con la mejora (sin chat)")  # X1: antes de después, la prueba
         self.assertIn("guárdalo como 'instalar'", steps[0]["texto"])
+        self.assertIn("--prueba", steps[1]["texto"])
         self.plan["instalar"] = "./gradlew :app:installProfiling"
         self.plan["serial"] = "ABC123"
         steps = self.step()[1]
         self.assertTrue(steps[0]["texto"].endswith("&& ANDROID_SERIAL=ABC123 ./gradlew :app:installProfiling"))
-        self.assertIn("--fase despues --corridas 10", steps[1]["texto"])
         self.plan["instalar"] = "adb -s ABC123 install -r app.apk"
         self.assertNotIn("ANDROID_SERIAL", self.step()[1][0]["texto"])
+        perf.save_test_record(self.folder, "arranque-frio", ["MARK x"], [])  # una prueba con todas las marcas
+        title, steps = self.step()
+        self.assertEqual(title, "medición después (sin chat)")
+        self.assertIn("--fase despues --corridas 10", steps[0]["texto"])
         self.plan["modelos"] = {"economico": "GPT-5 mini"}
         self.phases("antes", "control", "despues")
         title, steps = self.step()
@@ -1614,10 +1622,12 @@ class NextStepTest(PerfBase):
         self.plan["mejoras"][1]["estado"] = "aplicada"
         self.plan["mejoras"][1]["aplicada_en"] = "2026-11-06T12:00:00"  # después de fases.despues (2026-11-05)
         self.plan["instalar"] = "./gradlew app:installProfiling"
+        self.assertEqual(self.step()[0], "prueba de marcas con la mejora (sin chat)")
+        perf.save_test_record(self.folder, "arranque-frio", [], [])
         title, steps = self.step()
         self.assertEqual(title, "medición después (sin chat)")
-        self.assertIn("--fase despues --corridas 10 --rehacer", steps[1]["texto"])
-        self.assertIn("de nuevo", steps[1]["que"])
+        self.assertIn("--fase despues --corridas 10 --rehacer", steps[0]["texto"])
+        self.assertIn("de nuevo", steps[0]["que"])
         self.save()
         self.ok("decidir", "--carpeta", self.folder, "--aplicada", "M2")
         plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
@@ -1663,7 +1673,7 @@ class NextStepTest(PerfBase):
         self.assertNotIn("<AAAA-MM-DD", state)
         self.assertIn("| M2 | M2 |", state)
         out = self.ok("decidir", "--carpeta", self.folder, "--aplicada", "M1")
-        self.assertIn("medición después", out)
+        self.assertIn("prueba de marcas con la mejora", out)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
         self.assertLess(state.index("aprobadas M1"), state.index("aplicadas M1"))
         result = self.perf("decidir", "--carpeta", self.folder, "--aprobar", "M9")
@@ -2373,10 +2383,10 @@ class SegmentsCaptureTest(DeviceBase):
         self.tp_outputs(GOOD, marks, marks)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
         self.assertIn("sin marcas para detalle hilo_max_ms: el recorrido no completó el flujo", out)
-        self.assertIn("corrida 2/2", out)
+        self.assertIn("corrida 2 de 2", out)
         data = self.read_csv_at(self.plan.parent / "metricas.csv")
         values = sorted((k[2], v["valor"], v["familia"]) for k, v in data.items() if k[1] == "detalle hilo_max_ms")
-        self.assertEqual(values, [("2", "30", "app"), ("3", "30", "app")])
+        self.assertEqual(values, [("1", "30", "app"), ("2", "30", "app")])
         self.assertEqual(len([k for k in data if k[1] == "detalle frame_p90_ms"]), 2)
         self.assertIn("detalle hilo_max_ms", out[out.index("| Fase |"):])  # en el resumen compacto de la fase
 
@@ -2391,7 +2401,7 @@ class SegmentsCaptureTest(DeviceBase):
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2",
                            "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
-        self.assertIn("inválida: sin frames en el tramo para detalle frame_p90_ms", result.stdout)
+        self.assertIn("): sin frames en el tramo para detalle frame_p90_ms", result.stdout)
         self.assertNotIn("sin marcas para", result.stdout)
         self.assertIn("usa '<tramo> hilo_max_ms' como principal", result.stderr)
 
@@ -2619,9 +2629,9 @@ class RouteChecksTest(DeviceBase):
         # un swipe de 300 ms: sus MOVE siguen llegando cada 20 ms después de la marca de inicio del scroll
         swipe = [("input", (1000 + i * 20) * MS, MS, 0, "deliverInputEvent src=0x1002") for i in range(16)]
         rows = [("proceso", 0, 0, 0, PKG), ("frame", 0, 16 * MS, 0, "None"), ("seccion", 1010 * MS, 0, 0, "MARK scroll_inicio"),
-                ("seccion", 2000 * MS, 0, 0, "MARK scroll_fin")] + swipe
+                ("seccion", 2000 * MS, 0, 0, "MARK lista_fin")] + swipe
         flow = {"metricas_usuario": [{"nombre": "scroll_ms", "desde": {"marca": "MARK scroll_inicio"},
-                                      "hasta": {"marca": "MARK scroll_fin"}}]}
+                                      "hasta": {"marca": "MARK lista_fin"}}]}
         self.assertEqual(perf.trace_metrics(rows, 60, flow, set(), 34)[2]["con_input"], {})
         late = rows + [("input", 1700 * MS, MS, 0, "deliverInputEvent src=0x1002")]  # otro gesto, 400 ms después del swipe
         self.assertEqual(perf.trace_metrics(late, 60, flow, set(), 34)[2]["con_input"], {"scroll_ms": 1})
@@ -2742,6 +2752,9 @@ class RedoFlowTest(DeviceBase):
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
         plan["mejoras"] = [{"id": "M1", "titulo": "a", "estado": "aplicada", "aplicada_en": "2026-11-07T10:00:00"}]
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        # X1: con una mejora aplicada después de la última corrida de prueba, primero la prueba de las marcas
+        self.assertEqual(perf.next_steps(self.folder, plan)[0], "prueba de marcas con la mejora (sin chat)")
+        perf.save_test_record(self.folder, "home", ["NAV Home"], [])
         self.assertEqual(perf.next_steps(self.folder, plan)[0], "medición después (sin chat)")
         self.env["FAKE_UPDATED"] = "2026-11-08 09:00:00"
         out = self.ok(*(common + ["--fase", "despues", "--flujo", "home", "--rehacer"]))
@@ -2820,7 +2833,7 @@ class PrepareSecretsTest(DeviceBase):
         self.assertEqual(result.stdout.count("✖ 'preparar' falló (código 7). Sus últimas líneas"), 1)
         self.assertIn("    escribiendo *** con ***", result.stdout)
         self.assertIn("    FAILED: no aparece Inicio", result.stdout)
-        self.assertEqual(result.stdout.count("inválida: 'preparar' terminó con código 7 (se repite)"), 3)
+        self.assertEqual(result.stdout.count("'preparar' terminó con código 7 (se repite)"), 3)
         log = (self.plan.parent / "logs" / "preparar.log").read_text(encoding="utf-8")
         self.assertEqual(log, "escribiendo *** con ***\nFAILED: no aparece Inicio\n")
         self.assertIn(str(self.plan.parent / "logs" / "preparar.log"), result.stdout)
@@ -4028,8 +4041,8 @@ class CaptureFeedbackTest(DeviceBase):
         done = re.search(r"✔ compilación de ART fijada: completa \(speed\), igual en todas las fases \(tardó \d+ s\)", out)
         self.assertLess(before, done.start())
         self.assertLess(done.start(), out.index("… calentamiento 1 de 1 (no cuenta)"))
-        self.assertLess(out.index("… procesando la traza 1 de 2"), out.index("corrida 1/2"))
-        self.assertLess(out.index("corrida 1/2"), out.index("… procesando la traza 2 de 2"))
+        self.assertLess(out.index("… procesando la traza de la corrida 1 de 2"), out.index("✔ corrida 1 de 2"))
+        self.assertLess(out.index("✔ corrida 1 de 2"), out.index("… procesando la traza de la corrida 2 de 2"))
         self.assertEqual(perf.elapsed_text(42.4), "42 s")
         self.assertEqual(perf.elapsed_text(185), "3 min 05 s")
         out = self.ok("diagnostico", "--carpeta", self.plan.parent, "--flujo", "home")
@@ -4198,7 +4211,7 @@ class CaptureFeedbackTest(DeviceBase):
                       "archivo, y le falta el final. Sube 'duracion_max_s' en el flujo del plan", result.stderr)
         result = self.capture("--fase", "antes", "--corridas", "2", "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 5)
-        self.assertEqual(result.stdout.count("inválida: la traza terminó antes que el recorrido"), 3)
+        self.assertEqual(result.stdout.count("): la traza terminó antes que el recorrido"), 3)
         del self.env["FAKE_TRAZA_CORTADA"]
         self.assertEqual(self.capture("--prueba").returncode, 0)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
@@ -4440,7 +4453,7 @@ class HumanPauseTest(DeviceBase):
         write(tty, "\n\n")  # una respuesta por corrida
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2",
                       "--calentamiento", "0", "--sin-compilar")
-        self.assertIn("corrida 2/2", out)
+        self.assertIn("corrida 2 de 2", out)
         self.assertEqual(tty.read_text(encoding="utf-8").count("▶ PAUSA"), 2)
 
     def test_una_x_en_la_pausa_invalida_la_corrida_y_se_repite(self):
@@ -4703,7 +4716,7 @@ class SegmentNetworkTest(DeviceBase):
                       "--calentamiento", "0", "--sin-compilar")
         self.assertIn("sin marcas para pago red_llamadas: el recorrido no completó el flujo", out)
         data = self.read_csv_at(self.plan.parent / "metricas.csv")
-        self.assertEqual(sorted((k[2], v["valor"]) for k, v in data.items() if k[1] == "pago red_llamadas"), [("2", "1"), ("3", "1")])
+        self.assertEqual(sorted((k[2], v["valor"]) for k, v in data.items() if k[1] == "pago red_llamadas"), [("1", "1"), ("2", "1")])
         self.assertFalse([k for k in data if k[1].startswith("pago hilo") or k[1].startswith("pago frame")])
 
     def read_csv_at(self, path):
@@ -6074,8 +6087,9 @@ class ExitInfoTest(DeviceBase):
         self.exit_info(EXIT_ANDROID_13)  # poca memoria a las 10:00:01, pid 1234: dentro de la primera corrida
         result = self.capture("--fase", "antes", "--corridas", "2")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("✖ corrida 1 inválida: la app salió: poca memoria (la cerró el sistema) · memory pressure", result.stdout)
-        self.assertIn("corrida 2/2", result.stdout)  # se repite con las reglas de siempre
+        self.assertIn("✖ intento 1 (inválido, buscaba la corrida 1 de 2): la app salió: poca memoria (la cerró el sistema) · "
+                      "memory pressure", result.stdout)
+        self.assertIn("corrida 2 de 2", result.stdout)  # se repite con las reglas de siempre
         folder = self.plan.parent
         self.assertTrue(any("_invalida_la-app-sali" in f.name for f in (folder / "antes").iterdir()))
         runs = {r["corrida"] for r in perf.read_rows(folder / "metricas.csv")}
@@ -6680,7 +6694,10 @@ class NoCommitLineTest(DeviceBase):
         write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 5, "skill": perf.VERSION},
                                                  "control": {"fecha": "2026-11-05T10:20:00", "corridas": 5}}))
         outputs["decidir (sesión 3)"] = self.ok("decidir", "--carpeta", folder, "--aprobar", "M1")
-        outputs["decidir --aplicada (sesión 4)"] = self.ok("decidir", "--carpeta", folder, "--aplicada", "M1")
+        applied = self.ok("decidir", "--carpeta", folder, "--aplicada", "M1")
+        self.assertIn("prueba de marcas con la mejora", applied)  # X1: primero la corrida de prueba, sin chat
+        perf.save_test_record(folder, "home", ["NAV Home"], [])
+        outputs["siguiente tras la prueba (sesión 4)"] = self.ok("siguiente", "--carpeta", folder)
         outputs["reporte --inicial"] = self.ok("reporte", "--carpeta", folder, "--inicial")
         self.tp_outputs(GOOD)
         write(self.dir / "reports/perf/setup/pedido.json", json.dumps({"flujo": "de la lista al detalle", "llegar": ""}))
@@ -7221,8 +7238,9 @@ class CutRunTest(DeviceBase):
         self.assertEqual(code, 0, out)
         self.assertLess(time.time() - started, 45)  # no esperó los 60 s del recorrido desviado
         self.assertEqual(out.count("x + Enter la corta"), 1)  # lo dice una vez, al empezar
-        self.assertIn("✖ corrida 1 inválida: cortada a mano (x + Enter): su traza se descartó sin procesarla; se repite", out)
-        self.assertIn("corrida 2/2", out)
+        self.assertIn("✖ intento 1 (inválido, buscaba la corrida 1 de 2): cortada a mano (x + Enter): su traza se descartó sin "
+                      "procesarla; se repite", out)
+        self.assertIn("corrida 2 de 2", out)
         phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
         self.assertEqual(phases["antes"]["corridas"], 2)
         self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"], {"cortada a mano": 1})
@@ -7262,9 +7280,9 @@ class CutRunTest(DeviceBase):
                                       "1", "--calentamiento", "0", "--sin-compilar"], react)
         self.assertEqual(code, 0, out)
         self.assertEqual(answered, ["x\n", "\n"])
-        self.assertIn("✖ corrida 1 inválida: el recorrido terminó con código 1", out)  # la descartó la pausa
+        self.assertIn("✖ intento 1 (inválido, buscaba la corrida 1 de 1): el recorrido terminó con código 1", out)  # la descartó la pausa
         self.assertNotIn("cortada a mano", out)
-        self.assertIn("corrida 1/1", out)
+        self.assertIn("corrida 1 de 1", out)
         self.assertEqual(set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*")), flags_before)  # sin bandera vieja
 
     def test_sin_terminal_interactiva_no_hay_corte_ni_aviso(self):
@@ -7316,7 +7334,8 @@ class CutRunTest(DeviceBase):
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
                            "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("✖ corrida 1 inválida: apareció 'SCREEN LoginActivity onCreate' (traza guardada para auditoría)\n"
+        self.assertIn("✖ intento 1 (inválido, buscaba la corrida 1 de 1): apareció 'SCREEN LoginActivity onCreate' (traza "
+                      "guardada para auditoría)\n"
                       "  Hasta dónde llegó: última marca vista: SCREEN LoginActivity onCreate a los 0 s", result.stdout)
         self.assertEqual(perf.reach_text({}), "no se pudo leer la traza para saberlo")
         self.assertEqual(perf.reach_text({"ultima_marca": None, "marcas_plan": [("MARK lista", ["ventana.hasta"], False)]}),
@@ -7342,12 +7361,12 @@ class CutRunTest(DeviceBase):
         self.tp_outputs(GOOD)
         self.env["FAKE_FOCO"] = "com.ejemplo.app/com.ejemplo.app.ListaActivity"  # la pantalla esperada: sigue
         capture = ("capturar", "--plan", folder / "plan.json", "--fase", "antes", "--calentamiento", "0", "--sin-compilar")
-        self.assertIn("corrida 1/1", self.ok(*capture, "--corridas", "1"))
+        self.assertIn("corrida 1 de 1", self.ok(*capture, "--corridas", "1"))
         self.env["FAKE_FOCO"] = "com.ejemplo.otra/com.ejemplo.otra.AvisoActivity"  # se fue a otra pantalla
         result = self.perf(*capture, "--corridas", "2")
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         self.assertIn("punto de control: 'ListaActivity' no está al frente", result.stderr)
-        self.assertEqual(result.stdout.count("inválida: el recorrido terminó con código 1"), 3)
+        self.assertEqual(result.stdout.count("): el recorrido terminó con código 1"), 3)
         self.assertEqual(result.stdout.count("  Hasta dónde llegó: última marca vista: SCREEN MainActivity onResume"), 3)
         self.assertIn("3 corridas inválidas seguidas (última: el recorrido terminó con código 1)", result.stderr)
 
@@ -7538,98 +7557,174 @@ class SafeRevertTest(PerfBase):
         self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
         return out
 
-    def test_el_cierre_da_primero_el_parche_y_despues_quitar_con_apply_r(self):
+    def close_command(self, out):
+        """El comando `cerrar` que entrega `siguiente`, tal cual se pega."""
+        line = next(line for line in out.splitlines() if " cerrar --carpeta " in line)
+        return line.strip()
+
+    def test_el_cierre_es_un_solo_comando_que_se_pega_tal_cual(self):
         out = self.notice()
-        self.assertIn("Cambios temporales por revertir (primero el parche, después quitar):", out)
-        self.assertIn("Sin revertir (2): `app/Lista.kt`, `app/Nuevo.kt`", out)  # el revertido no se lista; sin la línea
-        save = next(line for line in out.splitlines() if "Primero guarda el parche" in line)
-        remove = next(line for line in out.splitlines() if "Después quítalos" in line)
-        self.assertLess(out.index(save), out.index(remove))
-        self.assertIn("git add -N -- app/Nuevo.kt && { [ -s <carpeta-fuera-del-repo>/lista-2026-11-09.patch ] || git diff "
-                      "--binary -- app/Lista.kt app/Nuevo.kt > <carpeta-fuera-del-repo>/lista-2026-11-09.patch; } && git "
-                      "apply --check -R <carpeta-fuera-del-repo>/lista-2026-11-09.patch", save)
-        self.assertIn("git apply -R <carpeta-fuera-del-repo>/lista-2026-11-09.patch && git reset -q -- app/Nuevo.kt", remove)
-        self.assertIn("Nunca quites un cambio temporal con `git checkout`, `git restore`, `git reset --hard` ni `git clean`",
-                      out)
-        for line in out.splitlines():  # ningún comando propuesto descarta un archivo
-            if line.strip().startswith(("Primero", "Después", "cd ")) or "`cd " in line:
-                for command in re.findall(r"`(cd [^`]+)`", line):
-                    self.assertIsNone(re.search(r"git (checkout|restore|clean|reset --hard)", command), command)
+        self.assertIn("quita los 2 cambios temporales que siguen puestos (app/Lista.kt, app/Nuevo.kt)", out)
+        command = self.close_command(out)
+        self.assertTrue(command.startswith("cd %s && python3 -I " % self.dir.resolve()), command)
+        self.assertTrue(command.endswith("cerrar --carpeta reports/perf/lista/2026-11-09"), command)
+        self.assertEqual(shlex.split(command)[-3:], ["cerrar", "--carpeta", "reports/perf/lista/2026-11-09"])
+        self.assertNotIn("<", command)
+        self.assertNotIn("...", command)
+        self.assertIsNone(re.search(r"git (checkout|restore|clean|reset --hard)", command))
+        self.assertEqual(subprocess.run(["bash", "-n", "-c", command]).returncode, 0)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
-        self.assertIn("**Cambios temporales por revertir (primero el parche, después quitar):**", state)
+        self.assertIn("cerrar --carpeta reports/perf/lista/2026-11-09`", state)
 
-    def test_los_comandos_que_entrega_guardan_y_quitan_sin_perder_nada(self):
+    def test_cerrar_guarda_el_parche_quita_y_marca_las_filas(self):
         (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca temporal\n", encoding="utf-8")
-        patches = self.dir.parent / (self.dir.name + "-parches")
-        patches.mkdir()
-        out = self.notice().replace("<carpeta-fuera-del-repo>", str(patches))
-        commands = [found for line in out.splitlines() if "guarda el parche" in line or "quítalos" in line
-                    for found in re.findall(r"`(cd [^`]+)`", line)]
-        self.assertEqual(len(commands), 2, out)
-        try:
-            for command in commands:
-                done = subprocess.run(command, shell=True, capture_output=True, text=True)
-                self.assertEqual(done.returncode, 0, command + "\n" + done.stderr)
-            self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
-            self.assertFalse((self.dir / "app" / "Nuevo.kt").exists())  # el archivo nuevo salió con el parche
-            patch = patches / "lista-2026-11-09.patch"
-            self.assertIn("marca temporal", patch.read_text(encoding="utf-8"))
-            # repetir el paso de guardar con los cambios ya fuera no vacía el parche, que es la única copia
-            subprocess.run(commands[0], shell=True, capture_output=True, text=True)
-            self.assertIn("marca temporal", patch.read_text(encoding="utf-8"))
-            self.assertIn("lista-2026-11-09.patch", self.notice())  # con el archivo nuevo ya quitado, el mismo parche
-            self.assertNotIn("-1.patch", self.notice())
-            again = subprocess.run(["git", "apply", str(patch)], cwd=str(self.dir), capture_output=True, text=True)
-            self.assertEqual(again.returncode, 0, again.stderr)  # y se puede volver a poner
-            self.assertIn("marca temporal", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))
-            self.assertTrue((self.dir / "app" / "Nuevo.kt").is_file())
-        finally:
-            shutil.rmtree(str(patches), ignore_errors=True)
+        command = self.close_command(self.notice())
+        simulated = subprocess.run(command + " --simular", shell=True, capture_output=True, text=True)
+        self.assertEqual(simulated.returncode, 0, simulated.stdout + simulated.stderr)
+        self.assertIn("Quita (cambios temporales): app/Lista.kt, app/Nuevo.kt", simulated.stdout)
+        self.assertIn("no guardé ni quité nada", simulated.stdout)
+        self.assertIn("marca temporal", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))  # nada tocado
+        done = subprocess.run(command, shell=True, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
+        self.assertFalse((self.dir / "app" / "Nuevo.kt").exists())  # el archivo nuevo salió con el parche
+        patches = list((self.folder / "parches").glob("*.patch"))
+        self.assertEqual(len(patches), 1, patches)
+        self.assertIn("marca temporal", patches[0].read_text(encoding="utf-8"))
+        self.assertIn("git status --short en %s:" % self.dir.resolve(), done.stdout)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("| `app/Lista.kt:12` | app | marca temporal | — | sí · perf.py cerrar", state)
+        self.assertEqual([row["revertido"] for row in perf.temp_changes(state)], [True, True, True])
+        again = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("No quedan cambios temporales por revertir", again)
+        self.assertEqual(len(list((self.folder / "parches").glob("*.patch"))), 1)  # no guarda un parche vacío
+        back = subprocess.run(["git", "apply", str(patches[0])], cwd=str(self.dir), capture_output=True, text=True)
+        self.assertEqual(back.returncode, 0, back.stderr)  # y se puede volver a poner
+        self.assertTrue((self.dir / "app" / "Nuevo.kt").is_file())
 
-    def test_un_archivo_que_otra_investigacion_abierta_tambien_declara_va_en_un_parche_aparte(self):
+    def test_un_archivo_que_otra_investigacion_abierta_tambien_declara_se_queda(self):
         other = self.dir / "reports" / "perf" / "detalle" / "2026-11-10"
         self.new_investigation(other, self.ROW % ("app/Lista.kt", "no"))
         closed = self.dir / "reports" / "perf" / "pago" / "2026-11-01"
         self.new_investigation(closed, self.ROW % ("app/Nuevo.kt", "no"), closed=True)  # cerrada: no cuenta
-        out = self.notice()
-        shared = next(line for line in out.splitlines() if "otra investigación abierta" in line)
-        self.assertIn("`app/Lista.kt` también es un cambio temporal de otra investigación abierta "
-                      "(reports/perf/detalle/2026-11-10)", shared)
-        self.assertIn("lista-2026-11-09-compartido-lista-kt.patch", shared)
-        self.assertIn("no lo quites entero", shared)
-        save = next(line for line in out.splitlines() if "Primero guarda el parche" in line)
-        self.assertIn("git diff --binary -- app/Nuevo.kt >", save)  # el parche propio no lleva el archivo compartido
-        self.assertIn("`cd %s && { [ -s" % self.dir.resolve(), shared)
-        self.assertNotIn("Lista.kt", save)
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca de las dos\n", encoding="utf-8")
+        out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("Queda sin quitar: app/Lista.kt: otra investigación abierta (reports/perf/detalle/2026-11-10)", out)
+        self.assertIn("marca de las dos", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))
+        self.assertFalse((self.dir / "app" / "Nuevo.kt").exists())
         self.assertNotIn("pago", out)
+        rows = {row["archivo"]: row["revertido"] for row in perf.temp_changes(
+            (self.folder / "estado.md").read_text(encoding="utf-8"))}
+        self.assertEqual(rows, {"app/Lista.kt": False, "app/Nuevo.kt": True, "app/Detalle.kt": True})
 
     def test_con_carpeta_de_parches_en_agents_md_los_parches_van_ahi(self):
-        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- setup listo\n- Carpeta de parches: `ia/perf/parches`\n")
-        out = self.notice()
-        self.assertIn("mkdir -p ia/perf/parches && git add -N -- app/Nuevo.kt && { [ -s ia/perf/parches/lista-2026-11-09.patch"
-                      " ] || git diff --binary -- app/Lista.kt app/Nuevo.kt > ia/perf/parches/lista-2026-11-09.patch; }", out)
-        self.assertNotIn("<carpeta-fuera-del-repo>", out)
-        # una carpeta con espacios va entre comillas en todo el comando, y el paso de quitar conserva el git reset
-        # del archivo nuevo aunque el de guardar ya lo haya anotado con git add -N
-        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- Carpeta de parches: ../mis parches %s\n" % self.dir.name)
-        out = self.notice()
-        commands = [found for line in out.splitlines() if "guarda el parche" in line or "quítalos" in line
-                    for found in re.findall(r"`(cd [^`]+)`", line)]
         patches = self.dir.parent / ("mis parches %s" % self.dir.name)
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- Carpeta de parches: ../mis parches %s\n" % self.dir.name)
+        commit_all = __import__("helpers").commit_all
+        commit_all(self.dir)  # AGENTS.md no es un cambio temporal
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca\n", encoding="utf-8")
         try:
-            done = subprocess.run(commands[0], shell=True, capture_output=True, text=True)
-            self.assertEqual(done.returncode, 0, commands[0] + "\n" + done.stderr)
-            self.assertTrue((patches / "lista-2026-11-09.patch").stat().st_size > 0)
-            self.assertIn("git reset -q -- app/Nuevo.kt", self.notice())
+            out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+            saved = list(patches.glob("lista-2026-11-09-temporales-*.patch"))
+            self.assertEqual(len(saved), 1, out)
+            self.assertIn("Parche guardado (no pisa ninguno): ", out)
+            self.assertIn("mis parches %s/%s" % (self.dir.name, saved[0].name), out)
+            self.assertFalse((self.folder / "parches").exists())
         finally:
             shutil.rmtree(str(patches), ignore_errors=True)
+
+    def test_dos_repos_y_una_mejora_que_se_queda(self):
+        from helpers import commit_all, init_repo
+        other = self.dir.parent / ("%s-pagos" % self.dir.name)
+        other.mkdir()
+        try:
+            init_repo(other)
+            write(other / "pagos" / "src" / "Pago.kt", "class Pago\n")
+            commit_all(other)
+            write(self.dir / "settings.gradle.kts", 'include(":pagos")\nproject(":pagos").projectDir = file("../%s/pagos")\n'
+                  % other.name)
+            write(self.dir / "app" / "Mejora.kt", "class Mejora\n")
+            commit_all(self.dir)
+            (self.dir / "app" / "Mejora.kt").write_text("class Mejora\n// la mejora M1\n", encoding="utf-8")
+            (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca\n", encoding="utf-8")
+            (other / "pagos" / "src" / "Pago.kt").write_text("class Pago\n// marca en el otro repo\n", encoding="utf-8")
+            write(other / "pagos" / "src" / "Marca.kt", "object Marca\n")  # nuevo en el otro repo
+            self.plan["mejoras"] = [{"id": "M1", "titulo": "Una carga", "estado": "aplicada",
+                                     "cambios": [{"repo": ".", "archivos": ["app/Mejora.kt"], "diff": "cambios/M1.diff"}]}]
+            write(self.folder / "plan.json", json.dumps(self.plan))
+            write(self.folder / "estado.md", STATE_COST % (
+                self.ROW % ("app/Lista.kt", "no") + self.ROW % ("app/Nuevo.kt", "no")
+                + "| `pagos/src/Pago.kt` | %s | marca temporal | — | no |\n" % other.name
+                + "| `pagos/src/Marca.kt` | pagos | marca temporal | — | no |\n"))
+            out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+            self.assertIn("Quedan (no se tocan): app/Mejora.kt (mejora M1)", out)
+            self.assertIn("Repo %s:" % other.resolve(), out)
+            self.assertEqual((self.dir / "app" / "Mejora.kt").read_text(encoding="utf-8"), "class Mejora\n// la mejora M1\n")
+            self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
+            self.assertEqual((other / "pagos" / "src" / "Pago.kt").read_text(encoding="utf-8"), "class Pago\n")
+            self.assertFalse((other / "pagos" / "src" / "Marca.kt").exists())
+            self.assertEqual(len(list((self.folder / "parches").glob("*.patch"))), 2)  # uno por repo
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=str(other), capture_output=True, text=True)
+            self.assertEqual(status.stdout, "")
+        finally:
+            shutil.rmtree(str(other), ignore_errors=True)
+
+    def test_un_archivo_nuevo_que_ya_no_esta_se_da_por_quitado(self):
+        (self.dir / "app" / "Nuevo.kt").unlink()
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca\n", encoding="utf-8")
+        out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
+        rows = {row["archivo"]: row["revertido"] for row in perf.temp_changes(
+            (self.folder / "estado.md").read_text(encoding="utf-8"))}
+        self.assertEqual(rows, {"app/Lista.kt": True, "app/Nuevo.kt": True, "app/Detalle.kt": True})
+        self.assertIn("sin cambios al cerrar", (self.folder / "estado.md").read_text(encoding="utf-8"))
+
+    def test_dos_filas_del_mismo_archivo_van_en_un_solo_diff(self):
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca\n// marca ajustada\n", encoding="utf-8")
+        write(self.folder / "estado.md", STATE_COST % (self.ROW % ("app/Lista.kt:2", "no") + self.ROW % ("app/Lista.kt:3", "no")))
+        out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertIn("Quita (cambios temporales): app/Lista.kt\n", out)
+        self.assertEqual((self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"), "class Lista\n")
+        rows = perf.temp_changes((self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertEqual([row["revertido"] for row in rows], [True, True])
+
+    def test_una_ruta_incompleta_detiene_sin_tocar_nada(self):
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// marca\n", encoding="utf-8")
+        write(self.folder / "estado.md", STATE_COST % (self.ROW % ("app/Lista.kt", "no")
+                                                        + self.ROW % ("app/.../Pantalla.kt, Otra.kt", "no")))
+        result = self.perf("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("no es una ruta completa", result.stderr)
+        self.assertIn("no guardé ni quité nada", result.stderr)
+        self.assertIn("// marca", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))
+        self.assertFalse((self.folder / "parches").exists())
+
+    def test_el_setup_en_parche_queda_anotado_en_agents_md(self):
+        from helpers import commit_all
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- Instrumentación: PerfHooks\n\n## Git\n\n- x\n")
+        commit_all(self.dir)
+        write(self.dir / "app" / "src" / "perf" / "PerfHooks.kt", "object PerfHooks\n")
+        write(self.dir / "app" / "Marca.kt", "object Marca\n")
+        write(self.folder / "estado.md", STATE_COST % ("| `app/src/perf/PerfHooks.kt` | app | setup de medición | — | no |\n"
+                                                        + self.ROW % ("app/Marca.kt", "no")))
+        out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
+        saved = sorted(path.name for path in (self.folder / "parches").glob("*.patch"))
+        self.assertEqual(len(saved), 2, saved)
+        self.assertTrue(any(name.startswith("perf-setup-") for name in saved), saved)
+        agents = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
+        section = agents.split("## Rendimiento")[1].split("## Git")[0]
+        self.assertIn("- Setup listo, en parche: `git -C %s apply " % self.dir.resolve(), section)
+        self.assertIn("antes de medir;", section)
+        self.assertIn("apply -R", section)
+        self.assertIn("instrumentación en el repo: no", section)  # el bloque de estado, al día
+        self.assertIn("- Instrumentación: PerfHooks", section)  # lo demás no se toca
 
     def test_antes_de_medir_despues_no_se_propone_quitar_nada(self):
         self.plan["mejoras"] = [{"id": "M1", "titulo": "Una sola carga", "estado": "aplicada"}]
         write(self.folder / "plan.json", json.dumps(self.plan))
         out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
-        self.assertIn("Siguiente · medición después", out)
-        self.assertNotIn("Cambios temporales por revertir (", out)  # las marcas siguen puestas hasta medir después
+        self.assertIn("Siguiente · prueba de marcas con la mejora", out)
+        self.assertNotIn(" cerrar --carpeta ", out)  # las marcas siguen puestas hasta medir después
 
     def test_la_raiz_del_proyecto_con_una_carpeta_enlazada_y_con_un_repo_anidado(self):
         from helpers import init_repo
@@ -7638,11 +7733,11 @@ class SafeRevertTest(PerfBase):
         try:
             init_repo(outside)  # la carpeta de contexto compartida es otro repo, fuera del proyecto
             (outside / "perf" / "investigaciones" / "lista").mkdir(parents=True)
-            os.symlink(str(outside), str(self.dir / "ia"))
+            os.symlink(str(outside), str(self.dir / "ctx"))
             (self.dir / "sub" / "reports" / "perf" / "x").mkdir(parents=True)
             nested = init_repo(self.dir / "sub")  # un repo anidado dentro del proyecto
             os.chdir(str(self.dir))
-            linked = Path("ia/perf/investigaciones/lista")
+            linked = Path("ctx/perf/investigaciones/lista")
             self.assertEqual(perf.project_root(linked).resolve(), self.dir.resolve())  # es del proyecto, no del otro repo
             self.assertEqual(perf.relative_folder(linked, perf.project_root(linked).resolve()), linked)
             self.assertEqual(perf.project_root(Path("sub/reports/perf/x")).resolve(), nested.resolve())  # como antes
@@ -7952,14 +8047,14 @@ class SingleFolderTest(DeviceBase):
     investigaciones y los parches; sin esas líneas, todo sigue en reports/perf."""
 
     AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- applicationId: com.example.app\n- setup listo\n"
-              "- Carpeta de investigaciones: `ia/perf/investigaciones`\n- **Carpeta de parches:** ia/perf/parches.\n\n"
+              "- Carpeta de investigaciones: `ctx/perf/investigaciones`\n- **Carpeta de parches:** ctx/perf/parches.\n\n"
               "## Otra\n\n- Carpeta de parches: `no/es/de/rendimiento`\n")
 
     def test_lee_las_dos_carpetas_de_la_seccion_de_rendimiento(self):
         write(self.dir / "AGENTS.md", self.AGENTS)
         found = perf.perf_folders(self.dir)
-        self.assertEqual(found, {"investigaciones": self.dir / "ia/perf/investigaciones", "parches": self.dir / "ia/perf/parches"})
-        self.assertEqual(perf.investigations_base(self.dir), self.dir / "ia/perf/investigaciones")
+        self.assertEqual(found, {"investigaciones": self.dir / "ctx/perf/investigaciones", "parches": self.dir / "ctx/perf/parches"})
+        self.assertEqual(perf.investigations_base(self.dir), self.dir / "ctx/perf/investigaciones")
         write(self.dir / "AGENTS.md", "## Performance\n\nEvidence folder: ~/perf-evidence\nPatches folder: /tmp/perf-patches\n"
                                       "```\nCarpeta de parches: dentro/de/un/bloque\n```\n")
         found = perf.perf_folders(self.dir)
@@ -7980,16 +8075,16 @@ class SingleFolderTest(DeviceBase):
         self.assertTrue((self.dir / "reports/perf/lista-de-clientes" / today / "plan.json").is_file())
         write(self.dir / "AGENTS.md", self.AGENTS)
         out = self.ok("nuevo", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "emulator-5554")
-        folder = self.dir / "ia/perf/investigaciones/arranque-frio" / today
-        self.assertIn("✔ Carpeta de la investigación: ia/perf/investigaciones/arranque-frio/%s (la carpeta de "
+        folder = self.dir / "ctx/perf/investigaciones/arranque-frio" / today
+        self.assertIn("✔ Carpeta de la investigación: ctx/perf/investigaciones/arranque-frio/%s (la carpeta de "
                       "investigaciones de AGENTS.md)" % today, out)
         self.assertTrue((folder / "estado.md").is_file())
-        self.assertIn("capturar --plan ia/perf/investigaciones/arranque-frio/%s/plan.json" % today, out)
+        self.assertIn("capturar --plan ctx/perf/investigaciones/arranque-frio/%s/plan.json" % today, out)
         out = self.ok("nuevo", "--carpeta", "reports/perf/otra", "--paquete", PKG, "--serial", "emulator-5554")
-        self.assertIn("AGENTS.md configura la carpeta de investigaciones en ia/perf/investigaciones: esta investigación "
+        self.assertIn("AGENTS.md configura la carpeta de investigaciones en ctx/perf/investigaciones: esta investigación "
                       "queda fuera de ella", out)  # --carpeta se sigue aceptando
         self.assertTrue((self.dir / "reports/perf/otra/plan.json").is_file())
-        # desde una subcarpeta del repo, la investigación va igual a la carpeta configurada (no a subcarpeta/ia/...)
+        # desde una subcarpeta del repo, la investigación va igual a la carpeta configurada (no a subcarpeta/ctx/...)
         from helpers import init_repo
         init_repo(self.dir)
         (self.dir / "app" / "src").mkdir(parents=True)
@@ -7997,8 +8092,8 @@ class SingleFolderTest(DeviceBase):
                                "--serial", "emulator-5554"], cwd=str(self.dir / "app" / "src"), env=self.env,
                               capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertTrue((self.dir / "ia/perf/investigaciones/detalle" / today / "plan.json").is_file(), done.stdout)
-        self.assertFalse((self.dir / "app" / "src" / "ia").exists())
+        self.assertTrue((self.dir / "ctx/perf/investigaciones/detalle" / today / "plan.json").is_file(), done.stdout)
+        self.assertFalse((self.dir / "app" / "src" / "ctx").exists())
 
     def test_con_la_carpeta_enlazada_a_otra_de_fuera_los_comandos_siguen_siendo_del_proyecto(self):
         from helpers import commit_all, init_repo
@@ -8009,10 +8104,10 @@ class SingleFolderTest(DeviceBase):
             write(self.dir / "app" / "Lista.kt", "class Lista\n")
             commit_all(self.dir)
             init_repo(outside)  # la carpeta de contexto es otro repo, enlazada dentro del proyecto
-            os.symlink(str(outside), str(self.dir / "ia"))
+            os.symlink(str(outside), str(self.dir / "ctx"))
             today = datetime.date.today().isoformat()
             self.ok("nuevo", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "emulator-5554")
-            folder = "ia/perf/investigaciones/arranque-frio/%s" % today
+            folder = "ctx/perf/investigaciones/arranque-frio/%s" % today
             self.assertTrue((outside / "perf/investigaciones/arranque-frio" / today / "plan.json").is_file())
             out = self.ok("siguiente", "--carpeta", folder)
             command = next(line.strip() for line in out.splitlines() if " capturar --plan " in line)
@@ -8025,20 +8120,20 @@ class SingleFolderTest(DeviceBase):
                                           "| `app/Lista.kt` | app | marca | — | no |\n"), encoding="utf-8")
             write(self.dir / folder / "reporte-final-dev.md", "x")
             out = self.ok("siguiente", "--carpeta", folder)
-            self.assertIn("mkdir -p ia/perf/parches && { [ -s ia/perf/parches/arranque-frio-%s.patch ]" % today, out)
+            self.assertIn("cerrar --carpeta ctx/perf/investigaciones/arranque-frio/%s" % today, out)
         finally:
             shutil.rmtree(str(outside), ignore_errors=True)
 
     def test_humo_deja_su_traza_y_propone_la_receta_en_la_carpeta_configurada(self):
         write(self.dir / "AGENTS.md", self.AGENTS)
-        write(self.dir / "ia/perf/investigaciones/setup/pedido.json", json.dumps({"flujo": "abrir la lista de clientes"}))
+        write(self.dir / "ctx/perf/investigaciones/setup/pedido.json", json.dumps({"flujo": "abrir la lista de clientes"}))
         self.tp_outputs(GOOD.replace('"limites"', '"lanzamiento",0,400000000,0,"launch"\n"limites"'))
         out = self.ok("humo", "--paquete", PKG, "--serial", "emulator-5554", "--sin-red")
         today = datetime.date.today().isoformat()
-        self.assertTrue(list((self.dir / "ia/perf/investigaciones/humo/prueba").glob("*.perfetto-trace*")))
+        self.assertTrue(list((self.dir / "ctx/perf/investigaciones/humo/prueba").glob("*.perfetto-trace*")))
         self.assertFalse((self.dir / "reports").exists())
         self.assertIn("medir abrir la lista de clientes", out)  # el pedido del setup, en la misma carpeta
-        self.assertIn("--carpeta ia/perf/investigaciones/arranque-frio/%s" % today, out)
+        self.assertIn("--carpeta ctx/perf/investigaciones/arranque-frio/%s" % today, out)
 
 
 class DevSettingsTest(DeviceBase):
@@ -8795,3 +8890,399 @@ class BusinessUnfilledTitleTest(PerfBase):
         self.assertIn("- Una mejora con el título sin completar: riesgo bajo.", text)
         self.assertNotIn("_sin completar_: riesgo", text)
         self.assertNotIn("LazyColumn", text)
+
+
+# ── 0.11.0 · X: el flujo no se rompe ─────────────────────────────────────────
+
+MARKED = GOOD + '"seccion",600000000,0,0,"MARK lista"\n'
+SOURCE = """package com.example.app
+
+class ListaScreen {
+    fun mostrar(items: List<String>) {
+        adapter.submit(items)
+        PerfHooks.mark("lista")
+    }
+
+    fun otra() = 1
+}
+"""
+
+
+class MarksAcrossPhasesTest(DeviceBase):
+    """X1: una mejora no rompe sus propias marcas sin que nadie lo vea. Cada fase guarda la huella de las marcas del
+    plan; `capturar` reconoce cuando faltan siempre las mismas; `siguiente` no ofrece medir después sin una prueba con
+    todas las marcas posterior a la última mejora; `comparar` avisa si cambiaron entre fases."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.plan.parent
+        write(self.dir / "app" / "src" / "main" / "kotlin" / "ListaScreen.kt", SOURCE)
+        spec = json.loads(self.plan.read_text(encoding="utf-8"))
+        spec["principales"] = ["lista_ms"]
+        spec["flujos"]["home"]["metricas_usuario"] = [{"nombre": "lista_ms", "desde": {"marca": "SCREEN MainActivity*"},
+                                                       "hasta": {"marca": "MARK lista"}}]
+        spec["instalar"] = "./gradlew :app:installProfiling"
+        self.spec = spec
+        self.save()
+
+    def save(self):
+        self.plan.write_text(json.dumps(self.spec), encoding="utf-8")
+
+    def capture(self, *extra):
+        return self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--calentamiento", "0", "--sin-compilar",
+                         *extra)
+
+    def test_la_huella_cambia_si_se_mueve_la_marca_y_no_si_el_cambio_queda_lejos(self):
+        first = perf.mark_fingerprints(self.dir, ["lista", "nunca"])
+        self.assertIsNotNone(first["lista"])
+        self.assertIsNone(first["nunca"])  # un nombre que el código no emite tal cual: sin huella
+        path = self.dir / "app" / "src" / "main" / "kotlin" / "ListaScreen.kt"
+        path.write_text(SOURCE.replace("fun otra() = 1", "fun otra() = 2"), encoding="utf-8")
+        self.assertEqual(perf.mark_fingerprints(self.dir, ["lista"])["lista"], first["lista"])  # lejos: igual
+        path.write_text(SOURCE.replace('        adapter.submit(items)\n        PerfHooks.mark("lista")\n',
+                                       '        adapter.submit(items) {\n            PerfHooks.mark("lista")\n        }\n'),
+                        encoding="utf-8")
+        self.assertNotEqual(perf.mark_fingerprints(self.dir, ["lista"])["lista"], first["lista"])  # otro callback
+        write(self.dir / "app" / "src" / "main" / "kotlin" / "Otra.kt", 'android.os.Trace.beginSection("MARK otra")\n')
+        self.assertIsNotNone(perf.mark_fingerprints(self.dir, ["otra"])["otra"])  # también con Trace directo
+        write(self.dir / "app" / "src" / "main" / "kotlin" / "Nav.kt", 'fun ir() = navigate("lista")\n')
+        self.assertEqual(perf.mark_fingerprints(self.dir, ["lista"])["lista"],
+                         perf.mark_fingerprints(self.dir, ["lista"])["lista"])
+        before = perf.mark_fingerprints(self.dir, ["lista"])["lista"]
+        write(self.dir / "app" / "src" / "main" / "kotlin" / "Nav.kt", 'fun ir() = navigate("lista", animado = true)\n')
+        self.assertEqual(perf.mark_fingerprints(self.dir, ["lista"])["lista"], before)  # una ruta no es la marca
+        self.assertEqual(perf.mark_names(self.spec["flujos"]["home"]), ["lista"])
+
+    def test_cada_fase_y_la_prueba_guardan_la_huella(self):
+        self.tp_outputs(MARKED)
+        self.assertEqual(self.capture("--fase", "antes", "--corridas", "1").returncode, 0)
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        record = phases["antes"]["flujos"]["home"]
+        self.assertEqual(set(record["marcas"]), {"lista"})
+        self.assertEqual(set(record["plan"]), {"recorrido", "metricas"})
+        self.assertEqual(self.capture("--prueba").returncode, 0)
+        test = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["prueba"]["flujos"]["home"]
+        self.assertTrue(test["marcas_ok"])
+        self.assertEqual(test["marcas"], record["marcas"])
+        self.tp_outputs(GOOD)  # sin la marca: la prueba vale, pero queda registrada la marca que faltó
+        (self.dir / "tp.count").unlink()
+        self.assertEqual(self.capture("--prueba").returncode, 0)
+        test = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["prueba"]["flujos"]["home"]
+        self.assertFalse(test["marcas_ok"])
+        self.assertEqual(test["faltan"], ["MARK lista"])
+
+    def test_si_faltan_siempre_las_mismas_marcas_no_pide_repetir_el_comando(self):
+        self.tp_outputs(GOOD)  # nunca sale MARK lista
+        result = self.capture("--fase", "despues", "--corridas", "5", "--forzar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("faltan siempre las mismas marcas (MARK lista): probablemente el cambio de código movió dónde se "
+                      "emiten", result.stderr)
+        self.assertIn("repetir el comando no lo arregla", result.stderr)
+        self.assertNotIn(perf.RETRY, result.stderr)
+        self.assertIn("Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", result.stderr)
+        self.assertIn("Texto para pegar (tal cual):", result.stderr)
+        self.assertIn("al mismo punto semántico", result.stderr)
+        self.assertIn("app/src/main/kotlin/ListaScreen.kt:6", result.stderr)  # dónde se emite hoy
+        self.assertIn("capturar --plan inv/plan.json --prueba", result.stderr)
+        self.assertIn("Patrón de los intentos inválidos (3 de 3 intentos): faltó MARK lista en 3", result.stdout)
+        # con fallas distintas, el mensaje de siempre (el entorno)
+        self.tp_outputs(LOGIN, GOOD, LOGIN)
+        (self.dir / "tp.count").unlink()
+        result = self.capture("--fase", "despues", "--corridas", "5", "--forzar")
+        self.assertIn("algo del entorno falla", result.stderr)
+
+    def test_si_la_fase_se_corta_por_las_marcas_se_rehace_no_se_completa(self):
+        self.tp_outputs(MARKED, GOOD, GOOD, GOOD)  # una válida y después la marca deja de salir
+        result = self.capture("--fase", "antes", "--corridas", "5")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["rehacer_marcas"], {"home": ["MARK lista"]})
+        self.assertFalse(phases["prueba"]["flujos"]["home"]["marcas_ok"])
+        title, steps = perf.next_steps(self.folder, self.spec)
+        self.assertEqual(title, "la fase antes se cortó porque faltan siempre las mismas marcas")
+        self.assertEqual(steps[0]["tipo"], "chat")
+        self.assertIn("--fase antes --corridas 10 --rehacer", steps[-1]["texto"])
+        perf.forget_flow(self.folder, self.folder / "metricas.csv", "antes", "home")
+        self.assertNotIn("antes", perf.read_phases(self.folder))
+
+    def test_una_marca_inestable_se_nombra_con_su_porcentaje(self):
+        lines = perf.invalid_summary([("sin marcas", ("MARK lista_fin",)), ("x", ()), ("sin marcas", ("MARK lista_fin",))], 7)
+        self.assertEqual(lines[0], "Patrón de los intentos inválidos (3 de 7 intentos): faltó MARK lista_fin en 2 · 1 × x")
+        self.assertEqual(len(lines), 1)  # 2 de 7 no pasa del 30 %
+        lines = perf.invalid_summary([("sin marcas", ("MARK lista_fin",))] * 6, 15)
+        self.assertIn("⚠ La marca MARK lista_fin faltó en 6 de 15 intentos (40 %): es inestable", lines[1])
+        self.assertIn("entre investigaciones", lines[1])
+        self.assertEqual(perf.invalid_summary([], 4), [])
+
+    def applied(self):
+        self.spec["mejoras"] = [{"id": "M1", "titulo": "Calcular fuera del hilo principal", "estado": "aplicada",
+                                 "aplicada_en": "2026-11-10T10:00:00"}]
+        self.save()
+        write(self.folder / "fases.json", json.dumps({
+            "antes": {"fecha": "2026-11-09T10:00:00", "corridas": 5, "flujos": {"home": {"corridas": 5, "marcas": {
+                "lista": "aaaa"}, "plan": perf.flow_fingerprints(self.spec["flujos"]["home"])}}},
+            "control": {"fecha": "2026-11-09T11:00:00", "corridas": 5}}))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+
+    def test_siguiente_no_ofrece_despues_sin_una_prueba_con_todas_las_marcas(self):
+        self.applied()
+        title, steps = perf.next_steps(self.folder, self.spec)
+        self.assertEqual(title, "prueba de marcas con la mejora (sin chat)")
+        self.assertNotIn("--fase despues", " ".join(step.get("texto", "") for step in steps))
+        perf.save_test_record(self.folder, "home", [], ["MARK lista"], {"lista": "aaaa"})
+        title, steps = perf.next_steps(self.folder, self.spec)
+        self.assertEqual(title, "la mejora rompió marcas del plan (antes de medir después)")
+        self.assertEqual(steps[0]["tipo"], "chat")
+        self.assertIn("no salen las marcas MARK lista del plan", steps[0]["texto"])
+        self.assertIn("al mismo punto semántico", steps[0]["texto"])
+        self.assertIn("--prueba", steps[-1]["texto"])
+        perf.save_test_record(self.folder, "home", ["MARK lista"], [], {"lista": "aaaa"})
+        title, steps = perf.next_steps(self.folder, self.spec)
+        self.assertEqual(title, "medición después (sin chat)")
+        self.assertIn("--fase despues", steps[0]["texto"])
+
+    def test_si_la_marca_cambio_despues_de_medir_antes_guia_rehacer_la_linea_base(self):
+        self.applied()
+        perf.save_test_record(self.folder, "home", ["MARK lista"], [], {"lista": "bbbb"})  # la marca se ajustó
+        title, steps = perf.next_steps(self.folder, self.spec)
+        self.assertEqual(title, "rehacer la línea base: cambiaron marcas del plan (sin chat)")
+        texts = [step.get("texto", "") for step in steps if step["tipo"] == "terminal"]
+        self.assertIn("lineabase --carpeta ", texts[0])
+        self.assertTrue(texts[0].endswith(" --quitar-mejoras"), texts[0])
+        self.assertIn("installProfiling", texts[1])
+        self.assertIn("--fase antes --corridas 10 --rehacer", texts[2])
+        self.assertIn("--fase control --corridas 10 --rehacer", texts[3])
+        self.assertTrue(texts[4].endswith(" --reaplicar-mejoras"), texts[4])
+        self.assertIn("installProfiling", texts[5])
+        self.assertIn("--prueba", texts[6])
+        self.assertIn("OPCIÓN", steps[-1]["que"])
+        warning = next(step for step in steps if step["tipo"] == "avisos")
+        self.assertIn("las marcas lista cambiaron después de medir antes", warning["lineas"][0])
+        self.assertIn("lista_ms", warning["lineas"][0])
+        for text in texts:
+            shlex.split(text)
+
+    def test_comparar_avisa_las_marcas_que_cambiaron_entre_fases(self):
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "home", "lista_ms", [300] * 5)
+              + rows("despues", "home", "lista_ms", [200] * 5) + rows("antes", "home", "hilo_max_ms", [90] * 5)
+              + rows("despues", "home", "hilo_max_ms", [40] * 5))
+        write(self.folder / "fases.json", json.dumps({
+            "antes": {"fecha": "2026-11-09T10:00:00", "flujos": {"home": {"marcas": {"lista": "aaaa"}}}},
+            "despues": {"fecha": "2026-11-11T10:00:00", "flujos": {"home": {"marcas": {"lista": "bbbb"}}}}}))
+        out = self.ok("comparar", self.folder / "metricas.csv")
+        self.assertIn("⚠ las marcas cambiaron entre fases (home: lista): el veredicto de las métricas que dependen de "
+                      "ellas es orientativo (lista_ms)", out)
+        table = next(line for line in out.splitlines() if line.startswith("| home | lista_ms"))
+        self.assertIn(perf.MARK_CHANGED, table)
+        self.assertNotIn(perf.MARK_CHANGED, next(line for line in out.splitlines() if line.startswith("| home | hilo_max_ms")))
+
+
+class BaselineRedoTest(PerfBase):
+    """X2: rehacer la línea base sin las mejoras, guiado: `lineabase --quitar-mejoras` guarda su parche y las quita,
+    `siguiente` da antes y control con --rehacer, reaplicar, instalar y la prueba, y nunca instala "con la mejora" antes
+    de reaplicarla. También: el control viejo tras rehacer antes y `recalcular` sobre las trazas guardadas."""
+
+    def setUp(self):
+        super().setUp()
+        from helpers import commit_all, init_repo
+        init_repo(self.dir)
+        write(self.dir / "app" / "Filtro.kt", "class Filtro {\n    fun filtrar() = calcular()\n}\n")
+        write(self.dir / "app" / "Lista.kt", "class Lista\n")
+        commit_all(self.dir)
+        self.folder = self.dir / "reports" / "perf" / "lista" / "2026-11-09"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "instalar": "./gradlew :app:installProfiling",
+                     "flujos": {"lista": {"recorrido": "true", "metricas_usuario": [
+                         {"nombre": "lista_ms", "desde": {"marca": "NAV Lista"}, "hasta": {"marca": "MARK lista"}}]}},
+                     "mejoras": [{"id": "M1", "titulo": "Calcular en segundo plano", "estado": "aprobada"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_COST % "| `app/Lista.kt` | app | marca | — | no |\n")
+        write(self.folder / "fases.json", json.dumps({
+            "antes": {"fecha": "2026-11-09T10:00:00", "flujos": {"lista": {"marcas": {"lista": "aaaa"}}}},
+            "control": {"fecha": "2026-11-09T11:00:00"}}))
+        (self.dir / "app" / "Lista.kt").write_text("class Lista\n// MARK lista\n", encoding="utf-8")  # temporal
+        (self.dir / "app" / "Filtro.kt").write_text("class Filtro {\n    fun filtrar() = enSegundoPlano { calcular() }\n}\n",
+                                                    encoding="utf-8")
+        write(self.dir / "app" / "FiltroTest.kt", "class FiltroTest\n")  # nuevo, de la mejora
+        self.ok("decidir", "--carpeta", self.folder.relative_to(self.dir), "--aplicada", "M1", "--archivos",
+                "app/Filtro.kt,app/FiltroTest.kt")
+
+    def plan_now(self):
+        return json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+
+    def test_quitar_y_reaplicar_las_mejoras_con_su_parche(self):
+        perf.save_test_record(self.folder, "lista", ["MARK lista"], [], {"lista": "bbbb"})  # la marca cambió
+        title, steps = perf.next_steps(self.folder, self.plan_now())
+        self.assertEqual(title, "rehacer la línea base: cambiaron marcas del plan (sin chat)")
+        out = self.ok("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--quitar-mejoras")
+        self.assertIn("Mejora M1 quitada", out)
+        self.assertIn("= calcular()", (self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"))
+        self.assertFalse((self.dir / "app" / "FiltroTest.kt").exists())
+        self.assertIn("// MARK lista", (self.dir / "app" / "Lista.kt").read_text(encoding="utf-8"))  # la marca se queda
+        record = json.loads((self.folder / "lineabase.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["estado"], record["mejoras"]), ("quitadas", ["M1"]))
+        self.assertIn("Siguiente · rehacer la línea base sin las mejoras", out)
+        title, steps = perf.next_steps(self.folder, self.plan_now())
+        texts = [step["texto"] for step in steps if step["tipo"] == "terminal"]
+        whats = [step["que"] for step in steps if step["tipo"] == "terminal"]
+        self.assertIn("sin las mejoras", whats[0])
+        self.assertIn("--fase antes", texts[1])
+        self.assertIn("--fase control", texts[2])
+        self.assertIn("--reaplicar-mejoras", texts[3])
+        # nunca "instalar con las mejoras" antes de reaplicarlas
+        self.assertLess(texts.index(next(t for t in texts if "--reaplicar-mejoras" in t)),
+                        whats.index("compila e instala el build de profiling con las mejoras"))
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        later = (datetime.datetime.now() + datetime.timedelta(minutes=5)).replace(microsecond=0).isoformat()
+        phases["antes"]["fecha"] = later
+        write(self.folder / "fases.json", json.dumps(phases))
+        texts = [step["texto"] for step in perf.next_steps(self.folder, self.plan_now())[1] if step["tipo"] == "terminal"]
+        self.assertIn("--fase control", texts[0])  # el control, más viejo que el antes nuevo
+        phases["control"]["fecha"] = later
+        write(self.folder / "fases.json", json.dumps(phases))
+        texts = [step["texto"] for step in perf.next_steps(self.folder, self.plan_now())[1] if step["tipo"] == "terminal"]
+        self.assertIn("--reaplicar-mejoras", texts[0])
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        phases["prueba"]["flujos"]["lista"]["fecha"] = "2026-11-10T10:00:00"  # la prueba es de antes de quitarlas
+        write(self.folder / "fases.json", json.dumps(phases))
+        out = self.ok("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--reaplicar-mejoras")
+        self.assertIn("enSegundoPlano", (self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"))
+        self.assertTrue((self.dir / "app" / "FiltroTest.kt").is_file())
+        self.assertIn("Siguiente · prueba de marcas con la mejora", out)  # la prueba es más vieja que la reaplicación
+        patches = list((self.folder / "parches").glob("*.patch"))
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(self.perf("lineabase", "--carpeta", self.folder.relative_to(self.dir),
+                                   "--reaplicar-mejoras").returncode, 2)  # ya reaplicadas: nada que hacer
+
+    def test_dos_mejoras_en_el_mismo_archivo_salen_y_vuelven_juntas(self):
+        self.plan = self.plan_now()
+        self.plan["mejoras"].append({"id": "M2", "titulo": "Una sola carga", "estado": "aprobada"})
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        (self.dir / "app" / "Filtro.kt").write_text("class Filtro {\n    fun filtrar() = enSegundoPlano { calcular() }\n"
+                                                    "    fun una() = 2\n}\n", encoding="utf-8")
+        self.ok("decidir", "--carpeta", self.folder.relative_to(self.dir), "--aplicada", "M2", "--archivos", "app/Filtro.kt")
+        out = self.ok("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--quitar-mejoras")
+        self.assertIn("Mejora M1, M2 quitada", out)
+        self.assertEqual((self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"),
+                         "class Filtro {\n    fun filtrar() = calcular()\n}\n")
+        self.assertEqual(len(list((self.folder / "parches").glob("*.patch"))), 1)  # un parche por repo
+        self.ok("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--reaplicar-mejoras")
+        self.assertIn("fun una() = 2", (self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"))
+        self.assertTrue((self.dir / "app" / "FiltroTest.kt").is_file())
+        again = self.perf("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--reaplicar-mejoras")
+        self.assertEqual(again.returncode, 2)
+        self.assertIn(" siguiente --carpeta ", again.stderr)  # un error que se repite igual no pide repetir el comando
+        self.assertNotIn(perf.RETRY, again.stderr)
+
+    def test_con_el_reporte_final_al_dia_las_marcas_cambiadas_no_reabren_la_linea_base(self):
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        plan = self.plan_now()
+        phases["despues"] = {"fecha": plan["mejoras"][0]["aplicada_en"],  # después de la mejora y antes del reporte
+                             "flujos": {"lista": {"marcas": {"lista": "bbbb"}}}}
+        write(self.folder / "fases.json", json.dumps(phases))
+        self.assertTrue(perf.next_steps(self.folder, plan)[0].startswith("rehacer la línea base"))
+        write(self.folder / "reporte-final-dev.html", "x")  # se cerró con veredictos orientativos
+        title, steps = perf.next_steps(self.folder, plan)
+        self.assertEqual(title, "investigación cerrada")
+        self.assertTrue(any(" cerrar --carpeta " in step.get("texto", "") for step in steps))
+
+    def test_mejoras_quitadas_a_mano_se_registran_y_se_reaplican(self):
+        patch = self.dir.parent / ("%s-mejora.patch" % self.dir.name)
+        try:
+            done = subprocess.run(["git", "diff", "--binary", "HEAD", "--", "app/Filtro.kt"], cwd=str(self.dir),
+                                  capture_output=True)
+            patch.write_bytes(done.stdout)
+            subprocess.run(["git", "apply", "-R", str(patch)], cwd=str(self.dir), check=True)
+            out = self.ok("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--registrar", patch)
+            self.assertIn("quedan registradas como quitadas", out)
+            self.assertIn("Siguiente · rehacer la línea base sin las mejoras", out)
+            self.assertIn("--reaplicar-mejoras", out)
+            self.ok("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--reaplicar-mejoras")
+            self.assertIn("enSegundoPlano", (self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"))
+            # un parche que no se puede volver a aplicar (las mejoras siguen puestas) no se registra
+            again = self.perf("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--registrar", patch)
+            self.assertEqual(again.returncode, 2)
+            self.assertIn("no se puede volver a aplicar", again.stderr)
+        finally:
+            patch.unlink()
+
+    def test_con_la_linea_base_rehecha_las_marcas_ya_no_piden_rehacerla(self):
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        later = (datetime.datetime.now() + datetime.timedelta(minutes=5)).replace(microsecond=0).isoformat()
+        phases["antes"]["fecha"] = phases["control"]["fecha"] = later
+        write(self.folder / "fases.json", json.dumps(phases))
+        write(self.folder / "lineabase.json", json.dumps({"estado": "reaplicadas", "fecha": "2026-11-10T10:00:00",
+                                                          "reaplicadas": "2026-11-10T11:00:00", "parches": []}))
+        perf.save_test_record(self.folder, "lista", ["MARK lista"], [], {"lista": "otra"})
+        phases = perf.read_phases(self.folder)
+        phases["prueba"]["flujos"]["lista"]["fecha"] = (datetime.datetime.now() + datetime.timedelta(minutes=9)) \
+            .replace(microsecond=0).isoformat()
+        perf.save_phases(self.folder, phases)
+        self.assertEqual(perf.baseline_changes(self.folder, self.plan_now(), "lista", perf.read_phases(self.folder))[0], [])
+        self.assertEqual(perf.next_steps(self.folder, self.plan_now())[0], "medición después (sin chat)")
+
+    def test_si_la_mejora_toca_un_archivo_con_marcas_lo_separa_un_chat(self):
+        rows = "| `app/Lista.kt` | app | marca | — | no |\n| `app/Filtro.kt` | app | marca | — | no |\n"
+        write(self.folder / "estado.md", STATE_COST % rows)
+        result = self.perf("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--quitar-mejoras")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("tienen la mejora y también cambios temporales (marcas): app/Filtro.kt (M1)", result.stderr)
+        self.assertIn("Chat nuevo", result.stderr)
+        self.assertIn("enSegundoPlano", (self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"))  # nada tocado
+
+    def test_el_control_mas_viejo_que_antes_se_rehace(self):
+        phases = {"antes": {"fecha": "2026-11-12T10:00:00"}, "control": {"fecha": "2026-11-09T11:00:00"}}
+        self.assertEqual(perf.baseline_steps(self.folder, {"flujos": {"lista": {}}, "mejoras": []}, "lista", phases,
+                                             lambda *parts: " ".join(map(str, parts)), ["capturar"], 10, "nada", False)[0],
+                         "rehacer el control (sin chat)")
+
+
+class RecalculateTest(DeviceBase):
+    """X2: `recalcular` vuelve a calcular las métricas del plan sobre las trazas guardadas, sin capturar."""
+
+    def test_una_metrica_nueva_desde_una_marca_que_ya_estaba(self):
+        folder = self.plan.parent
+        self.tp_outputs(MARKED)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2",
+                "--calentamiento", "0", "--sin-compilar")
+        spec = json.loads(self.plan.read_text(encoding="utf-8"))
+        spec["flujos"]["home"]["metricas_usuario"] = [
+            {"nombre": "lista_ms", "desde": {"marca": "SCREEN MainActivity*"}, "hasta": {"marca": "MARK lista"}},
+            {"nombre": "nunca_ms", "desde": {"marca": "SCREEN MainActivity*"}, "hasta": {"marca": "MARK nunca"}}]
+        self.plan.write_text(json.dumps(spec), encoding="utf-8")
+        self.assertEqual(perf.baseline_steps(folder, spec, "home", perf.read_phases(folder),
+                                             lambda *parts: " ".join(map(str, parts)), [], 10, "", False)[0],
+                         "recalcular las métricas del plan (sin chat)")
+        out = self.ok("recalcular", "--carpeta", folder)
+        self.assertIn("2 corridas recalculadas", out)
+        data = self.read_csv_at(folder / "metricas.csv")
+        self.assertEqual(sorted(k[2] for k in data if k[1] == "lista_ms"), ["1", "2"])
+        self.assertIn("✖ La marca MARK nunca no está en las trazas de antes (home, corridas 1, 2)", out)
+        self.assertIn("--fase antes --corridas 2 --rehacer", out)
+        self.assertNotEqual(perf.baseline_steps(folder, spec, "home", perf.read_phases(folder),
+                                                lambda *parts: " ".join(map(str, parts)), [], 10, "", False) or ("",)[0],
+                            "recalcular las métricas del plan (sin chat)")
+
+    def read_csv_at(self, path):
+        with path.open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+
+class StaleReportTest(PerfBase):
+    """X3: con una fase medida después del reporte final, `siguiente` vuelve a ofrecer la sesión 4."""
+
+    def test_rehacer_despues_reabre_el_cierre(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "a", "estado": "aplicada", "aplicada_en": "2026-11-10T10:00:00"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "reporte-final-dev.html", "x")
+        os.utime(str(folder / "reporte-final-dev.html"), (time.time() - 3600, time.time() - 3600))
+        now = datetime.datetime.now().replace(microsecond=0).isoformat()
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-09T10:00:00"},
+                                                 "control": {"fecha": "2026-11-09T11:00:00"},
+                                                 "despues": {"fecha": now}}))
+        title, steps = perf.next_steps(folder, plan)
+        self.assertEqual(title, "sesión 4 de nuevo · los reportes son anteriores a la última medición")
+        self.assertIn("anteriores a la fase despues del %s" % now, steps[-1]["texto"])
+        os.utime(str(folder / "reporte-final-dev.html"), None)  # un reporte nuevo
+        self.assertEqual(perf.next_steps(folder, plan)[0], "investigación cerrada")
