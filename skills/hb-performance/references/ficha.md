@@ -206,6 +206,11 @@ Una autorización externa, un pago, un login con otra app o un navegador: el flu
 - **Cada corrida puede ser una operación real.** Con un ambiente que mueve datos de verdad (un pago, una orden), cuenta las operaciones antes de aprobar y muéstralas en la ficha: la corrida de prueba (1) + el calentamiento de cada fase (1) + las corridas de cada fase. En modo riguroso con recorrido manual son 1 + 3 × (1 + 5) = 19; en triage, 1 + (1 + 3) = 5. Recomienda **triage** salvo que se vayan a aplicar mejoras, y usa datos de prueba que alcancen para todas.
 - **El tope de la traza:** con pausas humanas un recorrido puede pasar los 10 minutos que trae la configuración. Súbelo con `duracion_max_s` en el flujo; si la traza termina antes que el recorrido, la corrida sale inválida y lo dice.
 
+### Escenarios y servicios del flujo
+
+- **Una espera que el usuario puede acortar** (el flujo mide abrir una pantalla después de esperar en otra): propón medirla en dos escenarios desde el principio, un flujo base y un escenario con la otra espera (`escenario_de` y `variables`, [medicion.md](medicion.md) · Escenarios de tiempo). El script del recorrido lee la espera de una variable con un valor por defecto.
+- **Servicios del flujo:** si sabes qué servicios son del flujo, ponlos en `servicios` del flujo; los demás que caigan en la ventana se tratan como ajenos en el veredicto de la red ([medicion.md](medicion.md) · Red atribuida por servicio).
+
 ## 4. Métricas principales (antes de medir)
 
 Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después invita a quedarse con la que "mejoró".

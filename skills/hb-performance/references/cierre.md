@@ -18,6 +18,8 @@ Imprime las métricas principales, las de usuario, las centrales y cualquier mej
 | `no comparable` | Métrica de frames y la cantidad de frames cambió más de 50 %, o el percentil de un tramo que cambió de duración o de frames más de 30 % (un tramo que se achica deja pocos frames): el valor mide otra cosa |
 | `variación del backend` | Las métricas del servidor (TTFB, del flujo, de un tramo o de un servicio): una mejora de la app no las mueve, así que no reciben mejora ni regresión |
 | `informativa` | Además de las informativas de siempre, el jank de un tramo con menos de 10 frames (con 3 o 4, un solo frame lento da 25 % o 33 %; el mínimo se cambia con `min_frames` en el tramo o `min_frames_tramo` en el plan): el reporte muestra los frames |
+| `costo conocido` | La red (llamadas, solapadas, repetidas, en total o de un servicio) sube por los servicios que toca una mejora aplicada (su diff o su `servicios`): es su costo, no una regresión sin explicar |
+| `servicios ajenos al flujo` | El cambio viene de servicios que no son del flujo (ni `servicios` del flujo ni de una mejora) y entran o salen de la ventana por tiempo |
 | `sin cambio` | Cualquier otro caso |
 
 Con avisos `dos grupos` (las corridas se separan en dos grupos con un hueco grande entre ellos: la mediana puede caer donde no hay ninguna y el ruido entre medianas subestima la variación) o `marca cambiada entre fases`, el veredicto es orientativo: dilo en la lectura.
@@ -33,6 +35,8 @@ Con avisos (`pocas corridas`, `inestable`), el veredicto se presenta con el avis
 ## 2. Lectura de la comparación
 
 Escribe en `estado.md` ("Lectura de la comparación") una línea por cada métrica principal, cada regresión y cada "no comparable": qué cambió y por qué, con la evidencia. Si lo que siente el usuario solo se ve en una consulta (por ejemplo, cuándo termina un spinner), cita los rangos por corrida rotulados "sin veredicto estadístico". Para explicar una regresión, `perf.py diagnostico --carpeta <carpeta> --fase despues` deja `diagnostico-despues.md` con las mismas consultas.
+
+**Pros y contras de cada mejora.** En "Mejoras aplicadas" de `estado.md`, confirma con los datos lo que la sesión 2 anticipó de cada mejora, en la viñeta de la mejora (la que empieza con su id), una línea por campo: `Costo:` (lo que cuesta además de las llamadas, que calcula `perf.py`: carga al backend, datos, trabajo movido a otra pantalla), `Condición:` (cuándo se cumple; con escenarios, lo que muestran) y, si las hay, `Alternativas:`. El reporte final (dev y gerencia) arma con eso "Pros y contras de cada mejora": qué gana el usuario, qué cuesta y en qué condición, con el rango por escenario. Escríbelos en palabras: el de gerencia no publica un texto con términos técnicos.
 
 ## 3. Resumen ejecutivo
 
