@@ -1,0 +1,131 @@
+{
+  "antes": {
+    "fecha": "2026-04-14T10:00:00",
+    "commit": "abc1234",
+    "sucio": false,
+    "corridas": 5,
+    "hz": 60,
+    "compilacion": "completa (speed)",
+    "hz_corridas": [
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "version": "1.0 (7)",
+    "instalada": "2026-04-14 09:00:00",
+    "flujos": {
+      "detalle": {
+        "corridas": 5,
+        "hz_corridas": [
+          60,
+          60,
+          60,
+          60,
+          60
+        ],
+        "skill": "0.10.0",
+        "configs": [
+          "base@6247bfe391f0"
+        ]
+      }
+    },
+    "skill": "0.10.0",
+    "configs": [
+      "base@6247bfe391f0"
+    ],
+    "ajustes": {
+      "always_finish_activities": "0",
+      "window_animation_scale": "1",
+      "transition_animation_scale": "1",
+      "animator_duration_scale": "1"
+    }
+  },
+  "control": {
+    "fecha": "2026-04-14T10:20:00",
+    "commit": "abc1234",
+    "sucio": false,
+    "corridas": 5,
+    "hz": 60,
+    "compilacion": "completa (speed)",
+    "hz_corridas": [
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "version": "1.0 (7)",
+    "instalada": "2026-04-14 09:00:00",
+    "flujos": {
+      "detalle": {
+        "corridas": 5,
+        "hz_corridas": [
+          60,
+          60,
+          60,
+          60,
+          60
+        ],
+        "skill": "0.10.0",
+        "configs": [
+          "base@6247bfe391f0"
+        ]
+      }
+    },
+    "skill": "0.10.0",
+    "configs": [
+      "base@6247bfe391f0"
+    ],
+    "ajustes": {
+      "always_finish_activities": "0",
+      "window_animation_scale": "1",
+      "transition_animation_scale": "1",
+      "animator_duration_scale": "1"
+    }
+  },
+  "despues": {
+    "fecha": "2026-04-15T11:00:00",
+    "commit": "def5678",
+    "sucio": false,
+    "corridas": 5,
+    "hz": 60,
+    "compilacion": "completa (speed)",
+    "hz_corridas": [
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "version": "1.0 (7)",
+    "instalada": "2026-04-15 10:30:00",
+    "flujos": {
+      "detalle": {
+        "corridas": 5,
+        "hz_corridas": [
+          60,
+          60,
+          60,
+          60,
+          60
+        ],
+        "skill": "0.10.0",
+        "configs": [
+          "base@6247bfe391f0"
+        ]
+      }
+    },
+    "skill": "0.10.0",
+    "configs": [
+      "base@6247bfe391f0"
+    ],
+    "ajustes": {
+      "always_finish_activities": "0",
+      "window_animation_scale": "1",
+      "transition_animation_scale": "1",
+      "animator_duration_scale": "1"
+    }
+  }
+}

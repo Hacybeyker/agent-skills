@@ -18,7 +18,7 @@ class TraceEventListenerTest {
     @Test
     fun completedCallTracesQueueConnectionAndTtfbInsideHttp() {
         val tracer = RecordingTracer()
-        val listener = TraceEventListener(call, tracer)
+        val listener = TraceEventListener(call, tracer, log = {})
         val address = InetSocketAddress.createUnresolved("api.test", 443)
         listener.callStart(call)
         listener.dnsStart(call, "api.test")
@@ -45,7 +45,7 @@ class TraceEventListenerTest {
     @Test
     fun failedCallClosesTheOpenSections() {
         val tracer = RecordingTracer()
-        val listener = TraceEventListener(call, tracer)
+        val listener = TraceEventListener(call, tracer, log = {})
         listener.callStart(call)
         listener.requestHeadersEnd(call, call.request())
         listener.callFailed(call, IOException("offline"))
@@ -108,6 +108,20 @@ class TraceEventListenerTest {
         val huge = HttpSectionName.shorten("GET", "/" + "b".repeat(300), " #1a2b")
         assertEquals(HttpSectionName.MAX_ENDPOINT_NAME, huge.length)
         assertTrue(huge, huge.startsWith("GET ~") && huge.endsWith("b #1a2b"))
+    }
+
+    @Test
+    fun eachServiceLogsItsRealUrlOnceWithoutTheQuery() {
+        val lines = mutableListOf<String>()
+        val logged = OkHttpClient().newCall(
+            Request.Builder().url("https://api.test/base/v2/orders/7?page=2&token=x").build()
+        )
+        TraceEventListener(logged, RecordingTracer(), log = { lines += it }).callStart(logged)
+        TraceEventListener(logged, RecordingTracer(), log = { lines += it }).callStart(logged)
+        val otherPage = OkHttpClient().newCall(Request.Builder().url("https://api.test/base/v2/orders/7?page=3").build())
+        TraceEventListener(otherPage, RecordingTracer(), log = { lines += it }).callStart(otherPage)
+        assertEquals(1, lines.size) // the same service with another query does not log again
+        assertEquals("servicio\tGET\t${HttpSectionName.endpoint(logged.request())}\thttps://api.test/base/v2/orders/7", lines[0])
     }
 
     private class RecordingTracer : SectionTracer {
