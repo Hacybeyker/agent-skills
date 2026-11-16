@@ -8613,7 +8613,8 @@ class MissingDataFirstTest(PerfBase):
         self.assertTrue(command.startswith("cd "), command)
         self.assertIn("printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO", command)
         self.assertIn("printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE", command)
-        self.assertEqual(command.count("cd "), 1)
+        # un solo cd como comando: la ruta temporal puede terminar en "cd" (…/tmpab12cd && …) y no cuenta
+        self.assertEqual(len(re.findall(r"(?:^|[;&|]\s*)cd\s", command)), 1, command)
         self.assertIn("no queda en el historial ni en ningún archivo", lines[first + 2])
         self.assertIn("2. Terminal (sin chat) · una corrida de prueba", out)
         # sin serial en el plan: la primera captura dice cómo ver los dispositivos
