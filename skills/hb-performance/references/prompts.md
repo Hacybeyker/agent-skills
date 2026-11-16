@@ -224,6 +224,16 @@ Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-ger
 Con hb-performance, agrega al plan de <carpeta> una métrica de usuario (o un tramo en segmentos) desde <marca> hasta <marca> (familia <app|e2e>) y dime si hace falta medir de nuevo. No hagas commit ni push.
 ```
 
+### Medir una mejora en otro escenario de tiempo
+
+**Dónde:** chat nuevo · Intermedio · medio
+
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
+
+```text
+Con hb-performance, agrega al plan de <carpeta> un escenario del flujo <flujo> con <qué cambia: por ejemplo, abrir enseguida en vez de esperar 4 s> (escenario_de y variables; si recorrido.sh o preparar.sh todavía no leen esa variable, dime que cambiarlos pide rehacer la línea base) y dime qué hay que medir. No hagas commit ni push.
+```
+
 ### Una pregunta sobre una traza
 
 **Dónde:** chat nuevo · Diagnóstico · alto

@@ -53,10 +53,10 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase.
-SAME_CAPTURE = ("0.9.0", "0.10.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -94,7 +94,7 @@ ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 INPUT_GRACE_NS = 100_000_000  # los eventos del mismo gesto que dispara una métrica no cuentan como "pasos del recorrido"
 VERDICT_CLASS = {"mejora": "v-better", "regresión": "v-worse", "sin cambio": "v-same", "dentro del ruido": "v-same",
                  "informativa": "v-same", "no comparable": "v-same", "no confiable": "v-same",
-                 "variación del backend": "v-same"}
+                 "variación del backend": "v-same", "costo conocido": "v-same", "servicios ajenos al flujo": "v-same"}
 FICHA_REPORTE = ("alcance", "síntoma", "sintoma", "métricas principales", "metricas principales", "build",
                  "dispositivo", "modos")
 FAMILY_LABEL = {"app": "solo la app", "e2e": "app + backend", "info": "informativa"}
@@ -106,6 +106,10 @@ VERDICT_TEXT = {"mejora": "funcionó: mejoró más que el ruido de medición",
                 "variación del backend": "es del servidor: una mejora de la app no lo mueve; si cambió, es variación del "
                                          "backend o de la red del momento, no una regresión ni una mejora",
                 "no confiable": "no confiable: los frames se midieron con render por software, no dicen cómo se ve en un dispositivo real",
+                "costo conocido": "sube por una mejora aplicada que llama a ese servicio: es su costo (ver Pros y contras), "
+                                  "no una regresión sin explicar",
+                "servicios ajenos al flujo": "viene de servicios que no son del flujo y entran o salen de la ventana por "
+                                             "tiempo: no es una regresión ni una mejora de la app",
                 "informativa": "informativa: sin veredicto"}
 STATE_TEXT = {"propuesta": "propuesta · esperando tu decisión", "aprobada": "aprobada · se aplica en la sesión 3",
               "aplicada": "aplicada · implementada; se mide en la fase después", "descartada": "descartada · no se aplica",
@@ -116,7 +120,7 @@ GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rar
 - **Ruido de medición:** cuánto cambia la métrica entre dos mediciones **sin ningún cambio** en la app (antes contra control). Una diferencia menor que esto no prueba nada.
 - **Varía mucho (CV):** las corridas difieren entre sí más de un 10 %; suele ser el backend (red) o el dispositivo. El número sirve, pero con menos confianza.
 - **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
-- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames, o el tramo cambió de duración); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen; `variación del backend`, que es un tiempo del servidor, que una mejora de la app no mueve.
+- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames, o el tramo cambió de duración); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen; `variación del backend`, que es un tiempo del servidor, que una mejora de la app no mueve; `costo conocido`, que la red sube por una mejora que llama a ese servicio a propósito (su costo, en "Pros y contras"); `servicios ajenos al flujo`, que el cambio viene de servicios que no son del flujo y caen en la ventana por tiempo.
 - **Dos grupos:** las corridas se separan en dos grupos con un hueco grande entre ellos; la mediana puede caer donde no hay ninguna y el ruido entre medianas subestima la variación: el veredicto es orientativo.
 - **Hallazgos:** una causa posible encontrada en el código o en las trazas. Los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y la traza muestra que **no** es la causa (no hay nada que hacer); `sin confirmar` (antes `sin veredicto estadístico`), que no se pudo confirmar ni descartar.
 - **`sin confirmar` no quiere decir que falten trazas ni que la captura fallara.** Separa dos cosas: el **síntoma** puede ser estable (tiene su métrica, medida en todas las corridas) y aun así la **causa** no estar probada, porque nada une ese síntoma con una línea de código. Repetir las mismas corridas no lo cambia: la columna "Qué falta para decidir" dice qué sí (una métrica propia del tramo, otra clase de captura o probar un cambio). Si el síntoma es estable y está fuera de presupuesto, puede ir como mejora a prueba.
@@ -574,13 +578,23 @@ def compare(rows, cv_max=CV_MAX, trust=("ok", ""), plan=None):
 
 # ── Formato ──────────────────────────────────────────────────────────────────
 
+SINGULAR = {"llamadas": "llamada", "conexiones": "conexión", "frames": "frame", "cuadros": "cuadro", "veces": "vez",
+            "bloqueos": "bloqueo", "corridas": "corrida", "milisegundos": "milisegundo", "vistas": "vista",
+            "actividades": "actividad", "slices": "slice", "inflates": "inflate", "segundos": "segundo"}
+
+
+def counted(text, unit):
+    """"1 llamada", "2 llamadas": la unidad en singular cuando el número escrito es 1 (también "+1" o "−1")."""
+    return "%s %s" % (text, SINGULAR.get(unit, unit) if text.lstrip("+−-") == "1" else unit)
+
+
 def fmt(value, unit=""):
     if value is None:
         return "—"
     text = ("%.2f" % value).rstrip("0").rstrip(".")
     if text in ("-0", ""):
         text = "0"
-    return "%s %s" % (text, unit) if unit else text
+    return counted(text, unit) if unit else text
 
 
 def fmt_signed(value, unit=""):
@@ -738,6 +752,56 @@ def pause_range(value):
     return (low, high) if 0 <= low <= high <= 10000 else None
 
 
+# ── Escenarios de tiempo (0.12.0) ────────────────────────────────────────────
+# Una mejora que depende de un tiempo (una precarga que solo sirve si el usuario tarda) se mide en más de un escenario:
+# flujos hermanos que copian el flujo base y solo cambian `variables`, que perf.py pasa como variables de entorno a
+# `preparar` y al recorrido (el script las usa: `sleep "${PERF_ESPERA_S:-0}"`). Cada escenario es un flujo más del plan
+# (se mide, se compara y se reporta como cualquiera); plan.json guarda solo la diferencia, y load_plan la completa.
+SCENARIO_KEYS = ("escenario_de", "variables", "titulo")
+
+
+def check_variables(value):
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and ENV_NAME.fullmatch(key) and not isinstance(item, bool)
+        and isinstance(item, (str, int, float)) for key, item in value.items())
+
+
+def expand_scenarios(plan, path):
+    """Completa en `plan` cada escenario (`escenario_de`) con una copia del flujo base y sus `variables`."""
+    flows = plan["flujos"]
+    for name, flow in list(flows.items()):
+        if not isinstance(flow, dict):
+            continue
+        if flow.get("variables") is not None and not check_variables(flow["variables"]):
+            raise PerfError("%s: flujos.%s.variables es un objeto {\"NOMBRE\": \"valor\"} con nombres de variables de "
+                            "entorno (perf.py las pasa a preparar y al recorrido)" % (path, name))
+        base_name = flow.get("escenario_de")
+        if base_name is None:
+            continue
+        base = flows.get(base_name)
+        if not isinstance(base_name, str) or base_name == name or not isinstance(base, dict) or base.get("escenario_de"):
+            raise PerfError("%s: flujos.%s.escenario_de nombra el flujo base del escenario: otro flujo del plan que no sea "
+                            "a su vez un escenario" % (path, name))
+        extra = sorted(set(flow) - set(SCENARIO_KEYS))
+        if extra or not flow.get("variables"):
+            raise PerfError("%s: el escenario '%s' solo cambia 'variables' (y su 'titulo'); lo demás sale de '%s'%s" % (
+                path, name, base_name, " (sobra: %s)" % ", ".join(extra) if extra else "; le falta 'variables'"))
+        merged = json.loads(json.dumps(base))
+        merged.pop("titulo", None)
+        merged.update(json.loads(json.dumps(flow)))
+        merged["variables"] = dict(base.get("variables") or {}, **flow["variables"])
+        flows[name] = merged
+
+
+def scenario_env(plan, flow, plan_path):
+    """Las variables de entorno que `capturar` pone para `preparar` y el recorrido: las `variables` del flujo (las de
+    un escenario) y HB_PERF_PLAN y HB_PERF_FLUJO, para que `perf.py teclear` lea el ritmo del plan."""
+    spec = (plan.get("flujos") or {}).get(flow) or {}
+    env = {key: str(value) for key, value in (spec.get("variables") or {}).items()}
+    env.update(HB_PERF_PLAN=str(pathlib.Path(plan_path).resolve()), HB_PERF_FLUJO=str(flow))
+    return env
+
+
 def load_plan(path):
     path = pathlib.Path(path)
     try:
@@ -746,6 +810,7 @@ def load_plan(path):
         raise PerfError("no se pudo leer %s: %s" % (path, error))
     if not isinstance(plan, dict) or not plan.get("paquete") or not isinstance(plan.get("flujos"), dict):
         raise PerfError("%s necesita 'paquete' y 'flujos'" % path)
+    expand_scenarios(plan, path)
     for name, flow in plan["flujos"].items():
         if not isinstance(flow, dict):
             raise PerfError("el flujo '%s' de %s debe ser un objeto" % (name, path))
@@ -800,6 +865,14 @@ def load_plan(path):
                                                                            ", ".join(ESTADOS)))
         if not isinstance(item.get("a_prueba", False), bool):
             raise PerfError("%s: 'a_prueba' de la mejora %s es true o false" % (path, item["id"]))
+        for key in ("costo", "condicion", "alternativas"):
+            if item.get(key) is not None and not isinstance(item[key], str):
+                raise PerfError("%s: '%s' de la mejora %s es un texto (lo anticipa la sesión 2; lo confirma el cierre en "
+                                "\"Mejoras aplicadas\" de estado.md)" % (path, key, item["id"]))
+        for key in ("servicios", "metricas"):
+            if item.get(key) is not None and (not isinstance(item[key], list)
+                                              or not all(isinstance(v, str) and v.strip() for v in item[key])):
+                raise PerfError("%s: '%s' de la mejora %s es una lista de textos" % (path, key, item["id"]))
         if item.get("a_prueba") and not all(str(item.get(key) or "").strip() for key in ("hipotesis", "metrica", "esperado")):
             raise PerfError("%s: la mejora a prueba %s necesita 'hipotesis', 'metrica' y 'esperado': la medición de después "
                             "confirma o refuta la hipótesis con esa métrica" % (path, item["id"]))
@@ -813,6 +886,12 @@ def load_plan(path):
     for name, flow in plan["flujos"].items():
         if flow.get("preparar") is not None and not isinstance(flow["preparar"], str):
             raise PerfError("%s: flujos.%s.preparar es un comando (texto) que deja la app en el punto de partida" % (path, name))
+        services = flow.get("servicios")
+        if services is not None and (not isinstance(services, list) or not all(isinstance(v, str) and v.strip()
+                                                                                for v in services)):
+            raise PerfError("%s: flujos.%s.servicios es la lista de los servicios del flujo, por ejemplo [\"GET "
+                            "api/v1/contactos\", \"novedades\"] (el nombre completo o una parte de la ruta): los demás se "
+                            "tratan como ajenos al flujo en el veredicto de la red" % (path, name))
         needed = flow.get("requiere_env", [])
         if not isinstance(needed, list) or any(not isinstance(v, str) or not ENV_NAME.fullmatch(v) for v in needed):
             raise PerfError("%s: flujos.%s.requiere_env es una lista de nombres de variables de entorno, por ejemplo "
@@ -2336,7 +2415,8 @@ def required_env(flow, command, folder):
     """(variables que el flujo necesita, las que 'preparar' usa y el plan no declara en requiere_env). Las segundas se
     tratan como requeridas."""
     declared = list(flow.get("requiere_env") or [])
-    undeclared = [name for name in prepare_env_names(command, folder) if name not in declared]
+    given = set(flow.get("variables") or {})  # las de un escenario las pone perf.py: no se piden
+    undeclared = [name for name in prepare_env_names(command, folder) if name not in declared and name not in given]
     return declared + undeclared, undeclared
 
 
@@ -2917,8 +2997,9 @@ def write_phase(folder, phase, data, flow=None):
                 data.setdefault("avisos", [])
                 if note not in data["avisos"]:
                     data["avisos"].append(note)
-            if key == "plan" and earlier and isinstance(value, dict) and earlier.get("recorrido") != value.get("recorrido"):
-                note = "el recorrido del plan cambió entre tandas de la fase: repite la fase con --rehacer"
+            if key == "plan" and earlier and isinstance(value, dict) and route_changes(earlier, value):
+                note = "%s: repite la fase con --rehacer" % route_change_text(
+                    route_changes(earlier, value), "la primera tanda de la fase", "esta")
                 data.setdefault("avisos", [])
                 if note not in data["avisos"]:
                     data["avisos"].append(note)
@@ -3703,16 +3784,81 @@ def next_steps(folder, plan, flow=None):
     """(título, [pasos]) del paso que sigue. En el cierre (y con la investigación cerrada), si quedan cambios
     temporales sin revertir, agrega cómo quitarlos sin perderlos (revert_notice)."""
     title, steps = plan_steps(folder, plan, flow)
+    steps = scenario_steps(folder, plan, flow, steps)
     steps = before_capture(folder, plan, flow, steps)
     # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos. Con la investigación
     # cerrada, quitarlos es lo único que queda: va primero, y el final lo dice.
     if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
         notice = revert_notice(folder, project_root(folder).resolve())
+        dod = None if notice else dod_step(folder, project_root(folder).resolve(), read_close(folder))
         if notice and title.startswith(("investigación cerrada", "triage cerrado")):
+            title = title + " · faltan quitar los cambios temporales y el DoD"  # no está cerrada sin esos pasos
             steps = [notice] + [dict(step, texto=DONE_AFTER_CLOSE) if step["tipo"] == "fin" else step for step in steps]
         elif notice:
             steps = steps + [notice]
+        elif dod and title.startswith(("investigación cerrada", "triage cerrado")):
+            # Sin el DoD después de quitar los cambios temporales, la investigación no está cerrada.
+            title = title + " · falta el DoD después de quitar los cambios temporales"
+            steps = [dod] + [dict(step, texto=DONE_AFTER_DOD) if step["tipo"] == "fin" else step for step in steps]
     return title, steps
+
+
+def scenario_steps(folder, plan, flow, steps):
+    """Con escenarios (B3): cada fase que el flujo base ya midió se mide también en cada escenario que todavía no la
+    tiene (el reporte muestra el rango de la mejora por escenario). Antes y control de un escenario se miden sin las
+    mejoras: si hay alguna aplicada y no está quitada, el paso es quitarlas con `lineabase` (la secuencia sigue de ahí).
+    Cada medición va junto a la del flujo base de esa fase o, si ya no está, al principio. Sin escenarios, igual."""
+    flows = plan.get("flujos") or {}
+    name = flow if flow in flows else next(iter(flows), None)
+    family = scenario_flows(plan, name) if name else []
+    if len(family) < 2:
+        return steps
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    rel = relative_folder(folder, root)
+    phases = read_phases(folder)
+    triage = plan.get("profundidad") == "triage"
+    base = (flows.get(name) or {}).get("escenario_de") or name
+    applied = [m["id"] for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada"]
+    removed = read_lineabase(folder).get("estado") == "quitadas"
+    steps, blocked = list(steps), []
+    for phase in FASES:
+        if triage and phase == "control" or not phase_flow_record(phases, phase, base).get("corridas"):
+            continue
+        for other in family:
+            if other == base or phase_flow_record(phases, phase, other).get("corridas"):
+                continue
+            if phase != "despues" and applied and not removed:
+                blocked.append("%s de %s" % (phase, other))
+                continue
+            spec = flows[other]
+            paused = has_human_pause(spec, folder)
+            automatic = (bool(startup_spec(spec)) or spec.get("recorrido", "manual") != "manual") and not paused
+            runs = 3 if triage else 10 if automatic else 5
+            step = terminal(perf_command(root, "capturar", "--plan", rel / "plan.json", "--flujo", other, "--fase",
+                                         phase, "--corridas", runs),
+                            "mide %s en el escenario %s (%s), como el flujo %s: el reporte muestra el rango de la mejora "
+                            "por escenario" % (phase, other, scenario_label(plan, other), base),
+                            "nada: el recorrido es automático (%d corridas)" % runs if automatic else
+                            "recorre el flujo en cada una de las %d corridas (más 1 de calentamiento)" % runs)
+            same = [i for i, item in enumerate(steps) if item["tipo"] == "terminal" and "--fase %s" % phase in item["texto"]]
+            if same:
+                steps.insert(same[-1] + 1, step)
+            else:
+                lead = 0
+                while lead < len(steps) and steps[lead]["tipo"] == "avisos":
+                    lead += 1
+                steps.insert(lead, step)
+    if blocked:
+        return [{"tipo": "avisos", "titulo": "Escenarios sin línea base", "lineas": [
+            "Faltan %s, y las mejoras %s están en el código: medido así, el escenario tendría la mejora en su línea base. "
+            "Primero se quitan con su parche; después `siguiente` da instalar, antes y control (también del flujo base, "
+            "con el mismo build), reaplicar y la prueba" % (", ".join(blocked), ", ".join(applied))]},
+                terminal(perf_command(root, "lineabase", "--carpeta", rel, "--quitar-mejoras"),
+                         "guarda el código de las mejoras %s en un parche (sin pisar otro), comprueba que revierte limpio y "
+                         "lo quita del repo; las marcas y los cambios temporales se quedan" % ", ".join(applied),
+                         "nada; si algo no revierte limpio, se detiene sin tocar nada y te dice por qué")]
+    return steps
 
 
 def before_capture(folder, plan, flow, steps):
@@ -3780,8 +3926,9 @@ def older(phases, phase, than):
 
 def baseline_changes(folder, plan, flow, phases):
     """Lo que cambió después de medir antes, según la huella que guarda fases.json: (marcas que cambiaron, si cambió el
-    recorrido del plan, si cambiaron solo sus métricas). Las marcas se comparan con las de la última corrida de prueba
-    y las de después medidas más tarde que antes. Sin huella en antes (una versión anterior), no detecta nada."""
+    recorrido del plan o sus archivos, si cambiaron solo sus métricas, los archivos del recorrido que cambiaron). Las
+    marcas se comparan con las de la última corrida de prueba y las de después medidas más tarde que antes; el
+    recorrido y sus archivos, con los de ahora. Sin huella en antes (una versión anterior), no detecta nada."""
     spec = (plan.get("flujos") or {}).get(flow) or {}
     before = phase_flow_record(phases, "antes", flow)
     t_before = phase_time(phases, "antes")
@@ -3797,10 +3944,11 @@ def baseline_changes(folder, plan, flow, phases):
     if older(phases, "antes", "despues") and not rebuilt:
         marks |= set(changed_marks(before.get("marcas"), phase_flow_record(phases, "despues", flow).get("marcas")))
     recorded = before.get("plan") if isinstance(before.get("plan"), dict) else {}
-    now = flow_fingerprints(spec)
-    route = bool(recorded.get("recorrido")) and recorded["recorrido"] != now["recorrido"]
+    now = flow_fingerprints(spec, folder if isinstance(recorded.get("archivos"), dict) else None)
+    files = [name for name in route_changes(recorded, now) if name != "el recorrido del plan"]
+    route = bool(recorded.get("recorrido")) and recorded["recorrido"] != now["recorrido"] or bool(files)
     metrics = not route and bool(recorded.get("metricas")) and recorded["metricas"] != now["metricas"]
-    return sorted(marks), route, metrics
+    return sorted(marks), route, metrics, files
 
 
 def server_metric(metric):
@@ -3837,11 +3985,15 @@ def closing_level(folder, plan):
     except PerfError:
         rows = []
     results = compare(rows, trust=frames_trust(folder), plan=plan)[0] if rows else []
+    if results:
+        attribute_network(results, rows, plan, folder)
     regressions = [r["metrica"] for r in results if r["veredicto"] == "regresión" and not server_metric(r["metrica"])]
     if regressions:
         reasons.append("%d regresi%s" % (len(regressions), "ón" if len(regressions) == 1 else "ones"))
     if mark_change_notes(folder, plan):
         reasons.append("marcas que cambiaron entre fases")
+    if route_change_notes(folder, plan):
+        reasons.append("un recorrido que cambió entre fases")
     verdicts = {}
     for r in results:
         verdicts.setdefault(r["metrica"], []).append(r["veredicto"])
@@ -3894,7 +4046,7 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
             steps.append(measure("control", "mide el control de nuevo, con el mismo build sin las mejoras: el ruido del "
                                             "antes nuevo"))
         return "rehacer la línea base sin las mejoras (sin chat)", steps + [reapply, install_with, test]
-    marks, route, metrics = baseline_changes(folder, plan, flow, phases)
+    marks, route, metrics, files = baseline_changes(folder, plan, flow, phases)
     report = report_file(folder, "final")
     # Con el reporte final al día, se eligió cerrar con veredictos orientativos: no se vuelve a pedir la línea base.
     closed = report is not None and not reports_outdated(folder, report)
@@ -3902,7 +4054,10 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
         what = []
         if marks:
             what.append("las marcas %s cambiaron después de medir antes (el código que las emite es otro)" % ", ".join(marks))
-        if route:
+        if files:
+            what.append("%s cambi%s después de medir antes (la espera o los pasos pueden no ser los mismos)" % (
+                ", ".join(files), "ó" if len(files) == 1 else "aron"))
+        if route and not files:
             what.append("el recorrido del plan cambió después de medir antes")
         dependent = metrics_using_marks((plan.get("flujos") or {}).get(flow), marks) if marks else []
         lines = ["; ".join(what) + ": antes y después no miden lo mismo%s. Para un veredicto firme, la línea base se "
@@ -3933,6 +4088,7 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
                               "OPCIÓN, solo si decides no rehacer la línea base (en lugar de todo lo anterior): cierra "
                               "con esos veredictos como orientativos", plan))
         return "rehacer la línea base: %s (sin chat)" % ("cambiaron marcas del plan" if marks else
+                                                         "cambió %s" % ", ".join(files) if files else
                                                          "cambió el recorrido"),             [{"tipo": "avisos", "titulo": "La línea base ya no mide lo mismo", "lineas": lines}] + steps
     if metrics:
         return "recalcular las métricas del plan (sin chat)", [
@@ -3948,7 +4104,9 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
 
 
 DONE = "La investigación está completa y analizada: no queda nada por hacer."
-DONE_AFTER_CLOSE = "Con los cambios temporales quitados, la investigación queda completa: no queda nada más por hacer."
+DONE_AFTER_DOD = "Con el DoD en verde después de quitar los cambios temporales, la investigación queda completa."
+DONE_AFTER_CLOSE = ("Con los cambios temporales quitados y el DoD en verde (`cerrar` lo da al terminar), la investigación queda "
+                    "completa: no queda nada más por hacer.")
 
 
 def flow_env(spec, folder):
@@ -4348,6 +4506,7 @@ def code_span(text):
 def route_block(plan, root, folder=None):
     """La sección "Cómo se recorre" de estado.md: 'preparar' y 'recorrido' de cada flujo y el comando para verlos
     correr a mano, fuera de una captura."""
+    folder = pathlib.Path(folder) if folder is not None else None
     lines = []
     for name, flow in plan["flujos"].items():
         prepare = (flow.get("preparar") or "").strip()
@@ -4359,15 +4518,25 @@ def route_block(plan, root, folder=None):
         elif route == "manual":
             lines.append("- `recorrido`: manual; lo recorres tú en el dispositivo, con los pasos del plan")
         else:
+            variables = " ".join("%s=%s" % (key, q(str(value))) for key, value in sorted((flow.get("variables") or {}).items()))
+            if flow.get("escenario_de"):
+                lines.append("- Escenario de `%s`: el mismo recorrido con %s (perf.py las pasa a `preparar` y al recorrido)"
+                             % (flow["escenario_de"], code_span(variables)))
             lines.append("- `recorrido` (el tramo medido): %s" % code_span(route))
+            by_hand = [part.replace("{{CARPETA}}", q(str(folder.resolve())) if folder is not None else "{{CARPETA}}")
+                       for part in (prepare, route) if part]
             lines.append("- Para verlo correr a mano, sin medir: %s" % code_span(
-                "cd %s && %s" % (q(root), " && ".join(part for part in (prepare, route) if part))))
+                "cd %s && %s" % (q(root), "( export %s && %s )" % (variables, " && ".join(
+                    by_hand)) if variables else " && ".join(by_hand))))
         if flow.get("requiere_env"):
             names = [str(v) for v in flow["requiere_env"] if ENV_NAME.fullmatch(str(v))]
             lines.append("- Variables de entorno que necesita: %s. Cárgalas en la terminal donde mides, antes de medir (las "
                          "claves, con lectura oculta; el valor no se guarda): %s"
                          % (", ".join("`%s`" % v for v in flow["requiere_env"]),
                             "; ".join(code_span(command) for _, command in env_steps(names, root)) or "—"))
+        same = same_route_line(folder, name) if folder is not None else ""
+        if same:
+            lines.append(same)
         if folder is not None and has_human_pause(flow, folder):
             total, detail = human_runs(plan)
             lines.append("- Paso humano: el recorrido tiene una pausa (`perf.py pausa`), así que cada corrida la atiende una "
@@ -4641,7 +4810,20 @@ def cost_command(folder, session=None, model=None, effort=None, source=None):
                                        else "", option, value)
 
 
-def cost_total(folder, plan):
+SESSION_WORDS = {"0": "la preparación del proyecto", "1": "la ficha y el plan", "2": "el diagnóstico",
+                 "3": "la mejora %s", "4": "el cierre"}
+
+
+def session_words(label):
+    """El nombre de una sesión para un lector no técnico: "1 · ficha" → "la ficha y el plan", "3 · M1" → "la mejora M1"."""
+    number, _, rest = str(label).partition(" · ")
+    words = SESSION_WORDS.get(number.strip())
+    if not words:
+        return label
+    return words % rest.strip() if "%s" in words else words
+
+
+def cost_total(folder, plan, plain=False):
     """El total de la investigación en una línea: USD y tokens de las filas de "Consumo" que traen el dato, cuántas no
     lo traen y qué sesiones hechas faltan anotar. Un dato que falta se dice: no cuenta como cero."""
     try:
@@ -4671,7 +4853,7 @@ def cost_total(folder, plan):
     if missing:
         parts.append("faltan anotar %d %s (%s): el total es parcial" % (
             len(missing), "sesión hecha" if len(missing) == 1 else "sesiones hechas",
-            ", ".join(label for label, _, _ in missing)))
+            ", ".join(session_words(label) if plain else label for label, _, _ in missing)))
     if not rows and not missing:
         return "sin sesiones anotadas"
     return " · ".join(parts)
@@ -5144,22 +5326,25 @@ def save_change_diff(folder, improvement, files, repo=None, index=0):
             raise PerfError("%s no está dentro del repo %s: pasa --repo con el repo de ese archivo" % (name, top))
         tracked = subprocess.run(["git", "-C", str(top), "ls-files", "--error-unmatch", "--", str(inside)],
                                  capture_output=True, text=True).returncode == 0
+        # En bytes y con --binary: un archivo con fin de línea CRLF (o binario) queda tal cual, y `lineabase
+        # --quitar-mejoras` lo puede revertir con `git apply -R`.
         if tracked:
-            done = subprocess.run(["git", "-C", str(top), "diff", "--no-color", "HEAD", "--", str(inside)],
-                                  capture_output=True, text=True)
+            done = subprocess.run(["git", "-C", str(top), "diff", "--binary", "--no-color", "HEAD", "--", str(inside)],
+                                  capture_output=True)
         elif path.is_file():
-            done = subprocess.run(["git", "-C", str(top), "diff", "--no-color", "--no-index", "--", "/dev/null",
-                                   str(inside)], capture_output=True, text=True)
+            done = subprocess.run(["git", "-C", str(top), "diff", "--binary", "--no-color", "--no-index", "--",
+                                   "/dev/null", str(inside)], capture_output=True)
         else:
             raise PerfError("%s no existe ni está en git: revisa la ruta (es relativa a %s)" % (name, base))
         if done.returncode not in (0, 1):
-            raise PerfError("git diff falló con %s: %s" % (name, (done.stderr or "").strip()[:200]))
+            raise PerfError("git diff falló con %s: %s" % (name, done.stderr.decode("utf-8", "replace").strip()[:200]))
         chunks.append(done.stdout)
-    text = "".join(chunks)
+    data = b"".join(chunks)
+    text = data.decode("utf-8", "replace")
     safe = re.sub(r"[^\w.-]+", "-", str(improvement)).strip("-.") or "mejora"
     target = folder / CHANGES_DIR / ("%s%s.diff" % (safe, "-%d" % (index + 1) if index else ""))
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    target.write_bytes(data)
     lines = text.splitlines()
     return {"diff": "%s/%s" % (CHANGES_DIR, target.name), "repo": shown_path(top, root) if top.resolve() != root else ".",
             "archivos": list(files), "fecha": datetime.date.today().isoformat(),
@@ -5208,7 +5393,6 @@ def changes_md(folder, plan, results, findings_text):
 
     symptom_i, cause_i, evidence_i = column("síntoma", "sintoma"), column("causa"), column("evidencia")
     by_id = {row[0].strip(): row for row in rows if row}
-    by_metric = {r["metrica"]: r for r in results}
     blocks = ["> **Interno: contiene código.** Lo que cambió cada mejora aplicada, por qué y qué mejoró. El extracto "
               "muestra lo esencial (en verde lo agregado, en rojo lo quitado); el diff completo queda en la carpeta "
               "`cambios/` de la investigación. No va en el reporte para gerencia."]
@@ -5226,7 +5410,7 @@ def changes_md(folder, plan, results, findings_text):
                                                ". Evidencia: %s" % cell(evidence_i) if cell(evidence_i) else ""))
         if item.get("a_prueba") and item.get("hipotesis"):
             lines.append("- **Hipótesis que pone a prueba:** %s" % item["hipotesis"])
-        r = by_metric.get(item.get("metrica"))
+        r = improvement_metric(plan, item, results)
         lines.append("- **Qué mejoró:** %s" % (
             "`%s` %s: %s" % (r["metrica"], change_phrase(r), verdict_words(r)) if r else
             "su métrica (`%s`) no tiene antes y después" % item.get("metrica", "—")))
@@ -5242,7 +5426,7 @@ def changes_md(folder, plan, results, findings_text):
                 where, ", ".join("`%s`" % name for name in entry.get("archivos") or []), entry.get("agregadas", "—"),
                 entry.get("quitadas", "—"), entry["diff"]))
             try:
-                text = (folder / entry["diff"]).read_text(encoding="utf-8")
+                text = (folder / entry["diff"]).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 lines.append("- El diff guardado no está en la carpeta (`%s`): sin diff guardado." % entry["diff"])
                 continue
@@ -5312,7 +5496,15 @@ def cmd_decidir(args):
         plan["profundidad"] = depth
     elif depth:
         parts.append("profundidad %s (ya lo era)" % depth)
-    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # plan.json guarda los escenarios como los escribió la sesión (solo la diferencia): se reescribe lo que cambió.
+    raw = json.loads(plan_path.read_text(encoding="utf-8"))
+    raw["mejoras"] = plan.get("mejoras", [])
+    for key in ("profundidad", "desde_triage"):
+        if key in plan:
+            raw[key] = plan[key]
+        else:
+            raw.pop(key, None)
+    plan_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     parts += ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
               for _, estado, label in DECISIONS if estado in choices.values()]
     line = "- %s: %s (perf.py decidir)" % (datetime.date.today().isoformat(), "; ".join(parts))
@@ -5385,9 +5577,158 @@ NEVER_DISCARD = ("Nunca quites un cambio temporal con `git checkout`, `git resto
                  "borran el archivo entero sin guardarlo, también lo que no es de esta investigación")
 
 
+def row_files(cell):
+    """Los archivos de una celda de "Cambios temporales": uno, o varios separados por comas o cada uno entre acentos
+    graves (como las anotan las sesiones de 0.10.0 y 0.11.0), sin el ":línea" del final. [] si no hay ninguno."""
+    cell = (cell or "").strip()
+    quoted = re.findall(r"`([^`]+)`", cell)
+    items = quoted if len(quoted) > 1 else re.split(r"\s*,\s*", cell.replace("`", ""))
+    out = []
+    for item in items:
+        path = re.sub(r":\d+(?:-\d+)?$", "", item.strip())
+        if path and path not in ("—", "-") and path not in out:
+            out.append(path)
+    return out
+
+
+CLOSE_FILE = "cierre.json"
+DOD_LOG = "dod-cierre.log"
+
+
+def dod_commands(root):
+    """Los comandos de `## DoD` del AGENTS.md del proyecto, en orden y listos para pegar: el primer código en línea de
+    cada viñeta o ítem numerado y las líneas de un bloque de código. Los que no empiezan con `cd ` van con cd a la raíz.
+    [] si no hay AGENTS.md o no tiene la sección."""
+    text = read_agents(root)
+    if text is None:
+        return []
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if DOD_HEADING.match(line)), None)
+    if start is None:
+        return []
+    level = len(re.match(r"^﻿?[ \t]{0,3}(#+)", lines[start]).group(1))
+    out, fence = [], None
+    for line in lines[start + 1:]:
+        mark = FENCE.match(line)
+        if fence is None and not mark:
+            heading = ANY_HEADING.match(line)
+            if heading and len(heading.group(1)) <= level:
+                break
+            item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*)?`([^`]+)`", line)  # la viñeta empieza con el comando
+            if item:
+                out.append(item.group(1).strip())
+        elif fence is None:
+            fence = mark.group(1)
+        elif mark and mark.group(1)[0] == fence[0]:
+            fence = None
+        elif line.strip() and not line.lstrip().startswith("#"):
+            text = line.strip().lstrip("$ ").strip()
+            if out and out[-1].endswith("\\"):  # una línea que sigue a la anterior
+                out[-1] = out[-1][:-1].rstrip() + " " + text
+            else:
+                out.append(text)
+    commands = []
+    for command in out:
+        if command.startswith("cd ") or not command:
+            commands.append(command)
+        else:
+            commands.append("cd %s && %s" % (q(root), command))
+    return [command for command in dict.fromkeys(commands) if command and not DISCARDING.search(command)]
+
+
+# Un DoD no descarta ni publica nada: si una línea de `## DoD` lo hace, no se corre.
+DISCARDING = re.compile(r"\bgit\s+(?:checkout|restore|reset|clean|push|commit|rebase|stash)\b|\brm\s+-[a-z]*[rf]", re.I)
+
+
+PLACEHOLDER_ARG = re.compile(r"<[^<>\s][^<>]*>")
+
+
+def dod_sets(root, tops=()):
+    """[(repo, [comandos])] del DoD que corresponde después de quitar cambios en esos repos: el de AGENTS.md de la raíz
+    (con la línea de los módulos de otros repos, si la tiene) y el de cada otro repo tocado que tenga su propio
+    AGENTS.md con `## DoD`. Los comandos con marcadores (<módulo>) no se pueden correr: quedan fuera."""
+    out = []
+    for top in [pathlib.Path(root)] + [pathlib.Path(t) for t in tops if pathlib.Path(t).resolve() != pathlib.Path(root).resolve()]:
+        commands = [command for command in dod_commands(top) if not PLACEHOLDER_ARG.search(command)]
+        if commands:
+            out.append((top, commands))
+    return out
+
+
+def read_close(folder):
+    try:
+        data = json.loads((pathlib.Path(folder) / CLOSE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_close(folder, record):
+    (pathlib.Path(folder) / CLOSE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                                                   encoding="utf-8")
+
+
+def run_dod(folder, root, tops=()):
+    """Corre el DoD después de quitar los cambios temporales (dod_sets), en una sola tanda, con la salida en
+    <carpeta>/logs/dod-cierre.log y al chat solo un ✔ o ✖ por comando (con las últimas líneas del log si falla). Lo deja
+    en cierre.json: `siguiente` no da la investigación por cerrada sin él."""
+    folder = pathlib.Path(folder)
+    record = read_close(folder)
+    sets = dod_sets(root, tops or record.get("repos") or ())
+    stamp = datetime.datetime.now().replace(microsecond=0).isoformat()
+    if not sets:
+        record.update(dod="sin DoD", dod_fecha=stamp)
+        save_close(folder, record)
+        print("· AGENTS.md no tiene `## DoD` con comandos que se puedan correr (o solo tiene marcadores como <módulo>): "
+              "corre a mano los tests del módulo que tocaron los cambios temporales y la compilación de la variante "
+              "medida. `siguiente` no lo puede comprobar.")
+        return True
+    log = folder / "logs" / DOD_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    failed = []
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("\n=== DoD después de cerrar · %s ===\n" % stamp)
+        for _, commands in sets:
+            for command in commands:
+                handle.write("\n$ %s\n" % command)
+                handle.flush()
+                started = time.time()
+                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT)
+                handle.flush()
+                if done.returncode == 0:
+                    print("✔ %s (%s)" % (command, elapsed_text(time.time() - started)))
+                else:
+                    failed.append(command)
+                    print("✖ %s: terminó con código %d" % (command, done.returncode))
+    record.update(dod="ok" if not failed else "falló", dod_fecha=stamp, dod_log=str(log))
+    save_close(folder, record)
+    if failed:
+        tail = [line for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()][-8:]
+        print("Últimas líneas de %s:\n%s" % (log, "\n".join("    " + line[:200] for line in tail)))
+        raise PerfError("el DoD falló después de quitar los cambios temporales (%s): algo del proyecto dependía de ellos o "
+                        "ya fallaba" % "; ".join(failed)).con(
+            guardado="los cambios temporales ya están quitados (con su parche) y la salida completa en %s" % log,
+            seguir=[("corrige lo que falla y repite el DoD", same_command())])
+    print("✔ DoD en verde después de quitar los cambios temporales (log: %s)" % log)
+    return True
+
+
+def dod_step(folder, root, record):
+    """El paso que corre el DoD después de cerrar, o None si no hace falta (nada quitado, o ya en verde)."""
+    if not record.get("quitados") or record.get("dod") in ("ok", "sin DoD"):
+        return None
+    failed = record.get("dod") == "falló"
+    return terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(pathlib.Path(folder), root), "--dod"),
+                    "corre el DoD del proyecto (los comandos de ## DoD de AGENTS.md, también los de los módulos de otros "
+                    "repos) después de quitar los cambios temporales, con la salida en logs/%s, y lo anota%s" % (
+                        DOD_LOG, " (la vez anterior falló: %s)" % record.get("dod_log", "") if failed else ""),
+                    "espera; si algo falla, te muestra las últimas líneas del log y no da la investigación por cerrada")
+
+
 def temp_changes(state_text):
     """Las filas de "Cambios temporales por revertir" de estado.md: [{"archivo", "repo", "que", "revertido"}], sin las
-    que siguen con el relleno de la plantilla."""
+    que siguen con el relleno de la plantilla. Una fila con varios archivos (separados por comas o cada uno entre acentos
+    graves, como las anotaban las sesiones de 0.10.0 y 0.11.0) da una entrada por archivo."""
     _, sections = state_sections(state_text)
     body = next((text for title, text in sections.items() if title.startswith("cambios temporales")), "")
     headers, rows = parse_table(body)
@@ -5404,11 +5745,11 @@ def temp_changes(state_text):
         def cell(index):
             return row[index].strip() if index is not None and index < len(row) else ""
 
-        path = re.sub(r":\d+(?:-\d+)?$", "", cell(where).strip("`").strip())
-        if not path or path in ("—", "-") or has_placeholder(cell(where)):
+        if has_placeholder(cell(where)):
             continue
-        out.append({"archivo": path, "repo": cell(repo).strip("`").strip(), "que": cell(what),
-                    "revertido": bool(REVERTED.match(cell(reverted)))})
+        for path in row_files(cell(where)):
+            out.append({"archivo": path, "repo": cell(repo).strip("`").strip(), "que": cell(what),
+                        "revertido": bool(REVERTED.match(cell(reverted)))})
     return out
 
 
@@ -5553,7 +5894,7 @@ def git_apply(top, patch, reverse=False, check=False):
     return done.returncode == 0, " ".join((done.stderr or "").split())[:300]
 
 
-def repo_candidates(root, hint, extra):
+def repo_candidates(root, hint, extra, only_hint=False):
     """Las carpetas donde puede estar un archivo de "Cambios temporales" o de una mejora: la del repo que dice la fila
     (una ruta, o el nombre de un repo incluido desde fuera por settings.gradle), la raíz y los repos incluidos."""
     root = pathlib.Path(root)
@@ -5571,6 +5912,8 @@ def repo_candidates(root, hint, extra):
             for other in extra:
                 if other.name == token and other not in out:
                     out.append(other)
+    if only_hint:  # solo las que da la fila
+        return out
     for base in [root] + list(extra) + [top for top in (git_toplevel(other) for other in extra) if top is not None]:
         if base not in out:
             out.append(base)
@@ -5585,14 +5928,29 @@ def resolve_repo_file(root, name, hint, extra):
         return None, "'%s' no es una ruta completa (tiene '...', '…' o un patrón): escribe en estado.md la ruta del " \
                      "archivo desde la raíz de su repo" % name
     candidates = repo_candidates(root, hint, extra)
-    for base in candidates:
+    if (hint or "").strip().strip("`").strip() == ".":  # la fila dice la raíz: manda, como cualquier repo de la fila
+        candidates = [pathlib.Path(root)] + [base for base in candidates if base != pathlib.Path(root)]
+        hinted = 1
+    else:
+        hinted = len(repo_candidates(root, hint, extra, only_hint=True))  # van primero
+    matches = []
+    for index, base in enumerate(candidates):
         path = pathlib.Path(os.path.expanduser(name))
         path = path if path.is_absolute() else base / path
         if path.is_file():
             top = git_toplevel(path.parent)
             if top is None:
                 return None, "%s no está en un repo de git" % path
-            return top.resolve(), os.path.relpath(str(path.resolve()), str(top.resolve()))
+            found = (top.resolve(), os.path.relpath(str(path.resolve()), str(top.resolve())))
+            if index < hinted or path.is_absolute() and pathlib.Path(name).is_absolute():
+                return found  # el repo que dice la fila manda
+            if found not in matches:
+                matches.append(found)
+    if len(matches) > 1:
+        return None, "'%s' existe en más de un repo (%s): escribe en la columna \"Repo o módulo\" de esa fila en cuál " \
+                     "es" % (name, ", ".join(str(top) for top, _ in matches))
+    if matches:
+        return matches[0]
     # Un archivo nuevo que ya se quitó no existe, pero su carpeta sí: no hay nada que quitar (git no lo ve).
     for base in candidates:
         path = pathlib.Path(os.path.expanduser(name))
@@ -5666,10 +6024,10 @@ def mark_temp_reverted(folder, notes):
             continue
         if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells if cell) or column is None or where is None:
             continue
-        path = re.sub(r":\d+(?:-\d+)?$", "", cells[where].strip("`").strip()) if where < len(cells) else ""
-        if path in notes:
+        paths = row_files(cells[where]) if where < len(cells) else []
+        if paths and all(path in notes for path in paths):  # una fila de varios archivos, cuando se quitaron todos
             cells += [""] * (column + 1 - len(cells))
-            cells[column] = notes[path].replace("|", "\\|")
+            cells[column] = " · ".join(dict.fromkeys(notes[path] for path in paths)).replace("|", "\\|")
             lines[index] = "| " + " | ".join(cells) + " |"
             marked += 1
     if marked:
@@ -5717,6 +6075,8 @@ def cmd_cerrar(args):
     pending = [change for change in temp_changes(state.read_text(encoding="utf-8")) if not change["revertido"]]
     if not pending:
         print("✔ No quedan cambios temporales por revertir en %s." % state)
+        if args.dod:
+            run_dod(folder, root)
         if plan:
             print_next(folder, plan)
         return
@@ -5820,8 +6180,68 @@ def cmd_cerrar(args):
         note = update_agents_state(root)
         if note:
             print(note)
+    if plans:
+        # Después de quitar, el DoD: un cambio temporal pudo tapar algo, o algo del proyecto dependía de él.
+        record = read_close(folder)
+        record.update(fecha=datetime.datetime.now().replace(microsecond=0).isoformat(),
+                      quitados=record.get("quitados", 0) + sum(len(item["archivos"]) for item in plans),
+                      repos=sorted(set(record.get("repos") or []) | {str(item["repo"]) for item in plans}), dod="pendiente")
+        save_close(folder, record)
+        if args.dod:
+            run_dod(folder, root, record["repos"])
+        else:
+            sets = dod_sets(root, record["repos"])
+            if sets:
+                print("DoD después de quitar (los comandos de ## DoD de AGENTS.md), para confirmar que el proyecto sigue en "
+                      "verde. Los corre y lo anota, con la salida en %s:\n    %s" % (
+                          folder.resolve() / "logs" / DOD_LOG, same_command() + " --dod"))
+                for _, commands in sets:
+                    for command in commands:
+                        print("      · %s" % command)
+            else:
+                run_dod(folder, root, record["repos"])  # sin DoD que correr: lo dice y lo anota
     if plan:
         print_next(folder, plan)
+
+
+def improvements_in_tree(folder, plan):
+    """Los ids de las mejoras aplicadas cuyo código sigue en el repo: el diff que guardó `decidir --aplicada` revierte
+    limpio (`git apply --check -R`, sin commitear o ya commiteada) o, sin diff guardado, alguno de sus archivos tiene
+    cambios. Vacío si están quitadas con `lineabase --quitar-mejoras` o no hay ninguna aplicada."""
+    folder = pathlib.Path(folder)
+    if read_lineabase(folder).get("estado") == "quitadas":
+        return []
+    applied = [item for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
+    if not applied:
+        return []
+    root = project_root(folder).resolve()
+    extra = external_roots(root, read_no_leer(root))[0]
+    present = []
+    for item in applied:
+        entries = [entry for entry in item.get("cambios") or [] if isinstance(entry, dict)]
+        found = False
+        for entry in entries:
+            diff = folder / str(entry.get("diff") or "")
+            repo = pathlib.Path(os.path.expanduser(entry.get("repo") or "."))
+            repo = (repo if repo.is_absolute() else root / repo)
+            top = git_toplevel(repo) if repo.is_dir() else None
+            try:
+                usable = entry.get("diff") and diff.is_file() and diff.stat().st_size > 0
+            except OSError:
+                usable = False
+            if usable and top is not None:
+                found = git_apply(top, diff.resolve(), reverse=True, check=True)[0]
+            if not found:  # sin diff, o uno que ya no revierte limpio (una marca ajustada en el mismo lugar)
+                for name in entry.get("archivos") or []:
+                    owner, rel = resolve_repo_file(root, name, entry.get("repo"), extra)
+                    if owner is not None and rel in git_changes(owner):
+                        found = True
+                        break
+            if found:
+                break
+        if found:
+            present.append(item["id"])
+    return present
 
 
 def read_lineabase(folder):
@@ -5976,14 +6396,14 @@ def cmd_lineabase(args):
                 "intermedio", "medio", "vuelve a guardar el diff de la mejora", plan), plan, root),
                 ("después, repite", same_command())]
             try:
-                text = source.read_text(encoding="utf-8")
+                data = source.read_bytes()  # en bytes: los CRLF del diff quedan tal cual
             except OSError:
                 raise PerfError("no encuentro el diff guardado de %s (%s)" % (item["id"], source)).con(
                     guardado="nada", seguir=fix)
-            if not text.strip():
+            if not data.strip():
                 raise PerfError("el diff guardado de %s está vacío (%s): no sé qué quitar" % (item["id"], source)).con(
                     guardado="nada", seguir=fix)
-            patches.append({"mejora": item["id"], "repo": repo, "texto": text.encode("utf-8"), "fuente": source.resolve(),
+            patches.append({"mejora": item["id"], "repo": repo, "texto": data, "fuente": source.resolve(),
                             "ruta": patches_dir(folder, root) / ("%s-mejora-%s-%s.patch" % (name, slug(item["id"]), stamp))})
     if args.simular:
         for patch in patches:
@@ -6295,11 +6715,13 @@ def mark_fingerprints(root, names, patterns=None):
             for name, places in found.items()}
 
 
-def flow_fingerprints(flow_spec):
+def flow_fingerprints(flow_spec, folder=None):
     """{"recorrido": huella, "metricas": huella} de lo que el plan de un flujo decide al medir: cómo se recorre
-    (recorrido, preparar, inicio, pausas) y qué se calcula de la traza (ventana, métricas de usuario, tramos). Si cambia
-    el recorrido después de medir antes, hay que medir de nuevo; si cambian solo las métricas, se pueden recalcular
-    sobre las trazas guardadas (`perf.py recalcular`)."""
+    (recorrido, preparar, inicio, pausas y las variables de un escenario) y qué se calcula de la traza (ventana,
+    métricas de usuario, tramos). Si cambia el recorrido después de medir antes, hay que medir de nuevo; si cambian solo
+    las métricas, se pueden recalcular sobre las trazas guardadas (`perf.py recalcular`). Con `folder` (0.12.0), también
+    "archivos": {archivo: huella} del contenido de los scripts y flows que nombran `recorrido` y `preparar`
+    (route_files): una espera de `preparar.sh` que cambia no cambia el texto del plan, pero sí lo que se mide."""
     spec = flow_spec or {}
 
     def digest(keys):
@@ -6309,8 +6731,197 @@ def flow_fingerprints(flow_spec):
                                  if isinstance(item, dict) else item for item in data["segmentos"]]
         return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
 
-    return {"recorrido": digest(("recorrido", "preparar", "inicio", "pausas", "duracion_max_s")),
-            "metricas": digest(("ventana", "metricas_usuario", "segmentos", "input_slices"))}
+    out = {"recorrido": digest(("recorrido", "preparar", "inicio", "pausas", "duracion_max_s", "variables")),
+           "metricas": digest(("ventana", "metricas_usuario", "segmentos", "input_slices"))}
+    if folder is not None:
+        out["archivos"] = script_fingerprints(spec, folder)
+    return out
+
+
+# ── Huella de los archivos del recorrido (0.12.0) ────────────────────────────
+# `recorrido` y `preparar` suelen ser `bash <carpeta>/recorrido.sh`: la huella del texto del plan no ve que el script
+# cambió (una espera de 2 a 5 s). Se guarda también el contenido de cada script o flow que nombran, y de los que esos
+# nombran a su vez (el flow de Maestro que llama recorrido.sh, su runFlow). Se lee fuera de la traza.
+ROUTE_FILE_SUFFIXES = SCRIPT_SUFFIXES + (".py", ".js", ".kts")
+ROUTE_FILES_MAX = 20
+ROUTE_CHANGED = "recorrido cambiado entre fases"
+
+
+def route_files(spec, folder):
+    """[(nombre, ruta)] de los scripts y flows que el recorrido y `preparar` del flujo nombran y que existen: las rutas
+    absolutas, las relativas al directorio actual, a la carpeta de la investigación o a la raíz del proyecto, con
+    {{CARPETA}} resuelto; y los que esos archivos nombran a su vez (relativos al archivo o a la carpeta). El
+    nombre es la ruta relativa a la carpeta de la investigación (o a la raíz) si está dentro: "preparar.sh"."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    bases = [pathlib.Path.cwd(), folder, root]
+    found = []
+
+    def words(text):
+        text = text.replace("{{CARPETA}}", str(folder))
+        try:
+            items = shlex.split(text, comments=True)
+        except ValueError:
+            items = text.split()
+        out = []
+        for item in items:
+            # `--flujo=flow.yaml`, `FLOW=flujo.yaml`, `runFlow: sub.yaml`: la ruta va después del = o de los dos puntos
+            item = item.split("=", 1)[1] if "=" in item else item
+            if item.lower().endswith(ROUTE_FILE_SUFFIXES):
+                out.append(item)
+        return out
+
+    def add(word, places):
+        candidates = []
+        if "$" in word:  # una variable del script: se busca el archivo por su nombre
+            candidates = [base / pathlib.Path(word).name for base in places]
+        else:
+            path = pathlib.Path(os.path.expanduser(word))
+            candidates = [path] if path.is_absolute() else [base / path for base in places]
+        for path in candidates:
+            try:
+                if path.is_file() and path.stat().st_size <= SCRIPT_MAX_BYTES:
+                    path = path.resolve()
+                    if all(path != known for _, known in found) and len(found) < ROUTE_FILES_MAX:
+                        found.append((shown_route_file(path, folder, root), path))
+                    return path
+            except OSError:
+                continue
+        return None
+
+    texts = [spec.get(key) for key in ("recorrido", "preparar") if isinstance(spec.get(key), str)]
+    first = []
+    for text in texts:
+        for word in words(text):
+            path = add(word, bases)
+            if path is not None and path not in first:
+                first.append(path)
+    queue = list(first)
+    while queue:  # los que nombran a su vez (un flow que llama a otro con runFlow), hasta ROUTE_FILES_MAX archivos
+        path = queue.pop(0)
+        if path.suffix not in (".sh", ".bash", ".py", ".js", ".yaml", ".yml"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for word in words(line):
+                known = len(found)
+                added = add(word, [path.parent, folder, root])
+                if added is not None and len(found) > known:
+                    queue.append(added)
+    return found
+
+
+def shown_route_file(path, folder, root):
+    """El nombre de un archivo del recorrido para los avisos: relativo a la carpeta de la investigación o a la raíz si
+    está dentro; si no, la ruta tal cual."""
+    for base in (pathlib.Path(folder).resolve(), pathlib.Path(root).resolve()):
+        inside = under(pathlib.Path(path), base)
+        if inside is not None:
+            return str(inside)
+    return str(path)
+
+
+def script_fingerprints(spec, folder):
+    """{nombre: huella} del contenido de los archivos del recorrido (route_files). Los finales de línea y los espacios
+    al final de cada línea no cuentan; un comentario sí (es raro que cambie sin cambiar el script)."""
+    out = {}
+    for name, path in route_files(spec or {}, folder):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        text = "\n".join(line.rstrip() for line in data.decode("utf-8", "replace").splitlines())
+        out[name] = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return out
+
+
+def route_changes(old, new):
+    """Lo que cambió del recorrido entre dos huellas del plan de un flujo ({"recorrido", "archivos"}): los archivos cuyo
+    contenido cambió, que aparecieron o que ya no están, y "el recorrido del plan" si cambió su texto. Solo compara lo
+    que traen las dos: una fase medida con una versión sin la huella de los archivos no da avisos."""
+    old, new = old if isinstance(old, dict) else {}, new if isinstance(new, dict) else {}
+    out = []
+    if old.get("recorrido") and new.get("recorrido") and old["recorrido"] != new["recorrido"]:
+        out.append("el recorrido del plan")
+    first, second = old.get("archivos"), new.get("archivos")
+    if isinstance(first, dict) and isinstance(second, dict):
+        out += sorted(name for name in set(first) | set(second) if first.get(name) != second.get(name))
+    return out
+
+
+def route_change_text(changed, first, second):
+    """El aviso de un recorrido que cambió entre dos momentos, nombrando los archivos."""
+    first, second = PHASE_WORDS.get(first, first), PHASE_WORDS.get(second, second)
+    files = [name for name in changed if name != "el recorrido del plan"]
+    parts = []
+    if files:
+        parts.append("%s cambi%s entre %s y %s: la espera o los pasos pueden no ser los mismos" % (
+            ", ".join(files), "ó" if len(files) == 1 else "aron", first, second))
+    if "el recorrido del plan" in changed:
+        parts.append("el recorrido del plan (recorrido, preparar, pausas o variables) cambió entre %s y %s" % (
+            first, second))
+    return "; ".join(parts)
+
+
+def route_change_notes(folder, plan):
+    """{flujo: [(fase, cambios)]} de los flujos cuyo recorrido (el plan o el contenido de sus scripts) cambió entre
+    antes y control o entre antes y después, según la huella que guarda fases.json."""
+    phases = read_phases(folder)
+    out = {}
+    for flow in (plan.get("flujos") or {}):
+        before = phase_flow_record(phases, "antes", flow).get("plan")
+        for phase in ("control", "despues"):
+            changed = route_changes(before, phase_flow_record(phases, phase, flow).get("plan"))
+            if changed:
+                out.setdefault(flow, []).append((phase, changed))
+    return out
+
+
+def flag_route_changes(results, folder, plan):
+    """Marca con ROUTE_CHANGED las métricas de los flujos cuyo recorrido cambió entre antes y después (o el control):
+    no se midió igual contra igual y el veredicto queda orientativo. Devuelve las líneas para `comparar` y el reporte."""
+    changes = route_change_notes(folder, plan)
+    if not changes:
+        return []
+    for r in results:
+        if r["flujo"] in changes:
+            r["avisos"] = sorted(set(r["avisos"]) | {ROUTE_CHANGED})
+    root = project_root(pathlib.Path(folder)).resolve()
+    return ["%s: %s. Las métricas del flujo son orientativas: no se midió igual contra igual. Para un veredicto firme, "
+            "rehaz la línea base con el recorrido de ahora: %s" % (
+                flow, "; ".join(route_change_text(changed, "antes", phase) for phase, changed in items),
+                perf_command(root, "siguiente", "--carpeta", relative_folder(pathlib.Path(folder), root)))
+            for flow, items in sorted(changes.items())]
+
+
+def same_route_line(folder, flow):
+    """La condición "igual contra igual" del flujo, escrita por perf.py desde las huellas de fases.json (nunca por la
+    IA): si el recorrido y sus archivos son los mismos en las fases medidas, qué cambió, o que no se puede afirmar."""
+    phases = read_phases(folder)
+    measured = [phase for phase in FASES if phase_flow_record(phases, phase, flow).get("corridas")]
+    if not measured:
+        return ""
+    prints = {phase: phase_flow_record(phases, phase, flow).get("plan") for phase in measured}
+    without = [phase for phase in measured if not isinstance((prints[phase] or {}).get("archivos"), dict)]
+    if without:
+        return ("- Igual contra igual (lo calcula perf.py): sin la huella de los archivos del recorrido en %s (medida con "
+                "una versión anterior a 0.12.0): no se puede afirmar que los scripts fueron los mismos" % ", ".join(
+                    PHASE_WORDS.get(phase, phase) for phase in without))
+    changed = [(phase, route_changes(prints[measured[0]], prints[phase])) for phase in measured[1:]]
+    changed = [(phase, items) for phase, items in changed if items]
+    if changed:
+        return "- Igual contra igual (lo calcula perf.py): **no**. %s" % "; ".join(
+            route_change_text(items, measured[0], phase) for phase, items in changed)
+    files = sorted((prints[measured[0]] or {}).get("archivos") or {})
+    return "- Igual contra igual (lo calcula perf.py): el recorrido del plan%s %s en %s%s" % (
+        " y sus archivos (%s)" % ", ".join(files) if files else "", "son los mismos" if files else "es el mismo",
+        ", ".join(PHASE_WORDS.get(phase, phase) for phase in measured), "" if len(measured) > 1 else
+        " (una sola fase medida)")
 
 
 def changed_marks(old, new):
@@ -6444,9 +7055,10 @@ def test_run_warnings(root, plan_rate, info, gap, missing_builders, startup=Fals
         out.append(warning("nombre", "%d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están "
                                      "cortados (por ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno"
                            % (len(cut), SECTION_NAME_MAX, cut[0][-40:]),
-                           "hay nombres de sección cortados en %d caracteres: actualiza la instrumentación (perf.py "
-                           "instrumentar --actualizar) para que HttpSectionName acorte desde la izquierda"
-                           % SECTION_NAME_MAX))
+                           "hay nombres de sección cortados en %d caracteres: actualiza la instrumentación para que "
+                           "HttpSectionName acorte desde la izquierda" % SECTION_NAME_MAX,
+                           commands=[("actualiza la instrumentación generada (no pisa lo que editaste a mano)", command)
+                                     for command in [update_instrumentation_command(root)] if command]))
     return out
 
 
@@ -6747,7 +7359,14 @@ def dod_notice(root, plan):
     variante medida), sin agregar herramientas."""
     agents = read_agents(root)
     if agents is not None and has_dod(agents):
-        return None
+        missing = dod_missing_external(root)
+        if not missing:
+            return None
+        return {"tipo": "avisos", "crudo": True,
+                "titulo": "`## DoD` de AGENTS.md no trae los módulos de otros repos (%s): si la mejora cae en uno de "
+                          "ellos, la sesión 3 no sabría cómo validarlo. Agrega a la sección, con la tarea real del módulo"
+                          % ", ".join(name for name, _ in missing),
+                "lineas": [line for _, line in missing]}
     found = INSTALL_TASK.search(plan.get("instalar") or "")
     assemble = "./gradlew -q :<módulo-de-la-app>:assemble<VarianteMedida>"
     if found:  # del 'instalar' del plan: con su módulo si lo trae; sin módulo, la tarea sin ':' (la busca en todos)
@@ -6872,6 +7491,12 @@ def cmd_capturar(args, plan=None):
     if flow_name not in plan["flujos"]:
         raise PerfError("el flujo '%s' no está en el plan (flujos: %s)" % (flow_name, ", ".join(plan["flujos"])))
     flow = plan["flujos"][flow_name]
+    if args.plan:
+        # Las variables de un escenario y el plan para `teclear`: las ven `preparar` y el recorrido (procesos hijos).
+        os.environ.update(scenario_env(plan, flow_name, args.plan))
+        if flow.get("variables"):
+            print("· Escenario %s: %s (variables del plan, para preparar y el recorrido)" % (flow_name, " ".join(
+                "%s=%s" % (key, value) for key, value in sorted(flow["variables"].items()))))
     if args.sin_compilar and getattr(args, "compilar", False):
         raise PerfError("--sin-compilar y --compilar se contradicen: elige una")
     startup = None if args.recorrido else startup_spec(flow)
@@ -6922,6 +7547,23 @@ def cmd_capturar(args, plan=None):
                      same_command(corridas=target, sin=("--rehacer",)) + " --rehacer")])
 
     guide()
+    if phase == "antes" and args.rehacer and not args.prueba and not args.forzar and args.plan:
+        # Rehacer antes con las mejoras puestas no da una línea base: mediría la app con las mejoras. Se detiene antes
+        # de compilar y de tocar el dispositivo, con el camino guiado (lineabase quita las mejoras con su parche).
+        inside = improvements_in_tree(folder, plan)
+        if inside:
+            root = project_root(folder).resolve()
+            rel = relative_folder(folder, root)
+            raise Precondicion(
+                "las mejoras %s siguen en el código: medir antes de nuevo así no da una línea base (la app ya tiene las "
+                "mejoras). Quítalas primero con su parche; perf.py las reaplica antes de medir después" % ", ".join(inside)
+            ).con(guardado="nada: no compilé, no toqué el dispositivo ni la fase antes", seguir=[
+                ("guarda el código de las mejoras en un parche y lo quita del repo (las marcas y los cambios temporales "
+                 "se quedan); después te da, en orden, instalar, antes, control y reaplicar",
+                 perf_command(root, "lineabase", "--carpeta", rel, "--quitar-mejoras")),
+                ("o, solo si quieres medir antes con las mejoras puestas a sabiendas (no será la línea base), el mismo "
+                 "comando con --forzar; ojo: --forzar también salta los demás resguardos de capturar (dispositivo, build "
+                 "depurable, configuración distinta entre fases)", same_command() + " --forzar")])
     package = plan["paquete"]
     hz = args.hz or (plan.get("hz") if isinstance(plan.get("hz"), int) else None)
     route = None if startup else args.recorrido or flow.get("recorrido")
@@ -7144,7 +7786,7 @@ def cmd_capturar(args, plan=None):
     prints = {}
     if args.plan:
         root_dir = project_root(folder).resolve()
-        prints = {"marcas": mark_fingerprints(root_dir, mark_names(flow)), "plan": flow_fingerprints(flow)}
+        prints = {"marcas": mark_fingerprints(root_dir, mark_names(flow)), "plan": flow_fingerprints(flow, folder)}
     if not args.prueba:
         save_capture_warnings(folder, phase, flow_name, warnings + build_warnings)
 
@@ -7428,9 +8070,9 @@ def cmd_capturar(args, plan=None):
             if cut:
                 print("⚠ %d nombres de sección llegan al límite de %d caracteres de android.os.Trace y están cortados (por "
                       "ejemplo '…%s'): dos endpoints con el mismo comienzo pueden contar como uno. Actualiza la "
-                      "instrumentación entre investigaciones (perf.py instrumentar --actualizar): HttpSectionName acorta "
-                      "desde la izquierda y conserva el final de la ruta (setup.md · Nombres de endpoint largos)"
-                      % (len(cut), SECTION_NAME_MAX, cut[0][-40:]))
+                      "instrumentación entre investigaciones (%s): HttpSectionName acorta desde la izquierda y conserva "
+                      "el final de la ruta (setup.md · Nombres de endpoint largos)"
+                      % (len(cut), SECTION_NAME_MAX, cut[0][-40:], update_hint(root)))
             args.resultado = {"http": info.get("http", 0), "sin_red": bool(gap)}  # lo lee humo
             if args.plan:
                 save_test_record(folder, flow_name, [mark for mark, _, ok in info.get("marcas_plan") or [] if ok],
@@ -7456,8 +8098,9 @@ def cmd_capturar(args, plan=None):
                 print("Rutas reales de los servicios (log %s, fuera de la traza): %d" % (SERVICE_LOG_TAG, len(urls)))
             elif info.get("http"):
                 print("· Sin el log de rutas (%s): la instrumentación de red es anterior a 0.11.0, así que los reportes "
-                      "muestran el nombre corto de cada servicio. Para la ruta completa, `instrumentar --actualizar` entre "
-                      "investigaciones (no cambia el nombre de las secciones)." % SERVICE_LOG_TAG)
+                      "muestran el nombre corto de cada servicio. Para la ruta completa, actualiza la instrumentación "
+                      "entre investigaciones (no cambia el nombre de las secciones): %s" % (
+                          SERVICE_LOG_TAG, update_hint(root)))
             print("Traza: %s" % saved)
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
@@ -8472,6 +9115,24 @@ def logrado_rows(plan, results, readable=False):
     return out
 
 
+def improvement_metric(plan, item, results):
+    """El resultado de `comparar` de la métrica de una mejora en su flujo (el de su `flujo` o el primero del plan): con
+    escenarios, la misma métrica sale en varios flujos y cuenta la del flujo de la mejora. None si no hay."""
+    flow = improvement_flow(plan, item)
+    found = [r for r in results if r["metrica"] == item.get("metrica")]
+    return next((r for r in found if r["flujo"] == flow), None) or (found[0] if len(found) == 1 else None)
+
+
+def metric_results(results, plan):
+    """{métrica: resultado} con un resultado por métrica: si una métrica sale en varios flujos (escenarios), el del
+    flujo base."""
+    flows = plan.get("flujos") or {}
+    out = {}
+    for r in sorted(results, key=lambda r: bool((flows.get(r["flujo"]) or {}).get("escenario_de")), reverse=True):
+        out[r["metrica"]] = r
+    return out
+
+
 def improvement_result(item, r):
     """✔ funcionó / ✖ no funcionó / — según el estado de la mejora y el veredicto de su métrica. En una mejora a prueba
     (a_prueba), la medición de después confirma o refuta su hipótesis."""
@@ -8484,7 +9145,8 @@ def improvement_result(item, r):
         return "✔ hipótesis confirmada" if trial else "✔ funcionó"
     if r["veredicto"] == "regresión":
         return "✖ hipótesis refutada (empeoró)" if trial else "✖ empeoró"
-    if r["veredicto"] in ("informativa", "no comparable", "no confiable", "variación del backend"):
+    if r["veredicto"] in ("informativa", "no comparable", "no confiable", "variación del backend", COST_VERDICT,
+                          FOREIGN_VERDICT):
         return "— sin veredicto"
     return "✖ hipótesis refutada" if trial else "✖ no funcionó"
 
@@ -8637,7 +9299,8 @@ def cmd_comparar(args):
     folder = pathlib.Path(args.csv).parent
     trust = frames_trust(folder)
     results, unmatched = compare(rows, trust=trust, plan=plan)
-    marks_moved = flag_mark_changes(results, folder, plan)
+    marks_moved = flag_mark_changes(results, folder, plan) + flag_route_changes(results, folder, plan)
+    marks_moved += attribute_network(results, rows, plan, folder)
     chosen = compact_compare(results, plan, everything=args.todo)
     table = markdown_table(COMPARE_HEADERS, [compare_cells(r) for r in chosen[:None if args.todo else MAX_ROWS]])
     print(table)
@@ -8650,6 +9313,12 @@ def cmd_comparar(args):
     if counts.get("no comparable"):
         print("no comparable = la cantidad de frames cambió más de %d %%: los porcentajes y percentiles de frame "
               "miden otra cosa." % (FRAMES_CHANGE_MAX * 100))
+    if counts.get(COST_VERDICT):
+        print("costo conocido = la red sube por una mejora aplicada que llama a ese servicio a propósito: es su costo, y "
+              "el reporte final lo presenta en \"Pros y contras de cada mejora\".")
+    if counts.get(FOREIGN_VERDICT):
+        print("servicios ajenos al flujo = el cambio viene de servicios que el plan no cuenta como del flujo (`servicios` "
+              "del flujo o de una mejora) y entran o salen de la ventana por tiempo: no es regresión de la app.")
     if counts.get("no confiable"):
         print("no confiable = los frames se midieron con render por software (emulador sin GPU del host): no dicen cómo "
               "se ve en un dispositivo real.")
@@ -8681,6 +9350,391 @@ def cmd_comparar(args):
     print("Siguiente (sesión 4, en este chat): escribe en estado.md la lectura de la comparación, el resumen ejecutivo y el "
           "resumen para gerencia, y genera los reportes:\n    %s" % perf_command(
               root, "reporte", "--carpeta", relative_folder(folder, root), "--html"))
+
+
+# ── Red atribuida por servicio y costo de cada mejora (0.12.0) ───────────────
+# `red_llamadas` cuenta todo lo que cae en la ventana: también cargas de otra pantalla que siguen en curso y que entran
+# o salen según el tiempo. Con los servicios del flujo declarados (`servicios` del flujo o de una mejora) o tocados por
+# el diff de una mejora, un aumento que viene de servicios ajenos no es una regresión de la app, y uno que viene de los
+# servicios que toca una mejora es su costo conocido. Sin esa información no se atribuye nada (como antes).
+COST_VERDICT = "costo conocido"
+FOREIGN_VERDICT = "servicios ajenos al flujo"
+NETWORK_COUNTS = {"red_llamadas": "llamadas", "red_solapadas": "solapadas", "red_repetidas_2s": "repetidas_2s"}
+SERVICE_COUNT_SUFFIXES = ("llamadas", "solapadas", "repetidas_2s")
+SERVICE_METRIC = re.compile(r"red (.+) (llamadas|solapadas|repetidas_2s|ms|cliente_ms|cola_ms|conexion_ms)")
+
+
+def service_matches(endpoint, wanted):
+    """True si el servicio ("GET api/v1/contactos/{id}") es uno de los que nombra el plan: el nombre completo (método y
+    ruta) o, sin método, una parte de su ruta ("contactos"). Sin distinguir mayúsculas."""
+    name = QUERY_TAG.sub("", endpoint).strip().lower()
+    path = name.split(" ", 1)[-1]
+    for item in wanted or []:
+        text = QUERY_TAG.sub("", str(item)).strip().lower()
+        if text and (text == name if " " in text else text in path):
+            return True
+    return False
+
+
+def diff_services(text, endpoints):
+    """Los servicios que el diff de una mejora nombra: el final de su ruta, desde dos tramos o más (o la ruta entera si
+    tiene uno), como un texto completo entre comillas en una línea agregada o quitada ("v1/contactos",
+    "api/v1/contactos/{id}" o con "$id" en lugar de "{id}"). Un nombre suelto ("contactos") no alcanza: puede ser otra cosa."""
+    changed = "\n".join(line[1:] for line in (text or "").splitlines()
+                        if line[:1] in "+-" and not line.startswith(("+++", "---")))
+    if not changed:
+        return set()
+    found = set()
+    for endpoint in endpoints:
+        parts = [part for part in QUERY_TAG.sub("", endpoint).split(" ", 1)[-1].split("/") if part]
+        for start in range(len(parts)):
+            tail = parts[start:]
+            if (len(tail) < 2 and len(parts) > 1) or all(part.startswith("{") for part in tail):
+                break
+            pattern = '"/?%s/?(?:\\?[^"]*)?"' % "/".join(r'[^/"\s]+' if part.startswith("{") else re.escape(part)
+                                                           for part in tail)
+            if re.search(pattern, changed):
+                found.add(endpoint)
+                break
+    return found
+
+
+def flow_endpoints(groups, flow):
+    """Los servicios que el flujo llamó en alguna fase (las filas `red <servicio> llamadas`)."""
+    return sorted({found.group(1) for (name, metric) in groups if name == flow
+                   for found in [SERVICE_ROW.fullmatch(metric)] if found})
+
+
+def improvement_flow(plan, item):
+    """El flujo de una mejora: el que dice su `flujo` o el primero del plan."""
+    return item.get("flujo") or next(iter(plan.get("flujos") or {"": None}))
+
+
+def same_family(plan, flow, other):
+    """True si `flow` es `other` o un escenario suyo (o los dos son escenarios del mismo flujo)."""
+    flows = plan.get("flujos") or {}
+
+    def base(name):
+        spec = flows.get(name) or {}
+        return spec.get("escenario_de") or name
+
+    return base(flow) == base(other)
+
+
+def improvement_services(folder, plan, endpoints):
+    """{id: servicios} de cada mejora aplicada: los que nombra su `servicios` en plan.json y los que nombra su diff
+    guardado (diff_services)."""
+    out = {}
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") != "aplicada":
+            continue
+        named = {endpoint for endpoint in endpoints if service_matches(endpoint, item.get("servicios"))}
+        for entry in item.get("cambios") or []:
+            if isinstance(entry, dict) and entry.get("diff"):
+                try:
+                    text = (pathlib.Path(folder) / entry["diff"]).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                named |= diff_services(text, endpoints)
+        out[item["id"]] = named
+    return out
+
+
+def flow_service_set(plan, flow, endpoints, by_improvement):
+    """Los servicios del flujo: los que nombra `servicios` del flujo (o del flujo del que es escenario) y los de las
+    mejoras aplicadas a ese flujo. Vacío si el plan no dice ninguno: entonces no se atribuye nada."""
+    flows = plan.get("flujos") or {}
+    spec = flows.get(flow) or {}
+    wanted = list(spec.get("servicios") or []) + list((flows.get(spec.get("escenario_de")) or {}).get("servicios") or [])
+    own = {endpoint for endpoint in endpoints if service_matches(endpoint, wanted)}
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") == "aplicada" and same_family(plan, flow, improvement_flow(plan, item)):
+            own |= by_improvement.get(item["id"], set())
+    return own
+
+
+def endpoint_changes(groups, flow, suffix="llamadas", prefix=""):
+    """{servicio: (mediana de antes, mediana de después)} de `<prefix>red <servicio> <suffix>` por corrida (con
+    `prefix` "<tramo> ", las de un tramo); 0 en una fase medida donde no aparece."""
+    measured = {phase for (name, _), entry in groups.items() if name == flow for phase in entry["fases"]}
+    if not {"antes", "despues"} <= measured:
+        return {}
+    out = {}
+    for endpoint in flow_endpoints(groups, flow):
+        entry = groups.get((flow, "%sred %s %s" % (prefix, endpoint, suffix)))
+        values = entry["fases"] if entry else {}
+        out[endpoint] = tuple(statistics.median(values[phase]) if values.get(phase) else 0.0
+                              for phase in ("antes", "despues"))
+    return out
+
+
+def count_text(value, unit="llamada"):
+    """"+1 llamada", "−2 llamadas", "+0.5 llamadas"."""
+    word = unit if abs(value) == 1 else unit + "s"
+    return "%s%s %s" % ("+" if value > 0 else "−" if value < 0 else "", trim(abs(value), 1), word)
+
+
+def attribute_network(results, rows, plan, folder):
+    """B2 y B1: separa en el veredicto de la red los servicios del flujo de los ajenos. Una regresión de `red_llamadas`
+    (y de solapadas y repetidas) que viene solo de servicios ajenos queda "servicios ajenos al flujo"; una que viene de
+    los servicios que toca una mejora aplicada, "costo conocido" (con la mejora); y lo mismo por servicio. Devuelve las
+    líneas para `comparar` y el reporte."""
+    groups = group(rows)
+    flows = sorted({r["flujo"] for r in results})
+    every = sorted({endpoint for flow in flows for endpoint in flow_endpoints(groups, flow)})
+    by_improvement = improvement_services(folder, plan, every)
+    routes = route_change_notes(folder, plan) if plan else {}
+    notes = []
+    for flow in flows:
+        endpoints = flow_endpoints(groups, flow)
+        own = flow_service_set(plan, flow, endpoints, by_improvement)
+        if not own:
+            continue
+        owners = {}
+        for item in plan.get("mejoras") or []:
+            if item.get("estado") == "aplicada" and same_family(plan, flow, improvement_flow(plan, item)):
+                for endpoint in by_improvement.get(item["id"], ()):
+                    owners.setdefault(endpoint, []).append(item["id"])
+        why = "entran o salen de la ventana por tiempo (por ejemplo, cargas de otra pantalla que siguen en curso)"
+        if routes.get(flow):
+            why += "; además, %s" % route_change_text(routes[flow][0][1], "antes", routes[flow][0][0])
+        for r in results:
+            if r["flujo"] != flow or r["veredicto"] != "regresión":
+                continue
+            metric = r["metrica"]
+            segment = metric[:-len(" red_llamadas")] if metric.endswith(" red_llamadas") else None
+            if metric in NETWORK_COUNTS or segment:
+                # las de un tramo: sus llamadas por servicio (`<tramo> red <servicio> llamadas`)
+                changes = endpoint_changes(groups, flow, "llamadas", segment + " ") if segment else \
+                    endpoint_changes(groups, flow, NETWORK_COUNTS[metric])
+                up = {endpoint: (b, a) for endpoint, (b, a) in changes.items() if a > b}
+                foreign = sorted(endpoint for endpoint in up if endpoint not in own)
+                paid = sorted(endpoint for endpoint in up if endpoint in own and owners.get(endpoint))
+                loose = sorted(endpoint for endpoint in up if endpoint in own and not owners.get(endpoint))
+                detail = lambda names: ", ".join("%s (%s → %s)" % (name, trim(up[name][0], 1), trim(up[name][1], 1))
+                                                 for name in names)
+                if loose or not (foreign or paid):
+                    if foreign or paid:
+                        r["avisos"] = sorted(set(r["avisos"]) | {"servicios del flujo que suben sin una mejora que lo "
+                                                                 "explique: %s" % detail(loose)})
+                    continue
+                if paid:
+                    r["veredicto"] = COST_VERDICT
+                    r["avisos"] = sorted(set(r["avisos"]) | {"costo conocido de %s: %s" % (
+                        ", ".join(sorted({ident for name in paid for ident in owners[name]})), detail(paid))})
+                else:
+                    r["veredicto"] = FOREIGN_VERDICT
+                if foreign:
+                    r["avisos"] = sorted(set(r["avisos"]) | {"servicios ajenos al flujo que %s: %s" % (why, detail(foreign))})
+                continue
+            found = SERVICE_METRIC.fullmatch(metric)
+            if not found or found.group(1) not in endpoints:
+                continue
+            endpoint, suffix = found.group(1), found.group(2)
+            if endpoint not in own:
+                r["veredicto"] = FOREIGN_VERDICT
+                r["avisos"] = sorted(set(r["avisos"]) | {"servicio ajeno al flujo: %s" % why})
+            elif owners.get(endpoint) and suffix in SERVICE_COUNT_SUFFIXES:
+                r["veredicto"] = COST_VERDICT
+                r["avisos"] = sorted(set(r["avisos"]) | {"costo conocido de %s" % ", ".join(owners[endpoint])})
+        foreign_all = sorted(endpoint for endpoint in endpoints if endpoint not in own)
+        moved_foreign = [endpoint for endpoint, (b, a) in endpoint_changes(groups, flow).items()
+                         if endpoint in foreign_all and a != b]
+        if moved_foreign:
+            notes.append("%s: servicios ajenos al flujo que cambiaron entre antes y después (%s): %s; no son una "
+                         "regresión ni una mejora de la app. Servicios del flujo: %s" % (
+                             flow, ", ".join(moved_foreign[:6]), why, ", ".join(sorted(own)[:6])))
+    return notes
+
+
+# ── Pros y contras de cada mejora (0.12.0) ───────────────────────────────────
+# Cada mejora aplicada es una decisión: qué gana el usuario (sus métricas y veredictos, por escenario si los hay), qué
+# cuesta (las llamadas que suma o quita por servicio, que calcula perf.py, y lo que requiere juicio: carga al backend,
+# datos, trabajo movido a otra pantalla) y en qué condición se cumple. Lo que requiere juicio lo anticipa la sesión 2
+# en plan.json (`costo`, `condicion`, `alternativas` de la mejora) y lo confirma la sesión 4 en "Mejoras aplicadas" de
+# estado.md (líneas "Costo:", "Condición:" y "Alternativas:" en la viñeta de la mejora). Gana lo confirmado.
+NOTE_KEYS = (("costo", "costo"), ("condicion", "condici[oó]n"), ("alternativas", "alternativas?"))
+NOTE_FIELD = re.compile(r"\b(costo|condici[oó]n|alternativas?)\s*:\s*(.+?)(?=\s+·\s+[^·:\n]{1,30}:|$)", re.I)
+
+
+def improvement_notes(section, ident):
+    """{"costo", "condicion", "alternativas"} que la sesión 4 escribió en "Mejoras aplicadas" de estado.md para la
+    mejora `ident`: las líneas "Costo: …", "Condición: …" y "Alternativas: …" de su viñeta (la que empieza con su id) o
+    de las que cuelgan de ella, también separadas por " · " en la misma línea. Sin el texto de la plantilla."""
+    out, inside = {}, False
+    start = re.compile(r"^[-*]\s+(?:\*\*)?%s\b" % re.escape(ident))
+    for line in (section or "").splitlines():
+        if re.match(r"^[-*]\s", line):
+            inside = bool(start.match(line))
+        elif line.strip() and not line.startswith((" ", "\t")):
+            inside = False
+        if not inside or has_placeholder(line):
+            continue
+        for found in NOTE_FIELD.finditer(line):
+            key = next(name for name, pattern in NOTE_KEYS if re.fullmatch(pattern, found.group(1), re.I))
+            value = found.group(2).strip().rstrip(".").strip("*_ ")
+            if value and key not in out:
+                out[key] = value
+    return out
+
+
+def improvement_note(item, notes, key):
+    """(texto, de dónde sale) de un campo de juicio de una mejora: lo confirmado en estado.md o lo que anticipó el plan;
+    ("", "") si no hay."""
+    if notes.get(key):
+        return notes[key], "confirmado"
+    value = str(item.get(key) or "").strip()
+    return (value, "anticipado en el plan, sin confirmar") if value and value not in ("—", "-") else ("", "")
+
+
+def scenario_flows(plan, flow):
+    """Los flujos de la misma familia de escenarios que `flow` (él incluido), en el orden del plan; [flow] si no tiene."""
+    flows = plan.get("flujos") or {}
+    family = [name for name in flows if same_family(plan, name, flow)]
+    return family if len(family) > 1 else [flow]
+
+
+def scenario_label(plan, flow):
+    """Cómo se llama un escenario en el reporte: su `titulo` o el nombre del flujo, con sus variables."""
+    spec = (plan.get("flujos") or {}).get(flow) or {}
+    variables = ", ".join("%s=%s" % (key, value) for key, value in sorted((spec.get("variables") or {}).items()))
+    return "%s%s" % (spec.get("titulo") or flow, " · %s" % variables if variables else "")
+
+
+def tradeoffs(folder, plan, rows, results, sections):
+    """Por cada mejora aplicada: {"mejora", "gana": [(flujo, resultado)], "llamadas": [(servicio, antes, después)],
+    "ajenos": [(servicio, antes, después)], "memoria": [resultado], "costo", "condicion", "alternativas" (cada uno
+    (texto, origen))}. Las llamadas son las de los servicios que toca la mejora (su diff o su `servicios`)."""
+    groups = group(rows)
+    by_key = {(r["flujo"], r["metrica"]): r for r in results}
+    applied = [m for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada"]
+    if not applied:
+        return []
+    every = sorted({endpoint for flow in {r["flujo"] for r in results} for endpoint in flow_endpoints(groups, flow)})
+    by_improvement = improvement_services(folder, plan, every)
+    section = next((text for title, text in sections.items() if title.startswith("mejoras aplicadas")), "")
+    out = []
+    for item in applied:
+        flow = improvement_flow(plan, item)
+        family = scenario_flows(plan, flow)
+        metrics = [item.get("metrica")] + [m for m in item.get("metricas") or [] if isinstance(m, str)]
+        gains = [(name, by_key[(name, metric)]) for metric in dict.fromkeys(m for m in metrics if m)
+                 for name in family if (name, metric) in by_key]
+        calls = []
+        for endpoint in sorted(by_improvement.get(item["id"], ())):
+            before, after = endpoint_changes(groups, flow).get(endpoint, (None, None))
+            if before is not None:
+                calls.append((endpoint, before, after))
+        own = flow_service_set(plan, flow, flow_endpoints(groups, flow), by_improvement)
+        foreign = [(endpoint, b, a) for endpoint, (b, a) in sorted(endpoint_changes(groups, flow).items())
+                   if own and endpoint not in own and a != b]
+        memory = [r for r in results if r["flujo"] == flow and r["unidad"] == "MB" and r["familia"] != "info"]
+        notes = improvement_notes(section, item["id"])
+        out.append({"mejora": item, "gana": gains, "llamadas": calls, "ajenos": foreign, "memoria": memory,
+                    "costo": improvement_note(item, notes, "costo"), "condicion": improvement_note(item, notes, "condicion"),
+                    "alternativas": improvement_note(item, notes, "alternativas")})
+    return out
+
+
+def tradeoffs_md(items, plan):
+    """La sección "Pros y contras de cada mejora" del reporte final técnico ('' sin mejoras aplicadas)."""
+    if not items:
+        return ""
+    many = len(plan.get("flujos") or {}) > 1
+    out = ["> Cada mejora aplicada como una decisión: qué gana el usuario, qué cuesta y en qué condición se cumple. Las "
+           "llamadas las calcula perf.py (servicios que toca el diff de la mejora o que nombra el plan); costo, condición "
+           "y alternativas los escribe la investigación (anticipados en el plan de mejoras, confirmados en el cierre)."]
+    for entry in items:
+        item = entry["mejora"]
+        out += ["", "**%s · %s**" % (item["id"], improvement_title(item)), ""]
+        gains = ["%s%s: %s · %s" % (r["metrica"], " (%s)" % scenario_label(plan, flow) if many else "", change_phrase(r),
+                                    r["veredicto"]) for flow, r in entry["gana"]]
+        out.append("- **Qué gana el usuario:** %s" % ("; ".join(gains) if gains else "su métrica no tiene antes y "
+                                                                                    "después"))
+        costs = ["%s por corrida a %s (%s → %s)" % (count_text(after - before), endpoint, trim(before, 1), trim(after, 1))
+                 for endpoint, before, after in entry["llamadas"] if after != before]
+        costs += ["%s sin cambio de llamadas (%s por corrida)" % (endpoint, trim(after, 1))
+                  for endpoint, before, after in entry["llamadas"] if after == before]
+        if not entry["llamadas"]:
+            costs.append("sin servicios atribuidos a la mejora (ni su diff ni `servicios` en plan.json nombran uno): las "
+                         "llamadas no se separan por mejora")
+        text, origin = entry["costo"]
+        if text:
+            costs.append("%s (%s)" % (text, origin))
+        costs += ["memoria del flujo (todas las mejoras juntas): %s · %s" % (change_phrase(r), r["veredicto"])
+                  for r in entry["memoria"]]
+        out.append("- **Qué cuesta:** %s" % "; ".join(costs))
+        if entry["ajenos"]:
+            out.append("- **No es de la mejora:** servicios ajenos al flujo que cambiaron por tiempo: %s" % ", ".join(
+                "%s (%s → %s)" % (endpoint, trim(b, 1), trim(a, 1)) for endpoint, b, a in entry["ajenos"][:6]))
+        text, origin = entry["condicion"]
+        ranges = scenario_range(entry["gana"], plan)
+        condition = "; ".join(part for part in ("%s (%s)" % (text, origin) if text else "", ranges) if part)
+        out.append("- **En qué condición se cumple:** %s" % (condition or "sin condición registrada"))
+        text, origin = entry["alternativas"]
+        if text:
+            out.append("- **Alternativas:** %s (%s)" % (text, origin))
+    return "\n".join(out)
+
+
+def scenario_range(gains, plan, plain=False):
+    """El rango real de la mejora por escenario: "enseguida: sin cambio; tras 4 s: mejora (2.4 s → 40 ms)". '' con un
+    solo escenario."""
+    flows = [flow for flow, _ in gains]
+    if len(set(flows)) < 2:
+        return ""
+    parts = []
+    for flow, r in gains:
+        label = (plan["flujos"].get(flow) or {}).get("titulo") or flow
+        parts.append("%s: %s, %s" % (label, plain_verdict(r) if plain else r["veredicto"], change_phrase(r, plain=plain)))
+    return ("según el escenario, " if plain else "por escenario: ") + "; ".join(parts)
+
+
+def plain_tradeoffs(items, plan, problems):
+    """Lo mismo para gerencia, en palabras y por cambio: qué gana el usuario, qué cuesta ("consultar al servidor 1 vez
+    más cada vez que se recorre") y cuándo se nota (la condición y el resultado por escenario). Lo que la investigación
+    escribió con términos técnicos no se publica (va a `problems`)."""
+    if not items:
+        return ""
+    out = []
+    for entry in items:
+        item = entry["mejora"]
+        title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item["id"], problems)
+        title = "Un cambio con el título sin completar" if title.startswith("_") else title
+        many = len({flow for flow, _ in entry["gana"]}) > 1
+        gains = ["%s%s %s: %s" % (plain_metric(r["metrica"], plan), " (%s)" % (
+            (plan.get("flujos") or {}).get(flow, {}).get("titulo") or flow) if many else "", change_phrase(r, plain=True),
+            plain_verdict(r)) for flow, r in entry["gana"][:1]]
+        costs = []
+        for endpoint, before, after in entry["llamadas"]:
+            if after != before:
+                costs.append("consultar al servidor %s %s cada vez que el usuario hace este recorrido (%s)" % (
+                    plain_count(abs(after - before)), "más" if after > before else "menos", service_words(endpoint)))
+        text, _ = entry["costo"]
+        if text:
+            text = plain_or_unfilled(text, "el costo de %s" % item["id"], problems)
+            if not text.startswith("_"):
+                # lo que escribió la investigación va aparte de lo medido: es la misma decisión, dicha por quien la tomó
+                costs.append("según la investigación, %s" % (text[0].lower() + text[1:]))
+        condition, _ = entry["condicion"]
+        if condition:
+            condition = plain_or_unfilled(condition, "la condición de %s" % item["id"], problems)
+            condition = "" if condition.startswith("_") else condition[0].lower() + condition[1:]
+        ranges = scenario_range(entry["gana"], plan, plain=True)
+        when = ". ".join(part.rstrip(".") for part in (condition, (ranges[0].upper() if condition else ranges[0])
+                                                          + ranges[1:] if ranges else "") if part)
+        out += ["**%s**" % title, "",
+                "- Qué gana el usuario: %s." % (gains[0] if gains else "sin medición de antes y después"),
+                "- Qué cuesta: %s." % ("; ".join(costs) if costs else "no se registró un costo"),
+                "- Cuándo se nota: %s." % (when or "no se registró una condición"), ""]
+    return "\n".join(out).strip()
+
+
+def plain_count(value):
+    """"1 vez", "2 veces", "1 o 2 veces"."""
+    if not float(value).is_integer():
+        return "%d o %d veces" % (math.floor(value), math.ceil(value))
+    return "1 vez" if value == 1 else "%d veces" % value
 
 
 # ── har ──────────────────────────────────────────────────────────────────────
@@ -8977,9 +10031,10 @@ def nice(value, unit="", extra=0):
         return "sin dato"
     if unit == "ms":
         size = abs(value)
-        if size >= 10000:
+        if size >= 10000 or abs(float(trim(value / 1000, 2 + extra))) >= 10:
             return "%s s" % trim(value / 1000, 1 + extra)
-        if size >= 1000:
+        # una mediana de 999.7 ms no se escribe "1000 ms": al redondear ya es un segundo
+        if size >= 1000 or (size >= 10 and abs(float(trim(value, extra))) >= 1000):
             return "%s s" % trim(value / 1000, 2 + extra)
         if size >= 10:
             return "%s ms" % trim(value, extra)
@@ -8987,7 +10042,7 @@ def nice(value, unit="", extra=0):
     if unit in ("%", "MB"):
         return "%s %s" % (trim(value, 1 + extra), unit)
     text = trim(value, extra) if float(value).is_integer() or abs(value) >= 100 else trim(value, 1 + extra)
-    return "%s %s" % (text, unit) if unit else text
+    return counted(text, unit) if unit else text
 
 
 # Veredictos con los que dos valores iguales al redondear se dicen "se mantuvo en X", sin porcentaje.
@@ -9046,7 +10101,17 @@ def change_pct(before, after):
     if before in (None, 0) or after is None:
         return ""
     value = (after - before) / abs(before) * 100
-    return "%s%s %%" % ("+" if value > 0 else "−" if value < 0 else "", trim(abs(value), 0 if abs(value) >= 10 else 1))
+    return "%s%s %%" % ("+" if value > 0 else "−" if value < 0 else "", pct_text(value))
+
+
+def pct_text(value):
+    """El tamaño de un cambio en porcentaje, sin signo: sin decimales desde 10 %, con uno por debajo, y nunca "100" para
+    un cambio que no llega a 100 (99.52 % es "99.5")."""
+    size = abs(value)
+    text = trim(size, 0 if size >= 10 else 1)
+    if text == "100" and size != 100:
+        text = trim(size, 1) if trim(size, 1) != "100" else trim(size, 2)
+    return text
 
 
 def axis_scale(top, unit, plain=False, basis=None):
@@ -9179,8 +10244,11 @@ def final_chart(r, plain=False, plan=None):
     if r.get("control") and not plain:
         series.append(("Control", r["control"]["mediana"], r["control"]["min"], r["control"]["max"], "control"))
     series.append(("Después", r["despues"]["mediana"], r["despues"]["min"], r["despues"]["max"], "after"))
-    name = plain_metric(r["metrica"], plan or {}) if plain else "`%s`" % r["metrica"]
-    svg = range_chart(series, unit, plain_metric(r["metrica"], plan or {}) if plain else r["metrica"],
+    flows = (plan or {}).get("flujos") or {}
+    # con escenarios (o varios flujos), gerencia ve de cuál es cada gráfico, por su título
+    where = " (%s)" % ((flows.get(r["flujo"]) or {}).get("titulo") or r["flujo"]) if plain and len(flows) > 1 else ""
+    name = plain_metric(r["metrica"], plan or {}) + where if plain else "`%s`" % r["metrica"]
+    svg = range_chart(series, unit, name if plain else r["metrica"],
                       None if plain else r.get("ruido"), plain=plain)
     words = plain_verdict(r)
     text = "%s %s: %s." % (name, change_phrase(r, plain), words)
@@ -9232,7 +10300,7 @@ def plain_pct(before, after):
     if before in (None, 0) or after is None or after == before:
         return ""
     value = abs(after - before) / abs(before) * 100
-    return " (%s %% %s)" % (trim(value, 0 if value >= 10 else 1), "menos" if after < before else "más")
+    return " (%s %% %s)" % (pct_text(value), "menos" if after < before else "más")
 
 
 def plain_value(value, unit="ms", extra=0):
@@ -9583,6 +10651,22 @@ def short_service(service, size=30):
     return "%s …%s" % (method, tail[-max(size - len(method) - 2, 4):])
 
 
+def lane_labels(services, size=30):
+    """{servicio: etiqueta} para la línea de tiempo: el nombre corto y, si dos variantes del mismo servicio (distinta
+    marca de la query, "#ab12") quedarían con la misma etiqueta, la marca al final para distinguirlas."""
+    shorts = {service: short_service(service, size) for service in services}
+    out = {}
+    for service, text in shorts.items():
+        tag = QUERY_TAG.search(service)
+        twins = [other for other, label in shorts.items() if label == text and other != service]
+        if tag and twins:
+            base = short_service(service, size - len(tag.group(0)))
+            out[service] = "%s%s" % (base, tag.group(0))
+        else:
+            out[service] = text
+    return out
+
+
 def short_name(text, size):
     """Un nombre largo acortado desde la izquierda (el final de una ruta es lo que la distingue)."""
     return text if len(text) <= size else "…" + text[-(size - 1):]
@@ -9710,6 +10794,7 @@ def timeline_chart(rows, plan, phase="antes", folder=None):
             continue
         calls.sort()
         lanes = list(dict.fromkeys(name for _, _, name in calls))
+        lane_names = lane_labels(lanes)
         total = mine.get("ventana_ms")
         left = min(0.0, min(start for start, _, _ in calls))
         right = max([end for _, end, _ in calls] + [total or 0] + [at for _, at in marks + screens])
@@ -9741,7 +10826,8 @@ def timeline_chart(rows, plan, phase="antes", folder=None):
         for lane, service in enumerate(lanes):
             y = top_pad + lane * row
             mine_calls = [(a, b) for a, b, name in calls if name == service]
-            parts.append('<text x="0" y="%d" class="bar-label">%s</text>' % (y + 11, e(short_service(service, 30))))
+            parts.append('<text x="0" y="%d" class="bar-label">%s<title>%s</title></text>' % (
+                y + 11, e(lane_names.get(service) or short_service(service, 30)), e(service)))
             for start, end in mine_calls:
                 parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="bar-after"><title>%s · %s</title>'
                              '</rect>' % (scale(start), y, max(scale(end) - scale(start), 2), e(service), e(nice(end - start, "ms"))))
@@ -9795,8 +10881,16 @@ def plain_time(value, unit="ms", extra=0):
     if unit != "ms":
         return fmt(value, unit)
     if 0 < abs(value) < 1:
-        return "menos de 1 milisegundo"
-    return "%s s" % trim(value / 1000, 2 + extra) if abs(value) >= 100 else "%s milisegundos" % trim(value, extra)
+        # con decimales de más (dos valores que se verían iguales), el valor: nunca "de menos de 1 a menos de 1"
+        if not extra:
+            return "menos de 1 milisegundo"
+        places = extra
+        while trim(value, places) in ("0", "-0") and places < 4:
+            places += 1
+        return "%s milisegundos" % trim(value, places)
+    if abs(value) >= 100 or abs(float(trim(value, extra))) >= 100:  # 99.7 ms ya es "0.1 s", no "100 milisegundos"
+        return "%s s" % trim(value / 1000, 2 + extra)
+    return counted(trim(value, extra), "milisegundos")
 
 
 def service_words(service):
@@ -9818,7 +10912,7 @@ def services_line(rows, plan, phase="antes"):
     flows += sorted({row["flujo"] for row in rows} - set(flows))
     for flow in flows:
         services = flow_services(rows, flow, phase)
-        lead = "**%s:** " % flow if len(flows) > 1 else ""
+        lead = "**%s:** " % (((plan.get("flujos") or {}).get(flow) or {}).get("titulo") or flow) if len(flows) > 1 else ""
         if not services:
             counted = groups[(flow, "red_llamadas")]["fases"].get(phase) if (flow, "red_llamadas") in groups else None
             calls = statistics.median(counted) if counted else None
@@ -9882,10 +10976,13 @@ PLAIN_VERDICT = {"mejora": "mejora clara", "regresión": "empeoró", "sin cambio
                  "no comparable": "no se puede comparar: se midió otra cosa antes y después",
                  "no confiable": "no confiable: el dispositivo de medición no representa uno real",
                  "informativa": "solo informativo",
-                 "variación del backend": "depende del servidor, no de la app"}
+                 "variación del backend": "depende del servidor, no de la app",
+                 "costo conocido": "es el costo de una mejora, que se eligió a propósito",
+                 "servicios ajenos al flujo": "viene de otra parte de la app, no de lo que se midió"}
 MANAGEMENT_SECTION = "resumen para gerencia"
-MANAGEMENT_MISSING = ("_Sin completar: el resumen para este público todavía no se escribió. Lo que sigue sale de los "
-                      "datos de la investigación._")
+MANAGEMENT_MISSING = ("Sin completar: el resumen para este público todavía no se escribió. Lo que sigue sale de los "
+                      "datos de la investigación.")
+UNFILLED_PLAIN = "sin completar todavía"  # en el reporte de gerencia, en palabras (sin los guiones bajos)
 
 
 def plain_metric(metric, plan):
@@ -9950,6 +11047,8 @@ def plain_verdict(result):
         reasons = []
         if MARK_CHANGED in result["avisos"]:
             reasons.append("lo que se mide cambió entre antes y después")
+        elif ROUTE_CHANGED in result["avisos"]:
+            reasons.append("el recorrido no fue el mismo antes y después")
         if BIMODAL in result["avisos"]:
             reasons.append("las mediciones forman dos grupos")
         elif "inestable" in result["avisos"]:
@@ -10052,9 +11151,16 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
                  for what, part in (("el síntoma", cell(row, symptom_i)), ("la causa", cell(row, cause_i))) if part]
         if parts:  # sin ".:" al unir: el síntoma pierde su punto final
             found.append("- %s" % ": ".join([parts[0].rstrip(" .;:")] + parts[1:]))
+    unconfirmed = []
+    for row, kind in zip(findings, kinds):
+        if kind == "sin confirmar":
+            text = cell(row, symptom_i).rstrip(" .;:")
+            unconfirmed.append(text[0].lower() + text[1:] if text and not jargon(text) else "un punto técnico")
     other = [(one if count == 1 else many % count) for one, many, count in (
         ("1 se investigó y se descartó", "%d se investigaron y se descartaron", kinds.count("descartado")),
         ("1 quedó sin confirmar", "%d quedaron sin confirmar", kinds.count("sin confirmar"))) if count]
+    other = ["%s (%s)" % (item, "; ".join(unconfirmed)) if "sin confirmar" in item and unconfirmed else item
+             for item in other]
     found_md = "\n".join(found) if found else "Ningún problema confirmado." if findings else \
         "El diagnóstico no dejó hallazgos registrados."
     if other:
@@ -10072,7 +11178,8 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
     many = len(plan.get("flujos") or {}) > 1
 
     def label(metric, flow):
-        return plain_metric(metric, plan) + (" (%s)" % flow if many else "")
+        shown = ((plan.get("flujos") or {}).get(flow) or {}).get("titulo") or flow  # un escenario, por su título
+        return plain_metric(metric, plan) + (" (%s)" % shown if many else "")
 
     main_results = sorted([r for r in results if r["metrica"] in principales],
                           key=lambda r: (principales.index(r["metrica"]), r["flujo"])) if final else []
@@ -10122,9 +11229,8 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
             risks.append("- %s que no %s: el detalle está en el reporte técnico." % (
                 "Empeoró 1 medida" if others == 1 else "Empeoraron %d medidas" % others,
                 "es principal" if others == 1 else "son principales"))
-        by_metric = {r["metrica"]: r for r in results}
         risks += ["- %s: el cambio no dio el resultado esperado." % title(m) for m in applied
-                  if improvement_result(m, by_metric.get(m.get("metrica"))).startswith("✖")]
+                  if improvement_result(m, improvement_metric(plan, m, results)).startswith("✖")]
     level, _ = frames_trust(folder)
     if level != "ok":
         risks.append("- La fluidez se midió en un dispositivo que no representa uno real: esos valores son %s."
@@ -10132,9 +11238,11 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
     risks_md = "\n".join(risks) if risks else "Sin riesgos señalados."
 
     services = services_line(rows, plan, "despues" if final and any(r["fase"] == "despues" for r in rows) else "antes")
-    cost = "Sesiones de IA: %s. Las mediciones corren sin IA y no tienen costo de uso." % cost_total(folder, plan)
+    cost = "Sesiones de IA: %s. Las mediciones corren sin IA y no tienen costo de uso." % cost_total(folder, plan,
+                                                                                                    plain=True)
     kind = "final" if final else "inicial"
-    return [("En resumen", summary or MANAGEMENT_MISSING),
+    return [(name, plain_unfilled(body)) for name, body in [
+            ("En resumen", summary or MANAGEMENT_MISSING),
             ("Qué notaba el usuario", symptom or "_%s_" % UNFILLED),
             ("Qué se encontró", found_md),
             ("Qué se hizo" if final else "Qué se propone", done_md),
@@ -10144,7 +11252,15 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
             ("Riesgos", risks_md),
             ("Costo", cost),
             ("Más detalle", "El reporte técnico, con las mediciones completas y cómo leerlas, es el archivo "
-                            "reporte-%s-dev.html." % kind)]
+                            "reporte-%s-dev.html." % kind)]]
+
+
+def plain_unfilled(body):
+    """Un texto de gerencia sin "_sin completar_": en palabras, sin los guiones bajos de markdown."""
+    text = (body or "").replace("_%s_" % UNFILLED, UNFILLED_PLAIN)
+    if text == UNFILLED_PLAIN:
+        return "Sin completar todavía: la investigación no lo anotó."
+    return text
 
 
 def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
@@ -10186,7 +11302,23 @@ PLAN_HEADERS = ["#", "Mejora", "Hallazgo", "Métrica", "Antes", "Esperado", "Pri
 
 
 def plan_table_md(plan, rows):
-    return markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) + trial_md(plan)
+    return markdown_table(PLAN_HEADERS, plan_rows(plan, rows)) + trial_md(plan) + choices_md(plan)
+
+
+def choices_md(plan):
+    """Lo que la sesión 2 anticipa de cada mejora como decisión (costo, condición, alternativas): va debajo de la tabla
+    del plan; el cierre lo confirma en "Mejoras aplicadas"."""
+    items = [m for m in plan.get("mejoras", []) if any(str(m.get(key) or "").strip() for key in
+                                                         ("costo", "condicion", "alternativas"))]
+    if not items:
+        return ""
+    lines = ["", "", "**Cada mejora como una decisión** (lo anticipa el diagnóstico; el cierre lo confirma con los datos):", ""]
+    for m in items:
+        parts = ["%s: %s" % (label, m[key]) for key, label in (("costo", "costo"), ("condicion", "se cumple si"),
+                                                                ("alternativas", "alternativas"))
+                 if str(m.get(key) or "").strip()]
+        lines.append("- **%s** · %s" % (m["id"], " · ".join(parts)))
+    return "\n".join(lines)
 
 
 def parse_table(md):
@@ -10327,10 +11459,9 @@ def result_md(findings_text, plan):
 
 def improvements_summary(plan, results, n_findings=None):
     """Para el reporte final: de los hallazgos a las mejoras y su resultado, en una tabla corta."""
-    by_metric = {r["metrica"]: r for r in results}
     rows = []
     for m in plan.get("mejoras", []):
-        r = by_metric.get(m.get("metrica"))
+        r = improvement_metric(plan, m, results)
         estado = m.get("estado", "propuesta")
         result = improvement_result(m, r)
         if estado != "aplicada":
@@ -10392,7 +11523,8 @@ def render_report(folder, name, title, subtitle, parts, charts="", extras=None, 
         body += '<section id="s%d"%s><h2>%s</h2>%s%s</section>' % (
             i, ' class="resultado"' if section == "Resultado" else "", e(section), extras.get(section, ""),
             md_to_html(content))
-    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable|no confiable)( \(backend\))?</td>",
+    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable|no confiable|costo conocido|"
+                  r"servicios ajenos al flujo)( \(backend\))?</td>",
                   lambda m: '<td><span class="verdict %s">%s</span>%s</td>' % (
                       VERDICT_CLASS[m.group(1)], m.group(1), m.group(2) or ""), body)
     body = re.sub(r"<td>(propuesta|aprobada|aplicada|descartada|pendiente)</td>",
@@ -10410,7 +11542,7 @@ def verdict_words(r):
     """El veredicto en palabras para la tabla técnica: cuánto vale ("mejora clara", "orientativo: varía mucho entre
     corridas") y qué significa."""
     meaning = VERDICT_TEXT.get(r["veredicto"], "")
-    if r["veredicto"] in ("no comparable", "no confiable", "informativa"):
+    if r["veredicto"] in ("no comparable", "no confiable", "informativa", COST_VERDICT, FOREIGN_VERDICT):
         return meaning
     words = plain_verdict(r)
     return "%s · %s" % (words[0].upper() + words[1:], meaning)
@@ -10540,7 +11672,8 @@ def cmd_reporte(args):
         return
 
     results, unmatched = compare(rows, trust=frames_trust(folder), plan=plan)
-    marks_moved = flag_mark_changes(results, folder, plan)
+    marks_moved = flag_mark_changes(results, folder, plan) + flag_route_changes(results, folder, plan)
+    marks_moved += attribute_network(results, rows, plan, folder)
     principales = plan.get("principales") or []
     primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
     missing = [m for m in principales if m not in {r["metrica"] for r in results}]
@@ -10553,7 +11686,7 @@ def cmd_reporte(args):
          "se mantuvo" if moved(r)["igual"] else "%s (%s)" % (nice_signed(r["delta"], r["unidad"]), moved(r)["pct"] or "—"),
          r["veredicto"], verdict_words(r) + (" · depende del backend" if r["familia"] == "e2e" else "")]
         for r in primary]) if primary else ""
-    results_by_metric = {r["metrica"]: r for r in results}
+    results_by_metric = metric_results(results, plan)
     n_findings = len(parse_table(pick("hallazgos"))[1])
     logrado_md = markdown_table(LOGRADO_HEADERS, logrado_rows(plan, results, readable=True)) if plan.get("mejoras") else ""
     comparison_md = ("> La tabla técnica, igual a `comparacion.md`: todas las métricas medidas, con mediana y P90 por fase. "
@@ -10567,6 +11700,7 @@ def cmd_reporte(args):
                  row["fase"] == "despues" for row in rows) else ("antes",), urls=service_urls(folder))),
              ("Red por tramo", segment_network_md(rows, plan, ("antes", "despues"))),
              ("Mejoras: esperado contra logrado", logrado_md),
+             ("Pros y contras de cada mejora", tradeoffs_md(tradeoffs(folder, plan, rows, results, sections), plan)),
              ("Hallazgos", findings_md(pick("hallazgos"), plan, results_by_metric)),
              ("Mejoras aplicadas", filled("mejoras aplicadas")),
              ("Cambios de código (interno: contiene código)", changes_md(folder, plan, results, pick("hallazgos"))),
@@ -10585,6 +11719,10 @@ def cmd_reporte(args):
         extras["Servicios del flujo"] = services_html
     problems = []
     business = management_parts(folder, plan, rows, sections, results, problems=problems)
+    choices = plain_tradeoffs(tradeoffs(folder, plan, rows, results, sections), plan, problems)
+    if choices:
+        at = next((i for i, (name, _) in enumerate(business) if name == "Resultado"), len(business) - 1) + 1
+        business.insert(at, ("Qué gana y qué cuesta cada cambio", choices))
     plain_figures = "".join(figure(*final_chart(r, plain=True, plan=plan)) for r in primary[:3])
     internal = any(name.startswith("Cambios de código") and body for name, body in parts)
     write_reports(folder, "final", title, date, parts, business, args.html, charts, extras,
@@ -10703,11 +11841,33 @@ def keyboard_shown(adb):
     return bool(re.search(r"\bmInputShown=true\b", adb.shell("dumpsys input_method").stdout))
 
 
+TYPING_PAUSE = "120-200"
+
+
+def typing_pause(plan_path=None, flow=None):
+    """La pausa entre teclas de `teclear` sin --pausa: `tecleo.pausa_ms` del flujo en el plan (el de --plan, o el que
+    `capturar` deja en HB_PERF_PLAN y HB_PERF_FLUJO para el recorrido); TYPING_PAUSE si no hay. Así recorrido.sh y el
+    plan no pueden divergir."""
+    plan_path = plan_path or os.environ.get("HB_PERF_PLAN")
+    flow = flow or os.environ.get("HB_PERF_FLUJO")
+    if not plan_path:
+        return TYPING_PAUSE
+    try:
+        plan = load_plan(plan_path)
+    except PerfError:
+        return TYPING_PAUSE
+    flows = plan.get("flujos") or {}
+    spec = flows.get(flow) if flow in flows else (next(iter(flows.values())) if len(flows) == 1 else {})
+    typing = (spec or {}).get("tecleo")
+    value = typing.get("pausa_ms") if isinstance(typing, dict) else None
+    return value if value is not None else TYPING_PAUSE
+
+
 def cmd_teclear(args):
     """Escribe un texto en el campo con foco, carácter por carácter y con una pausa entre teclas, como una persona. La
     secuencia de pausas sale del texto y de la pausa (siempre la misma), así que antes y después teclean igual. Va en
     `recorrido.sh`, dentro de la traza: el intervalo real entre teclas lo mide `tecleo` del plan."""
-    pause = pause_range(args.pausa)
+    pause = pause_range(args.pausa if args.pausa is not None else typing_pause(args.plan, args.flujo))
     if pause is None:
         raise PerfError("--pausa es un número de milisegundos o un rango, por ejemplo 150 o 120-200")
     if "%" in args.texto:
@@ -11011,6 +12171,9 @@ def cmd_humo(args):
     note = update_agents_state(root, humo="pasó el %s" % today, http=http)
     if note:
         print(note)
+    for name, line in dod_missing_external(root):  # S13 con un `## DoD` que ya existía (0.12.0)
+        print("⚠ `## DoD` de AGENTS.md no trae el módulo %s, que viene de otro repo: agrega a la sección, con la tarea "
+              "real del módulo:\n    %s" % (name, line))
     nuevo = ["nuevo", "--receta", "arranque-frio", "--paquete", args.paquete, "--serial", serial, "--carpeta",
              shlex.quote(shown_path(investigations_base(root) / "arranque-frio" / datetime.date.today().isoformat(),
                                     root))]
@@ -11887,6 +13050,63 @@ def find_instrumentation(root):
     return perf_set, hooks
 
 
+def update_instrumentation_command(root):
+    """El comando completo que actualiza la instrumentación generada: `instrumentar --modulo <módulo> --paquete <paquete
+    de PerfHooks.kt> --actualizar`, con cd a la raíz. None si no encuentro PerfHooks.kt o su paquete."""
+    root = pathlib.Path(root)
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = sorted(d for d in dirs if d not in ("build", "node_modules", "reports", "out") and not d.startswith("."))
+        if "PerfHooks.kt" not in files:
+            continue
+        path = pathlib.Path(current) / "PerfHooks.kt"
+        parts = path.relative_to(root).parts
+        if "src" not in parts:
+            continue
+        module = pathlib.Path(*parts[:parts.index("src")]) if parts.index("src") else pathlib.Path(".")
+        try:
+            found = re.search(r"^\s*package\s+([\w.]+)", path.read_text(encoding="utf-8", errors="ignore"), re.M)
+        except OSError:
+            found = None
+        if found:
+            return perf_command(root, "instrumentar", "--modulo", str(module), "--paquete", found.group(1), "--actualizar")
+    return None
+
+
+def update_hint(root):
+    """"(`<comando>`)" para actualizar la instrumentación, o la opción sola si no encuentro el comando completo."""
+    command = update_instrumentation_command(root)
+    return "`%s`" % command if command else "`perf.py instrumentar --modulo <módulo> --paquete <paquete> --actualizar` " \
+                                            "(setup.md)"
+
+
+def dod_missing_external(root):
+    """Los repos incluidos desde fuera por settings.gradle que `## DoD` de AGENTS.md no nombra (ni por su nombre ni por
+    su ruta), con la línea que propondría para cada uno: [(nombre, línea)]. [] sin DoD, sin repos externos o si todos
+    aparecen."""
+    text = read_agents(root)
+    if text is None or not has_dod(text):
+        return []
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if DOD_HEADING.match(line))
+    level = len(re.match(r"^﻿?[ \t]{0,3}(#+)", lines[start]).group(1))
+    body = []
+    for line in lines[start + 1:]:
+        heading = ANY_HEADING.match(line)
+        if heading and len(heading.group(1)) <= level:
+            break
+        body.append(line)
+    body = "\n".join(body)
+    out = []
+    for other in external_roots(root, read_no_leer(root))[0]:
+        top = git_toplevel(other) or other
+        if other.name in body or top.name in body or str(top) in body:
+            continue
+        out.append((other.name, "- `cd %s && ./gradlew -q :<módulo>:test<Variante>UnitTest`: los tests de %s, que viene de "
+                                "otro repo (settings.gradle lo incluye desde fuera; si Gradle lo ve como módulo, el comando "
+                                "va desde la raíz)" % (shlex.quote(str(top)), other.name)))
+    return out
+
+
 def find_generated(root, name):
     """True si bajo la raíz del proyecto hay un archivo con ese nombre generado por `instrumentar`."""
     for current, dirs, files in os.walk(str(root)):
@@ -12325,6 +13545,9 @@ def main(argv=None):
                                    "parche aparte y AGENTS.md dice cómo ponerlo antes de medir.")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--simular", action="store_true", help="solo muestra qué quitaría y qué quedaría; no toca nada")
+    p.add_argument("--dod", action="store_true",
+                   help="después de quitar, corre el DoD de AGENTS.md (con la salida en <carpeta>/logs/%s) y lo anota; sin "
+                        "cambios por quitar, solo corre el DoD" % DOD_LOG)
     p.set_defaults(func=cmd_cerrar)
 
     p = sub.add_parser("lineabase", help="quita o reaplica el código de las mejoras para rehacer la línea base",
@@ -12481,7 +13704,11 @@ def main(argv=None):
                                    "texto: es la misma en todas las fases. El espacio se escribe como %s (adb input text "
                                    "no escribe '%').")
     p.add_argument("texto")
-    p.add_argument("--pausa", default="120-200", help="milisegundos entre teclas: un número o un rango (120-200)")
+    p.add_argument("--pausa", help="milisegundos entre teclas: un número o un rango (120-200). Sin ella, `tecleo.pausa_ms` "
+                                   "del flujo en el plan (--plan, o el que `capturar` pasa al recorrido); si no hay, "
+                                   "120-200")
+    p.add_argument("--plan", help="plan.json del que leer la pausa (por defecto, el de la captura en curso)")
+    p.add_argument("--flujo", help="flujo del plan (por defecto, el de la captura en curso)")
     p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
     p.set_defaults(func=cmd_teclear)
 

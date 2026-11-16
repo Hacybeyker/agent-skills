@@ -16,18 +16,20 @@
 | Dispositivo | {{DISPOSITIVO}} |
 | Modos | <guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage> |
 | Stack | <UI · asincronía · listas · red> |
-| Precondiciones | estado de la app igual en todas las fases (sesión, datos, caché) · nunca desinstalar ni borrar datos entre fases |
+| Precondiciones | el mismo estado de la app al empezar cada fase (sesión, datos, caché) · nunca desinstalar ni borrar datos entre fases |
 | No leer | {{NO_LEER}} |
 
 ## Cómo se recorre
 
 <!-- perf:recorrido -->
-(lo escribe perf.py: `preparar` y `recorrido` de cada flujo, y el comando para verlos correr a mano)
+(lo escribe perf.py: `preparar` y `recorrido` de cada flujo, el comando para verlos correr a mano y si el recorrido y sus archivos fueron los mismos en las fases medidas)
 <!-- /perf:recorrido -->
 
 ## Cambios temporales por revertir
 
 Marcas o código puestos solo para esta investigación (por ejemplo, una marca con `android.os.Trace` en un módulo que no ve `PerfHooks`) y las ediciones de cableado en código de `main` que no se van a commitear (el gancho de red donde se arma el cliente HTTP, por ejemplo). Se revierten antes de proponer un commit y, a más tardar, en el cierre.
+
+**Un archivo por fila**, con su ruta desde la raíz de su repo (sin `...`): así `perf.py cerrar` lo quita sin adivinar.
 
 | Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |
 | --- | --- | --- | --- | --- |

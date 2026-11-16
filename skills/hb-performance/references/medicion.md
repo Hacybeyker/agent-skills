@@ -85,8 +85,12 @@ Una mejora puede dejar de emitir una marca del plan o moverla (por ejemplo, al p
 
 - **Huella de las marcas.** Cada fase guarda en `fases.json`, por flujo, una huella de cada marca `MARK <nombre>` del plan (el archivo y las líneas que rodean cada lugar donde se emite) y del plan del flujo (cómo se recorre y qué métricas calcula). Se toma antes de medir, fuera de la traza: no cambia los tiempos.
 - **Antes de medir después, una prueba.** Con una mejora aplicada, `siguiente` da primero instalar y `capturar --prueba`; solo con una prueba posterior a la última mejora en la que salen todas las marcas ofrece `--fase despues`. Si falta alguna, el paso es un chat que la ajusta al mismo punto semántico (y la anota en "Cambios temporales por revertir") y otra prueba.
+- **Huella de los archivos del recorrido (0.12.0).** Además del texto de `recorrido` y `preparar`, la huella del plan guarda el **contenido** de cada script o flow que nombran (`preparar.sh`, `recorrido.sh`, un `.yaml` de Maestro, con `{{CARPETA}}` y rutas relativas resueltas) y de los que esos nombran a su vez (el flow de Maestro que llama `recorrido.sh`, su `runFlow`), hasta 20 archivos. Una espera de `preparar.sh` que pasa de 2 a 5 s no cambia el plan, pero sí qué llamadas caen en la ventana: `comparar` lo avisa con el archivo ("preparar.sh cambió entre antes y después: la espera o los pasos pueden no ser los mismos"), deja orientativas las métricas del flujo y `siguiente` ofrece rehacer la línea base. Una fase medida con una versión anterior no tiene esa huella: no se compara contra ella (sin falsos avisos).
+- **Igual contra igual lo dice `perf.py`.** "Cómo se recorre" de `estado.md` trae, por flujo, la línea "Igual contra igual (lo calcula perf.py)", que sale de las huellas de `fases.json`: los mismos archivos en todas las fases medidas, qué cambió, o que no se puede afirmar. Ninguna sesión escribe "igual en todas las fases" por su cuenta.
+- **El recorrido no cambia a escondidas.** Después de medir antes, ninguna sesión cambia `preparar`, `recorrido` ni sus scripts sin decirlo. Si hace falta (por ejemplo, una espera para que termine una precarga), es un **escenario nuevo** (ver "Escenarios de tiempo") o una línea base nueva (`lineabase`), y va como paso en "Siguiente".
 - **`comparar` avisa** si la huella de una marca cambió entre antes y después: "las marcas cambiaron entre fases: el veredicto de las métricas que dependen de ellas es orientativo", con esas métricas marcadas, y remite a rehacer la línea base.
 - **Rehacer la línea base, guiado.** Si las marcas o el recorrido cambiaron después de medir antes, `siguiente` da la secuencia completa, un paso por comando: `perf.py lineabase --carpeta <carpeta> --quitar-mejoras` (guarda el diff de cada mejora aplicada en un parche nuevo, sin pisar otro, comprueba que revierte limpio y lo quita; las marcas y los cambios temporales se quedan), instalar sin las mejoras, `capturar --fase antes --rehacer` y `--fase control --rehacer`, `perf.py lineabase --carpeta <carpeta> --reaplicar-mejoras`, instalar con las mejoras y la prueba. Mientras las mejoras estén quitadas (`lineabase.json` y "Advertencias para el diagnóstico" lo dicen), `siguiente` nunca manda a instalar "con la mejora" sin reaplicarla antes. Si un archivo tiene la mejora y también marcas temporales, separarlo pide criterio: el comando se detiene sin tocar nada y entrega el chat que lo hace. Como opción, rotulada así, se puede medir después igual con veredictos orientativos.
+- **`antes --rehacer` con las mejoras puestas se detiene.** Si `capturar --fase antes --rehacer` se corre sin pasar por `lineabase` y alguna mejora aplicada sigue en el código (su diff guardado revierte limpio o sus archivos tienen cambios), se detiene antes de compilar y ofrece `lineabase --quitar-mejoras`: medido así, el antes no sería la línea base. `--forzar` mide igual, a sabiendas.
 - **Rehacer antes invalida el control (y después).** Si `antes` se midió más tarde que `control`, `siguiente` pide rehacer el control antes de seguir, y un `despues` más viejo que `antes` se mide de nuevo.
 - **Una métrica nueva sobre trazas que ya están:** si solo cambiaron las métricas o los tramos del plan después de medir y las marcas que usan ya están en las trazas, `siguiente` ofrece `perf.py recalcular --carpeta <carpeta> [--fase …]`, que vuelve a calcular las métricas de la traza de cada corrida válida y actualiza `metricas.csv`, sin capturar. Si una marca no está en las trazas, lo dice y da el comando para medir de nuevo esa fase.
 
@@ -232,6 +236,31 @@ Las métricas de frames y del hilo principal cubren la ventana entera del flujo.
 - **Red por tramo.** Cada llamada `HTTP` se asigna al tramo donde **empieza** (si dos tramos se solapan, al primero del plan), aunque termine después; las que empiezan fuera de todos los tramos solo cuentan en las métricas de la corrida entera, que no cambian. Las `<tramo> red_*` salen cuando la corrida tiene red (alguna sección `HTTP`, o la investigación ya la medía); sin tramos, todo queda como siempre. No entran en el resumen compacto salvo que sean principales: se leen en la tabla "Red por tramo" de `diagnostico.md` (la corrida mediana y la peor, con los endpoints de cada tramo y las llamadas que quedan fuera) y del reporte (la mediana entre corridas, por fase).
 - **`"solo_red": true`** en un tramo: no calcula frames, hilo ni jank; solo agrupa sus llamadas, y trae `<tramo> red_llamadas` aunque sea 0. Para los tramos donde la app espera o hace polling ([ficha.md](ficha.md) · Flujos que pasan por otra app).
 - Una investigación que midió `antes` con una versión anterior de la skill no tiene las `<tramo> red_*` en esa fase: en `comparar` salen como métricas sin las dos fases, sin veredicto, hasta que se repita la fase.
+
+## Escenarios de tiempo
+
+Una mejora que depende de un tiempo (una precarga que solo sirve si el usuario tarda en abrir la pantalla) se mide en más de un escenario, para mostrar su rango real y no solo el caso favorable. Un escenario es un flujo hermano que copia el flujo base y solo cambia `variables`:
+
+```json
+"flujos": {
+  "abrir": {"recorrido": "bash {{CARPETA}}/recorrido.sh", "variables": {"PERF_ESPERA_S": "4"}, "titulo": "tras 4 s", "...": "..."},
+  "abrir_enseguida": {"escenario_de": "abrir", "variables": {"PERF_ESPERA_S": "0"}, "titulo": "enseguida"}
+}
+```
+
+- `capturar` pasa las `variables` como variables de entorno a `preparar` y al recorrido; el script las usa con un valor por defecto (`sleep "${PERF_ESPERA_S:-0}"`). `plan.json` guarda solo la diferencia: lo demás sale del flujo base al cargar el plan, así que los dos tienen la misma huella salvo ese parámetro (y la misma de los archivos del recorrido).
+- Cada escenario es un flujo más: se mide con `--flujo <escenario>` en las mismas fases que el base (`siguiente` agrega esos pasos cuando el base ya midió una fase), se compara y se reporta. El reporte final muestra la mejora por escenario y "Pros y contras" lo usa como condición ("tras 4 s: mejora; enseguida: sin cambio").
+- Lo propone la ficha cuando el flujo tiene una espera que el usuario puede acortar, y lo pide la sesión 2 cuando una mejora depende del tiempo. Agregar un escenario después de medir antes no cambia el flujo base (solo pide medir el escenario) si el script ya leía la variable; si hay que editar `recorrido.sh` o `preparar.sh` para que la lea, su huella cambia y `siguiente` pide rehacer la línea base: por eso conviene dejar la variable desde la ficha.
+
+## Red atribuida por servicio
+
+`red_llamadas` (y `red_solapadas`, `red_repetidas_2s`) cuenta todo lo que cae en la ventana, también cargas de otra pantalla que siguen en curso y entran o salen según el tiempo. Con los **servicios del flujo** declarados (`"servicios": ["GET api/v1/contactos", "novedades"]` en el flujo: el nombre completo o una parte de la ruta), los que nombra `servicios` de una mejora y los que toca el diff guardado de una mejora (su ruta, desde dos tramos, como texto entre comillas), `comparar` separa:
+
+- un aumento que viene solo de **servicios ajenos** al flujo: `servicios ajenos al flujo`, no regresión de la app; el aviso dice cuáles y por qué pueden entrar en la ventana (y si el recorrido cambió entre fases, cuál archivo);
+- un aumento que viene de los servicios que toca una **mejora aplicada**: `costo conocido` de esa mejora, que el reporte presenta en "Pros y contras";
+- un aumento de un servicio del flujo que ninguna mejora explica: sigue siendo `regresión`.
+
+Sin servicios declarados ni atribuidos, no se separa nada (como antes).
 
 ## Hilos ajenos a la app
 
