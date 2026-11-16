@@ -120,7 +120,7 @@ class SameRouteTest(PerfBase):
         self.assertEqual(perf.route_change_notes(self.folder, perf.load_plan(self.folder / "plan.json")), {})
         line = perf.same_route_line(self.folder, "home")
         self.assertEqual(line, "- Igual contra igual (lo calcula perf.py): el recorrido del plan y sus archivos "
-                               "(preparar.sh) son los mismos en antes, control, despues")
+                               "(preparar.sh) son los mismos en antes, control, después")
         self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
         self.assertIn(line, (self.folder / "estado.md").read_text(encoding="utf-8"))
 
@@ -131,7 +131,7 @@ class SameRouteTest(PerfBase):
         self.assertEqual(perf.route_change_notes(self.folder, perf.load_plan(self.folder / "plan.json")), {})
         self.assertEqual(perf.baseline_changes(self.folder, perf.load_plan(self.folder / "plan.json"), "home",
                                                perf.read_phases(self.folder))[1:], (False, False, []))
-        self.assertIn("sin la huella de los archivos del recorrido en antes, control, despues",
+        self.assertIn("sin la huella de los archivos del recorrido en antes, control, después",
                       perf.same_route_line(self.folder, "home"))
 
     def test_siguiente_ofrece_rehacer_la_linea_base_si_preparar_cambio(self):
@@ -328,7 +328,7 @@ class TradeoffsReportTest(PerfBase):
         self.assertNotEqual(prints[0]["recorrido"], prints[1]["recorrido"])
 
     def test_pros_y_contras_en_dev_y_en_gerencia(self):
-        self.ok("reporte", "--carpeta", self.folder.relative_to(self.dir))
+        self.ok("reporte", "--carpeta", self.folder.relative_to(self.dir), "--html")
         dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         section = dev[dev.index("## Pros y contras de cada mejora"):dev.index("\n## Hallazgos")]
         self.assertIn("**Qué gana el usuario:** tab_visible_ms (tras 4 s · PERF_ESPERA_S=4): pasó de 2.4 s a 41 ms "
@@ -343,7 +343,12 @@ class TradeoffsReportTest(PerfBase):
         self.assertIn("**Cargar la lista por adelantado**\n\n- Qué gana el usuario: abrir la pestaña (tras 4 s) pasó de 2.4 "
                       "s a 41 milisegundos (98 % menos): mejora clara.", part)
         self.assertIn("- Qué cuesta: consultar al servidor 1 vez más cada vez que el usuario hace este recorrido "
-                      "(contactos); una consulta más al abrir la app, aunque no se abra la pestaña.", part)
+                      "(contactos); según la investigación, una consulta más al abrir la app, aunque no se abra la pestaña.",
+                      part)
+        self.assertIn("**enseguida:**", business)  # "Servicios" por el título del escenario
+        self.assertNotIn("**abrir_enseguida:**", business)
+        html = (self.folder / "reporte-final-gerencia.html").read_text(encoding="utf-8")
+        self.assertIn("abrir la pestaña (enseguida)", html)  # el gráfico dice de qué escenario es
         self.assertIn("- Cuándo se nota: se nota si se abre la pestaña 4 s o más después de entrar. Según el escenario, "
                       "tras 4 s: mejora clara", part)
         self.assertIn("abrir la pestaña (enseguida)", business)  # el escenario por su título, no por el nombre interno
@@ -469,6 +474,8 @@ class CloseRowsTest(PerfBase):
         write(self.dir / "app" / "Home.kt", "class Home\n// MARK home temporal\n")
         self.state("| `app/Home.kt` | app | marca | — | no |\n")
         write(self.folder / "reporte-final-dev.md", "x")
+        self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0],
+                         "investigación cerrada · faltan quitar los cambios temporales y el DoD")
         out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
         self.assertIn("DoD después de quitar", out)
         self.assertIn("--dod", out)

@@ -4945,7 +4945,8 @@ class Compat070Test(PerfBase):
         final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("3 hallazgos → 2 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
         self.assertNotIn("## Red por tramo", final)
-        self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0], "investigación cerrada")
+        self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0],
+                         "investigación cerrada · faltan quitar los cambios temporales y el DoD")  # 0.12.0
 
     def test_las_fases_de_0_7_0_con_datos_por_flujo_se_leen_igual(self):
         phases = perf.read_phases(self.folder)
@@ -9202,7 +9203,7 @@ class BaselineRedoTest(PerfBase):
         self.assertTrue(perf.next_steps(self.folder, plan)[0].startswith("rehacer la línea base"))
         write(self.folder / "reporte-final-dev.html", "x")  # se cerró con veredictos orientativos
         title, steps = perf.next_steps(self.folder, plan)
-        self.assertEqual(title, "investigación cerrada")
+        self.assertEqual(title, "investigación cerrada · faltan quitar los cambios temporales y el DoD")  # 0.12.0
         self.assertTrue(any(" cerrar --carpeta " in step.get("texto", "") for step in steps))
 
     def test_mejoras_quitadas_a_mano_se_registran_y_se_reaplican(self):

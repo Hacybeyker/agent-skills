@@ -3792,6 +3792,7 @@ def next_steps(folder, plan, flow=None):
         notice = revert_notice(folder, project_root(folder).resolve())
         dod = None if notice else dod_step(folder, project_root(folder).resolve(), read_close(folder))
         if notice and title.startswith(("investigación cerrada", "triage cerrado")):
+            title = title + " · faltan quitar los cambios temporales y el DoD"  # no está cerrada sin esos pasos
             steps = [notice] + [dict(step, texto=DONE_AFTER_CLOSE) if step["tipo"] == "fin" else step for step in steps]
         elif notice:
             steps = steps + [notice]
@@ -6853,9 +6854,6 @@ def route_changes(old, new):
     return out
 
 
-PHASE_WORDS = {"antes": "antes", "control": "control", "despues": "después"}
-
-
 def route_change_text(changed, first, second):
     """El aviso de un recorrido que cambió entre dos momentos, nombrando los archivos."""
     first, second = PHASE_WORDS.get(first, first), PHASE_WORDS.get(second, second)
@@ -6912,7 +6910,8 @@ def same_route_line(folder, flow):
     without = [phase for phase in measured if not isinstance((prints[phase] or {}).get("archivos"), dict)]
     if without:
         return ("- Igual contra igual (lo calcula perf.py): sin la huella de los archivos del recorrido en %s (medida con "
-                "una versión anterior a 0.12.0): no se puede afirmar que los scripts fueron los mismos" % ", ".join(without))
+                "una versión anterior a 0.12.0): no se puede afirmar que los scripts fueron los mismos" % ", ".join(
+                    PHASE_WORDS.get(phase, phase) for phase in without))
     changed = [(phase, route_changes(prints[measured[0]], prints[phase])) for phase in measured[1:]]
     changed = [(phase, items) for phase, items in changed if items]
     if changed:
@@ -6921,7 +6920,8 @@ def same_route_line(folder, flow):
     files = sorted((prints[measured[0]] or {}).get("archivos") or {})
     return "- Igual contra igual (lo calcula perf.py): el recorrido del plan%s %s en %s%s" % (
         " y sus archivos (%s)" % ", ".join(files) if files else "", "son los mismos" if files else "es el mismo",
-        ", ".join(measured), "" if len(measured) > 1 else " (una sola fase medida)")
+        ", ".join(PHASE_WORDS.get(phase, phase) for phase in measured), "" if len(measured) > 1 else
+        " (una sola fase medida)")
 
 
 def changed_marks(old, new):
@@ -9714,7 +9714,8 @@ def plain_tradeoffs(items, plan, problems):
         if text:
             text = plain_or_unfilled(text, "el costo de %s" % item["id"], problems)
             if not text.startswith("_"):
-                costs.append(text[0].lower() + text[1:])
+                # lo que escribió la investigación va aparte de lo medido: es la misma decisión, dicha por quien la tomó
+                costs.append("según la investigación, %s" % (text[0].lower() + text[1:]))
         condition, _ = entry["condicion"]
         if condition:
             condition = plain_or_unfilled(condition, "la condición de %s" % item["id"], problems)
@@ -10243,8 +10244,11 @@ def final_chart(r, plain=False, plan=None):
     if r.get("control") and not plain:
         series.append(("Control", r["control"]["mediana"], r["control"]["min"], r["control"]["max"], "control"))
     series.append(("Después", r["despues"]["mediana"], r["despues"]["min"], r["despues"]["max"], "after"))
-    name = plain_metric(r["metrica"], plan or {}) if plain else "`%s`" % r["metrica"]
-    svg = range_chart(series, unit, plain_metric(r["metrica"], plan or {}) if plain else r["metrica"],
+    flows = (plan or {}).get("flujos") or {}
+    # con escenarios (o varios flujos), gerencia ve de cuál es cada gráfico, por su título
+    where = " (%s)" % ((flows.get(r["flujo"]) or {}).get("titulo") or r["flujo"]) if plain and len(flows) > 1 else ""
+    name = plain_metric(r["metrica"], plan or {}) + where if plain else "`%s`" % r["metrica"]
+    svg = range_chart(series, unit, name if plain else r["metrica"],
                       None if plain else r.get("ruido"), plain=plain)
     words = plain_verdict(r)
     text = "%s %s: %s." % (name, change_phrase(r, plain), words)
@@ -10908,7 +10912,7 @@ def services_line(rows, plan, phase="antes"):
     flows += sorted({row["flujo"] for row in rows} - set(flows))
     for flow in flows:
         services = flow_services(rows, flow, phase)
-        lead = "**%s:** " % flow if len(flows) > 1 else ""
+        lead = "**%s:** " % (((plan.get("flujos") or {}).get(flow) or {}).get("titulo") or flow) if len(flows) > 1 else ""
         if not services:
             counted = groups[(flow, "red_llamadas")]["fases"].get(phase) if (flow, "red_llamadas") in groups else None
             calls = statistics.median(counted) if counted else None
