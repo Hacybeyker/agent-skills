@@ -191,6 +191,7 @@ view.doOnPreDraw {
   cd <repo> && git apply <carpeta-fuera-del-repo>/<nombre>.patch       # volver a aplicar
   ```
   `set -C` hace que la redirección falle ("file exists") si el parche ya existe: así nunca se pisa uno guardado, ni se guarda un parche vacío encima después de quitar los cambios; si pasa, usa otro nombre (con la fecha y la hora). `git apply --check -R` confirma que el parche revierte limpio antes de confiar en él. Un archivo nuevo solo entra en `git diff` después de `git add -N <archivo>`; al quitar el parche, sácalo también del índice (`git reset -q -- <archivo>`), o `git status` lo sigue mostrando como borrado. Anota la ruta del parche en la fila del inventario.
+- **Al cerrar la investigación no hace falta armar estos comandos:** `perf.py cerrar --carpeta <carpeta>` guarda el parche de cada repo, comprueba que revierte limpio y los quita ([cierre.md](cierre.md) · Entrega).
 - Lo mismo vale para una marca que se pone solo para distinguir dos caminos del código durante el diagnóstico, o para marcar el inicio de una acción que no navega ([ficha.md](ficha.md)).
 
 #### Reglas para una marca puesta por un agente

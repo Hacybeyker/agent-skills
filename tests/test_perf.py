@@ -3034,7 +3034,7 @@ class NoImprovementsTest(PerfBase):
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · sesión 4 · cierre sin mejoras", out)
         self.assertNotIn("sesión 2", out[out.index("Siguiente ·"):])
-        self.assertIn('--sesion "2 · diagnóstico" --modelo "Sonnet 5.5" --esfuerzo alto --costo "<costo>"', out)
+        self.assertIn("--sesion '2 · diagnóstico' --modelo 'Sonnet 5.5' --esfuerzo alto --costo '<lo que muestre tu herramienta>'", out)
         write(self.folder / "reporte-final.md", "x")
         self.assertEqual(perf.next_steps(self.folder, self.plan)[0], "investigación cerrada")
 
@@ -7404,13 +7404,15 @@ class CostTest(PerfBase):
     def test_siguiente_lista_las_sesiones_hechas_sin_fila_con_un_comando_completo_por_cada_una(self):
         write(self.folder / "reporte-inicial.md", "x")
         out = self.ok("siguiente", "--carpeta", self.folder)
-        self.assertIn("Costo (opcional, Terminal): 3 sesiones hechas sin anotar. Un comando por cada una; solo falta el costo", out)
-        self.assertIn("/cost en Claude Code; /usage en GitHub Copilot CLI, que informa AI Credits y tokens", out)
+        self.assertIn("Costo (opcional, Terminal): 3 sesiones hechas sin anotar. Un comando por cada una; reemplaza "
+                      "%s por el valor" % "'<lo que muestre tu herramienta>'", out)
+        self.assertIn("/cost en Claude Code (USD); /usage en GitHub Copilot CLI (AI Credits, que no son tokens)", out)
         commands = [line.strip() for line in out.splitlines() if " consumo --carpeta " in line]
         self.assertEqual(len(commands), 3, out)
-        for command, rest in zip(commands, ('--sesion "1 · ficha" --modelo "Sonnet 5.5" --esfuerzo medio --costo "<costo>"',
-                                            '--sesion "2 · diagnóstico" --modelo "Sonnet 5.5" --esfuerzo alto --costo "<costo>"',
-                                            '--sesion "3 · M1" --modelo "Sonnet 5.5" --esfuerzo medio --costo "<costo>"')):
+        value = "'<lo que muestre tu herramienta>'"
+        for command, rest in zip(commands, ("--sesion '1 · ficha' --modelo 'Sonnet 5.5' --esfuerzo medio --costo " + value,
+                                            "--sesion '2 · diagnóstico' --modelo 'Sonnet 5.5' --esfuerzo alto --costo " + value,
+                                            "--sesion '3 · M1' --modelo 'Sonnet 5.5' --esfuerzo medio --costo " + value)):
             self.assertTrue(command.startswith("cd ") and command.endswith(rest), command)
             self.assertEqual(command.count("<"), 1)  # solo queda el costo por llenar
         state = self.state()
@@ -7419,12 +7421,12 @@ class CostTest(PerfBase):
         self.assertIn("**Total de la investigación:** faltan anotar 3 sesiones hechas (1 · ficha, 2 · diagnóstico, 3 · M1): "
                       "el total es parcial", state)
         # el comando impreso, con el costo puesto, anota la fila y la sesión deja de listarse
-        ready = commands[1].split(" consumo ")[1].replace('"<costo>"', '"0.80 USD"')
+        ready = commands[1].split(" consumo ")[1].replace(value, "'0.80 USD'")
         self.ok("consumo", *__import__("shlex").split(ready))
-        self.assertIn("| 2 · diagnóstico | Sonnet 5.5 · alto | 0.80 USD | — |", self.state())
+        self.assertIn("| 2 · diagnóstico | Sonnet 5.5 · alto | 0.80 USD |", self.state())
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("2 sesiones hechas sin anotar", out)
-        self.assertNotIn('--sesion "2 · diagnóstico"', out)
+        self.assertNotIn("--sesion '2 · diagnóstico'", out)
 
     def test_nada_se_bloquea_si_no_se_anota_y_tambien_sale_con_la_investigacion_cerrada(self):
         write(self.folder / "reporte-inicial.md", "x")
@@ -7432,7 +7434,7 @@ class CostTest(PerfBase):
         out = self.ok("siguiente", "--carpeta", self.folder)
         self.assertIn("Siguiente · investigación cerrada", out)
         self.assertIn("4 sesiones hechas sin anotar", out)
-        self.assertIn('--sesion "4 · cierre" --modelo "Haiku 5.5" --esfuerzo bajo --costo "<costo>"', out)
+        self.assertIn("--sesion '4 · cierre' --modelo 'Haiku 5.5' --esfuerzo bajo --costo '<lo que muestre tu herramienta>'", out)
         for session in ("1 · ficha", "2 · diagnóstico", "3 · M1", "4 · cierre"):
             self.ok("consumo", "--carpeta", self.folder, "--sesion", session, "--costo", "0.50 USD")
         out = self.ok("siguiente", "--carpeta", self.folder)
@@ -7486,7 +7488,8 @@ class CostTest(PerfBase):
             if "gerencia" in path.name:
                 continue
             self.assertIn("## Costo de la investigación", text, path.name)
-            self.assertIn("| 2 · diagnóstico | Sonnet 5.5 | 0.80 USD | — |", text, path.name)
+            self.assertIn("| 2 · diagnóstico | Sonnet 5.5 | 0.80 USD |", text, path.name)
+            self.assertNotIn("| Pasos |", text, path.name)  # K5: ninguna sesión trae pasos: sin la columna
             self.assertIn("**Total:** 0.80 USD en 1 sesión anotada · faltan anotar", text, path.name)
             self.assertIn("el total es parcial", text, path.name)
 
@@ -8667,8 +8670,8 @@ class SetupCostTest(PerfBase):
         write(self.dir / "AGENTS.md", self.AGENTS)
         self.assertEqual(self.labels(), ["0 · setup", "1 · ficha"])
         out = self.ok("siguiente", "--carpeta", self.folder.relative_to(self.dir))
-        self.assertIn('consumo --carpeta reports/perf/lista/2026-11-10 --sesion "0 · setup" --modelo "Sonnet 5.5" '
-                      '--esfuerzo medio --costo "<costo>"', out)
+        self.assertIn("consumo --carpeta reports/perf/lista/2026-11-10 --sesion '0 · setup' --modelo 'Sonnet 5.5' "
+                      "--esfuerzo medio --costo '<lo que muestre tu herramienta>'", out)
         # otra investigación del proyecto ya la anotó: no se pide dos veces
         other = self.dir / "reports" / "perf" / "otra" / "2026-11-01"
         write(other / "estado.md", STATE_COST % "" + "| 0 · setup | Sonnet 5.5 | 1.40 USD | 42 |\n")
@@ -9403,6 +9406,7 @@ class RequestAndEnvTest(DeviceBase):
         self.assertEqual(perf.request_env({"flujo": "x", "requiere_env": ["PERF_PIN"]}), ["PERF_PIN"])
         self.assertEqual(perf.request_env({"flujo": "el login con PERF_USUARIO", "llegar": ""}), ["PERF_USUARIO"])
         self.assertEqual(perf.request_env({"texto": "mide HTTP_GET de API_V1 con $MI_CLAVE"}), ["MI_CLAVE"])
+        self.assertEqual(perf.request_env({"texto": "con $TOKEN y ${CLAVE}"}), ["TOKEN", "CLAVE"])
         prompt = perf.session1_prompt({"flujo": "de la lista al detalle", "llegar": "La app ya tiene sesión"}, "emulator-5554")
         self.assertIn("Para llegar ahí: La app ya tiene sesión. Dispositivo emulator-5554.", prompt)
 
@@ -9495,7 +9499,27 @@ class PhaseConfigTest(DeviceBase):
         self.assertIn("cpu y completa son capturas de diagnóstico (alteran los tiempos; completa no trae muestreo de CPU)",
                       result.stderr)
         self.assertRegex(result.stderr, r"capturar --plan \S+ --flujo home --sin-compilar --config cpu --prueba")
-        self.assertIn("O la fase con la misma configuración que las otras", result.stderr)
+        self.assertIn("O la fase con la misma configuración que las otras (base)", result.stderr)
+        # al revés: las otras con completa y esta sin --config: el camino agrega --config completa, no ofrece una prueba
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        saved = phases["antes"]["flujos"]["home"]["configs"]
+        phases["antes"]["flujos"]["home"]["configs"] = ["completa@abc"]
+        write(self.plan.parent / "fases.json", json.dumps(phases))
+        result = self.perf(*(common + ["--fase", "control"]))
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("La fase con la misma configuración que las otras (completa)", result.stderr)
+        self.assertRegex(result.stderr, r"--fase control --config completa\n")
+        self.assertNotRegex(result.stderr, r"capturar [^\n]*--prueba\n")
+        # las otras con una configuración propia que ya no está: un paso igual, nunca un error sin salida
+        phases["antes"]["flujos"]["home"]["configs"] = ["mia.pbtx@abc"]
+        write(self.plan.parent / "fases.json", json.dumps(phases))
+        result = self.perf(*(common + ["--fase", "control"]))
+        self.assertEqual(result.returncode, 3)
+        self.assertNotIn("--config mia.pbtx", result.stderr)
+        self.assertIn("Decide qué configuración vale para todas las fases", result.stderr)
+        self.assertRegex(result.stderr, r"--fase control --forzar\n")
+        phases["antes"]["flujos"]["home"]["configs"] = saved
+        write(self.plan.parent / "fases.json", json.dumps(phases))
         out = self.ok(*(common + ["--fase", "control", "--memoria"]))
         self.assertIn("--memoria tiene que estar en todas las fases o en ninguna: antes se midió sin --memoria", out)
 
@@ -9872,3 +9896,233 @@ class BusinessWordsTest(PerfBase):
         self.assertIn("con las esperas del guion de medición", text)
         self.assertIn('⚠ Gerencia: "busqueda_ms" no tiene un nombre en palabras', out)  # sin etiqueta: lo dice y cómo
         self.assertIn('"etiquetas": {"busqueda_ms": "<qué es, en palabras>"}', out)
+
+
+# ── 0.11.0 · K: consumo con cualquier herramienta ────────────────────────────
+
+def transcript_lines(prompt, messages):
+    """Un transcript sintético de Claude Code: el primer pedido y mensajes del agente con su uso; un mismo id puede
+    repetirse (un mensaje en varias líneas) y cuenta una vez."""
+    lines = [{"type": "user", "message": {"role": "user", "content": prompt}}]
+    for ident, model, fresh, read, written, out in messages:
+        lines.append({"type": "assistant", "message": {"id": ident, "model": model, "usage": {
+            "input_tokens": fresh, "cache_read_input_tokens": read, "cache_creation_input_tokens": written,
+            "output_tokens": out}}})
+    lines.append({"type": "attachment", "attachment": {}})
+    return "".join(json.dumps(line) + "\n" for line in lines)
+
+
+class ConsumptionToolsTest(PerfBase):
+    """K1–K5: la opción de `consumo` según la herramienta, el costo mutilado por el shell, la fila que se reemplaza, los
+    tokens de /usage de Copilot CLI, el transcript de Claude Code y la columna "Pasos" solo cuando hay datos."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = {"paquete": PKG, "principales": ["lista_ms"], "flujos": {"lista": {"recorrido": "true"}},
+                     "mejoras": [{"id": "M1", "titulo": "Una sola carga", "estado": "aplicada", "metrica": "lista_ms"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", STATE_COST % "")
+        write(self.folder / "reporte-inicial.md", "x")
+        write(self.folder / "fases.json", json.dumps({n: {"fecha": "2026-11-05"} for n in ("antes", "control", "despues")}))
+
+    def state(self):
+        return (self.folder / "estado.md").read_text(encoding="utf-8")
+
+    def tool(self, name):
+        write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- Herramienta de IA: %s\n" % name)
+
+    def test_la_opcion_segun_la_herramienta(self):
+        self.tool("GitHub Copilot CLI")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        commands = [line for line in out.splitlines() if " consumo --carpeta " in line]
+        self.assertTrue(commands and all(line.endswith("--creditos '<AI Credits de /usage>'") for line in commands), out)
+        self.assertIn("son AI Credits, no tokens", out)
+        for line in commands:
+            self.assertEqual(subprocess.run(["bash", "-n", "-c", line.strip()]).returncode, 0, line)
+        self.tool("Claude Code")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("--costo '<monto en USD>'", out)
+        self.assertIn("--desde-transcript auto", out)
+        self.tool("OpenAI Codex")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("--costo '<monto> USD'", out)
+        for line in out.splitlines():
+            if " consumo --carpeta " in line:
+                self.assertEqual(subprocess.run(["bash", "-n", "-c", line.strip()]).returncode, 0, line)
+
+    def test_un_costo_mutilado_por_el_shell_no_se_anota_y_la_misma_sesion_reemplaza_su_fila(self):
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "-bash.40")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("llegó mutilado: el shell expandió un \"$\"", result.stderr)
+        self.assertIn("--costo '<lo que mostró tu herramienta, con su $>'", result.stderr)
+        self.assertNotIn("bash.40", self.state())
+        # "$0.40" en la terminal de un IDE (zsh o bash sin inicio de sesión) y "$1.25" con $1 vacío
+        for mangled in ("zsh.40", "/bin/zsh.40", "bash.40 USD", "-zsh.40", "costo -> .25", ".25 USD"):
+            self.assertEqual(self.perf("consumo", "--carpeta", self.folder, "--sesion", "2", "--costo", mangled)
+                             .returncode, 2, mangled)
+        self.assertIsNone(perf.MANGLED_COST.search("0.40 USD"))
+        self.assertIsNone(perf.MANGLED_COST.search("1.05 USD (sesión con fresh.5)"))
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--creditos", "45.20")
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--creditos", "90")
+        self.assertIn("actualiza la fila que tenía esa sesión", out)
+        self.assertEqual(self.state().count("| 2 · diagnóstico |"), 1)
+        self.assertIn("90 AI Credits (0.90 USD)", self.state())
+        self.assertNotIn("45.2", self.state())
+        self.assertEqual(self.perf("consumo", "--carpeta", self.folder, "--sesion", "2", "--creditos", "<AI Credits>")
+                         .returncode, 2)
+
+    def test_tokens_de_usage_con_escritura_de_cache(self):
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "4 · cierre", "--creditos", "12.5", "--tokens-entrada",
+                "320k", "--tokens-cache", "300k", "--tokens-cache-escritura", "15k", "--tokens-salida", "6.4k")
+        state = self.state()
+        self.assertIn("12.5 AI Credits (0.12 USD) · tokens: 320000 entrada, 300000 caché, 15000 escritura de caché, "
+                      "6400 salida", state)
+        self.assertIn("tokens: 320 k entrada, 300 k caché, 15 k escritura de caché, 6 k salida", state)
+
+    def test_claude_code_desde_el_transcript_y_la_columna_pasos(self):
+        self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.80 USD")
+        self.assertNotIn("Pasos", self.state())  # K5: ninguna sesión la trae
+        transcript = self.dir / "t.jsonl"
+        write(transcript, transcript_lines("Sigue hb-performance con %s: sesión 3, aplica M1. No hagas commit ni push."
+                                           % (self.folder / "estado.md"),
+                                           [("m1", "claude-sonnet-5-5", 10, 1000, 200, 50),
+                                            ("m1", "claude-sonnet-5-5", 10, 1000, 200, 50),
+                                            ("m2", "claude-sonnet-5-5", 5, 2000, 0, 30)]))
+        out = self.ok("consumo", "--carpeta", self.folder, "--desde-transcript", transcript)
+        self.assertIn("| 3 · M1 | claude-sonnet-5-5 | tokens: 3215 entrada, 3000 caché, 200 escritura de caché, 80 salida "
+                      "| 2 |", out)
+        self.assertIn("| Sesión | Modelo | Costo o tokens | Pasos |", self.state())
+        self.assertIn("| 2 · diagnóstico | — | 0.80 USD | — |", self.state())
+        # auto: el más reciente de la carpeta del proyecto en la configuración de Claude Code
+        config = self.dir / "config"
+        project = config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.dir.resolve()))
+        write(project / "viejo.jsonl", transcript_lines("otra cosa", [("x", "m", 1, 0, 0, 1)]))
+        write(project / "nuevo.jsonl", transcript_lines("Sigue hb-performance con %s" % (self.folder / "estado.md"),
+                                                        [("y", "claude-haiku-5-5", 100, 0, 0, 10)]))
+        os.utime(str(project / "viejo.jsonl"), (time.time() - 600, time.time() - 600))
+        self.env["CLAUDE_CONFIG_DIR"] = str(config)
+        result = self.perf("consumo", "--carpeta", self.folder, "--desde-transcript", "auto")
+        self.assertEqual(result.returncode, 2)  # sin número y sin una sesión 2 o 4 hecha sin anotar: no adivina
+        self.assertIn("falta --sesion", result.stderr)
+        write(self.folder / "reporte-final-dev.html", "x")  # la sesión 4 ya está hecha
+        out = self.ok("consumo", "--carpeta", self.folder, "--desde-transcript", "auto")
+        self.assertIn("| 4 · cierre | claude-haiku-5-5 | tokens: 100 entrada, 0 caché, 0 escritura de caché, 10 salida | 1 |",
+                      out)  # sin número de sesión: la última hecha sin anotar
+
+    def test_el_hook_de_fin_de_sesion(self):
+        transcript = self.dir / "t.jsonl"
+        write(transcript, transcript_lines("Sigue hb-performance con %s: sesión 3, aplica M1" % (self.folder / "estado.md"),
+                                           [("a", "claude-sonnet-5-5", 10, 0, 0, 5)]))
+        hook = json.dumps({"session_id": "x", "transcript_path": str(transcript), "cwd": str(self.dir),
+                           "hook_event_name": "SessionEnd", "reason": "other"})
+        result = self.perf("consumo", "--desde-hook", stdin=hook)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("| 3 · M1 |", self.state())
+        write(transcript, transcript_lines("explícame algo", [("b", "m", 1, 0, 0, 1)]))
+        result = self.perf("consumo", "--desde-hook", stdin=hook)
+        self.assertEqual(result.returncode, 0)  # un chat que no es de una investigación: nada, sin error
+        self.assertIn("no retoma una investigación", result.stderr)
+        self.assertEqual(self.perf("consumo", "--desde-hook", stdin="no es json").returncode, 0)
+        # un chat auxiliar ("guarda el diff…") no es una sesión: no pisa la de diagnóstico
+        write(transcript, transcript_lines("Sigue hb-performance con %s: guarda el diff de M1 con `perf.py decidir`. No "
+                                           "hagas commit ni push." % (self.folder / "estado.md"),
+                                           [("c", "claude-sonnet-5-5", 10, 0, 0, 5)]))
+        result = self.perf("consumo", "--desde-hook", stdin=hook)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("no es una sesión de la investigación", result.stderr)
+        self.assertNotIn("| 2 · diagnóstico |", self.state())
+
+    def test_la_sesion_sale_solo_del_texto_de_una_sesion(self):
+        state = self.folder / "estado.md"
+
+        def session(prompt):
+            return perf.transcript_session({"pedido": prompt}, None, None)[1]
+
+        self.assertEqual(session("Sigue hb-performance con %s: sesión 3, aplica M1. No hagas commit ni push." % state),
+                         "3 · M1")
+        self.assertEqual(session("Sigue hb-performance con %s: sesión 4 de nuevo: los reportes finales son anteriores "
+                                 "a antes" % state), "4 · cierre (de nuevo)")
+        self.assertEqual(session("Sigue hb-performance con %s: sesión 4 con las marcas cambiadas entre fases (x)"
+                                 % state), "4 · cierre")
+        self.assertEqual(session("Sigue hb-performance con %s: cierra la investigación sin fase después." % state),
+                         "4 · cierre")
+        for auxiliary in ("guarda el diff de M1 con perf.py decidir (sesión 3)", "en la fase despues: no salen las "
+                          "marcas lista_fin del plan", "quita temporalmente el código de las mejoras M1"):
+            self.assertIsNone(session("Sigue hb-performance con %s: %s" % (state, auxiliary)), auxiliary)
+        self.assertEqual(session("Sigue hb-performance con %s. No hagas commit ni push." % state), "2 · diagnóstico")
+        # el texto que imprime `siguiente` con `no_leer` en el plan sigue siendo el de la sesión 2
+        plan = dict(self.plan, no_leer=["docs/notas.md", "build/"])
+        typed = perf.chat_text("Sigue hb-performance con %s" % state, plan)
+        self.assertIn("No leas ni busques en: docs/notas.md, build/.", typed)
+        self.assertEqual(session(typed), "2 · diagnóstico")
+        spaced = self.dir / "con espacio" / "inv"
+        shutil.copytree(str(self.folder), str(spaced))
+        self.assertEqual(perf.transcript_session({"pedido": "Sigue hb-performance con %s: sesión 3, aplica M1"
+                                                  % (spaced / "estado.md")}, None, None), (spaced, "3 · M1"))
+
+    def test_transcript_de_otro_chat_y_mensajes_sinteticos(self):
+        other = self.dir / "otra"
+        shutil.copytree(str(self.folder), str(other))
+        transcript = self.dir / "t.jsonl"
+        write(transcript, transcript_lines("Sigue hb-performance con %s: sesión 3, aplica M1" % (other / "estado.md"),
+                                           [("a", "claude-sonnet-5-5", 10, 0, 0, 5)]))
+        result = self.perf("consumo", "--carpeta", self.folder, "--desde-transcript", transcript)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("es de otra investigación", result.stderr)
+        write(transcript, transcript_lines("explícame algo", [("a", "claude-sonnet-5-5", 10, 0, 0, 5)]))
+        result = self.perf("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--desde-transcript",
+                           transcript)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no es de hb-performance", result.stderr)
+        lines = transcript_lines("Sigue hb-performance con %s: sesión 3, aplica M1" % (self.folder / "estado.md"),
+                                 [("a", "claude-sonnet-5-5", 10, 0, 0, 5)] + [("s%d" % n, "<synthetic>", 0, 0, 0, 0)
+                                                                               for n in range(3)])
+        write(transcript, lines)
+        found = perf.read_transcript(transcript)
+        self.assertEqual((found["pasos"], found["modelo"]), (1, "claude-sonnet-5-5"))
+
+    def test_volver_a_anotar_combina_y_la_seccion_conserva_sus_notas(self):
+        state = self.folder / "estado.md"
+        write(state, self.state().replace("## Consumo\n\n", "## Consumo\n\nNota: la sesión 2 se hizo en dos chats.\n\n"))
+        transcript = self.dir / "t.jsonl"
+        write(transcript, transcript_lines("Sigue hb-performance con %s: sesión 3, aplica M1" % state,
+                                           [("a", "claude-sonnet-5-5", 10, 0, 0, 5)]))
+        self.ok("consumo", "--carpeta", self.folder, "--desde-transcript", transcript)
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "3 · M1", "--costo", "0.42 USD")
+        self.assertIn("| 3 · M1 | claude-sonnet-5-5 | 0.42 USD · tokens: 10 entrada, 0 caché, 0 escritura de caché, 5 "
+                      "salida | 1 |", out)
+        text = self.state()
+        self.assertIn("Nota: la sesión 2 se hizo en dos chats.", text)
+        self.assertEqual(text.count("| 3 · M1 |"), 1)
+        self.assertEqual(text.count("**Total de la investigación:**"), 1)
+
+
+FIXTURE_0100 = ROOT / "tests" / "fixtures" / "hb-performance-0.10.0"
+
+
+class Compat0100Test(PerfBase):
+    """Una investigación de 0.10.0 (fases.json con su versión y sus ajustes, estado.md con "Altera", "Advertencias" y la
+    columna "Pasos" en "Consumo") sigue funcionando con 0.11.0: sus corridas cuentan como la misma captura, `siguiente`
+    y los reportes corren, y `consumo` reemplaza una sesión y quita la columna "Pasos" vacía."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        shutil.copytree(str(FIXTURE_0100), str(self.folder))
+
+    def test_una_investigacion_de_0100_sigue(self):
+        phases = perf.read_phases(self.folder)
+        self.assertTrue(perf.same_capture(perf.phase_skill(phases["antes"], "detalle")))
+        self.assertEqual(perf.mark_change_notes(self.folder, perf.load_plan(self.folder / "plan.json")), {})
+        self.ok("siguiente", "--carpeta", self.folder)
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        self.assertIn("## Costo", (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8"))
+        out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.90 USD")
+        self.assertIn("actualiza la fila que tenía esa sesión", out)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("| Sesión | Modelo | Costo o tokens |\n| --- | --- | --- |\n| 2 · diagnóstico | Sonnet 5.5 · alto | "
+                      "0.90 USD |", state)  # el costo nuevo reemplaza el viejo; el modelo anotado se conserva
+        self.assertEqual([(row["repo"], row["revertido"]) for row in perf.temp_changes(state)],
+                         [("feature/detalle", False)])  # la tabla de cambios temporales sigue legible

@@ -66,7 +66,7 @@ Tiene varias sesiones y comandos de terminal: su guía completa está en [skills
 
 Cada chat de hb-performance se abre nuevo, desde la terminal y en la raíz del proyecto, con el modelo y el esfuerzo de su sesión. Para empezar (modelo intermedio, esfuerzo medio): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después, `perf.py siguiente` imprime el comando de cada sesión y el texto para pegar.
 
-**Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo):
+**Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo). La primera vez, este pedido hace el setup (sesión 0) y guarda tu flujo, tal cual lo escribes, para la sesión 1: por eso te pide el flujo aunque todavía no lo mida.
 
 ```text
 Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>. No hagas commit ni push.
@@ -84,7 +84,7 @@ Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin contr
 Sigue hb-performance con <ruta absoluta>/estado.md. No hagas commit ni push.
 ```
 
-El diagnóstico y el cierre dejan cada reporte en dos versiones: `-dev` (técnico) y `-gerencia` (una página en palabras, para un equipo no técnico). Anotar el costo es opcional: `perf.py siguiente` imprime el comando ya completo por cada sesión.
+El diagnóstico y el cierre dejan cada reporte en dos versiones: `-dev` (técnico) y `-gerencia` (una página en palabras, para un equipo no técnico). Los comandos y los textos para pegar van siempre en un bloque de código: el texto confiable es el que imprime `perf.py siguiente`. El cierre termina con un solo comando, `perf.py cerrar`, que quita los cambios temporales con su parche. Anotar el costo es opcional: `perf.py siguiente` imprime el comando ya completo por cada sesión, con la opción de tu herramienta (`--costo` en USD con Claude Code, o `--desde-transcript auto` sin copiar nada; `--creditos` con GitHub Copilot CLI).
 
 ## hb-coach · aprender un tema
 

@@ -53,10 +53,10 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase.
-SAME_CAPTURE = ("0.9.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -3191,6 +3191,20 @@ def without_options(argv, with_value, flags):
     return out
 
 
+def phase_config_names(folder, phase, flow, redo=False):
+    """Los nombres de las configuraciones de Perfetto con que se midieron las otras fases del flujo."""
+    phases = read_phases(folder)
+    names = set()
+    for other in FASES:
+        if other == phase and redo:
+            continue
+        record = phases.get(other) if isinstance(phases.get(other), dict) else {}
+        tracked = (record.get("flujos") or {}).get(flow) or {}
+        names |= {str(label).split("@", 1)[0] for label in tracked.get("configs") or record.get("configs") or []
+                  if label and label != UNKNOWN_CONFIG}
+    return sorted(names)
+
+
 def phase_config_mismatch(folder, phase, flow, name, redo=False):
     """El motivo para no medir una fase con otra configuración de Perfetto que las demás fases del flujo, o None. `cpu`
     y `completa` son de diagnóstico: alteran los tiempos y no se mezclan con las fases."""
@@ -4420,9 +4434,15 @@ def render_steps(steps, markdown, root=None, plan=None):
 # "Usage-based billing"). Si GitHub cambia el valor, cambia esta constante.
 AI_CREDIT_USD = 0.01
 COST_PLACEHOLDER = "<costo>"
-COST_WHERE = ("lo muestra tu herramienta al cerrar el chat: /cost en Claude Code; /usage en GitHub Copilot CLI, que "
-              "informa AI Credits y tokens (con ellos, --creditos <n> y --tokens-entrada, --tokens-cache, "
-              "--tokens-salida en vez de --costo)")
+COST_WHERE = ("lo muestra tu herramienta al cerrar el chat: /cost en Claude Code (USD); /usage en GitHub Copilot CLI "
+              "(AI Credits, que no son tokens); con otra herramienta, lo que muestre (modelos.md · Consumo por "
+              "herramienta)")
+# Qué opción de `consumo` usa cada herramienta (modelos.md · Consumo por herramienta): (opción, valor a completar, nota)
+COST_OPTION = {"copilot": ("--creditos", "'<AI Credits de /usage>'", "son AI Credits, no tokens: el número de \"AI Credits\" "
+                                                                   "de /usage, sin el texto"),
+               "claude": ("--costo", "'<monto en USD>'", "el monto en USD que muestra /cost, entre comillas simples"),
+               "otra": ("--costo", "'<monto> USD'", "el monto en USD, entre comillas simples; si tu herramienta da tokens, "
+                                                    "--tokens-entrada y --tokens-salida en su lugar")}
 # Nivel de modelo y esfuerzo que `siguiente` recomienda para cada sesión: con ellos sale el comando ya completo.
 SESSIONS = {"0": ("0 · setup", "intermedio", "medio"), "1": ("1 · ficha", "intermedio", "medio"), "2": ("2 · diagnóstico", "diagnostico", "alto"),
             "3": ("3 · %s", "intermedio", "medio"), "4": ("4 · cierre", "economico", "bajo")}
@@ -4430,7 +4450,8 @@ COST_TOTAL = "**Total de la investigación:**"
 USD_AMOUNT = re.compile(r"(?:US\$|USD|\$)[ \t]*(\d[\d.,]*)|(\d[\d.,]*)[ \t]*(?:USD|US\$|\$|dólares|dolares)", re.I)
 # Solo los AI Credits de GitHub Copilot tienen una conversión documentada: "12 créditos" de otra herramienta no se suma.
 CREDIT_AMOUNT = re.compile(r"(\d[\d.,]*)[ \t]*AI[ \t]+(?:credits?|cr[eé]ditos?)", re.I)
-TOKEN_PART = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*(?:tokens[ \t]+)?(?:de[ \t]+)?(entrada|cach[eé]|salida)", re.I)
+TOKEN_PART = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*(?:tokens[ \t]+)?(?:de[ \t]+)?(escritura de cach[eé]|entrada|"
+                        r"cach[eé]|salida)", re.I)
 TOKEN_TOTAL = re.compile(r"(\d[\d.,]*[ \t]*[kKmM]?)[ \t]*tokens(?![ \t]+(?:de[ \t]+)?(?:entrada|cach[eé]|salida))", re.I)
 
 
@@ -4475,7 +4496,8 @@ def cost_rows(state_text):
         if not row or not row[0].strip() or any("<" in cell for cell in row):
             continue
         cells = [cell.strip() for cell in row] + [""] * 4
-        out.append({"sesion": cells[0], "modelo": cells[1], "costo": cells[2], "pasos": cells[3]})
+        out.append({"sesion": cells[0], "modelo": cells[1], "costo": cells[2],
+                    "pasos": "" if cells[3] in NO_STEPS else cells[3]})
     return out
 
 
@@ -4494,7 +4516,8 @@ def cost_of(cell):
     for number, kind in TOKEN_PART.findall(cell):
         value = amount(number, whole=True)
         if value is not None:
-            key = "caché" if kind.lower().startswith("cach") else kind.lower()
+            key = "escritura de caché" if kind.lower().startswith("escritura") else \
+                "caché" if kind.lower().startswith("cach") else kind.lower()
             tokens[key] = tokens.get(key, 0) + value
     if not tokens:
         whole = TOKEN_TOTAL.search(cell)
@@ -4595,14 +4618,26 @@ def missing_costs(folder, plan):
     return out
 
 
-def cost_command(folder, session=None, model=None, effort=None):
-    """El comando para anotar el costo de una sesión, con la carpeta relativa a la raíz del proyecto. Con la sesión,
-    el modelo y el esfuerzo sale completo: solo queda el costo por llenar."""
+def cost_option(root):
+    """(opción, valor a completar, nota) de `consumo` según la herramienta de IA que anota AGENTS.md: --creditos con
+    GitHub Copilot CLI (AI Credits, no tokens), --costo en USD con Claude Code y con otra; sin la línea, --costo genérico."""
+    tool = ai_tool(root)[0] if root is not None else None
+    return COST_OPTION.get(tool or "", ("--costo", "'<lo que muestre tu herramienta>'", COST_WHERE))
+
+
+def cost_command(folder, session=None, model=None, effort=None, source=None):
+    """El comando para anotar el costo de una sesión, con la carpeta relativa a la raíz del proyecto y la opción de la
+    herramienta del proyecto (cost_option). Con la sesión, el modelo y el esfuerzo sale completo: solo queda el valor
+    por llenar. Con `source` (una ruta de transcript o "auto"), sale completo del todo: lo lee del transcript."""
     root = project_root(folder).resolve()
     folder = relative_folder(folder, root)
-    return "cd %s && python3 -I %s consumo --carpeta %s --sesion \"%s\" --modelo \"%s\"%s --costo \"%s\"" % (
-        q(root), q(HERE / "perf.py"), q(folder), session or "<sesión>", model or "<modelo>",
-        " --esfuerzo %s" % effort if effort else "", COST_PLACEHOLDER)
+    head = "cd %s && python3 -I %s consumo --carpeta %s --sesion %s" % (
+        q(root), q(HERE / "perf.py"), q(folder), q(session) if session else "'<sesión>'")
+    if source:
+        return "%s --desde-transcript %s" % (head, q(source))
+    option, value, _ = cost_option(root)
+    return "%s --modelo %s%s %s %s" % (head, q(model) if model else "'<modelo>'", " --esfuerzo %s" % q(effort) if effort
+                                       else "", option, value)
 
 
 def cost_total(folder, plan):
@@ -4628,7 +4663,8 @@ def cost_total(folder, plan):
     if tokens:
         counted = sum(1 for cost in costs if cost["tokens"])
         parts.append("tokens: " + ", ".join("%s %s" % (short_count(tokens[kind]), kind)
-                                            for kind in ("entrada", "caché", "salida", "sin desglose") if kind in tokens)
+                                            for kind in ("entrada", "caché", "escritura de caché", "salida",
+                                                         "sin desglose") if kind in tokens)
                      + (" (solo %d de %d sesiones anotadas los traen)" % (counted, len(rows)) if counted < len(rows) else ""))
     missing = missing_costs(folder, plan) if plan else []
     if missing:
@@ -4667,9 +4703,7 @@ def cost_md(folder, plan):
         rows = []
     intro = ("> Lo que costó cada sesión de IA, según lo anotó quien la corrió (`perf.py consumo`). Las mediciones "
              "corren en la terminal, sin chat, y no cuestan tokens.\n\n")
-    table = markdown_table(["Sesión", "Modelo", "Costo o tokens", "Pasos"],
-                           [[row["sesion"], row["modelo"] or "—", row["costo"] or "—", row["pasos"] or "—"]
-                            for row in rows]) + "\n\n" if rows else ""
+    table = consumo_table(rows) + "\n\n" if rows else ""
     return "%s%s**Total:** %s" % (intro, table, cost_total(folder, plan))
 
 
@@ -4679,9 +4713,15 @@ def cost_lines(folder, plan):
     missing = missing_costs(folder, plan)
     if not missing:
         return []
-    lines = ["Costo (opcional, Terminal): %s sin anotar. Un comando por cada una; solo falta el costo, que %s:" % (
-        "1 sesión hecha" if len(missing) == 1 else "%d sesiones hechas" % len(missing), COST_WHERE)]
-    return lines + ["  %s" % cost_command(folder, label, model, effort) for label, model, effort in missing]
+    root = project_root(pathlib.Path(folder)).resolve()
+    option, value, note = cost_option(root)
+    lines = ["Costo (opcional, Terminal): %s sin anotar. Un comando por cada una; reemplaza %s por el valor (%s):" % (
+        "1 sesión hecha" if len(missing) == 1 else "%d sesiones hechas" % len(missing), value, note)]
+    lines += ["  %s" % cost_command(folder, label, model, effort) for label, model, effort in missing]
+    if ai_tool(root)[0] == "claude":
+        lines.append("  Con Claude Code, justo al cerrar el chat de una sesión y sin copiar nada (tokens y pasos del "
+                     "transcript local): %s" % cost_command(folder, missing[-1][0], source="auto"))
+    return lines
 
 
 def write_next(folder, title, steps, missing=(), plan=None):
@@ -4743,17 +4783,223 @@ def cmd_siguiente(args):
     print_next(folder, plan, args.flujo)
 
 
+# Un costo que el shell mutiló: "$0.40" entre comillas dobles se vuelve "-bash.40" ($0 es el nombre del shell: "-bash" o
+# "-zsh" en una terminal de inicio de sesión; "zsh", "bash" o "/bin/zsh" en la de un IDE) y "$1" desaparece ("-> .").
+# Se rechaza con el comando corregido, con comillas simples. "$12.40" en bash queda "2.40": eso no se puede detectar.
+MANGLED_COST = re.compile(r"(?:^|[\s(])(?:-|/\S*/)?(?:ba|z|k|da)?sh(?:\.\d|\b)|->\s*\.|->\s*$|(?:^|\s)\.\d")
+NO_STEPS = ("", "—", "-")
+
+
+def glue_dashed_values(argv, options=("--costo",)):
+    """`--costo "$0.40"` en bash de inicio de sesión llega como `--costo -bash.40`: argparse lo tomaría por una opción y
+    fallaría antes de que `consumo` lo reconozca y lo explique. Se pega como `--costo=-bash.40`."""
+    out, index = [], 0
+    while index < len(argv):
+        if argv[index] in options and index + 1 < len(argv) and argv[index + 1].startswith("-") \
+                and not argv[index + 1].startswith("--"):
+            out.append("%s=%s" % (argv[index], argv[index + 1]))
+            index += 2
+            continue
+        out.append(argv[index])
+        index += 1
+    return out
+
+
+def consumo_table(rows):
+    """La tabla "Consumo" de estado.md: la columna "Pasos" solo si alguna sesión la trae (se llena al leer un
+    transcript, K5)."""
+    steps = any(row["pasos"] not in NO_STEPS for row in rows)
+    headers = ["Sesión", "Modelo", "Costo o tokens"] + (["Pasos"] if steps else [])
+    return markdown_table(headers, [[row["sesion"], row["modelo"] or "—", row["costo"] or "—"]
+                                    + ([row["pasos"] or "—"] if steps else []) for row in rows])
+
+
+def claude_projects(root):
+    """La carpeta donde Claude Code guarda los transcripts de las sesiones abiertas en `root`: <config>/projects/<la
+    ruta con cada carácter que no es letra ni número como "-"> (documentación de Claude Code: ~/.claude/projects/
+    <proyecto>/<sesión>.jsonl; CLAUDE_CONFIG_DIR cambia ~/.claude). None si no existe."""
+    base = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")) / "projects"
+    for path in (lexical(root), pathlib.Path(root).resolve()):
+        folder = base / re.sub(r"[^A-Za-z0-9]", "-", str(path))
+        if folder.is_dir():
+            return folder
+    return None
+
+
+def transcript_path(value, root):
+    """El transcript de `--desde-transcript`: una ruta, o "auto" (el más reciente del proyecto: el del chat que acabas
+    de cerrar)."""
+    if value != "auto":
+        path = pathlib.Path(os.path.expanduser(value))
+        if not path.is_file():
+            raise PerfError("no existe el transcript %s" % path)
+        return path
+    folder = claude_projects(root)
+    found = sorted(folder.glob("*.jsonl"), key=lambda path: path.stat().st_mtime) if folder else []
+    if not found:
+        raise PerfError("no encontré transcripts de Claude Code para %s (en %s): pasa la ruta del transcript con "
+                        "--desde-transcript <ruta>, o anota el costo con --costo" % (
+                            root, folder or "~/.claude/projects")).con(guardado="nada")
+    return found[-1]
+
+
+TRANSCRIPT_RESUME = re.compile(r"Sigue hb-performance con (\S.*?estado\.md)")
+# Lo que sigue a la ruta en el texto de una sesión: ": sesión 3, aplica M1", ": sesión 4 de nuevo…" o nada (el texto de
+# reanudar de la sesión 2 o de la 4). Cualquier otro texto es un chat auxiliar (guardar un diff, ajustar marcas…).
+TRANSCRIPT_SESSION = re.compile(r"\s*:\s*sesi[oó]n (\d)(?:, aplica ([\w-]+))?(\s+de nuevo)?", re.I)
+TRANSCRIPT_PLAIN = re.compile(r"\s*\.?\s*(?:No leas ni busques en: [^\n]*?\.\s*)?(?:No hagas commit ni push\.?)?\s*",
+                              re.I)  # con `no_leer` en el plan, chat_text agrega las rutas que no se leen
+TRANSCRIPT_CLOSE = re.compile(r"\s*:\s*cierra la investigaci[oó]n", re.I)
+
+
+def read_transcript(path):
+    """Lo que un transcript de Claude Code dice del uso de su sesión: tokens (entrada total, leída de caché, escrita en
+    caché y salida), pasos (los mensajes del agente), el modelo más usado y el primer pedido del usuario. El formato
+    del transcript no está documentado como estable: se leen solo los campos de uso de cada mensaje del agente y, si
+    faltan, el dato no se suma."""
+    usage = {"entrada": 0, "caché": 0, "escritura de caché": 0, "salida": 0}
+    seen, models, first = set(), {}, None
+    try:
+        handle = open(str(path), encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise PerfError("no pude leer el transcript %s: %s" % (path, error))
+    with handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            message = item.get("message") if isinstance(item.get("message"), dict) else {}
+            if item.get("type") == "user" and first is None and not item.get("isMeta"):
+                content = message.get("content")
+                if isinstance(content, list):
+                    content = " ".join(str(block.get("text") or "") for block in content
+                                       if isinstance(block, dict) and block.get("type") == "text")
+                if isinstance(content, str) and content.strip():
+                    first = content
+            if item.get("type") != "assistant" or not isinstance(message.get("usage"), dict) \
+                    or message.get("model") == "<synthetic>":  # un mensaje que no generó el modelo no es un paso
+                continue
+            ident = message.get("id") or item.get("uuid")
+            if ident in seen:  # un mismo mensaje puede ocupar varias líneas: se cuenta una vez
+                continue
+            seen.add(ident)
+            numbers = message["usage"]
+            fresh, read, written = (to_int(numbers.get(key)) for key in (
+                "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+            usage["entrada"] += fresh + read + written
+            usage["caché"] += read
+            usage["escritura de caché"] += written
+            usage["salida"] += to_int(numbers.get("output_tokens"))
+            if message.get("model"):
+                models[message["model"]] = models.get(message["model"], 0) + 1
+    if not seen:
+        raise PerfError("el transcript %s no trae el uso de ningún mensaje del agente: anota el costo con --costo" % path)
+    return {"tokens": usage, "pasos": len(seen), "modelo": max(models, key=models.get) if models else "",
+            "pedido": first or ""}
+
+
+def transcript_session(found, folder, plan):
+    """(carpeta, sesión) de la investigación a la que pertenece un transcript, según su primer pedido: "Sigue
+    hb-performance con <ruta>/estado.md: sesión 3, aplica M1" da "3 · M1"; "…: sesión 4 de nuevo…", "4 · cierre (de
+    nuevo)"; el texto de reanudar sin nada más, la última de las sesiones 2 y 4 hecha sin fila en "Consumo". Un chat
+    auxiliar (guardar un diff, ajustar marcas…) no es una sesión: (carpeta, None). (None, None) si no es de una
+    investigación."""
+    match = TRANSCRIPT_RESUME.search(found["pedido"])
+    folder = pathlib.Path(match.group(1)).parent if match and folder is None else folder
+    if folder is None or not (pathlib.Path(folder) / "estado.md").is_file():
+        return None, None
+    if not match:
+        return folder, None
+    rest = found["pedido"][match.end():]
+    session = TRANSCRIPT_SESSION.match(rest)
+    if session:
+        number, improvement = session.group(1), session.group(2)
+        label = SESSIONS.get(number, ("%s" % number,))[0]
+        if "%s" in label:  # la sesión 3 lleva la mejora: "3 · M1"
+            label = label % improvement if improvement else None
+        if label and session.group(3):
+            label += " (de nuevo)"  # otro chat de la misma sesión no pisa la fila del primero
+        elif label and re.search(r"contin[uú]a", rest, re.I):
+            label += " (continuación)"
+        return folder, label
+    if TRANSCRIPT_CLOSE.match(rest):
+        return folder, SESSIONS["4"][0]
+    if not TRANSCRIPT_PLAIN.fullmatch(rest):
+        return folder, None
+    try:
+        plan = plan or load_plan(pathlib.Path(folder) / "plan.json")
+    except PerfError:
+        return folder, None
+    # El texto de reanudar sin nada más es el de la sesión 2 o el de la 4: la última de ellas hecha sin anotar.
+    missing = [label for label, _, _ in missing_costs(folder, plan) if label.startswith(("2 ", "4 "))]
+    return folder, (missing[-1] if missing else None)
+
+
+def same_investigation(found, folder, root):
+    """'' si el transcript es de la investigación `folder` (su primer pedido la nombra, o no nombra ninguna); si no, el
+    motivo."""
+    match = TRANSCRIPT_RESUME.search(found["pedido"])
+    if not match:
+        return "" if "hb-performance" in found["pedido"] else "su primer pedido no es de hb-performance"
+    named = pathlib.Path(os.path.expanduser(match.group(1)))
+    named = (named if named.is_absolute() else pathlib.Path(root) / named).parent
+    try:
+        same = named.resolve() == pathlib.Path(folder).resolve()
+    except OSError:
+        same = False
+    return "" if same else "es de otra investigación (%s)" % named
+
+
 def cmd_consumo(args):
+    if getattr(args, "desde_hook", False):
+        return consumo_from_hook(args)
+    if not args.carpeta:
+        raise PerfError("falta --carpeta: la carpeta de la investigación")
     folder = pathlib.Path(args.carpeta)
     state = folder / "estado.md"
     if not state.is_file():
         raise PerfError("no existe %s" % state)
+    root = project_root(folder).resolve()
+    if getattr(args, "desde_transcript", None):
+        # K4: tokens, pasos y modelo, del transcript local de Claude Code; la sesión, si no se dice, de su primer pedido.
+        path = transcript_path(args.desde_transcript, root)
+        found = read_transcript(path)
+        other = same_investigation(found, folder, root)
+        if other:  # el transcript más reciente puede ser de otro chat: no se anota algo ajeno
+            raise PerfError("el transcript %s %s: no lo anoto en %s. Pasa la ruta del transcript del chat de esta "
+                            "investigación con --desde-transcript <ruta>, o anota el costo con --costo" % (
+                                path, other, folder)).con(guardado="nada")
+        if not args.sesion:
+            args.sesion = transcript_session(found, folder, None)[1]
+        for key, name in (("entrada", "tokens_entrada"), ("caché", "tokens_cache"),
+                          ("escritura de caché", "tokens_cache_escritura"), ("salida", "tokens_salida")):
+            if getattr(args, name, None) is None:
+                setattr(args, name, str(found["tokens"][key]))
+        args.pasos = args.pasos or str(found["pasos"])
+        args.modelo = args.modelo or found["modelo"] or None
+    if not args.sesion:
+        raise PerfError("falta --sesion: el rótulo de la sesión, por ejemplo '2 · diagnóstico' o '3 · M1' (no lo pude "
+                        "deducir del transcript: un chat auxiliar, como guardar un diff o ajustar marcas, no es una "
+                        "sesión; si quieres sumarlo, dale un rótulo propio)")
     text = state.read_text(encoding="utf-8")
-    if any("<" in str(v) for v in (args.sesion, args.costo, args.modelo, args.pasos) if v):
-        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo \"1.05 USD\", o "
+    if any("<" in str(v) for v in (args.sesion, args.costo, args.modelo, args.pasos, getattr(args, "creditos", None))
+           if v):
+        raise PerfError("reemplaza los <...> por el valor real antes de anotar (por ejemplo --costo '1.05 USD', o "
                         "--creditos 120 si tu herramienta informa AI Credits)")
+    if args.costo and MANGLED_COST.search(args.costo):
+        # K2: el shell expandió un "$" dentro de comillas dobles. No se anota algo roto.
+        fixed = same_command(argv=without_options(GUIA["argv"], ("--costo",), ())) + " --costo '<lo que mostró tu " \
+                                                                                      "herramienta, con su $>'"
+        raise PerfError("el costo '%s' llegó mutilado: el shell expandió un \"$\" dentro de comillas dobles ($0 es el "
+                        "nombre del shell, $1 queda vacío). No lo anoto. Repite con el costo entre comillas simples, que "
+                        "no se expanden; con GitHub Copilot CLI, lo que muestra /usage son AI Credits: --creditos <número>"
+                        % args.costo).con(guardado="nada", seguir=[("repite con comillas simples", fixed)])
     tokens = [(label, getattr(args, name, None)) for label, name in (
-        ("entrada", "tokens_entrada"), ("caché", "tokens_cache"), ("salida", "tokens_salida"))]
+        ("entrada", "tokens_entrada"), ("caché", "tokens_cache"), ("escritura de caché", "tokens_cache_escritura"),
+        ("salida", "tokens_salida"))]
     numbers = {}
     for label, raw in tokens + [("créditos", getattr(args, "creditos", None))]:
         if raw is None:
@@ -4765,8 +5011,8 @@ def cmd_consumo(args):
         if numbers[label] is None:
             raise PerfError("'%s' no es una cantidad: usa un número (120, 45000, 45k, 1.2M)" % raw)
     if not args.costo and not numbers:
-        raise PerfError("falta el costo: usa --costo \"<lo que muestre tu herramienta>\" (por ejemplo \"1.05 USD\"), "
-                        "--creditos <AI Credits> o --tokens-entrada, --tokens-cache y --tokens-salida")
+        raise PerfError("falta el costo: usa %s %s (%s), --creditos <AI Credits>, --tokens-entrada y --tokens-salida, o, "
+                        "con Claude Code, --desde-transcript auto" % cost_option(root))
     parts = [args.costo] if args.costo else []
     if "créditos" in numbers:
         credits = numbers["créditos"]
@@ -4778,19 +5024,35 @@ def cmd_consumo(args):
         parts.append("tokens: " + ", ".join(listed))
     effort = getattr(args, "esfuerzo", None)
     model = " · ".join(part for part in (args.modelo, effort) if part)
-    row = "| %s | %s | %s | %s |" % (args.sesion, model or "—", " · ".join(parts), args.pasos or "—")
+    entry = {"sesion": args.sesion, "modelo": model or "—", "costo": " · ".join(parts), "pasos": args.pasos or ""}
+    rows = cost_rows(text)
+    key = " ".join(args.sesion.lower().split())
+    replaced = [row for row in rows if " ".join(row["sesion"].lower().split()) == key]
+    if replaced:  # lo que se vuelve a anotar reemplaza lo mismo; lo demás (el USD de /cost, los tokens) se conserva
+        entry = merge_cost_row(replaced[0], entry)
+    rows = [entry if " ".join(row["sesion"].lower().split()) == key else row for row in rows]
+    if not replaced:
+        rows.append(entry)
 
-    def append(match):
-        body = [line for line in match.group(2).rstrip("\n").split("\n")
-                if line.strip() and "<" not in line and not line.startswith(COST_TOTAL)]
-        table = [line for line in body if line.lstrip().startswith("|")]
-        return match.group(1) + "\n".join(table + [row] + [line for line in body if line not in table]) + "\n"
+    def rewrite(match):
+        lines = match.group(2).split("\n")
+        start = next((index for index, line in enumerate(lines) if line.startswith("|")), None)
+        if start is None:
+            return match.group(1) + consumo_table(rows) + "\n" + match.group(2)
+        end = start
+        while end < len(lines) and lines[end].startswith("|"):
+            end += 1
+        # Solo la tabla: el texto que haya antes o después en la sección (notas, el total) se queda.
+        return match.group(1) + "\n".join(lines[:start] + consumo_table(rows).split("\n") + lines[end:])
 
-    new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S)
+    new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", rewrite, text, count=1, flags=re.S)
     if not count:
         raise PerfError("%s no tiene la sección '## Consumo'" % state)
     state.write_text(new, encoding="utf-8")
-    print("✔ Consumo: %s" % row)
+    shown = "| %s | %s | %s |%s" % (entry["sesion"], entry["modelo"], entry["costo"],
+                                    " %s |" % entry["pasos"] if entry["pasos"] else "")
+    print("✔ Consumo%s: %s" % (" (actualiza la fila que tenía esa sesión: lo que no volviste a anotar se conserva)"
+                                if replaced else "", shown))
     try:
         plan = load_plan(folder / "plan.json")
     except PerfError:
@@ -4798,6 +5060,58 @@ def cmd_consumo(args):
     update_cost_total(folder, plan)
     print("  Total de la investigación: %s" % cost_total(folder, plan))
     print(next_hint(folder))
+
+
+def cost_kind(part):
+    """De qué es una parte de "Costo o tokens": "tokens", "créditos" o "costo" (lo escrito con --costo)."""
+    return "tokens" if part.startswith("tokens:") else "créditos" if "AI Credits" in part else "costo"
+
+
+def merge_cost_row(old, new):
+    """La fila de una sesión que se vuelve a anotar: cada parte nueva (costo, créditos o tokens) reemplaza la del mismo
+    tipo; las que no se volvieron a anotar, los pasos y el modelo se conservan."""
+    fresh = [part for part in new["costo"].split(" · ") if part]
+    kinds = {cost_kind(part) for part in fresh}
+    kept = [part for part in (old.get("costo") or "").split(" · ") if part and part not in ("—",)
+            and cost_kind(part) not in kinds]
+    order = {"costo": 0, "créditos": 1, "tokens": 2}
+    parts = sorted(kept + fresh, key=lambda part: order[cost_kind(part)])
+    return {"sesion": new["sesion"], "modelo": new["modelo"] if new["modelo"] not in NO_STEPS else old.get("modelo") or "—",
+            "costo": " · ".join(parts), "pasos": new["pasos"] or ("" if old.get("pasos") in NO_STEPS else old["pasos"])}
+
+
+def consumo_from_hook(args):
+    """`consumo --desde-hook`, para un hook SessionEnd de Claude Code: lee de la entrada estándar el JSON del hook
+    (transcript_path), deduce la investigación y la sesión del primer pedido del transcript y anota su consumo. Si el
+    chat no es de una investigación, o algo falla, lo dice en una línea y termina con 0: un hook no debe molestar."""
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+        path = pathlib.Path(str(data.get("transcript_path") or ""))
+        if not path.is_file():
+            print("· hb-performance: el hook no trajo un transcript; no anoto nada", file=sys.stderr)
+            return
+        found = read_transcript(path)
+        base = pathlib.Path(str(data.get("cwd") or os.getcwd()))
+        match = TRANSCRIPT_RESUME.search(found["pedido"])
+        if not match:
+            print("· hb-performance: este chat no retoma una investigación (Sigue hb-performance con …); no anoto nada",
+                  file=sys.stderr)
+            return
+        folder = pathlib.Path(os.path.expanduser(match.group(1)))
+        folder = (folder if folder.is_absolute() else base / folder).parent
+        folder, session = transcript_session(found, folder, None)
+        if folder is None or not session:
+            print("· hb-performance: este chat no es una sesión de la investigación (un chat auxiliar, o una sesión ya "
+                  "anotada); si quieres sumarlo, perf.py consumo con --sesion y un rótulo propio", file=sys.stderr)
+            return
+        argv = ["consumo", "--carpeta", str(folder), "--sesion", session, "--desde-transcript", str(path)]
+        reset_guide(argv)
+        cmd_consumo(argparse.Namespace(carpeta=str(folder), sesion=session, desde_transcript=str(path), desde_hook=False,
+                                       costo=None, creditos=None, tokens_entrada=None, tokens_cache=None,
+                                       tokens_cache_escritura=None, tokens_salida=None, modelo=None, esfuerzo=None,
+                                       pasos=None))
+    except (PerfError, OSError, ValueError) as error:
+        print("· hb-performance: no anoté el consumo de este chat (%s)" % error, file=sys.stderr)
 
 
 DECISIONS = (("aprobar", "aprobada", "aprobadas"), ("descartar", "descartada", "descartadas"),
@@ -6654,12 +6968,27 @@ def cmd_capturar(args, plan=None):
     if not args.prueba:
         mismatch = phase_config_mismatch(folder, phase, flow_name, used_config["nombre"], args.rehacer)
         if mismatch and not args.forzar:
-            raise Precondicion(mismatch).con(seguir=[
-                ("la captura de diagnóstico, una corrida que no se mezcla con las fases",
-                 same_command(argv=without_options(GUIA["argv"], ("--fase", "--corridas", "--calentamiento"),
-                                                   ("--rehacer",)) + ["--prueba"])),
-                ("o la fase con la misma configuración que las otras",
-                 same_command(argv=without_options(GUIA["argv"], ("--config",), ())))])
+            ways = []
+            if used_config["nombre"] in ("cpu", "completa"):  # lo que se quería era diagnosticar: una corrida aparte
+                ways.append(("la captura de diagnóstico, una corrida que no se mezcla con las fases",
+                             same_command(argv=without_options(GUIA["argv"], ("--fase", "--corridas", "--calentamiento"),
+                                                               ("--rehacer",)) + ["--prueba"])))
+            others = phase_config_names(folder, phase, flow_name, args.rehacer)
+            if len(others) == 1:
+                again = without_options(GUIA["argv"], ("--config",), ())
+                try:  # una configuración propia se nombra por su archivo: solo si se encuentra
+                    resolve_config(plan, folder, others[0])
+                    ways.append(("%sla fase con la misma configuración que las otras (%s)" % (
+                        "o " if ways else "", others[0]),
+                        same_command(argv=again + ([] if others[0] == plan.get("config", "base")
+                                                   else ["--config", others[0]]))))
+                except PerfError:
+                    pass
+            if not ways:  # las otras fases ya mezclan configuraciones, o la suya no se encuentra
+                ways.append(("decide qué configuración vale para todas las fases y rehaz las que usan otra (con "
+                             "--rehacer y --config); para medir igual, sabiendo que esta fase no se podrá comparar "
+                             "con las otras", same_command(argv=list(GUIA["argv"]) + ["--forzar"])))
+            raise Precondicion(mismatch).con(seguir=ways)
         if mismatch:
             print("⚠ %s (sigo por --forzar)" % mismatch)
         if used_config["nombre"] in ("cpu", "completa") and not mismatch:
@@ -10569,12 +10898,12 @@ def read_request(path):
     return data
 
 
-REQUEST_ENV = re.compile(r"\$\{?([A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9])\b|\b(PERF_[A-Z0-9_]*[A-Z0-9])\b")
+REQUEST_ENV = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\b|\b(PERF_[A-Z0-9_]*[A-Z0-9])\b")
 
 
 def request_env(request):
-    """Las variables de entorno que nombra el pedido: su "requiere_env" o, si no lo trae, los nombres con forma de
-    variable (MAYÚSCULAS_CON_GUION_BAJO) que aparecen en su texto."""
+    """Las variables de entorno que nombra el pedido: su "requiere_env" o, si no lo trae, las que su texto nombra sin
+    duda ($NOMBRE, ${NOMBRE} o el prefijo PERF_ de la skill)."""
     declared = request.get("requiere_env")
     if isinstance(declared, list):
         return [str(name) for name in declared if ENV_NAME.fullmatch(str(name))]
@@ -11935,19 +12264,32 @@ def main(argv=None):
     p.add_argument("--flujo")
     p.set_defaults(func=cmd_siguiente)
 
-    p = sub.add_parser("consumo", help="anota el costo de una sesión en la tabla Consumo de estado.md")
-    p.add_argument("--carpeta", required=True)
-    p.add_argument("--sesion", required=True, help="por ejemplo '0 · setup' o '3 · M1'")
-    p.add_argument("--costo", help="lo que muestre tu herramienta: '1.05 USD', '38k tokens' (solo un monto en USD o "
-                                   "los AI Credits entran al total en USD)")
+    p = sub.add_parser("consumo", help="anota el costo de una sesión en la tabla Consumo de estado.md (repetir la misma "
+                                       "--sesion actualiza su fila: lo nuevo reemplaza lo mismo y lo demás se conserva)")
+    p.add_argument("--carpeta", help="la carpeta de la investigación (no hace falta con --desde-hook)")
+    p.add_argument("--sesion", help="por ejemplo '0 · setup' o '3 · M1'; con --desde-transcript, si falta, sale del "
+                                    "primer pedido del transcript")
+    p.add_argument("--costo", help="lo que muestre tu herramienta, entre comillas simples: '1.05 USD' (solo un monto en "
+                                   "USD o los AI Credits entran al total en USD)")
     p.add_argument("--creditos", help="AI Credits de GitHub Copilot (/usage); se suman al total como USD (1 AI Credit = "
                                       "%s USD)" % fmt(AI_CREDIT_USD))
-    p.add_argument("--tokens-entrada", dest="tokens_entrada", help="tokens de entrada del chat (45000, 45k)")
-    p.add_argument("--tokens-cache", dest="tokens_cache", help="tokens leídos de caché")
-    p.add_argument("--tokens-salida", dest="tokens_salida", help="tokens de salida")
+    p.add_argument("--tokens-entrada", dest="tokens_entrada",
+                   help="tokens de entrada del chat, el total (con lo leído de caché): en /usage de Copilot CLI, el número "
+                        "de ↑ (45000, 45k, 1.2m)")
+    p.add_argument("--tokens-cache", dest="tokens_cache", help="tokens leídos de caché (en /usage: cached)")
+    p.add_argument("--tokens-cache-escritura", dest="tokens_cache_escritura",
+                   help="tokens escritos en caché (en /usage: written), opcional")
+    p.add_argument("--tokens-salida", dest="tokens_salida", help="tokens de salida, con el razonamiento (en /usage: ↓)")
+    p.add_argument("--desde-transcript", dest="desde_transcript", metavar="RUTA|auto",
+                   help="Claude Code: lee los tokens, los pasos y el modelo del transcript local de la sesión (auto: el "
+                        "más reciente del proyecto, el del chat que acabas de cerrar)")
+    p.add_argument("--desde-hook", dest="desde_hook", action="store_true",
+                   help="para un hook SessionEnd de Claude Code: lee el JSON del hook de la entrada estándar y anota la "
+                        "sesión del transcript, si es de una investigación (modelos.md · Consumo por herramienta)")
     p.add_argument("--modelo", help="modelo usado en ese chat")
     p.add_argument("--esfuerzo", help="esfuerzo de razonamiento del chat (bajo, medio, alto)")
-    p.add_argument("--pasos", help="requests o pasos del agente, si tu herramienta los muestra")
+    p.add_argument("--pasos", help="pasos del agente; se llena solo con --desde-transcript (la columna no se muestra si "
+                                   "ninguna sesión la trae)")
     p.set_defaults(func=cmd_consumo)
 
     p = sub.add_parser("cerrar", help="quita los cambios temporales de la investigación con un parche por repo, sin perderlos",
@@ -12153,8 +12495,9 @@ def main(argv=None):
                         "huella) y deja lo que había en <archivo>.orig")
     p.set_defaults(func=cmd_instrumentar)
 
+    argv = glue_dashed_values(sys.argv[1:] if argv is None else list(argv))
     args = parser.parse_args(argv)
-    reset_guide(sys.argv[1:] if argv is None else argv)
+    reset_guide(argv)
     # El único lugar que cierra un fallo: qué pasó, qué quedó guardado y el comando para seguir (guide_lines).
     try:
         args.func(args)

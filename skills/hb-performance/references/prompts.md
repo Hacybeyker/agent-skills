@@ -167,10 +167,10 @@ Sigue hb-performance con <ruta>/estado.md: cierra la investigación sin fase des
 **Dónde:** terminal, sin chat
 
 ```bash
-cd <raíz> && python3 -I <skill>/scripts/perf.py consumo --carpeta <carpeta> --sesion "<2 · diagnóstico>" --modelo "<modelo del chat>" --esfuerzo <alto> --costo "<0.80 USD>"
+cd <raíz> && python3 -I <skill>/scripts/perf.py consumo --carpeta <carpeta> --sesion '<2 · diagnóstico>' --modelo '<modelo del chat>' --esfuerzo <alto> --costo '<0.80 USD>'
 ```
 
-Es opcional. `perf.py siguiente` imprime este comando ya completo por cada sesión hecha sin anotar: solo cambia `<costo>`. Con GitHub Copilot CLI, `/usage` informa AI Credits y tokens: usa `--creditos <n>` y `--tokens-entrada <n> --tokens-cache <n> --tokens-salida <n>` en vez de `--costo`. El total de la investigación queda debajo de la tabla "Consumo" de `estado.md` y en los reportes.
+Es opcional. `perf.py siguiente` imprime este comando ya completo por cada sesión hecha sin anotar, con la opción de tu herramienta (la línea `Herramienta de IA:` de `AGENTS.md`): solo cambia el valor. El costo va **entre comillas simples**: entre dobles, el shell se come el `$` ("$0.40" llega como "-bash.40", o "zsh.40" en la terminal de un IDE) y `consumo` lo rechaza. Con GitHub Copilot CLI, lo que muestra `/usage` son AI Credits, no tokens: `--creditos <número>` (y, si quieres, `--tokens-entrada <↑> --tokens-cache <cached> --tokens-cache-escritura <written> --tokens-salida <↓>`). Con Claude Code, `--costo '<monto en USD>'` (lo que muestra `/cost`) o, justo al cerrar el chat y sin copiar nada, `--desde-transcript auto` (tokens y pasos del transcript local). Repetir el comando con la misma `--sesion` actualiza su fila: lo que vuelves a anotar reemplaza lo mismo y lo demás se conserva (por ejemplo, `--costo` después de `--desde-transcript`). El total de la investigación queda debajo de la tabla "Consumo" de `estado.md` y en los reportes ([modelos.md](modelos.md) · Consumo por herramienta).
 
 ## Pedidos puntuales
 
