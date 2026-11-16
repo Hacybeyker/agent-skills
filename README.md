@@ -27,7 +27,7 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
 | [`hb-stack-mobile-kotlin`](skills/hb-stack-mobile-kotlin) | Perfil | Android y KMP con Clean Architecture + MVVM (UDF) por features |
-| [`hb-coach`](skills/hb-coach) | Herramienta | Coach para aprender temas de software paso a paso, con plan y cuaderno |
+| [`hb-coach`](skills/hb-coach) | Herramienta | Coach para aprender cualquier tema paso a paso (software y también estadística, idiomas o finanzas): curso por módulos con retos y examen, repasos espaciados y un cuaderno HTML |
 
 Las skills externas y los plugins que las complementan están en [CATALOG.md](CATALOG.md).
 

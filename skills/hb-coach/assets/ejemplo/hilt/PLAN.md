@@ -5,13 +5,15 @@ area: android
 nivel_actual: básico
 nivel_objetivo: avanzado
 leccion_actual: "1.3"
+playground: "https://play.kotlinlang.org/"
 creado: 2026-09-15
 actualizado: 2026-09-15
+formato: 2
 ---
 
 # Plan de estudio · Hilt: inyección de dependencias en Android
 
-> Ejemplo de referencia del Software Coach: muestra el formato y el nivel de detalle esperados. El contexto del proyecto es ficticio.
+> Ejemplo de referencia de hb-coach: muestra el formato y el nivel de detalle esperados en un tema de software. El contexto del proyecto es ficticio.
 
 ## Resumen
 
@@ -50,6 +52,7 @@ actualizado: 2026-09-15
   - Objetivo: describir binding, grafo y componente, y el papel de KSP.
   - Práctica: provocar y leer un error de binding faltante.
   - Dominio: explica un error `[Dagger/MissingBinding]` y cómo resolverlo.
+- [ ] **Examen M1** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 
 ### Módulo 2 · Primeros pasos con Hilt 🟢 Básico
 
@@ -75,6 +78,7 @@ actualizado: 2026-09-15
   - Objetivo: obtener ViewModels inyectados desde un composable.
   - Práctica: migrar `OrdersViewModel` a `@HiltViewModel`.
   - Dominio: la pantalla funciona sin fábricas manuales.
+- [ ] **Examen M2** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 
 ### Módulo 3 · Componentes, scopes y qualifiers 🟡 Intermedio
 
@@ -84,6 +88,7 @@ actualizado: 2026-09-15
 - [ ] **3.2 Scopes: `@Singleton`, `@ActivityRetainedScoped` y `@ViewModelScoped`** — Elegir el scope mínimo necesario y conocer su coste.
 - [ ] **3.3 Qualifiers para varias implementaciones** — Distinguir dos instancias del mismo tipo con `@Qualifier`.
 - [ ] **3.4 Creación diferida con `Provider` y `Lazy`** — Retrasar o repetir la creación de objetos.
+- [ ] **Examen M3** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 
 ### Módulo 4 · Integraciones con Jetpack 🟡 Intermedio
 
@@ -93,6 +98,7 @@ actualizado: 2026-09-15
 - [ ] **4.2 WorkManager con `@HiltWorker`** — Inyectar dependencias en Workers.
 - [ ] **4.3 Navigation Compose y ViewModels por destino** — Acotar ViewModels a destinos y grafos de navegación.
 - [ ] **4.4 `@EntryPoint` para clases que Hilt no controla** — Obtener dependencias desde clases del sistema.
+- [ ] **Examen M4** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 
 ### Módulo 5 · Testing con Hilt 🟠 Avanzado
 
@@ -101,6 +107,7 @@ actualizado: 2026-09-15
 - [ ] **5.1 Tests instrumentados con `@HiltAndroidTest`** — Configurar `HiltAndroidRule` y un runner de test propio.
 - [ ] **5.2 Sustituir bindings: `@TestInstallIn`, `@UninstallModules` y `@BindValue`** — Reemplazar implementaciones reales por fakes.
 - [ ] **5.3 Tests unitarios sin Hilt** — Probar clases con inyección por constructor sin levantar el grafo.
+- [ ] **Examen M5** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 
 ### Módulo 6 · Arquitectura y rendimiento 🟠 Avanzado
 
@@ -109,6 +116,7 @@ actualizado: 2026-09-15
 - [ ] **6.1 Hilt en proyectos multimódulo** — Ubicar los módulos de Hilt por capa y controlar la visibilidad.
 - [ ] **6.2 Coste en arranque y en compilación** — Medir el impacto de los scopes y del procesamiento con KSP.
 - [ ] **6.3 Hilt frente a Koin y a la DI manual** — Comparar trade-offs y decidir con argumentos.
+- [ ] **Examen M6** — 6 a 10 preguntas y una tarea · aprueba con 80 %
 
 ### Módulo 7 · Proyecto final 🔴 Experto
 
