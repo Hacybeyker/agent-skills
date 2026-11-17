@@ -488,6 +488,13 @@ class CloseRowsTest(PerfBase):
         self.assertIn("✔ cd", out)
         self.assertIn("DoD en verde", out)
         self.assertEqual(perf.read_close(self.folder)["dod"], "ok")
+        # 0.13.0 (B5): el reporte es anterior al cierre, así que `siguiente` ofrece regenerarlo; con el reporte al
+        # día (más nuevo que cierre.json), la investigación queda cerrada. Las fechas se fijan: no depende del reloj.
+        closed = (self.folder / perf.CLOSE_FILE).stat().st_mtime
+        os.utime(str(self.folder / "reporte-final-dev.md"), (closed - 60, closed - 60))
+        self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0],
+                         "investigación cerrada · regenera los reportes con el cierre hecho (sin chat)")
+        os.utime(str(self.folder / "reporte-final-dev.md"), (closed + 60, closed + 60))
         self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0],
                          "investigación cerrada")
 

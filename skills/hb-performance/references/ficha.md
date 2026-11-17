@@ -209,6 +209,9 @@ Una autorización externa, un pago, un login con otra app o un navegador: el flu
 ### Escenarios y servicios del flujo
 
 - **Una espera que el usuario puede acortar** (el flujo mide abrir una pantalla después de esperar en otra): propón medirla en dos escenarios desde el principio, un flujo base y un escenario con la otra espera (`escenario_de` y `variables`, [medicion.md](medicion.md) · Escenarios de tiempo). El script del recorrido lee la espera de una variable con un valor por defecto.
+- **`preparar` y las cachés:** anota en el flujo si `preparar` reinicia el proceso (`"preparar_reinicia": true`) y qué cachés limpia (`"preparar_limpia": "memoria"`, `"disco"`, `"ambas"` o `"ninguna"`): con una mejora de caché o precarga decide qué caso real representa el número. Son campos de presentación: no cambian la huella.
+- **Tramos:** si la marca de fin de un tramo sale más de una vez (la lista visible al abrir y al volver), usa `"cual": "primera"` en su `hasta`; si no, el tramo termina en la última y cubre todo el flujo.
+- **Campos del plan y huella:** cambian lo que se mide (y piden línea base nueva o `recalcular`): `recorrido`, `preparar`, `inicio`, `pausas`, `duracion_max_s`, `variables`, `traza_desde_preparar`, `ventana`, `metricas_usuario`, `segmentos` (sin su `titulo` ni `min_frames`), `input_slices` y `repetidas_ventana_s`; `siguiente` nombra el campo que cambió. Son de presentación y se pueden editar después de medir sin aviso: `titulo`, `etiquetas`, `min_frames`, `servicios`, `pasos`, `preparar_reinicia`, `preparar_limpia` y `escenarios`.
 - **Servicios del flujo:** si sabes qué servicios son del flujo, ponlos en `servicios` del flujo; los demás que caigan en la ventana se tratan como ajenos en el veredicto de la red ([medicion.md](medicion.md) · Red atribuida por servicio).
 
 ## 4. Métricas principales (antes de medir)
