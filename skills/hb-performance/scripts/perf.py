@@ -3786,6 +3786,10 @@ def next_steps(folder, plan, flow=None):
     title, steps = plan_steps(folder, plan, flow)
     steps = scenario_steps(folder, plan, flow, steps)
     steps = before_capture(folder, plan, flow, steps)
+    # B4: dos parches de marcas del mismo repo sin vigente traban `cerrar` y `lineabase`: se pregunta primero.
+    doubtful = pending_marks_doubt(folder, plan)
+    if doubtful:
+        steps = marks_choice_steps(folder, project_root(folder).resolve(), doubtful) + steps
     # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos. Con la investigación
     # cerrada, quitarlos es lo único que queda: va primero, y el final lo dice.
     if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
@@ -5887,16 +5891,19 @@ def write_new(path, data):
             candidate = path.with_name("%s-%d%s" % (path.stem, index, path.suffix))
 
 
-def git_apply(top, patch, reverse=False, check=False):
-    """(ok, error) de `git apply [--check] [-R] <parche>` en el repo."""
-    command = ["git", "-C", str(top), "apply"] + (["--check"] if check else []) + (["-R"] if reverse else []) + [str(patch)]
+def git_apply(top, patch, reverse=False, check=False, include=()):
+    """(ok, error) de `git apply [--check] [-R] [--include=<ruta>…] <parche>` en el repo. Con `include`, solo las partes
+    del parche de esos archivos (rutas relativas al repo)."""
+    command = ["git", "-C", str(top), "apply"] + (["--check"] if check else []) + (["-R"] if reverse else []) + [
+        "--include=%s" % path for path in include] + [str(patch)]
     done = subprocess.run(command, capture_output=True, text=True, timeout=120)
     return done.returncode == 0, " ".join((done.stderr or "").split())[:300]
 
 
 def repo_candidates(root, hint, extra, only_hint=False):
     """Las carpetas donde puede estar un archivo de "Cambios temporales" o de una mejora: la del repo que dice la fila
-    (una ruta, o el nombre de un repo incluido desde fuera por settings.gradle), la raíz y los repos incluidos."""
+    (una ruta, el nombre de un repo hermano junto a la raíz o el de un repo de `extra`: los que incluye settings.gradle
+    y los que ya registraron `lineabase` y `decidir --repo`), la raíz y los repos de `extra`."""
     root = pathlib.Path(root)
     out = []
     text = (hint or "").strip().strip("`").strip()
@@ -5909,6 +5916,11 @@ def repo_candidates(root, hint, extra, only_hint=False):
             path = path if path.is_absolute() else root / path
             if path.is_dir() and path not in out:
                 out.append(path)
+            # Un nombre suelto también puede ser un repo hermano (junto a la raíz) que settings.gradle no declara.
+            sibling = root.parent / token
+            if "/" not in token and not pathlib.Path(token).is_absolute() and sibling.is_dir() and \
+                    (sibling / ".git").exists() and sibling not in out:
+                out.append(sibling)
             for other in extra:
                 if other.name == token and other not in out:
                     out.append(other)
@@ -6065,6 +6077,589 @@ def note_setup_patch(root, patches):
     return "✔ AGENTS.md: la sección de rendimiento dice que el setup está en un parche y cómo ponerlo y quitarlo"
 
 
+# ── Archivos con mejora y marcas, parche de marcas vigente y repos hermanos (0.13.0) ──
+# Un archivo de "Cambios temporales" que también es de una mejora nunca se revierte entero: se quitan solo las marcas, con
+# el parche de marcas vigente de su repo, o el comando se detiene sin tocar nada. Lo que es de una mejora sale de cuatro
+# lugares: los archivos de `decidir --aplicada`, los que nombran los diffs de cambios/, los de los parches de `lineabase` y
+# la propia fila de estado.md (si nombra una mejora).
+MARKS_LINE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?[*_]*parche\s+de\s+marcas\s+(vigente|reemplazado)[*_]*[ \t]*:[*_]*[ \t]*"
+                        r"(.+?)[ \t]*$", re.I | re.M)
+PATCH_PATH = re.compile(r"`([^`\s]+\.(?:patch|diff))`|([^\s`|()]+\.(?:patch|diff))(?![\w.])")
+MARK_CODE = re.compile(r"\bTrace\.(?:begin|end)\w*|\bMarkTrace\b|\bContentVisible\b|\bPerfHooks\b|"
+                       r"\b(?:begin|end)AsyncSection\b|hb-perf")
+GENERATED_PATCH = re.compile(r"-(?:temporales|respaldo|mejoras?)-")  # los que arman cerrar y lineabase
+IMPROVEMENT_WORD = re.compile(r"(?<![\w-])mejoras?(?![\w-])", re.I)
+
+
+def patch_path_in(text):
+    """La primera ruta de un parche (.patch o .diff) de un texto, entre acentos graves o suelta; None si no hay."""
+    found = PATCH_PATH.search(text or "")
+    return (found.group(1) or found.group(2)) if found else None
+
+
+def resolve_patch(raw, folder, root):
+    """La ruta de un parche anotado en estado.md: absoluta, o relativa a la investigación, a la raíz o a la carpeta de
+    parches (la primera que exista)."""
+    path = pathlib.Path(os.path.expanduser(str(raw).strip().strip("`")))
+    if path.is_absolute():
+        return path
+    for base in (pathlib.Path(folder), pathlib.Path(root), patches_dir(folder, root)):
+        if (base / path).is_file():
+            return (base / path).resolve()
+    return (pathlib.Path(folder) / path).resolve()
+
+
+def patch_sections(data):
+    """{ruta: bytes de su parte} de un parche de git, en orden. La ruta es la del lado nuevo (la del viejo si el archivo
+    se borra), relativa al repo."""
+    out = {}
+    for part in re.split(rb"(?m)^(?=diff --git )", data or b""):
+        if not part.startswith(b"diff --git "):
+            continue
+        name = None
+        for line in part.splitlines():
+            if line.startswith((b"--- ", b"+++ ")):
+                value = line[4:].strip().strip(b'"')
+                if value != b"/dev/null":
+                    name = value[2:] if value[:2] in (b"a/", b"b/") else value
+                if line.startswith(b"+++ "):
+                    break
+            elif line.startswith(b"@@"):
+                break
+        if name is None:
+            head = re.match(rb"diff --git \"?a/(.+?)\"? \"?b/(.+?)\"?$", part.splitlines()[0])
+            name = head.group(2) if head else None
+        if name is not None:
+            out[os.path.normpath(name.decode("utf-8", "replace"))] = part
+    return out
+
+
+def read_patch(path):
+    try:
+        return pathlib.Path(path).read_bytes()
+    except OSError:
+        return b""
+
+
+def patch_files(path):
+    """Los archivos que toca un parche guardado (relativos a su repo); [] si no se puede leer."""
+    return list(patch_sections(read_patch(path)))
+
+
+def split_hunks(section):
+    """(cabecera, [hunks]) de la parte de un archivo en un parche, en bytes."""
+    head, hunks = [], []
+    for line in section.splitlines(keepends=True):
+        if line.startswith(b"@@"):
+            hunks.append([line])
+        elif hunks:
+            hunks[-1].append(line)
+        else:
+            head.append(line)
+    return b"".join(head), [b"".join(hunk) for hunk in hunks]
+
+
+def hunk_changes(hunk):
+    """Las líneas que un hunk agrega o quita, con su signo y sin el fin de línea ni los espacios del final."""
+    return [line[:1] + line[1:].rstrip() for line in hunk.splitlines()[1:] if line[:1] in (b"+", b"-")]
+
+
+def changed_lines(data, rel=None):
+    """El conjunto de líneas agregadas o quitadas de un parche (solo las del archivo `rel`, si se da)."""
+    out = set()
+    for name, section in patch_sections(data).items():
+        if rel is None or name == os.path.normpath(rel):
+            for hunk in split_hunks(section)[1]:
+                out.update(hunk_changes(hunk))
+    return out
+
+
+def mark_like(line, names=()):
+    """True si una línea agregada o quitada parece una marca de medición (la API de las marcas o el nombre de una marca
+    del plan entre comillas)."""
+    text = line[1:].decode("utf-8", "replace") if isinstance(line, bytes) else str(line)[1:]
+    return bool(MARK_CODE.search(text)) or any('"%s"' % name in text for name in names)
+
+
+def classify_hunks(section, improvement, marks=None, names=()):
+    """[(hunk, tipo)] de la parte de un archivo con mejora y marcas, línea por línea: una línea del parche de marcas o con
+    aspecto de marca es de las marcas (aunque el diff guardado de la mejora la lleve, porque se guardó con las marcas
+    puestas); una del diff de la mejora, de la mejora; cualquier otra, un cambio temporal. "mejora" si el hunk solo tiene
+    líneas de la mejora, "marcas" si no tiene ninguna y "mezcla" si tiene de las dos. Las líneas en blanco no cuentan."""
+    out = []
+    for hunk in split_hunks(section)[1]:
+        kinds = set()
+        for line in hunk_changes(hunk):
+            if not line[1:].strip():
+                continue
+            if (marks is not None and line in marks) or mark_like(line, names):
+                kinds.add("marcas")
+            elif line in improvement:
+                kinds.add("mejora")
+            else:
+                kinds.add("marcas")
+        if kinds:
+            out.append((hunk, "mezcla" if len(kinds) > 1 else kinds.pop()))
+    return out
+
+
+def plan_mark_names(plan):
+    return sorted({mark for flow in (plan.get("flujos") or {}).values() if isinstance(flow, dict)
+                   for mark, _ in plan_marks(flow)})
+
+
+def registered_repos(folder, root, plan):
+    """Los repos que la investigación ya usó con su ruta: los de `lineabase` y los de `decidir --aplicada --repo`."""
+    root = pathlib.Path(root).resolve()
+    raw = [item.get("repo") for item in read_lineabase(folder).get("parches") or [] if isinstance(item, dict)]
+    raw += [entry.get("repo") for item in (plan or {}).get("mejoras") or [] for entry in item.get("cambios") or []
+            if isinstance(entry, dict)]
+    out = []
+    for value in raw:
+        if not value or str(value).strip() in (".", ""):
+            continue
+        path = pathlib.Path(os.path.expanduser(str(value)))
+        path = path if path.is_absolute() else root / path
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        if path.is_dir() and path != root and path not in out:
+            out.append(path)
+    return out
+
+
+def project_repos(folder, root, plan):
+    """Las carpetas fuera de la raíz donde pueden estar los archivos de la investigación: las que incluye
+    settings.gradle(.kts) y los repos que ya registraron `lineabase` y `decidir --repo` (un repo hermano que el proyecto
+    sustituye por otro mecanismo no sale en settings.gradle)."""
+    extra = list(external_roots(root, read_no_leer(root))[0])
+    for path in registered_repos(folder, root, plan):
+        if path not in extra:
+            extra.append(path)
+    return extra
+
+
+def sibling_matches(root, name):
+    """Los repos hermanos de la raíz (carpetas junto a ella con git) que tienen ese archivo: ["../modulo-pagos"]."""
+    root = pathlib.Path(root).resolve()
+    out = []
+    try:
+        siblings = sorted(path for path in root.parent.iterdir() if path.is_dir() and path != root)
+    except OSError:
+        return out
+    for sibling in siblings[:200]:
+        if (sibling / name).is_file() and (sibling / ".git").exists():
+            out.append("../%s" % sibling.name)
+    return out
+
+
+def improvement_touch(folder, root, plan, extra):
+    """{(repo, ruta relativa): [ids]} de cada archivo que toca una mejora aplicada: los de `decidir --aplicada
+    --archivos`, los que nombran sus diffs en cambios/ y los de los parches de `lineabase`."""
+    folder = pathlib.Path(folder)
+    out = {}
+
+    def add(key, ident):
+        out.setdefault(key, [])
+        if ident not in out[key]:
+            out[key].append(ident)
+
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") != "aplicada":
+            continue
+        for entry in item.get("cambios") or []:
+            if not isinstance(entry, dict):
+                continue
+            names = list(entry.get("archivos") or []) + (patch_files(folder / entry["diff"]) if entry.get("diff") else [])
+            for name in dict.fromkeys(names):
+                top, rel = resolve_repo_file(root, name, entry.get("repo"), extra)
+                if top is not None:
+                    add((top, os.path.normpath(rel)), item["id"])
+    for item in read_lineabase(folder).get("parches") or []:
+        if not isinstance(item, dict) or not item.get("parche"):
+            continue
+        top = pathlib.Path(item.get("repo") or root).resolve()
+        for name in patch_files(item["parche"]):
+            add((top, name), item.get("mejora") or "mejora")
+    return out
+
+
+def row_improvements(change, plan):
+    """Las mejoras que nombra una fila de "Cambios temporales" ("lleva además una línea de M2"): sus ids o, si solo dice
+    "mejora", ["una mejora"]."""
+    text = "%s %s" % (change.get("que") or "", change.get("archivo") or "")
+    ids = [item["id"] for item in plan.get("mejoras") or []
+           if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(str(item["id"])), text)]
+    return ids or (["una mejora"] if IMPROVEMENT_WORD.search(change.get("que") or "") else [])
+
+
+def patch_repo(path, tops):
+    """El repo de un parche: el primero donde existen todos sus archivos o, si no, donde aplica en algún sentido."""
+    files = patch_files(path)
+    if not files:
+        return None
+    for top in tops:
+        if all((pathlib.Path(top) / name).exists() for name in files):
+            return pathlib.Path(top)
+    for top in tops:
+        if git_apply(top, path, reverse=True, check=True)[0] or git_apply(top, path, check=True)[0]:
+            return pathlib.Path(top)
+    for top in tops:
+        if any((pathlib.Path(top) / name).exists() for name in files):
+            return pathlib.Path(top)
+    return None
+
+
+def marks_patches(folder, root, plan=None, extra=None):
+    """El parche de marcas de cada repo (B4): {"vigente": {repo: parche}, "dudosos": {repo: [parches]}, "reemplazados":
+    [parches], "sin_repo": [parches]}. Manda la línea "Parche de marcas vigente: <ruta>" de estado.md; sin ella, un
+    único parche de marcas del repo (nombrado en "Cambios temporales" o con "marcas" en el nombre, en la carpeta de
+    parches) es el vigente. Dos o más sin vigente son dudosos: nadie adivina cuál."""
+    folder, root = pathlib.Path(folder), pathlib.Path(root).resolve()
+    try:
+        text = (folder / "estado.md").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    declared, replaced = [], set()
+    for kind, value in MARKS_LINE.findall(text):
+        raw = patch_path_in(value) or value.strip().strip("`")
+        if not raw or has_placeholder(raw):
+            continue
+        path = resolve_patch(raw, folder, root)
+        if kind.lower() == "vigente":
+            declared.append(path)
+        else:
+            replaced.add(path)
+    declared = [path for path in dict.fromkeys(declared) if path not in replaced]
+    _, sections = state_sections(text)
+    body = next((section for title, section in sections.items() if title.startswith("cambios temporales")), "")
+    body = MARKS_LINE.sub("", body)
+    mentioned = [resolve_patch(found.group(1) or found.group(2), folder, root) for found in PATCH_PATH.finditer(body)
+                 if "marca" in pathlib.Path(found.group(1) or found.group(2)).name.lower()]
+    for base in dict.fromkeys([patches_dir(folder, root), folder.resolve() / "parches"]):
+        if base.is_dir():
+            mentioned += sorted(path.resolve() for path in base.glob("*marca*.patch")
+                                if not GENERATED_PATCH.search(path.name))
+    extra = project_repos(folder, root, plan or {}) if extra is None else extra
+    tops = list(dict.fromkeys([root] + [top.resolve() for top in (git_toplevel(path) for path in extra) if top is not None]))
+    out = {"vigente": {}, "dudosos": {}, "reemplazados": sorted(replaced), "sin_repo": []}
+    by_repo = {}
+    for path in declared:
+        top = patch_repo(path, tops) if path.is_file() else None
+        if top is None:
+            out["sin_repo"].append(path)
+            continue
+        by_repo.setdefault(top, []).append(path)
+    loose = {}
+    for path in dict.fromkeys(mentioned):
+        if path in replaced or path in declared or not path.is_file():
+            continue
+        top = patch_repo(path, tops)
+        if top is not None and top not in by_repo:
+            loose.setdefault(top, []).append(path)
+    for group_ in (by_repo, loose):
+        for top, paths in group_.items():
+            if len(paths) == 1:
+                out["vigente"][top] = paths[0]
+            else:
+                out["dudosos"][top] = paths
+    return out
+
+
+def pending_marks_doubt(folder, plan):
+    """{repo: [parches]} de los repos con dos o más parches de marcas sin vigente, si quedan cambios temporales."""
+    folder = pathlib.Path(folder)
+    try:
+        if not any(not change["revertido"] for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8"))):
+            return {}
+    except OSError:
+        return {}
+    try:
+        return marks_patches(folder, project_root(folder).resolve(), plan)["dudosos"]
+    except (OSError, PerfError):
+        return {}
+
+
+def marks_choice_steps(folder, root, doubtful):
+    """Los pasos para decir cuál de los parches de marcas de un repo es el vigente: un comando por parche."""
+    rel = relative_folder(pathlib.Path(folder), root)
+    steps = [{"tipo": "avisos", "titulo": "¿Cuál es el parche de marcas vigente?", "lineas": [
+        "%s tiene %d parches de marcas y estado.md no dice cuál es el vigente (%s): `cerrar`, `lineabase` y `siguiente` "
+        "no adivinan. Elige el que tiene las marcas de ahora (el más nuevo, si rehiciste las marcas); el otro queda como "
+        "reemplazado" % (shown_path(top, root), len(paths), ", ".join(str(path) for path in paths))
+        for top, paths in sorted(doubtful.items())]}]
+    for top, paths in sorted(doubtful.items()):
+        for path in paths:
+            steps.append(terminal(perf_command(root, "marcas", "--carpeta", rel, "--vigente", path),
+                                  "deja %s como el parche de marcas vigente de %s (lo escribe en estado.md) y marca los "
+                                  "otros como reemplazados; no toca el código" % (path.name, shown_path(top, root)),
+                                  "corre solo el del parche que tiene las marcas de ahora"))
+    return steps
+
+
+def record_marks_patch(folder, root, patch, top):
+    """Escribe en "Cambios temporales por revertir" de estado.md la línea del parche de marcas vigente de ese repo y
+    cambia a "reemplazado" la que había. Devuelve los parches reemplazados."""
+    state = pathlib.Path(folder) / "estado.md"
+    text = state.read_text(encoding="utf-8")
+    current = marks_patches(folder, root)
+    patch = pathlib.Path(patch).resolve()
+    replaced = [path for key, path in current["vigente"].items() if key == top and path != patch]
+    replaced += [path for key, paths in current["dudosos"].items() if key == top for path in paths if path != patch]
+    today = datetime.date.today().isoformat()
+
+    def demote(match):
+        raw = patch_path_in(match.group(2)) or match.group(2).strip().strip("`")
+        path = resolve_patch(raw, folder, root)
+        if path == patch:
+            return ""  # vuelve a ser el vigente: su línea vieja (vigente o reemplazado) se reescribe abajo
+        if match.group(1).lower() == "vigente" and path in replaced:
+            return "- Parche de marcas reemplazado: `%s` (por `%s`, %s)" % (path, patch.name, today)
+        return match.group(0)
+
+    text = MARKS_LINE.sub(demote, text)
+    line = "- Parche de marcas vigente: `%s` (repo `%s`; lo escribió `perf.py marcas`, %s)" % (
+        patch, shown_path(top, root), today)
+    extra_lines = [line] + ["- Parche de marcas reemplazado: `%s` (por `%s`, %s)" % (path, patch.name, today)
+                            for path in replaced if not re.search(re.escape(str(path)), text)]
+    lines = text.split("\n")
+    start = next((i for i, row in enumerate(lines) if row.lower().startswith("## cambios temporales")), None)
+    if start is None:
+        lines += ["", "## Cambios temporales por revertir", ""] + extra_lines
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+        while end > start + 1 and not lines[end - 1].strip():
+            end -= 1
+        lines[end:end] = [""] + extra_lines
+    state.write_text(re.sub(r"\n{3,}", "\n\n", "\n".join(lines)), encoding="utf-8")
+    return replaced
+
+
+def improvement_lines(folder, root, plan, extra):
+    """{(repo, ruta): líneas que agrega o quita la mejora} según los diffs de las mejoras aplicadas (cambios/<id>.diff)."""
+    folder = pathlib.Path(folder)
+    out = {}
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") != "aplicada":
+            continue
+        for entry in item.get("cambios") or []:
+            if not isinstance(entry, dict) or not entry.get("diff"):
+                continue
+            data = read_patch(folder / entry["diff"])
+            for name in patch_sections(data):
+                top, rel = resolve_repo_file(root, name, entry.get("repo"), extra)
+                if top is not None:
+                    out.setdefault((top, os.path.normpath(rel)), set()).update(changed_lines(data, name))
+    return out
+
+
+def separate_marks(folder, root, plan, extra, files):
+    """El parche con solo las marcas de los archivos [(repo, ruta)]: de un archivo que también es de una mejora, los hunks
+    que no tocan la mejora; de los demás, el diff entero. {repo: bytes}, o PerfError si un hunk mezcla las dos."""
+    improvement = improvement_lines(folder, root, plan, extra)
+    names = plan_mark_names(plan)
+    out, mixed = {}, []
+    for top, rel in files:
+        changes = git_changes(top)
+        if rel not in changes:
+            continue
+        data = file_patch(top, rel, changes[rel])
+        lines = improvement.get((top, os.path.normpath(rel)))
+        if not lines:
+            out[top] = out.get(top, b"") + data
+            continue
+        for section in patch_sections(data).values():
+            head = split_hunks(section)[0]
+            kinds = classify_hunks(section, lines, None, names)
+            if any(kind == "mezcla" for _, kind in kinds):
+                mixed.append(rel)
+                continue
+            keep = [hunk for hunk, kind in kinds if kind == "marcas"]
+            if keep:
+                out[top] = out.get(top, b"") + head + b"".join(keep)
+    if mixed:
+        raise PerfError("en %s el código de la mejora y las marcas están en el mismo hunk (líneas que se tocan): no se "
+                        "pueden separar solas" % ", ".join(sorted(mixed)))
+    return out
+
+
+def cmd_marcas(args):
+    """El parche de marcas vigente de cada repo: lo muestra, lo fija (--vigente) o lo arma separando los hunks
+    (--separar)."""
+    folder = pathlib.Path(args.carpeta)
+    if not (folder / "estado.md").is_file():
+        raise PerfError("no existe %s" % (folder / "estado.md"))
+    plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
+    root = project_root(folder).resolve()
+    extra = project_repos(folder, root, plan)
+    tops = list(dict.fromkeys([root] + [top.resolve() for top in (git_toplevel(path) for path in extra)
+                                        if top is not None]))
+    if args.vigente:
+        patch = pathlib.Path(os.path.expanduser(args.vigente)).resolve()
+        if not patch.is_file():
+            raise PerfError("no existe el parche %s" % patch).con(guardado="nada")
+        top = patch_repo(patch, tops)
+        if top is None:
+            raise PerfError("no sé de qué repo es %s: sus archivos no están en la raíz ni en los repos de la investigación"
+                            % patch).con(guardado="nada")
+        replaced = record_marks_patch(folder, root, patch, top)
+        print("✔ estado.md: parche de marcas vigente de %s: %s%s" % (shown_path(top, root), patch, "".join(
+            "\n✔ reemplazado (ya no se usa): %s" % path for path in replaced)))
+    elif args.separar:
+        pending = [change for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8"))
+                   if not change["revertido"]]
+        files = []
+        for change in pending:
+            top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
+            if top is not None and (top, rel) not in files:
+                files.append((top, rel))
+        try:
+            parts = separate_marks(folder, root, plan, extra, files)
+        except PerfError as error:
+            raise error.con(guardado="nada", seguir=[("registra a mano el parche de las marcas de ese archivo (con set -C) "
+                                                      "y fíjalo como vigente", perf_command(
+                                                          root, "marcas", "--carpeta", relative_folder(folder, root),
+                                                          "--vigente", patches_dir(folder, root) / "marcas.patch"))])
+        if not parts:
+            print("· No hay marcas sin quitar en los archivos de \"Cambios temporales por revertir\": no armé ningún parche.")
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        name = slug("-".join(lexical(folder).parts[-2:]))
+        for top, data in sorted(parts.items()):
+            path = write_new(patches_dir(folder, root) / ("%s-marcas-%s-%s.patch" % (name, slug(top.name), stamp)), data)
+            ok, error = git_apply(top, path, reverse=True, check=True)
+            if not ok:
+                raise PerfError("el parche de marcas que armé (%s) no revierte limpio en %s: %s. No lo fijé como vigente"
+                                % (path, top, error)).con(guardado="el parche, como copia: %s" % path)
+            replaced = record_marks_patch(folder, root, path.resolve(), top)
+            print("✔ Parche de marcas de %s (solo las marcas; no pisa ninguno): %s" % (shown_path(top, root), path))
+            for old in replaced:
+                print("✔ reemplazado (ya no se usa): %s" % old)
+    state = marks_patches(folder, root, plan, extra)
+    for top, path in sorted(state["vigente"].items()):
+        print("· Vigente en %s: %s" % (shown_path(top, root), path))
+    for top, paths in sorted(state["dudosos"].items()):
+        print("⚠ %s tiene %d parches de marcas sin vigente: %s" % (shown_path(top, root), len(paths),
+                                                                   ", ".join(str(path) for path in paths)))
+    for path in state["sin_repo"]:
+        print("⚠ estado.md dice que %s es el vigente, pero no existe o no es de ningún repo de la investigación" % path)
+    if not state["vigente"] and not state["dudosos"]:
+        print("· Ningún parche de marcas registrado. Si `cerrar` lo pide, `marcas --separar` lo arma con los hunks que no "
+              "son de la mejora.")
+    if plan:
+        print_next(folder, plan)
+
+
+def fix_repo_column(folder, old, new):
+    """Cambia "Repo o módulo" de las filas de "Cambios temporales" que dicen `old` por `new` (una ruta desde la raíz,
+    como `../modulo-pagos`). Devuelve cuántas filas cambió."""
+    state = pathlib.Path(folder) / "estado.md"
+    lines = state.read_text(encoding="utf-8").split("\n")
+    start = next((i for i, line in enumerate(lines) if line.lower().startswith("## cambios temporales")), None)
+    if start is None:
+        return 0
+    headers, column, changed = None, None, 0
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("## "):
+            break
+        if not line.lstrip().startswith("|"):
+            if headers is not None:
+                break
+            continue
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if headers is None:
+            headers = [cell.lower() for cell in cells]
+            column = next((i for i, name in enumerate(headers) if name.startswith("repo")), None)
+            continue
+        if column is None or column >= len(cells) or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells if cell):
+            continue
+        value = cells[column].strip("`").strip()
+        if value == old or old in ("—", "-") and value in ("", "—", "-"):
+            cells[column] = "`%s`" % new
+            lines[index] = "| " + " | ".join(cells) + " |"
+            changed += 1
+    if changed:
+        state.write_text("\n".join(lines), encoding="utf-8")
+    return changed
+
+
+def improvement_line_checks(folder, root, plan, extra, marks=None):
+    """{(repo, ruta): [(mejora, signo, línea)]} de las líneas que agregan o quitan las mejoras aplicadas, según sus diffs
+    (cambios/<id>.diff) y los parches de `lineabase`, sin las que son marcas (las del parche de marcas vigente o con
+    aspecto de marca): lo que tiene que seguir igual en el árbol después de quitar las marcas."""
+    folder = pathlib.Path(folder)
+    marks = marks or {}
+    names = plan_mark_names(plan)
+    sources = []
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") == "aplicada":
+            sources += [(item["id"], folder / entry["diff"], entry.get("repo")) for entry in item.get("cambios") or []
+                        if isinstance(entry, dict) and entry.get("diff")]
+    record = read_lineabase(folder)
+    if record.get("estado") == "quitadas":
+        return {}  # el código de las mejoras no está en el árbol: no hay nada que comprobar
+    sources += [(item.get("mejora") or "mejora", pathlib.Path(item["parche"]), item.get("repo"))
+                for item in record.get("parches") or [] if isinstance(item, dict) and item.get("parche")]
+    out = {}
+    for ident, path, repo in sources:
+        data = read_patch(path)
+        for name, section in patch_sections(data).items():
+            top, rel = resolve_repo_file(root, name, repo, extra)
+            if top is None:
+                continue
+            patch = marks.get(top)
+            own_marks = changed_lines(read_patch(patch), rel) if patch is not None else set()
+            for hunk in split_hunks(section)[1]:
+                for line in hunk_changes(hunk):
+                    if line[1:].strip() and line not in own_marks and not mark_like(line, names):
+                        entry = (ident, line[:1], line[1:].strip())
+                        if entry not in out.setdefault((top, os.path.normpath(rel)), []):
+                            out[(top, os.path.normpath(rel))].append(entry)
+    return out
+
+
+def foreign_marks_lines(folder, root, plan, extra, top, rel, patch):
+    """Lo que el parche de marcas lleva en un archivo y no parece una marca, cuando no hay diff de la mejora con que
+    separarlo (o es una línea del diff de la mejora): la primera de esas líneas, o "" si todo parece marca."""
+    names = plan_mark_names(plan)
+    own = improvement_lines(folder, root, plan, extra).get((top, os.path.normpath(rel)))
+    for line in sorted(changed_lines(read_patch(patch), rel)):
+        if not line[1:].strip() or mark_like(line, names):
+            continue
+        if own is None or line in own:
+            return line[1:].strip().decode("utf-8", "replace")[:60]
+    return ""
+
+
+def line_counts(checks):
+    """{(repo, ruta): {línea sin espacios a los lados: veces}} del contenido actual de cada archivo de `checks`."""
+    out = {}
+    for top, rel in checks:
+        try:
+            text = (pathlib.Path(top) / rel).read_bytes()
+        except OSError:
+            text = b""
+        counts = {}
+        for line in text.splitlines():
+            key = line.strip()
+            counts[key] = counts.get(key, 0) + 1
+        out[(top, rel)] = counts
+    return out
+
+
+def lost_lines(checks, before, after):
+    """Las mejoras cuyo código cambió al quitar: una línea que agregan aparece menos veces que antes, o una que quitan
+    vuelve a aparecer."""
+    lost = set()
+    for key, entries in checks.items():
+        for ident, sign, line in entries:
+            then, now = before[key].get(line, 0), after[key].get(line, 0)
+            if sign == b"+" and now < then or sign == b"-" and now > then:
+                lost.add(ident)
+    return sorted(lost)
+
+
 def cmd_cerrar(args):
     folder = pathlib.Path(args.carpeta)
     state = folder / "estado.md"
@@ -6072,6 +6667,22 @@ def cmd_cerrar(args):
         raise PerfError("no existe %s" % state)
     plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
     root = project_root(folder).resolve()
+    rel_folder = relative_folder(folder, root)
+    if getattr(args, "corregir_repo", None):
+        old, sep, new = args.corregir_repo.partition("=")
+        if not sep or not old.strip() or not new.strip():
+            raise PerfError("--corregir-repo va como VIEJO=NUEVO, por ejemplo 'modulo-pagos=../modulo-pagos'")
+        target = pathlib.Path(os.path.expanduser(new.strip()))
+        if not (target if target.is_absolute() else root / target).is_dir():
+            raise PerfError("%s no es una carpeta (la ruta es desde la raíz %s, como ../modulo-pagos): no cambié nada"
+                            % (new.strip(), root)).con(guardado="nada")
+        count = fix_repo_column(folder, old.strip(), new.strip())
+        print("✔ estado.md: %d fila%s de \"Cambios temporales\" con el repo `%s` (era `%s`)" % (
+            count, "" if count == 1 else "s", new.strip(), old.strip()) if count else
+              "· Ninguna fila de \"Cambios temporales\" dice `%s` en \"Repo o módulo\": no cambié nada" % old.strip())
+        if plan:
+            print_next(folder, plan)
+        return
     pending = [change for change in temp_changes(state.read_text(encoding="utf-8")) if not change["revertido"]]
     if not pending:
         print("✔ No quedan cambios temporales por revertir en %s." % state)
@@ -6080,22 +6691,40 @@ def cmd_cerrar(args):
         if plan:
             print_next(folder, plan)
         return
-    extra = external_roots(root, read_no_leer(root))[0]
-    mine = improvement_files(folder, root, plan, extra)
+    extra = project_repos(folder, root, plan)
+    touched = improvement_touch(folder, root, plan, extra)
     shared = shared_temp_files(folder, root)
-    problems, kept, groups = [], [], {}
+    problems, fixes, kept, groups, mixed = [], [], [], {}, {}
     for change in pending:
         top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
         if top is None:
+            found = sibling_matches(root, change["archivo"])
+            if len(found) == 1:
+                fixes.append(("la fila de %s dice el repo '%s': el archivo está en %s; deja esa ruta en la columna "
+                              "\"Repo o módulo\"" % (change["archivo"], change["repo"] or "—", found[0]),
+                              perf_command(root, "cerrar", "--carpeta", rel_folder, "--corregir-repo",
+                                           "%s=%s" % (change["repo"] or "—", found[0]))))
+                rel += " (está en %s)" % found[0]
             problems.append(rel)
             continue
-        if (top, rel) in mine:
-            kept.append("%s: también es un archivo de la mejora %s; un parche llevaría las dos. Quita a mano solo lo "
-                        "temporal y marca la fila en estado.md" % (change["archivo"], mine[(top, rel)]))
-            continue
+        hint = (change["repo"] or "").strip().strip("`")
+        if hint and "/" not in hint and hint not in (".", "—", "-") and top != root and \
+                (root.parent / hint).resolve() == top:
+            fixes.append(("la fila de %s dice el repo '%s' (un nombre suelto): lo encontré en %s; para dejarlo escrito "
+                          "como ruta desde la raíz" % (change["archivo"], hint, os.path.relpath(str(top), str(root))),
+                          perf_command(root, "cerrar", "--carpeta", rel_folder, "--corregir-repo",
+                                       "%s=%s" % (hint, os.path.relpath(str(top), str(root))))))
         if change["archivo"] in shared:
             kept.append("%s: otra investigación abierta (%s) también lo declara; quita a mano solo lo de esta, o déjalo "
                         "hasta que cierre la otra" % (change["archivo"], ", ".join(shared[change["archivo"]])))
+            continue
+        ids = list(dict.fromkeys(touched.get((top, os.path.normpath(rel)), []) + row_improvements(change, plan)))
+        if ids:
+            known = [item for item in mixed.get(top, []) if item[0] == rel]
+            if known:
+                known[0][3].append(change["archivo"])
+            else:
+                mixed.setdefault(top, []).append((rel, change["archivo"], ids, []))
             continue
         kind = "setup" if SETUP_ROW.search(change["que"] or "") else "temporales"
         known = [item for items in groups.get(top, {}).values() for item in items if item[0] == rel]
@@ -6106,15 +6735,17 @@ def cmd_cerrar(args):
     if problems:
         raise PerfError("no puedo cerrar sin saber dónde está cada archivo; no toqué nada:\n  - %s" % "\n  - ".join(
             problems)).con(guardado="nada: no guardé ni quité nada",
-                           seguir=[("cuando corrijas las rutas en \"Cambios temporales por revertir\" de estado.md, "
-                                    "repite", same_command())])
+                           seguir=fixes + [("cuando corrijas las rutas en \"Cambios temporales por revertir\" de "
+                                            "estado.md, repite", same_command())])
+    marks = marks_patches(folder, root, plan, extra) if mixed else {"vigente": {}, "dudosos": {}}
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
     target_dir = patches_dir(folder, root)
     name = slug("-".join(lexical(folder).parts[-2:]))
-    plans, notes = [], {}
-    for top, kinds in groups.items():
+    plans, notes, only_marks, stops, doubtful = [], {}, {}, [], {}
+    for top in list(groups) + [top for top in mixed if top not in groups]:
+        kinds = groups.get(top, {})
         changes = git_changes(top)
-        temp_rels = {rel for items in kinds.values() for rel, _, _ in items}
+        temp_rels = {rel for items in kinds.values() for rel, _, _ in items} | {item[0] for item in mixed.get(top, [])}
         print("Repo %s:" % top)
         for kind, items in kinds.items():
             present = [(rel, label, more) for rel, label, more in items if rel in changes]
@@ -6126,26 +6757,112 @@ def cmd_cerrar(args):
                 continue
             print("  Quita (%s): %s" % ("setup de medición" if kind == "setup" else "cambios temporales",
                                        ", ".join(rel for rel, _, _ in present)))
+            for rel, _, _ in present:
+                print("    · %s: archivo entero (solo temporal)" % rel)
             text = b"".join(file_patch(top, rel, changes[rel]) for rel, _, _ in present)
             label = "perf-setup" if kind == "setup" else "%s-temporales" % name
             plans.append({"repo": top, "tipo": kind, "archivos": present, "texto": text,
                           "ruta": target_dir / ("%s-%s-%s.patch" % (label, slug(top.name), stamp))})
+        patch = marks["vigente"].get(top)
+        for rel, label, ids, more in mixed.get(top, []):
+            why = None
+            if rel not in changes:
+                for row_name in [label] + more:
+                    notes[row_name] = "sí · sin cambios al cerrar (%s)" % datetime.date.today().isoformat()
+                continue
+            if top in marks["dudosos"]:
+                doubtful[top] = marks["dudosos"][top]
+                why = "hay %d parches de marcas de este repo y estado.md no dice cuál es el vigente" % len(
+                    marks["dudosos"][top])
+            elif patch is None:
+                why = ("también tiene código de %s y no hay parche de marcas vigente de este repo: revertir el archivo "
+                       "entero quitaría la mejora" % ", ".join(ids)) + (
+                    " (estado.md declara como vigente %s, que no existe o no es de ningún repo de la investigación)"
+                    % ", ".join(str(path) for path in marks.get("sin_repo") or []) if marks.get("sin_repo") else "")
+            elif rel not in patch_files(patch):
+                why = "también tiene código de %s y el parche de marcas vigente (%s) no toca este archivo" % (
+                    ", ".join(ids), patch.name)
+            elif foreign_marks_lines(folder, root, plan, extra, top, rel, patch):
+                why = ("el parche de marcas vigente (%s) lleva en este archivo líneas que no parecen marcas (%s): podría "
+                       "llevar código de %s" % (patch.name, foreign_marks_lines(folder, root, plan, extra, top, rel, patch),
+                                                 ", ".join(ids)))
+            else:
+                ok, error = git_apply(top, patch, reverse=True, check=True, include=[rel])
+                still = [line for line in changed_lines(file_patch(top, rel, changes[rel]), rel)
+                         if line[:1] == b"+" and mark_like(line, plan_mark_names(plan))]
+                if not ok and still:
+                    why = ("el parche de marcas vigente (%s) no coincide con las marcas que hay en el archivo (%s): ¿se "
+                           "movieron o se rehicieron? Arma un parche nuevo con `marcas --separar`" % (
+                               patch.name, still[0][1:].strip().decode("utf-8", "replace")[:60]))
+                elif not ok and git_apply(top, patch, check=True, include=[rel])[0]:
+                    print("    · %s: sin marcas que quitar (el parche de marcas ya no está en el archivo; la mejora "
+                          "%s se queda)" % (rel, ", ".join(ids)))
+                    for row_name in [label] + more:
+                        notes[row_name] = "sí · sin marcas al cerrar (%s); la mejora se queda" % (
+                            datetime.date.today().isoformat())
+                    continue
+                elif not ok:
+                    why = "el parche de marcas vigente (%s) no revierte limpio en este archivo: %s" % (
+                        patch.name, error or "sin detalle")
+            if why:
+                stops.append("%s: %s" % (rel, why))
+                print("    · %s: se detiene: %s" % (rel, why))
+                continue
+            print("    · %s: solo marcas, con %s (la mejora %s se queda)" % (rel, patch, ", ".join(ids)))
+            only_marks.setdefault(top, {"parche": patch, "archivos": []})["archivos"].append((rel, label, more))
         own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
                for path in (investigations_base(root), target_dir)]
         own = [str(path) for path in own if path is not None]  # la carpeta de la investigación y la de los parches
-        stay = ["%s (mejora %s)" % (rel, mine[(top, rel)]) if (top, rel) in mine else rel
+        stay = ["%s (mejora %s)" % (rel, ", ".join(touched[(top, rel)])) if (top, rel) in touched else rel
                 for rel in sorted(changes) if rel not in temp_rels
                 and not any(rel == path or rel.startswith(path.rstrip("/") + "/") for path in own)]
+        stay += ["%s (sin las marcas: la mejora %s se queda)" % (rel, ", ".join(ids))
+                 for rel, _, ids, _ in mixed.get(top, []) if top in only_marks and
+                 any(item[0] == rel for item in only_marks[top]["archivos"])]
         print("  Quedan (no se tocan): %s" % (", ".join(stay) if stay else "nada más con cambios"))
     for line in kept:
         print("  Queda sin quitar: %s" % line)
+    for why, command in fixes:
+        print("· %s:\n    %s" % (why, command))
+    if stops:
+        follow = marks_choice_steps(folder, root, doubtful)[1:] if doubtful else []
+        follow = [(step["que"], step["texto"]) for step in follow]
+        if not doubtful:
+            follow.append(("arma el parche de marcas con los hunks que no son de la mejora (si se tocan, se detiene y "
+                           "lo dice) y lo deja como vigente", perf_command(root, "marcas", "--carpeta", rel_folder,
+                                                                         "--separar")))
+        follow.append(("después, repite (primero con --simular)", same_command(sin=("--simular",)) + " --simular"))
+        if args.simular:
+            print("· Simulación: se detendría sin tocar nada:\n  - %s" % "\n  - ".join(stops))
+            for what, command in follow:
+                print("  Para seguir, %s:\n    %s" % (what, command))
+            return
+        raise PerfError("hay archivos con código de una mejora y marcas que no puedo separar sin riesgo; no toqué nada "
+                        "(revertir el archivo entero quitaría la mejora y el proyecto seguiría compilando):\n  - %s"
+                        % "\n  - ".join(stops)).con(guardado="nada: no guardé ni quité nada", seguir=follow)
+    touched_repos = sorted({item["repo"] for item in plans} | set(only_marks))
+    backups = {top: target_dir / "respaldos" / ("%s-respaldo-%s-%s.patch" % (name, slug(top.name), stamp))
+               for top in touched_repos}
     if args.simular:
+        for top in touched_repos:
+            print("· Simulación: antes de quitar, guardaría un respaldo de todo el diff de %s en %s." % (top, backups[top]))
         for item in plans:
             print("· Simulación: guardaría %s en %s y lo quitaría con git apply -R." % (
                 ", ".join(rel for rel, _, _ in item["archivos"]), item["ruta"]))
+        for top, item in sorted(only_marks.items()):
+            print("· Simulación: en %s quitaría solo las marcas de %s con git apply -R --include del parche %s." % (
+                top, ", ".join(rel for rel, _, _ in item["archivos"]), item["parche"]))
         print("· Simulación: no guardé ni quité nada. Para hacerlo, el mismo comando sin --simular:")
         print("    %s" % same_command(sin=("--simular",)))
         return
+    for top in touched_repos:
+        own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
+               for path in (investigations_base(root), target_dir, folder.resolve())]
+        own = [str(path) for path in own if path is not None]  # la evidencia y los parches no son código del repo
+        changes = {rel: code for rel, code in git_changes(top).items()
+                   if not any(rel == path or rel.startswith(path.rstrip("/") + "/") for path in own)}
+        backups[top] = write_new(backups[top], b"".join(file_patch(top, rel, code) for rel, code in sorted(changes.items())))
+        print("✔ Respaldo de todo el diff de %s (no pisa ninguno): %s" % (top, backups[top]))
     for item in plans:
         item["ruta"] = write_new(item["ruta"], item["texto"])
         print("✔ Parche guardado (no pisa ninguno): %s" % item["ruta"])
@@ -6154,21 +6871,68 @@ def cmd_cerrar(args):
         ok, error = git_apply(item["repo"], item["ruta"], reverse=True, check=True)
         if not ok:
             failed.append("%s: %s" % (item["repo"], error or "git apply --check -R falló"))
+    for top, item in only_marks.items():
+        ok, error = git_apply(top, item["parche"], reverse=True, check=True,
+                              include=[rel for rel, _, _ in item["archivos"]])
+        if not ok:
+            failed.append("%s (solo marcas): %s" % (top, error or "git apply --check -R falló"))
     if failed:
         raise PerfError("un parche no revierte limpio, así que no quité nada:\n  - %s" % "\n  - ".join(failed)).con(
             guardado="los parches, como copia (no se aplicaron): %s" % ", ".join(str(item["ruta"]) for item in plans),
             seguir=[("revisa esos archivos (un cambio a medias o un archivo que otro proceso modificó) y repite",
                      same_command())])
+    # Los hunks de las mejoras que están en el árbol antes de quitar tienen que seguir después.
+    checks = improvement_line_checks(folder, root, plan, extra, {top: item["parche"] for top, item in only_marks.items()})
+    before = line_counts(checks)
+    done = []
     for item in plans:
         ok, error = git_apply(item["repo"], item["ruta"], reverse=True)
         if not ok:  # comprobado justo antes: no debería pasar
             raise PerfError("git apply -R falló en %s después de comprobarlo: %s" % (item["repo"], error)).con(
-                guardado="los parches en %s" % ", ".join(str(entry["ruta"]) for entry in plans))
+                guardado="los parches en %s y el respaldo en %s" % (", ".join(str(entry["ruta"]) for entry in plans),
+                                                                    ", ".join(map(str, backups.values()))))
+        done.append((item["repo"], item["ruta"], ()))
+    for top, item in sorted(only_marks.items()):
+        include = [rel for rel, _, _ in item["archivos"]]
+        ok, error = git_apply(top, item["parche"], reverse=True, include=include)
+        if not ok:
+            raise PerfError("git apply -R (solo marcas) falló en %s después de comprobarlo: %s" % (top, error)).con(
+                guardado="el respaldo en %s" % backups[top])
+        done.append((top, item["parche"], include))
+    lost = lost_lines(checks, before, line_counts(checks))
+    if lost:
+        failed_back = []
+        for top, patch, include in reversed(done):  # vuelve todo a como estaba, comprobando cada paso
+            ok, error = git_apply(top, patch, include=include)
+            if not ok:
+                failed_back.append("%s en %s: %s" % (patch, top, error or "sin detalle"))
+        if failed_back:
+            raise PerfError("después de quitar, el código de %s ya no estaba completo en el árbol, y al volver a ponerlo "
+                            "falló: %s. Vuelve el árbol a como estaba con el respaldo" % (
+                                ", ".join(lost), "; ".join(failed_back))).con(
+                guardado="el respaldo de todo el diff de cada repo: %s (aplícalo con git apply sobre el último commit)"
+                % ", ".join(map(str, backups.values())))
+        raise PerfError("después de quitar, el código de %s ya no estaba completo en el árbol: lo volví a poner todo "
+                        "como estaba (comprobado) y me detuve" % ", ".join(lost)).con(
+            guardado="lo quitado se volvió a aplicar; el respaldo de todo el diff está en %s" % ", ".join(
+                map(str, backups.values())),
+            seguir=[("revisa qué parche lleva líneas de la mejora (el de marcas vigente debe tener solo marcas) y "
+                     "repite con --simular", same_command(sin=("--simular",)) + " --simular")])
+    today = datetime.date.today().isoformat()
+    for item in plans:
         for _, label, more in item["archivos"]:
             for row_name in [label] + more:
-                notes[row_name] = "sí · perf.py cerrar %s · parche: %s" % (datetime.date.today().isoformat(),
-                                                                         item["ruta"])
-    for top in groups:
+                notes[row_name] = "sí · perf.py cerrar %s · parche: %s" % (today, item["ruta"])
+    for top, item in only_marks.items():
+        for _, label, more in item["archivos"]:
+            for row_name in [label] + more:
+                notes[row_name] = "sí · perf.py cerrar %s · solo las marcas, con %s (la mejora se queda)" % (
+                    today, item["parche"])
+    if checks:
+        count = sum(len(entries) for entries in checks.values())
+        print("✔ El código de las mejoras sigue completo en el árbol (%d línea%s comprobada%s)" % (
+            count, "" if count == 1 else "s", "" if count == 1 else "s"))
+    for top in touched_repos or list(groups):
         status = subprocess.run(["git", "-C", str(top), "status", "--short"], capture_output=True, text=True, timeout=120)
         print("git status --short en %s:" % top)
         print("\n".join("    " + line for line in status.stdout.splitlines()) or "    (sin cambios)")
@@ -6180,12 +6944,13 @@ def cmd_cerrar(args):
         note = update_agents_state(root)
         if note:
             print(note)
-    if plans:
+    if plans or only_marks:
         # Después de quitar, el DoD: un cambio temporal pudo tapar algo, o algo del proyecto dependía de él.
         record = read_close(folder)
+        removed = sum(len(item["archivos"]) for item in plans) + sum(len(item["archivos"]) for item in only_marks.values())
         record.update(fecha=datetime.datetime.now().replace(microsecond=0).isoformat(),
-                      quitados=record.get("quitados", 0) + sum(len(item["archivos"]) for item in plans),
-                      repos=sorted(set(record.get("repos") or []) | {str(item["repo"]) for item in plans}), dod="pendiente")
+                      quitados=record.get("quitados", 0) + removed,
+                      repos=sorted(set(record.get("repos") or []) | {str(top) for top in touched_repos}), dod="pendiente")
         save_close(folder, record)
         if args.dod:
             run_dod(folder, root, record["repos"])
@@ -6215,7 +6980,7 @@ def improvements_in_tree(folder, plan):
     if not applied:
         return []
     root = project_root(folder).resolve()
-    extra = external_roots(root, read_no_leer(root))[0]
+    extra = project_repos(folder, root, plan)
     present = []
     for item in applied:
         entries = [entry for entry in item.get("cambios") or [] if isinstance(entry, dict)]
@@ -6292,7 +7057,7 @@ def cmd_lineabase(args):
     if args.registrar:
         # Las mejoras se quitaron a mano (un archivo tenía también marcas): se registra el parche para reaplicarlo.
         applied_ids = [item["id"] for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
-        tops = [root] + [top for top in (git_toplevel(other) for other in external_roots(root, read_no_leer(root))[0])
+        tops = [root] + [top for top in (git_toplevel(other) for other in project_repos(folder, root, plan))
                          if top is not None]
         patches = []
         for raw in args.registrar:
@@ -6333,7 +7098,7 @@ def cmd_lineabase(args):
                 "compiles, no instales ni captures" % (folder.resolve() / "estado.md", ", ".join(without), rel),
                 "intermedio", "medio", "busca qué archivos cambió cada mejora y guarda su diff", plan), plan, root),
                 ("después, repite", same_command())])
-    extra = external_roots(root, read_no_leer(root))[0]
+    extra = project_repos(folder, root, plan)
     temp = set()
     try:
         for change in temp_changes((folder / "estado.md").read_text(encoding="utf-8")):
@@ -13548,7 +14313,22 @@ def main(argv=None):
     p.add_argument("--dod", action="store_true",
                    help="después de quitar, corre el DoD de AGENTS.md (con la salida en <carpeta>/logs/%s) y lo anota; sin "
                         "cambios por quitar, solo corre el DoD" % DOD_LOG)
+    p.add_argument("--corregir-repo", dest="corregir_repo", metavar="VIEJO=NUEVO",
+                   help="cambia la columna 'Repo o módulo' de las filas que dicen VIEJO por NUEVO (una ruta desde la raíz, "
+                        "como ../modulo-pagos) y no quita nada")
     p.set_defaults(func=cmd_cerrar)
+
+    p = sub.add_parser("marcas", help="el parche de marcas vigente de cada repo: lo muestra, lo fija o lo arma",
+                       description="Un archivo que tiene una mejora y marcas solo se cierra con el parche de marcas "
+                                   "vigente de su repo (cerrar nunca lo revierte entero). Sin opciones, muestra el vigente "
+                                   "de cada repo; --vigente lo fija en estado.md (y marca el anterior como reemplazado); "
+                                   "--separar lo arma con los hunks de los cambios temporales que no son de una mejora.")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--vigente", metavar="PARCHE", help="el parche de marcas que tiene las marcas de ahora")
+    p.add_argument("--separar", action="store_true",
+                   help="arma el parche de marcas (set -C, con fecha y hora) con los hunks que no son de una mejora; si "
+                        "un hunk mezcla las dos, se detiene sin escribir nada")
+    p.set_defaults(func=cmd_marcas)
 
     p = sub.add_parser("lineabase", help="quita o reaplica el código de las mejoras para rehacer la línea base",
                        description="Para medir antes y control de nuevo sin las mejoras aplicadas (por ejemplo, porque "
