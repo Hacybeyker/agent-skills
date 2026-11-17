@@ -53,9 +53,10 @@ MS = 1_000_000
 def without_new(record):
     """Un registro de fases.json sin los campos opcionales que agregan 0.9.0 y 0.10.0 (la versión de la skill, la
     configuración, si el build era depurable y las opciones de desarrollador) y 0.11.0 (la huella de las marcas y del
-    plan)."""
+    plan) y 0.13.0 (cuándo se midió el flujo, con qué instalación y cuánto tardó)."""
     return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes", "marcas",
-                                                                         "plan", "memoria")}
+                                                                         "plan", "memoria", "fecha", "instalada",
+                                                                         "segundos")}
 
 
 class PerfBase(unittest.TestCase):
@@ -8001,7 +8002,7 @@ class AudienceReportsTest(PerfBase):
                        "Resumen técnico"):
             self.assertNotIn(jargon, text, jargon)
         page = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
-        self.assertLess(len(page.splitlines()), 60)  # una página corta
+        self.assertLess(len(page.splitlines()), 70)  # una página corta (0.13.0: con la leyenda de las etiquetas)
 
     def test_sin_el_resumen_para_gerencia_se_genera_igual_y_lo_marca_sin_completar(self):
         write(self.folder / "estado.md", STATE_REPORT % "")  # un estado.md de una versión anterior: sin la sección
@@ -8980,7 +8981,7 @@ class MarksAcrossPhasesTest(DeviceBase):
         phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
         record = phases["antes"]["flujos"]["home"]
         self.assertEqual(set(record["marcas"]), {"lista"})
-        self.assertEqual(set(record["plan"]), {"recorrido", "metricas", "archivos"})  # archivos: 0.12.0
+        self.assertEqual(set(record["plan"]), {"recorrido", "metricas", "archivos", "campos"})  # archivos: 0.12.0; campos: 0.13.0
         self.assertEqual(self.capture("--prueba").returncode, 0)
         test = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["prueba"]["flujos"]["home"]
         self.assertTrue(test["marcas_ok"])
@@ -9244,9 +9245,13 @@ class BaselineRedoTest(PerfBase):
     def test_si_la_mejora_toca_un_archivo_con_marcas_lo_separa_un_chat(self):
         rows = "| `app/Lista.kt` | app | marca | — | no |\n| `app/Filtro.kt` | app | marca | — | no |\n"
         write(self.folder / "estado.md", STATE_COST % rows)
+        # 0.13.0: la marca pegada a la línea de la mejora (el mismo hunk); en hunks separados, lineabase los separa solo
+        (self.dir / "app" / "Filtro.kt").write_text("class Filtro {\n    fun filtrar() = enSegundoPlano { calcular() }\n"
+                                                    "    // MARK filtro\n}\n", encoding="utf-8")
         result = self.perf("lineabase", "--carpeta", self.folder.relative_to(self.dir), "--quitar-mejoras")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("tienen la mejora y también cambios temporales (marcas): app/Filtro.kt (M1)", result.stderr)
+        self.assertIn("en app/Filtro.kt (M1) el código de la mejora y las marcas están en hunks que se tocan",
+                      result.stderr)
         self.assertIn("Chat nuevo", result.stderr)
         self.assertIn("enSegundoPlano", (self.dir / "app" / "Filtro.kt").read_text(encoding="utf-8"))  # nada tocado
 
