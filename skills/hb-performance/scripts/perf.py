@@ -3865,7 +3865,7 @@ def next_steps(folder, plan, flow=None):
             title = title + " · falta el DoD después de quitar los cambios temporales"
             steps = [dod] + [dict(step, texto=DONE_AFTER_DOD) if step["tipo"] == "fin" else step for step in steps]
         elif title.startswith("investigación cerrada") and not (pathlib.Path(folder) / CLOSE_FILE).is_file() and \
-                phase_skill(read_phases(folder).get("despues")) not in ("0.12.0", VERSION):
+                not version_at_least(phase_skill(read_phases(folder).get("despues")), "0.12.0"):
             # A6: cerrada con una versión anterior, sin registro del cierre: el DoD después de cerrar no está anotado.
             root = project_root(folder).resolve()
             dod_now = terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root), "--dod"),
@@ -3885,6 +3885,15 @@ def next_steps(folder, plan, flow=None):
             at = next((i for i, step in enumerate(steps) if step["tipo"] == "fin"), len(steps))
             steps = steps[:at] + [regenerate] + steps[at:]
     return title, steps
+
+
+def version_at_least(version, minimum):
+    """True si la versión de la skill ("0.13.0") es esa o posterior; False sin dato (anterior a 0.9.0)."""
+    def parts(text):
+        found = re.match(r"(\d+)\.(\d+)\.(\d+)", str(text or ""))
+        return tuple(int(item) for item in found.groups()) if found else None
+    have, want = parts(version), parts(minimum)
+    return have is not None and want is not None and have >= want
 
 
 CLOSE_PENDING = "cierre pendiente"
@@ -10002,8 +10011,11 @@ def cmd_capturar(args, plan=None):
                                  folder=folder)
     print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
     write_summary(csv_path, rows, plan)
-    for line in phase_notes(folder, plan, rows, phase, flow_name):
+    notes = phase_notes(folder, plan, rows, phase, flow_name)
+    for line in notes:
         print(line)
+    # Quedan en "Advertencias para el diagnóstico" de estado.md: la sesión 2 y la 4 las leen sin la salida de la terminal.
+    save_capture_warnings(folder, phase, flow_name, [line[2:] for line in notes])
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
     if args.plan:
         print_next(folder, plan, flow_name)
@@ -11172,8 +11184,10 @@ def cmd_recalcular(args):
                                 folder=folder)
         print("Métricas recalculadas · %s · %s:" % (phase, flow_name))
         print(markdown_table(SUMMARY_HEADERS, table[:MAX_ROWS]))
-        for line in phase_notes(folder, plan, rows, phase, flow_name):
+        notes = phase_notes(folder, plan, rows, phase, flow_name)
+        for line in notes:
             print(line)
+        save_capture_warnings(folder, phase, flow_name, [line[2:] for line in notes])
     write_summary(csv_path, rows, plan)
     print_next(folder, plan)
 

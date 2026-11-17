@@ -752,6 +752,10 @@ class ScenarioWindowTest(PerfBase):
         plan = perf.load_plan(self.folder / "plan.json")
         found = perf.data_origin(self.folder, plan, "despues", "contactos", plan["mejoras"][0])
         self.assertEqual(found["conteo"], {"precarga": 1, "red en el tramo": 1, "sin llamada": 1})
+        # lo que imprime `capturar` al terminar la fase queda en las advertencias que leen las sesiones 2 y 4
+        notes = perf.phase_notes(self.folder, plan, perf.read_rows(self.folder / "metricas.csv"), "despues", "contactos")
+        perf.save_capture_warnings(self.folder, "despues", "contactos", [line[2:] for line in notes])
+        self.assertIn("Origen del dato de M1", json.dumps(perf.read_notes(self.folder), ensure_ascii=False))
         self.assertEqual(perf.origin_lines(self.folder, plan, "despues", "contactos"),
                          ["Origen del dato de M1 (contactos, despues): GET api/v1/contactos en la ventana: precarga 1 · red "
                           "en el tramo 1 · sin llamada 1 (de 3 corridas)"])
@@ -805,6 +809,12 @@ class ForeignAndPlanFieldsTest(PerfBase):
                          ["preparar"])
         self.assertEqual(perf.changed_fields({"recorrido": "x"}, first), [])  # una fase de 0.12.0: sin el dato
         self.assertTrue(set(perf.MEASURE_FIELDS).isdisjoint(perf.PRESENTATION_FIELDS))
+
+    def test_version_at_least(self):
+        self.assertTrue(perf.version_at_least("0.13.0", "0.12.0"))
+        self.assertTrue(perf.version_at_least("0.14.1", "0.12.0"))
+        self.assertFalse(perf.version_at_least("0.10.0", "0.12.0"))
+        self.assertFalse(perf.version_at_least(None, "0.12.0"))
 
 
 # ── D · Herramientas de setup ─────────────────────────────────────────────────
