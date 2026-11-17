@@ -29,7 +29,9 @@
 
 Marcas o código puestos solo para esta investigación (por ejemplo, una marca con `android.os.Trace` en un módulo que no ve `PerfHooks`) y las ediciones de cableado en código de `main` que no se van a commitear (el gancho de red donde se arma el cliente HTTP, por ejemplo). Se revierten antes de proponer un commit y, a más tardar, en el cierre.
 
-**Un archivo por fila**, con su ruta desde la raíz de su repo (sin `...`): así `perf.py cerrar` lo quita sin adivinar.
+**Un archivo por fila**, con su ruta desde la raíz de su repo (sin `...`), y en "Repo o módulo" la ruta del repo desde la raíz del proyecto (`.` o `../<repo>` para un repo hermano): así `perf.py cerrar` lo quita sin adivinar. Si el archivo también lleva código de una mejora, dilo en "Qué es" ("lleva además la mejora M1"): `cerrar` solo le quita las marcas, con el parche de marcas vigente.
+
+El parche de marcas vigente de cada repo lo escribe `perf.py marcas --vigente <parche>` (o `marcas --separar`) en una línea "Parche de marcas vigente: <ruta>" debajo de la tabla; uno solo por repo: el anterior queda "reemplazado".
 
 | Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |
 | --- | --- | --- | --- | --- |

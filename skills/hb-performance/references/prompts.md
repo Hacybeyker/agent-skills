@@ -274,6 +274,26 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py instrumentar --modulo <el módu
 
 Hazlo **entre** investigaciones, no en medio de una: una plantilla nueva puede nombrar distinto las secciones (desde 0.10.0, los endpoints con rutas largas se acortan desde la izquierda), y antes y después tienen que nombrar igual. Después, el formateador y el DoD del proyecto. Si un archivo sale con `✖ no se actualiza`, alguien lo editó a mano (o es de una versión sin huella): mira la diferencia y, si aceptas reemplazarlo, repite con `--actualizar --forzar`, que deja lo que había en `<archivo>.orig`.
 
+### Fijar el parche de marcas vigente (rehiciste las marcas, o `cerrar` lo pide)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py marcas --carpeta <carpeta> --separar
+```
+
+Arma el parche con solo las marcas (de un archivo que también tiene una mejora, los hunks que no son de ella), sin pisar ninguno, y lo deja como el vigente de su repo en `estado.md`; el anterior queda como reemplazado. Si ya tienes el parche, `marcas --carpeta <carpeta> --vigente <parche>`. Sin opciones, muestra el vigente de cada repo. `cerrar` y `lineabase` usan solo el vigente: con dos sin decir cuál, se detienen y `siguiente` te pregunta.
+
+### Pasar una investigación de una versión anterior a la actual
+
+**Dónde:** chat nuevo, con el modelo intermedio y esfuerzo medio (el comando lo da `siguiente`)
+
+```text
+Sigue hb-performance con <ruta absoluta>/estado.md: pasa esta investigación a la versión actual para rehacer la línea base. No hagas commit ni push.
+```
+
+`siguiente` lo ofrece solo cuando una investigación medida con una versión anterior no puede afirmar "igual contra igual" (un archivo del recorrido cambió entre fases, según su fecha). El chat actualiza la instrumentación, repone las marcas con el parche vigente y deja el plan listo; después, `lineabase --quitar-mejoras` y la secuencia de siempre.
+
 ### Investigar algo que quedó en "Pendientes"
 
 **Dónde:** chat nuevo · Intermedio · medio
