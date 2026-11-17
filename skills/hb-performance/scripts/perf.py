@@ -7259,13 +7259,20 @@ def sibling_matches(root, name):
     """Los repos hermanos de la raíz (carpetas junto a ella con git) que tienen ese archivo: ["../modulo-pagos"]."""
     root = pathlib.Path(root).resolve()
     out = []
+    name = (name or "").strip().strip("`").strip()
+    if not name or PATH_GUESS.search(name) or pathlib.Path(name).is_absolute():
+        return out  # una ruta incompleta o absoluta no se busca en otros repos
     try:
-        siblings = sorted(path for path in root.parent.iterdir() if path.is_dir() and path != root)
+        siblings = sorted(root.parent.iterdir())
     except OSError:
         return out
     for sibling in siblings[:200]:
-        if (sibling / name).is_file() and (sibling / ".git").exists():
-            out.append("../%s" % sibling.name)
+        # Junto a la raíz puede haber carpetas sin permiso de lectura (en /tmp, por ejemplo): se saltan.
+        try:
+            if sibling != root and sibling.is_dir() and (sibling / ".git").exists() and (sibling / name).is_file():
+                out.append("../%s" % sibling.name)
+        except OSError:
+            continue
     return out
 
 

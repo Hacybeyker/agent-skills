@@ -347,6 +347,16 @@ class SiblingRepoTest(PerfBase):
         self.assertIn("--corregir-repo pagos-viejo=../modulo-pagos", result.stderr + result.stdout)
         self.assertIn("MARK", (self.sibling / "pagos" / "PagosFragment.kt").read_text(encoding="utf-8"))
 
+    def test_una_carpeta_sin_permiso_junto_a_la_raiz_no_rompe(self):
+        locked = self.dir / "sin-permiso"
+        locked.mkdir()
+        os.chmod(str(locked), 0)
+        try:
+            self.assertEqual(perf.sibling_matches(self.root, "pagos/PagosFragment.kt"), ["../modulo-pagos"])
+            self.assertEqual(perf.sibling_matches(self.root, ".../PagosFragment.kt"), [])  # incompleta: no se busca
+        finally:
+            os.chmod(str(locked), 0o755)
+
     def test_los_repos_de_lineabase_cuentan(self):
         write(self.folder / "lineabase.json", json.dumps({"estado": "reaplicadas", "parches": [
             {"mejora": "M1", "repo": str(self.sibling.resolve()), "parche": "/no/existe.patch"}]}))
