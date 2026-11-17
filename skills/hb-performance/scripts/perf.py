@@ -8453,11 +8453,26 @@ def save_capture_warnings(folder, phase, flow, warnings):
     save_notes(folder, data)
 
 
+def save_phase_notes(folder, phase, flow, lines):
+    """Lo que `capturar` y `recalcular` dicen al terminar una fase (phase_notes): reemplaza lo que había de esa fase y
+    ese flujo (un recálculo que arregla los tramos o una tanda nueva no dejan avisos viejos)."""
+    data = read_notes(folder)
+    bucket = note_bucket(data, "fase", phase)
+    texts = [one_line(line) for line in lines if line]
+    if texts:
+        bucket[flow] = texts
+    elif flow in bucket:
+        bucket.pop(flow)
+    else:
+        return
+    save_notes(folder, data)
+
+
 def forget_notes(folder, phase, flow):
     """--rehacer: lo que se anotó de las corridas que se descartan ya no vale."""
     data = read_notes(folder)
     changed = False
-    for kind in ("invalidas", "capturar", "diagnostico"):
+    for kind in ("invalidas", "capturar", "diagnostico", "fase"):
         bucket = (data.get(kind) or {}).get(phase) if isinstance(data.get(kind), dict) else None
         if isinstance(bucket, dict) and flow in bucket:
             bucket.pop(flow)
@@ -9091,6 +9106,9 @@ def warnings_lines(folder, plan):
     for phase in FASES:
         for flow, texts in by_flow("capturar", phase):
             lines += ["Captura de %s (%s): %s" % (phase, flow, one_line(text))
+                      for text in (texts if isinstance(texts, list) else []) if isinstance(text, str)]
+        for flow, texts in by_flow("fase", phase):  # 0.13.0: lo último que dijo capturar o recalcular de la fase
+            lines += ["Fase %s (%s): %s" % (phase, flow, one_line(text))
                       for text in (texts if isinstance(texts, list) else []) if isinstance(text, str)]
     phases = read_phases(folder)
     if isinstance(phases, dict):
@@ -10015,7 +10033,7 @@ def cmd_capturar(args, plan=None):
     for line in notes:
         print(line)
     # Quedan en "Advertencias para el diagnóstico" de estado.md: la sesión 2 y la 4 las leen sin la salida de la terminal.
-    save_capture_warnings(folder, phase, flow_name, [line[2:] for line in notes])
+    save_phase_notes(folder, phase, flow_name, [line[2:] for line in notes])
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
     if args.plan:
         print_next(folder, plan, flow_name)
@@ -11187,7 +11205,7 @@ def cmd_recalcular(args):
         notes = phase_notes(folder, plan, rows, phase, flow_name)
         for line in notes:
             print(line)
-        save_capture_warnings(folder, phase, flow_name, [line[2:] for line in notes])
+        save_phase_notes(folder, phase, flow_name, [line[2:] for line in notes])
     write_summary(csv_path, rows, plan)
     print_next(folder, plan)
 

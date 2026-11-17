@@ -754,8 +754,16 @@ class ScenarioWindowTest(PerfBase):
         self.assertEqual(found["conteo"], {"precarga": 1, "red en el tramo": 1, "sin llamada": 1})
         # lo que imprime `capturar` al terminar la fase queda en las advertencias que leen las sesiones 2 y 4
         notes = perf.phase_notes(self.folder, plan, perf.read_rows(self.folder / "metricas.csv"), "despues", "contactos")
-        perf.save_capture_warnings(self.folder, "despues", "contactos", [line[2:] for line in notes])
-        self.assertIn("Origen del dato de M1", json.dumps(perf.read_notes(self.folder), ensure_ascii=False))
+        perf.save_phase_notes(self.folder, "despues", "contactos", [line[2:] for line in notes])
+        lines = perf.warnings_lines(self.folder, plan)
+        self.assertTrue([line for line in lines if "Origen del dato de M1" in line and "precarga 1" in line], lines)
+        # otra vez, con otro resultado: reemplaza, no suma; sin avisos, no queda ninguno
+        perf.save_phase_notes(self.folder, "despues", "contactos", ["Origen del dato de M1 (contactos, despues): precarga 3"])
+        lines = [line for line in perf.warnings_lines(self.folder, plan) if "Origen del dato" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("precarga 3", lines[0])
+        perf.save_phase_notes(self.folder, "despues", "contactos", [])
+        self.assertFalse([line for line in perf.warnings_lines(self.folder, plan) if "Origen del dato" in line])
         self.assertEqual(perf.origin_lines(self.folder, plan, "despues", "contactos"),
                          ["Origen del dato de M1 (contactos, despues): GET api/v1/contactos en la ventana: precarga 1 · red "
                           "en el tramo 1 · sin llamada 1 (de 3 corridas)"])
