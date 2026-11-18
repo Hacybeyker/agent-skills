@@ -888,9 +888,12 @@ class CaptureTest(DeviceBase):
     def test_falta_trace_processor(self):
         (self.dir / "bin" / "trace_processor").unlink()
         self.env["PATH"] = str(self.dir / "bin")
+        self.env["HOME"] = str(self.dir / "home")  # 0.14.0: también lo busca en ~/.local/bin, fuera del PATH
+        self.env.pop("TRACE_PROCESSOR", None)
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes")
         self.assertEqual(result.returncode, 3)
-        self.assertIn("trace_processor", result.stderr)
+        self.assertIn("falta trace_processor", result.stderr)
+        self.assertNotIn("zshrc", result.stderr)  # el mensaje no toca el perfil del shell
 
     def test_consulta_acota_filas_y_ancho(self):
         self.tp_outputs('"nombre","ms"\n' + "".join('"%s",%d\n' % ("x" * 100, i) for i in range(30)))
@@ -3649,10 +3652,11 @@ class SetupPresentTest(DeviceBase):
         write(self.dir / "AGENTS.md", "# Proyecto\n\n## Rendimiento\n\n- applicationId: com.ejemplo.app\n- setup listo\n")
         warning = perf.setup_warning(self.dir)
         self.assertIn('AGENTS.md dice "setup listo" pero no encontré la instrumentación en el repo', warning)
-        self.assertIn("si el setup se guarda como parche, aplícalo (git apply <parche>)", warning)
+        self.assertIn("`perf.py setup --estado` dice el caso y el comando que la repone", warning)  # 0.14.0: nada a mano
+        self.assertNotIn("git apply <parche>", warning)
         write(self.dir / "AGENTS.md", "## Reglas\n\n- Nunca despliegues con parches manuales.\n\n## Rendimiento\n\n"
                                       "- Setup listo, en parche: `git apply herramientas/perf-setup.patch` antes de medir\n")
-        self.assertIn('Reaplícala antes de seguir: según AGENTS.md: "Setup listo, en parche: `git apply '
+        self.assertIn('Reponla antes de seguir: AGENTS.md dice: "Setup listo, en parche: `git apply '
                       'herramientas/perf-setup.patch` antes de medir"', perf.setup_warning(self.dir))
         write(self.dir / "AGENTS.md", "## Reglas\n\n- Nunca despliegues con parches manuales.\n\n## Rendimiento\n\n- setup listo\n")
         self.assertIn("si el setup se guarda como parche, aplícalo", perf.setup_warning(self.dir))  # esa línea ajena no se cita
@@ -3665,10 +3669,9 @@ class SetupPresentTest(DeviceBase):
         self.assertEqual(perf.find_instrumentation(self.dir / "otra"), (False, False))
 
     def test_nuevo_y_humo_lo_dicen_antes_de_seguir(self):
-        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- setup listo (parche: git apply herramientas/perf.patch)\n")
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- setup listo\n")
         out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x", "--paquete", PKG, "--flujo", "x")
         self.assertIn('⚠ AGENTS.md dice "setup listo" pero no encontré la instrumentación en el repo', out)
-        self.assertIn("git apply herramientas/perf.patch", out)
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
         self.assertEqual(out.count('AGENTS.md dice "setup listo" pero no encontré la instrumentación'), 2)  # al empezar y al final
@@ -5831,8 +5834,10 @@ class DeobfuscateTest(DeviceBase):
         self.env.pop("ANDROID_HOME", None)
         self.env.pop("ANDROID_SDK_ROOT", None)
         self.env.pop("RETRACE", None)
-        # solo las herramientas simuladas y las del sistema: un retrace real en el PATH de la máquina no cuenta
+        # solo las herramientas simuladas y las del sistema: un retrace real en el PATH de la máquina no cuenta, ni el
+        # del SDK de la carpeta del usuario (0.14.0: también se busca ahí, fuera del PATH)
         self.env["PATH"] = os.pathsep.join([str(self.dir / "bin"), "/usr/bin", "/bin"])
+        self.env["HOME"] = str(self.dir / "home")
         self.mapping = self.dir / "app" / "build" / "outputs" / "mapping" / "profiling" / "mapping.txt"
         write(self.mapping, MAPPING.read_text(encoding="utf-8"))
         old = time.time() - 30 * 24 * 3600  # generado mucho antes de la instalación simulada (2026-11-05 10:00:00)
@@ -5882,7 +5887,8 @@ class DeobfuscateTest(DeviceBase):
     def test_sin_retrace_dice_como_instalarlo_y_sigue_sin_desofuscar(self):
         out = self.consulta()
         self.assertIn("· Sin desofuscar: falta `retrace`", out)
-        self.assertIn("cmdline-tools;latest", out)
+        self.assertIn("es opcional", out)
+        self.assertIn("Android SDK Command-line Tools", out)
         self.assertIn("| main | base.odex | a.b.a | 40 |", out)
 
     def test_sin_mapping_o_con_uno_de_otro_ofuscador_avisa_y_nunca_falla(self):

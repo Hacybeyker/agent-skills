@@ -1858,20 +1858,95 @@ def parse_meminfo(text):
 
 # ── Herramientas externas ────────────────────────────────────────────────────
 
-TP_INSTALL = ('cd ~ && mkdir -p ~/.local/bin && curl -fsSL https://get.perfetto.dev/trace_processor '
-              '-o ~/.local/bin/trace_processor && chmod +x ~/.local/bin/trace_processor && '
-              '{ grep -qs \'.local/bin\' ~/.zshrc || echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc; } && '
-              'export PATH="$HOME/.local/bin:$PATH" && trace_processor --version')
+# ── Herramientas de la máquina (0.14.0) ──────────────────────────────────────
+# La skill no instala ni configura nada en la máquina del usuario: busca cada herramienta donde ya puede estar, también
+# fuera del PATH, y si falta dice qué es, para qué sirve, si es obligatoria y dónde obtenerla. Ningún comando que corre o
+# imprime escribe en un perfil del shell, cambia una variable global ni pide permisos de administrador; lo que encuentra
+# fuera del PATH se lo pasa solo a sus procesos hijos.
+NO_MACHINE_CHANGES = "Esta skill no instala ni configura nada en tu máquina"
+PATH_IS_YOURS = ("Si además lo quieres en el PATH, agrégalo tú o tu herramienta de entorno: esta skill no edita la "
+                 "configuración de tu shell")
+TP_NAMES = ("trace_processor", "trace_processor_shell")
+TP_URL = "https://get.perfetto.dev/trace_processor"
+TP_DOCS = "https://perfetto.dev/docs/analysis/trace-processor"
+PLATFORM_TOOLS_URL = "https://developer.android.com/tools/releases/platform-tools"
+CMDLINE_TOOLS_URL = "https://developer.android.com/studio#command-line-tools-only"
+JDK_URL = "https://developer.android.com/build/jdks"
+MAESTRO_URL = "https://maestro.dev"
+# El JBR (el JDK que trae Android Studio) en sus rutas de instalación usuales: la de macOS y, en Linux, las carpetas donde
+# la guía de instalación de Android Studio pide descomprimirlo (/usr/local para un usuario, /opt para varios) y la del
+# usuario. Otra instalación se indica con JAVA_HOME delante del comando.
+STUDIO_JBR = ("/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+              "~/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+              "/usr/local/android-studio/jbr", "/opt/android-studio/jbr", "~/android-studio/jbr")
+QUIET_TOOLS = {"activo": False}  # los comandos que un recorrido llama muchas veces (teclear, pausa, nodos) no lo repiten
+_TOOLS_SAID = set()
+
+
+def home_dir():
+    return pathlib.Path(os.path.expanduser("~"))
+
+
+def is_executable(path):
+    return pathlib.Path(path).is_file() and os.access(str(path), os.X_OK)
+
+
+def outside_path(name, path, detail=""):
+    """Dice una vez por comando (en la salida de error, para no ensuciar lo que otro programa lee) que se usa una
+    herramienta que no está en el PATH."""
+    key = (name, str(path))
+    if key in _TOOLS_SAID or QUIET_TOOLS["activo"]:
+        return
+    _TOOLS_SAID.add(key)
+    print("· uso %s de %s (no está en el PATH%s)" % (name, path, detail), file=sys.stderr)
+
+
+def tp_home_paths():
+    """Dónde queda trace_processor cuando se descarga en el usuario, aunque esa carpeta no esté en el PATH."""
+    return [home_dir() / ".local" / "bin" / name for name in TP_NAMES]
+
+
+def tp_download_command():
+    """El comando que descarga trace_processor a ~/.local/bin solo si no existe (ni siquiera como enlace simbólico roto): baja
+    a un nombre provisional y lo mueve sin pisar (`mv -n`), así nunca reemplaza un archivo que ya está ni deja uno a medias
+    con el nombre final. No toca el PATH ni ningún perfil del shell."""
+    target = "~/.local/bin/trace_processor"
+    return ("cd ~ && mkdir -p ~/.local/bin && { [ -e %(t)s ] || [ -L %(t)s ] || { curl -fsSL %(url)s -o %(t)s.descarga && "
+            "chmod +x %(t)s.descarga && mv -n %(t)s.descarga %(t)s; }; } && %(t)s --version"
+            % {"t": target, "url": TP_URL})
 
 
 def find_tp(option):
+    """La ruta de trace_processor: --tp, TRACE_PROCESSOR, el PATH y ~/.local/bin (aunque no esté en el PATH)."""
     for candidate in (option, os.environ.get("TRACE_PROCESSOR"), shutil.which("trace_processor"),
                       shutil.which("trace_processor_shell")):
         if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
             return candidate
-    raise Precondicion("falta trace_processor de Perfetto (lee las trazas y las consulta con SQL). "
-                       "Instálalo sin root, en tu usuario, y vuelve a correr este comando:\n  %s\n"
-                       "Si ya lo tienes en otra ruta, pásalo con --tp o con TRACE_PROCESSOR=<ruta>." % TP_INSTALL)
+    for path in tp_home_paths():
+        if is_executable(path):
+            outside_path("trace_processor", path)
+            return str(path)
+    present = [path for path in tp_home_paths() if os.path.lexists(str(path))]  # también un enlace simbólico roto
+    looked = "--tp, TRACE_PROCESSOR, el PATH (trace_processor y trace_processor_shell) y %s" % " y ".join(
+        str(path) for path in tp_home_paths())
+    if present:  # está, pero no se puede ejecutar: no se descarga otro encima
+        raise Precondicion(
+            "encontré %s pero no es un archivo ejecutable (o es un enlace roto), así que no lo puedo usar. trace_processor (de Perfetto) lee las "
+            "trazas y las consulta con SQL: es obligatorio para medir. No descargo otro encima: revisa ese archivo (si es "
+            "el de Perfetto, dale permiso de ejecución) o indica otro con --tp <ruta> o TRACE_PROCESSOR=<ruta> delante "
+            "del comando. %s." % (present[0], NO_MACHINE_CHANGES)).con(seguir=[(RETRY, same_command())])
+    raise Precondicion(
+        "falta trace_processor de Perfetto (lee las trazas y las consulta con SQL): es obligatorio para medir.\n"
+        "  Dónde lo busqué: %s.\n"
+        "  Cómo obtenerlo: el paso 1 de abajo lo descarga en tu usuario, sin permisos de administrador y solo si ese "
+        "archivo no existe (nunca reemplaza uno que ya esté). Con eso basta: perf.py lo encuentra ahí aunque esa carpeta "
+        "no esté en el PATH. Más información: %s.\n"
+        "  %s.\n"
+        "  Si ya lo tienes en otra ruta, pásalo con --tp <ruta> o con TRACE_PROCESSOR=<ruta> delante del comando. %s."
+        % (looked, TP_DOCS, PATH_IS_YOURS, NO_MACHINE_CHANGES)).con(seguir=[
+            ("descarga trace_processor a ~/.local/bin, solo si no existe (no toca el PATH ni la configuración del shell)",
+             tp_download_command()),
+            ("después, repite el comando", same_command())])
 
 
 _TP_STYLE = {}
@@ -1939,14 +2014,148 @@ def fill_sql(sql, package, params):
     return sql
 
 
+def sdk_roots():
+    """Las carpetas donde puede estar el SDK de Android, en orden: ANDROID_HOME, ANDROID_SDK_ROOT y las rutas por
+    defecto de Android Studio (~/Library/Android/sdk en macOS, ~/Android/Sdk en Linux). Solo las que existen."""
+    candidates = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT"),
+                  str(home_dir() / "Library" / "Android" / "sdk"), str(home_dir() / "Android" / "Sdk")]
+    out = []
+    for value in candidates:
+        path = pathlib.Path(os.path.expanduser(value)) if value else None
+        if path is not None and path.is_dir() and path not in out:
+            out.append(path)
+    return out
+
+
+ADB_LOOKED = ("ADB=<ruta>, el PATH y platform-tools/adb dentro de ANDROID_HOME, de ANDROID_SDK_ROOT y de las rutas por "
+              "defecto del SDK (~/Library/Android/sdk en macOS, ~/Android/Sdk en Linux)")
+
+
 def adb_binary():
+    """La ruta de adb: ADB, el PATH y platform-tools del SDK (ANDROID_HOME, ANDROID_SDK_ROOT o su ruta por defecto),
+    aunque no esté en el PATH."""
     for candidate in (os.environ.get("ADB"), shutil.which("adb")):
         if candidate:
             return candidate
-    home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
-    if home and (pathlib.Path(home) / "platform-tools" / "adb").is_file():
-        return str(pathlib.Path(home) / "platform-tools" / "adb")
-    raise Precondicion("falta adb: instala las platform-tools del SDK de Android o déjalo en el PATH")
+    for sdk in sdk_roots():
+        path = sdk / "platform-tools" / "adb"
+        if path.is_file():
+            outside_path("adb", path)
+            return str(path)
+    raise Precondicion(
+        "falta adb (habla con el dispositivo: instala la app, la recorre y baja las trazas): es obligatorio para medir.\n"
+        "  Dónde lo busqué: %s.\n"
+        "  Cómo obtenerlo: viene con las platform-tools del SDK de Android. Instálalas desde Android Studio (SDK Manager "
+        "· SDK Tools · \"Android SDK Platform-Tools\") o descárgalas de %s; en la ruta por defecto del SDK perf.py las "
+        "encuentra sin el PATH.\n"
+        "  %s.\n"
+        "  Si ya lo tienes en otra ruta, pásalo con ADB=<ruta> delante del comando. %s."
+        % (ADB_LOOKED, PLATFORM_TOOLS_URL, PATH_IS_YOURS, NO_MACHINE_CHANGES)).con(seguir=[(RETRY, same_command())])
+
+
+def maestro_home():
+    """La carpeta donde el instalador de Maestro deja su ejecutable (~/.maestro/bin)."""
+    return home_dir() / ".maestro" / "bin"
+
+
+MAESTRO_CALL = re.compile(r"(?:^|[\s;&|(])maestro[ \t]+\S")
+
+
+def missing_maestro(command, folder):
+    """El aviso si `preparar` (el comando, o un script que nombra) parece llamar a Maestro y Maestro no está en el PATH
+    ni en ~/.maestro/bin; None si no lo nombra o si está. Es una búsqueda por texto: sirve de aviso, no para detener."""
+    if not command or shutil.which("maestro") or is_executable(maestro_home() / "maestro"):
+        return None
+    texts = [command]
+    for path in named_scripts(command, folder):
+        try:
+            texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    if not any(MAESTRO_CALL.search(line) for text in texts for line in text.splitlines()
+               if not line.lstrip().startswith("#")):
+        return None
+    return ("parece que falta Maestro, que `preparar` de este flujo nombra para llevar la app al punto de partida. Para "
+            "la skill es opcional (un flujo se puede preparar con adb), pero este plan lo usa: si `preparar` falla, es por "
+            "esto (si tu script llega a Maestro por otro camino, ignora este aviso).\n"
+            "  Dónde lo busqué: el PATH y %s.\n"
+            "  Cómo obtenerlo: sigue la guía oficial (%s); necesita Java 17 o superior. Si lo instalas en esa carpeta, "
+            "perf.py lo encuentra sin el PATH.\n"
+            "  %s. %s; si prefieres no usar Maestro, dilo en el chat de la sesión 1 para cambiar `preparar` (la skill no "
+            "lo reemplaza sola)." % (maestro_home(), MAESTRO_URL, PATH_IS_YOURS, NO_MACHINE_CHANGES))
+
+
+def adb_shown():
+    """`adb` para un comando que se pega en la terminal: el nombre si está en el PATH; si no, la ruta donde lo encontró
+    perf.py (un comando con `adb` a secas no correría)."""
+    if shutil.which("adb"):
+        return "adb"
+    try:
+        return q(adb_binary())
+    except PerfError:
+        return "adb"
+
+
+def java_home():
+    """(JAVA_HOME para un proceso hijo o None, de dónde sale, hay Java). None con Java disponible quiere decir que el
+    hijo ya lo encuentra solo (JAVA_HOME válido o `java` en el PATH): no se cambia nada. Si no, el JBR de Android Studio
+    en sus rutas usuales (STUDIO_JBR). Nunca cambia el entorno de quien corre perf.py."""
+    key = (os.environ.get("JAVA_HOME"), os.environ.get("PATH"), os.environ.get("HOME"))
+    if key not in _JAVA_HOME:
+        _JAVA_HOME[key] = _java_home()
+    return _JAVA_HOME[key]
+
+
+_JAVA_HOME = {}
+
+
+def _java_home():
+    current = os.environ.get("JAVA_HOME")
+    if current and is_executable(pathlib.Path(os.path.expanduser(current)) / "bin" / "java"):
+        return None, "JAVA_HOME", True
+    found = shutil.which("java")
+    if found and sys.platform == "darwin" and os.path.realpath(found) == "/usr/bin/java":
+        # En macOS /usr/bin/java existe aunque no haya ningún JDK: /usr/libexec/java_home dice si hay uno instalado.
+        try:
+            found = found if subprocess.run(["/usr/libexec/java_home"], capture_output=True,
+                                            timeout=30).returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            found = None
+    if found:
+        return None, "el PATH", True
+    for raw in STUDIO_JBR:
+        path = pathlib.Path(os.path.expanduser(raw))
+        if is_executable(path / "bin" / "java"):
+            return str(path), "el JBR de Android Studio", True
+    return None, "", False
+
+
+def child_env(base=None, java=False):
+    """El entorno para un proceso hijo que usa las herramientas (un recorrido, `preparar`, retrace, Gradle, el DoD): el
+    de quien corre perf.py más lo que perf.py encontró fuera del PATH, agregado al FINAL del PATH (nunca tapa lo que ya
+    está) y solo para ese hijo. Sin nada que agregar devuelve `base` tal cual (None: el hijo hereda el entorno). Con
+    `java`, también JAVA_HOME si el hijo no encontraría Java por su cuenta."""
+    extra, variables = [], {}
+    if not shutil.which("adb") and not os.environ.get("ADB"):
+        for sdk in sdk_roots():
+            if (sdk / "platform-tools" / "adb").is_file():
+                extra.append(str(sdk / "platform-tools"))
+                break
+    if java:
+        home, origin, _ = java_home()
+        if home:
+            outside_path("Java", home, "; es %s y vale solo para este proceso" % origin)
+            variables["JAVA_HOME"] = home
+            extra.append(str(pathlib.Path(home) / "bin"))
+        if not shutil.which("maestro") and is_executable(maestro_home() / "maestro"):
+            outside_path("Maestro", maestro_home() / "maestro")
+            extra.append(str(maestro_home()))
+    if not extra and not variables:
+        return base
+    env = dict(os.environ if base is None else base)
+    env.update(variables)
+    env["PATH"] = os.pathsep.join([part for part in (env.get("PATH"),) if part] + extra)
+    return env
 
 
 class Adb:
@@ -2010,7 +2219,7 @@ def select_device(serial):
         raise Precondicion("hay %d dispositivos conectados (%s): elige uno con --serial, o guárdalo en el plan con "
                            "'nuevo --serial'" % (len(devices), ", ".join(devices))).con(seguir=[
             ("mira cuál es cuál (el serial es la primera columna; el modelo, model:)",
-             "cd %s && adb devices -l" % shlex.quote(os.getcwd()))]
+             "cd %s && %s devices -l" % (shlex.quote(os.getcwd()), adb_shown()))]
             + [("o repite el comando en %s" % device, same_command() + " --serial " + shlex.quote(device))
                for device in devices])
     return devices[0]
@@ -2484,7 +2693,7 @@ def run_prepare(command, folder, secret_names, capture=None):
     capture = bool(secret_names) if capture is None else capture
     with tempfile.TemporaryFile() as raw:
         result = subprocess.run(command, shell=True, stdout=raw if capture else subprocess.DEVNULL,
-                                stderr=subprocess.STDOUT if capture else raw)
+                                stderr=subprocess.STDOUT if capture else raw, env=child_env(java=True))
         raw.seek(0)
         text = mask_secrets(raw.read().decode("utf-8", "replace"), secret_names)
     lines = [line.rstrip()[:200] for line in text.splitlines() if line.strip()][-40:]
@@ -2719,10 +2928,10 @@ def drive(recorrido, label, cutter=None):
         answer = wait_enter("▶ %s: recorre el flujo y presiona Enter (x + Enter para descartarla) " % label)
         return "descartada por el usuario" if answer == "x" else None
     if cutter is None:
-        result = subprocess.run(recorrido, shell=True)
+        result = subprocess.run(recorrido, shell=True, env=child_env())
         return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
     cutter.empezar()
-    process = subprocess.Popen(recorrido, shell=True, env=cutter.entorno())
+    process = subprocess.Popen(recorrido, shell=True, env=child_env(cutter.entorno()))
     try:
         while True:
             try:
@@ -4027,9 +4236,9 @@ def before_capture(folder, plan, flow, steps):
     if not plan.get("serial"):
         # Sin el serial en el plan, con más de un dispositivo la captura se detiene: lo dice en la primera, con el comando.
         index = steps.index(captures[0])
-        steps[index] = dict(captures[0], tu="%s; con más de un dispositivo conectado, mira cuál es con `cd %s && adb "
+        steps[index] = dict(captures[0], tu="%s; con más de un dispositivo conectado, mira cuál es con `cd %s && %s "
                                             "devices -l` y agrega --serial <serial> al comando" % (
-                                                captures[0]["tu"].rstrip("."), shlex.quote(str(root))))
+                                                captures[0]["tu"].rstrip("."), shlex.quote(str(root)), adb_shown()))
     lead = [{"tipo": "avisos", "titulo": "Antes de medir", "lineas": notes}] if notes else []
     return lead + first + steps
 
@@ -6712,7 +6921,8 @@ def run_dod(folder, root, tops=()):
                 handle.write("\n$ %s\n" % command)
                 handle.flush()
                 started = time.time()
-                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT)
+                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT,
+                                      env=child_env(java=True))
                 handle.flush()
                 if done.returncode == 0:
                     print("✔ %s (%s)" % (command, elapsed_text(time.time() - started)))
@@ -9436,6 +9646,13 @@ def cmd_capturar(args, plan=None):
         raise Precondicion("el recorrido del flujo '%s' tiene una pausa humana (perf.py pausa) y %s"
                            % (flow_name, NO_TTY[0].lower() + NO_TTY[1:]))
     recorrido = args.recorrido or (flow.get("recorrido") if not startup else None) or "manual"
+    if not args.forzar:
+        setup_gate(project_root(folder).resolve(), folder if args.plan else None, plan if args.plan else None)
+        if args.plan and args.prueba:
+            marks_module_gate(folder, project_root(folder).resolve(), plan, flow, Precondicion)
+    no_maestro = missing_maestro(prepare_command, folder)
+    if no_maestro:  # la detección es por texto (el script puede llegar a Maestro por otro camino): avisa y sigue
+        print("⚠ " + no_maestro)
     tp = find_tp(args.tp)
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
@@ -10070,9 +10287,16 @@ def write_summary(csv_path, rows, plan):
 
 # ── desofuscación (R8) ───────────────────────────────────────────────────────
 
-RETRACE_INSTALL = ("instala las Command-line Tools del SDK de Android (Android Studio · SDK Manager · SDK Tools · \"Android SDK "
-                   "Command-line Tools\", o `sdkmanager \"cmdline-tools;latest\"`): traen `retrace` en "
-                   "<sdk>/cmdline-tools/latest/bin. Necesita Java. Si está en otra ruta, pásala con RETRACE=<ruta>")
+RETRACE_INSTALL = ("es opcional (solo sirve para ver los nombres reales en lugar de los ofuscados por R8; la medición "
+                   "sigue igual). Lo busqué en RETRACE=<ruta>, en el PATH y en cmdline-tools/*/bin del SDK (ANDROID_HOME, "
+                   "ANDROID_SDK_ROOT y su ruta por defecto). Viene con las Command-line Tools del SDK de Android: "
+                   "instálalas desde Android Studio (SDK Manager · SDK Tools · \"Android SDK Command-line Tools\") o "
+                   "descárgalas de %s; en el SDK, perf.py las encuentra sin el PATH. Necesita Java. %s"
+                   % (CMDLINE_TOOLS_URL, NO_MACHINE_CHANGES))
+JAVA_MISSING = ("`retrace` necesita Java y no lo encontré en JAVA_HOME, en el PATH ni en el JBR de Android Studio (%s). Es "
+                "opcional: solo sirve para desofuscar. Android Studio trae uno (su JBR); con otro JDK, pásalo con "
+                "JAVA_HOME=<ruta> delante del comando (guía: %s). %s" % (", ".join(STUDIO_JBR[:1] + STUDIO_JBR[2:4]),
+                                                                        JDK_URL, NO_MACHINE_CHANGES))
 MAPPING_ID = re.compile(r"^#[ \t]*pg_map_id:[ \t]*(\S+)", re.M)
 MAPPING_CLASS = re.compile(r"^[^\s#][^\n]* -> [^\s:]+:[ \t]*$", re.M)
 APK_MAP_ID = re.compile(br'"pg-map-id":"([^"]+)"')  # el marcador que R8 deja en cada classes.dex: ~~R8{...,"pg-map-id":"<id>",...}
@@ -10089,15 +10313,15 @@ ENCRYPTED_HINT = ("la app puede usar cifrado de clases u otro ofuscador (ofuscad
 
 
 def find_retrace():
-    """La ruta de `retrace` (cmdline-tools del SDK), o None."""
+    """La ruta de `retrace` (cmdline-tools del SDK), o None: RETRACE, el PATH y cmdline-tools/*/bin del SDK
+    (ANDROID_HOME, ANDROID_SDK_ROOT, su ruta por defecto o el SDK del adb del PATH), aunque no esté en el PATH."""
     candidates = [os.environ.get("RETRACE"), shutil.which("retrace")]
-    homes = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT")]
+    homes = [str(path) for path in sdk_roots()]
     adb = shutil.which("adb")
     if adb:
         homes.append(str(pathlib.Path(adb).resolve().parent.parent))
-    for home in homes:
-        if home:
-            candidates += [str(path) for path in sorted(pathlib.Path(home).glob("cmdline-tools/*/bin/retrace"), reverse=True)]
+    for home in dict.fromkeys(homes):
+        candidates += [str(path) for path in sorted(pathlib.Path(home).glob("cmdline-tools/*/bin/retrace"), reverse=True)]
     for candidate in candidates:
         if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
             return candidate
@@ -10288,6 +10512,8 @@ class Deobfuscator:
         if not self.retrace:
             self.note("· Sin desofuscar: falta `retrace`; %s." % RETRACE_INSTALL)
             return False
+        if not shutil.which("retrace") and self.retrace != os.environ.get("RETRACE"):
+            outside_path("retrace", self.retrace)
         self.mapping = mapping
         try:  # relativa a la raíz: esta nota también queda en diagnostico.md
             shown = pathlib.Path(path).resolve().relative_to(pathlib.Path(self.root).resolve())
@@ -10303,7 +10529,7 @@ class Deobfuscator:
             source = f.name
         try:
             result = subprocess.run([self.retrace, str(self.mapping["ruta"]), source], capture_output=True, text=True,
-                                    timeout=300)
+                                    timeout=300, env=child_env(java=True))
         except (OSError, subprocess.SubprocessError) as error:
             self.note("⚠ Sin desofuscar: retrace no corrió (%s)." % str(error)[:120])
             return None
@@ -10311,6 +10537,8 @@ class Deobfuscator:
             os.unlink(source)
         if result.returncode != 0:
             self.note("⚠ Sin desofuscar: retrace falló (%s)." % ((result.stderr or result.stdout).strip().splitlines() or ["sin salida"])[-1][:160])
+            if not java_home()[2]:  # la causa más probable: el script de retrace no encontró Java
+                self.note("· %s." % (JAVA_MISSING[0].upper() + JAVA_MISSING[1:]))
             return None
         return result.stdout.splitlines()
 
@@ -15845,6 +16073,7 @@ def main(argv=None):
     argv = glue_dashed_values(sys.argv[1:] if argv is None else list(argv))
     args = parser.parse_args(argv)
     reset_guide(argv)
+    QUIET_TOOLS["activo"] = args.command in ("teclear", "pausa", "nodos")
     # El único lugar que cierra un fallo: qué pasó, qué quedó guardado y el comando para seguir (guide_lines).
     try:
         args.func(args)
