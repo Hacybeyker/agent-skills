@@ -47,6 +47,7 @@ Las skills externas y los plugins que las complementan están en [CATALOG.md](CA
 - `git` y `bash`, para instalar con un clon. En macOS vienen con las Command Line Tools (`xcode-select --install`); en Linux, con el gestor de paquetes.
 - Node.js y pnpm, para instalar sin clonar (detalle en esa sección).
 - `python3`, solo con su librería estándar, para los scripts de `hb-setup`, `hb-implement`, `hb-performance` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
+- Para `hb-performance`, además: `git`, `adb` (platform-tools del SDK de Android) y `trace_processor` de Perfetto; según el caso, Java 17 o superior; opcionales, `retrace` y Maestro. La skill las busca donde ya estén, también fuera del `PATH`, y dice cuál falta, pero no las instala ni cambia la configuración de tu shell.
 
 Hay dos formas. Usa **una sola** por máquina.
 

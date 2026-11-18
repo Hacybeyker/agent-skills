@@ -12,6 +12,8 @@ Cruza la evidencia con el código para encontrar las causas y propone un plan de
 3. Si no hay mapa (investigación creada con una receta), arma uno mínimo del camino medido, de 15 líneas como máximo. En el arranque: `Application`, content providers e inicializadores, la primera actividad, la primera pantalla, su ViewModel o presenter y su fuente de datos.
 4. Carga solo los patrones del stack ([patrones/](patrones/)): en el arranque, [arranque.md](patrones/arranque.md); si hay métricas `red`, siempre [red.md](patrones/red.md).
 
+**Módulos que la app consume compilados.** Si "Advertencias para el diagnóstico" dice que un módulo del alcance es binario (o está sin confirmar), el código que leas de ese módulo en disco **puede no ser la versión del binario**: dilo en el hallazgo y no cites su `archivo:línea` como evidencia confirmada. Lo que la traza muestra dentro de ese módulo (con `--config cpu` y su mapping, si lo publica) va como hallazgo "fuera del alcance: módulo compilado", con la evidencia de la traza; la mejora es del lado del módulo app o un pedido al equipo dueño. Ninguna sesión edita ese módulo ([ficha.md](ficha.md) · Módulos del alcance).
+
 ## 2. Qué responde cada consulta de `diagnostico.md`
 
 | Consulta | Responde |

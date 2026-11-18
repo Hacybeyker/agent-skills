@@ -72,6 +72,16 @@ Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin contr
 
 Termina en el reporte inicial.
 
+### Qué herramientas hacen falta y cómo está el setup
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py setup --estado
+```
+
+Solo lectura. Lista las herramientas de la máquina (obligatorias: Python 3.8 o superior, git, `adb` y `trace_processor`; según el caso, Java 17 o superior; opcionales, `retrace` y Maestro) con la ruta donde encontró cada una, también fuera del `PATH`. **La skill no instala ni configura nada:** si falta una, dice para qué sirve y dónde obtenerla, y la instalas tú o tu herramienta de entorno. Después dice el caso del setup del proyecto (versionado, en un parche o sin setup), el parche vigente con su ficha y el paso que sigue.
+
 ### Prueba de humo del setup
 
 **Dónde:** terminal, sin chat
@@ -161,6 +171,8 @@ Sigue hb-performance con <ruta>/estado.md. No hagas commit ni push.
 ```text
 Sigue hb-performance con <ruta>/estado.md: cierra la investigación sin fase después. No hagas commit ni push.
 ```
+
+Al terminar, el agente te entrega `perf.py cerrar`: quita los cambios temporales con su parche, da el DoD (`--dod` lo corre) y, si el setup va en un parche, lo quita al final (`--sin-setup` lo deja puesto). Cuando ya no queda nada, `siguiente` lo dice: "Investigación cerrada: no queda ningún paso por ejecutar".
 
 ### Anotar el costo de un chat
 
@@ -272,7 +284,57 @@ Imprime, en orden, lo que falta: completar `antes`, medir `control` y la decisi�
 cd <raíz> && python3 -I <skill>/scripts/perf.py instrumentar --modulo <el módulo que genera el APK, normalmente app> --paquete <paquete>.perf --actualizar
 ```
 
-Hazlo **entre** investigaciones, no en medio de una: una plantilla nueva puede nombrar distinto las secciones (desde 0.10.0, los endpoints con rutas largas se acortan desde la izquierda), y antes y después tienen que nombrar igual. Después, el formateador y el DoD del proyecto. Si un archivo sale con `✖ no se actualiza`, alguien lo editó a mano (o es de una versión sin huella): mira la diferencia y, si aceptas reemplazarlo, repite con `--actualizar --forzar`, que deja lo que había en `<archivo>.orig`.
+Con el setup en un parche, `perf.py setup --reponer` te da esta secuencia cuando la skill es más nueva que el parche: actualizar, instalar, la prueba de humo y `setup --guardar` (el parche nuevo pasa a ser el vigente; el anterior queda guardado como reemplazado). Hazlo **entre** investigaciones, no en medio de una: una plantilla nueva puede nombrar distinto las secciones (desde 0.10.0, los endpoints con rutas largas se acortan desde la izquierda), y antes y después tienen que nombrar igual. Después, el formateador y el DoD del proyecto. Si un archivo sale con `✖ no se actualiza`, alguien lo editó a mano (o es de una versión sin huella): mira la diferencia y, si aceptas reemplazarlo, repite con `--actualizar --forzar`, que deja lo que había en `<archivo>.orig`.
+
+### Reponer el setup antes de medir (va en un parche y no está en el código)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py setup --reponer
+```
+
+No hace falta recordarlo: `siguiente`, `nuevo`, `humo` y `capturar` lo dan como primer paso cuando corresponde. Aplica el parche vigente solo si es de este repo y de esta app (lo dice su ficha), si no cambió desde que se guardó y si aplica limpio; si el proyecto cambió, prueba con `--3way` y lo aplica solo sin conflictos, avisándolo. **Si se detiene, no tocó nada** y dice qué falta: cambios tuyos sin commitear en esos archivos (haz el commit y repite), un parche de otro repo o de otra app, o conflictos (la sesión 0 genera el setup de nuevo). Con `--simular` solo muestra qué haría. No apliques el parche a mano.
+
+### Guardar el setup como parche (el equipo no lo quiere en el repo)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py setup --guardar --quitar --archivos <archivos del proyecto que se editaron a mano para el setup>
+```
+
+Lo corre la sesión 0 al terminar, si eliges "en parche". `--archivos` lleva los archivos cableados a mano (el `build.gradle(.kts)`, cada archivo con un builder de red, la pantalla con `reportFullyDrawn`); los que generó la skill los reconoce sola. Guarda solo el setup, sin pisar ningún parche, con su ficha al lado (repo, `applicationId`, versión de la skill, commit base y SHA-256), deja la línea `Setup: en parche <ruta>` en `AGENTS.md` y lo quita del árbol. Sin `--quitar` lo guarda y lo deja puesto. Nunca se lleva trabajo tuyo dentro del parche: si un archivo tiene líneas del setup y otras tuyas, se detiene sin guardar nada y te da el comando; haz primero el commit de lo tuyo o, si todo el archivo es del setup, agrégalo a `--archivos`.
+
+### Quitar el setup al terminar (va en un parche)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py setup --quitar
+```
+
+`perf.py cerrar` ya lo hace como último paso; este comando es para quitarlo fuera de un cierre. Si el setup cambió desde que se guardó (por ejemplo, tras `instrumentar --actualizar`), primero guarda un parche nuevo; después guarda un respaldo, comprueba que revierte limpio y lo quita. Con el setup versionado no quita nada y lo dice.
+
+### Decir cuál es el parche del setup (hay más de uno, o el setup se perdió)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py setup --vigente <parche>
+```
+
+`perf.py` nunca adivina: si hay dos parches de setup sin uno vigente, o `AGENTS.md` dice "setup listo" y el código no está, `siguiente` y `setup --estado` te dan este comando por cada parche que encontraron. Corre solo el del parche que corresponde: comprueba que es de este repo y lo deja escrito en `AGENTS.md`.
+
+### Un módulo del alcance llega compilado (binario)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py setup --estado --carpeta <carpeta> --comprobar-modulos
+```
+
+La sesión 1 registra los módulos del alcance (`--modulos <módulo> …`) y `perf.py` le pregunta a Gradle si cada uno se compila desde código o llega como binario. **Un módulo binario no se edita**, aunque su código esté en disco: no llegaría al APK. `siguiente` te dice el archivo y la clave del proyecto que lo controlan; cámbialos tú (la skill no toca ese archivo), sincroniza Gradle y corre este comando para comprobarlo de nuevo. Si no puedes compilarlo desde código, `--confirmar <módulo>=binario` lo deja registrado: se mide desde el módulo app y la mejora es del lado de la app o un pedido al equipo dueño.
 
 ### Fijar el parche de marcas vigente (rehiciste las marcas, o `cerrar` lo pide)
 

@@ -47,6 +47,12 @@ Para quitarlos y volver a ponerlos sin perderlos, guárdalos como parche **fuera
 
 - <`ruta/al/Archivo.kt:línea`: qué es, en una línea>
 
+Módulos del alcance: si cada uno se compila desde código o llega como binario, según Gradle. Lo escribe `perf.py setup --estado --carpeta <carpeta> --modulos …`; un módulo binario o sin confirmar no se edita.
+
+<!-- perf:modulos -->
+(sin registrar)
+<!-- /perf:modulos -->
+
 ## Hipótesis
 
 1. <hipótesis → se confirma o se descarta con una métrica o una consulta>
@@ -109,6 +115,10 @@ Las mejoras viven en `mejoras` de plan.json; perf.py dibuja la tabla (propuesta 
 ## Pendientes
 
 - <no son mejoras, sino lo que la investigación no pudo cerrar; uno por línea: H3 · síntoma y qué tan estable es (en cuántas corridas, con qué métrica) · qué falta para cerrarlo · cuánto cuesta (una corrida, una captura con muestreo, una sesión) · acción sugerida; si lo que falta es una captura que se puede correr ya, agrégala como Captura pendiente, con su comando entre acentos graves>
+
+## Pedido al equipo dueño del módulo
+
+<solo si un módulo del alcance llega compilado y la causa está ahí: qué se midió, la evidencia de la traza y lo que se propone, listo para enviarle; si no aplica, deja esta línea tal cual>
 
 ## Consumo
 

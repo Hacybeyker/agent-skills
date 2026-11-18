@@ -20,6 +20,7 @@ Comandos (cada uno con --help):
   nodos         busca un nodo en un volcado de uiautomator y da el centro de sus bounds para tocarlo con adb
   pausa         desde un recorrido: muestra un texto en la terminal y espera a la persona (un paso humano)
   salidas       por qué se cerró la app: sus últimas salidas según el sistema (Android 11+), con el motivo en claro
+  setup         el setup de medición: su caso (versionado, en parche o sin setup), guardarlo, reponerlo y quitarlo
 
 Códigos de salida: 0 bien · 2 uso o datos inválidos · 3 precondición (dispositivo, app o herramientas) ·
 4 captura fallida · 5 no se juntaron las corridas válidas pedidas.
@@ -53,10 +54,10 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase.
-SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -1858,20 +1859,95 @@ def parse_meminfo(text):
 
 # ── Herramientas externas ────────────────────────────────────────────────────
 
-TP_INSTALL = ('cd ~ && mkdir -p ~/.local/bin && curl -fsSL https://get.perfetto.dev/trace_processor '
-              '-o ~/.local/bin/trace_processor && chmod +x ~/.local/bin/trace_processor && '
-              '{ grep -qs \'.local/bin\' ~/.zshrc || echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc; } && '
-              'export PATH="$HOME/.local/bin:$PATH" && trace_processor --version')
+# ── Herramientas de la máquina (0.14.0) ──────────────────────────────────────
+# La skill no instala ni configura nada en la máquina del usuario: busca cada herramienta donde ya puede estar, también
+# fuera del PATH, y si falta dice qué es, para qué sirve, si es obligatoria y dónde obtenerla. Ningún comando que corre o
+# imprime escribe en un perfil del shell, cambia una variable global ni pide permisos de administrador; lo que encuentra
+# fuera del PATH se lo pasa solo a sus procesos hijos.
+NO_MACHINE_CHANGES = "Esta skill no instala ni configura nada en tu máquina"
+PATH_IS_YOURS = ("Si además lo quieres en el PATH, agrégalo tú o tu herramienta de entorno: esta skill no edita la "
+                 "configuración de tu shell")
+TP_NAMES = ("trace_processor", "trace_processor_shell")
+TP_URL = "https://get.perfetto.dev/trace_processor"
+TP_DOCS = "https://perfetto.dev/docs/analysis/trace-processor"
+PLATFORM_TOOLS_URL = "https://developer.android.com/tools/releases/platform-tools"
+CMDLINE_TOOLS_URL = "https://developer.android.com/studio#command-line-tools-only"
+JDK_URL = "https://developer.android.com/build/jdks"
+MAESTRO_URL = "https://maestro.dev"
+# El JBR (el JDK que trae Android Studio) en sus rutas de instalación usuales: la de macOS y, en Linux, las carpetas donde
+# la guía de instalación de Android Studio pide descomprimirlo (/usr/local para un usuario, /opt para varios) y la del
+# usuario. Otra instalación se indica con JAVA_HOME delante del comando.
+STUDIO_JBR = ("/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+              "~/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+              "/usr/local/android-studio/jbr", "/opt/android-studio/jbr", "~/android-studio/jbr")
+QUIET_TOOLS = {"activo": False}  # los comandos que un recorrido llama muchas veces (teclear, pausa, nodos) no lo repiten
+_TOOLS_SAID = set()
+
+
+def home_dir():
+    return pathlib.Path(os.path.expanduser("~"))
+
+
+def is_executable(path):
+    return pathlib.Path(path).is_file() and os.access(str(path), os.X_OK)
+
+
+def outside_path(name, path, detail=""):
+    """Dice una vez por comando (en la salida de error, para no ensuciar lo que otro programa lee) que se usa una
+    herramienta que no está en el PATH."""
+    key = (name, str(path))
+    if key in _TOOLS_SAID or QUIET_TOOLS["activo"]:
+        return
+    _TOOLS_SAID.add(key)
+    print("· uso %s de %s (no está en el PATH%s)" % (name, path, detail), file=sys.stderr)
+
+
+def tp_home_paths():
+    """Dónde queda trace_processor cuando se descarga en el usuario, aunque esa carpeta no esté en el PATH."""
+    return [home_dir() / ".local" / "bin" / name for name in TP_NAMES]
+
+
+def tp_download_command():
+    """El comando que descarga trace_processor a ~/.local/bin solo si no existe (ni siquiera como enlace simbólico roto): baja
+    a un nombre provisional y lo mueve sin pisar (`mv -n`), así nunca reemplaza un archivo que ya está ni deja uno a medias
+    con el nombre final. No toca el PATH ni ningún perfil del shell."""
+    target = "~/.local/bin/trace_processor"
+    return ("cd ~ && mkdir -p ~/.local/bin && { [ -e %(t)s ] || [ -L %(t)s ] || { curl -fsSL %(url)s -o %(t)s.descarga && "
+            "chmod +x %(t)s.descarga && mv -n %(t)s.descarga %(t)s; }; } && %(t)s --version"
+            % {"t": target, "url": TP_URL})
 
 
 def find_tp(option):
+    """La ruta de trace_processor: --tp, TRACE_PROCESSOR, el PATH y ~/.local/bin (aunque no esté en el PATH)."""
     for candidate in (option, os.environ.get("TRACE_PROCESSOR"), shutil.which("trace_processor"),
                       shutil.which("trace_processor_shell")):
         if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
             return candidate
-    raise Precondicion("falta trace_processor de Perfetto (lee las trazas y las consulta con SQL). "
-                       "Instálalo sin root, en tu usuario, y vuelve a correr este comando:\n  %s\n"
-                       "Si ya lo tienes en otra ruta, pásalo con --tp o con TRACE_PROCESSOR=<ruta>." % TP_INSTALL)
+    for path in tp_home_paths():
+        if is_executable(path):
+            outside_path("trace_processor", path)
+            return str(path)
+    present = [path for path in tp_home_paths() if os.path.lexists(str(path))]  # también un enlace simbólico roto
+    looked = "--tp, TRACE_PROCESSOR, el PATH (trace_processor y trace_processor_shell) y %s" % " y ".join(
+        str(path) for path in tp_home_paths())
+    if present:  # está, pero no se puede ejecutar: no se descarga otro encima
+        raise Precondicion(
+            "encontré %s pero no es un archivo ejecutable (o es un enlace roto), así que no lo puedo usar. trace_processor (de Perfetto) lee las "
+            "trazas y las consulta con SQL: es obligatorio para medir. No descargo otro encima: revisa ese archivo (si es "
+            "el de Perfetto, dale permiso de ejecución) o indica otro con --tp <ruta> o TRACE_PROCESSOR=<ruta> delante "
+            "del comando. %s." % (present[0], NO_MACHINE_CHANGES)).con(seguir=[(RETRY, same_command())])
+    raise Precondicion(
+        "falta trace_processor de Perfetto (lee las trazas y las consulta con SQL): es obligatorio para medir.\n"
+        "  Dónde lo busqué: %s.\n"
+        "  Cómo obtenerlo: el paso 1 de abajo lo descarga en tu usuario, sin permisos de administrador y solo si ese "
+        "archivo no existe (nunca reemplaza uno que ya esté). Con eso basta: perf.py lo encuentra ahí aunque esa carpeta "
+        "no esté en el PATH. Más información: %s.\n"
+        "  %s.\n"
+        "  Si ya lo tienes en otra ruta, pásalo con --tp <ruta> o con TRACE_PROCESSOR=<ruta> delante del comando. %s."
+        % (looked, TP_DOCS, PATH_IS_YOURS, NO_MACHINE_CHANGES)).con(seguir=[
+            ("descarga trace_processor a ~/.local/bin, solo si no existe (no toca el PATH ni la configuración del shell)",
+             tp_download_command()),
+            ("después, repite el comando", same_command())])
 
 
 _TP_STYLE = {}
@@ -1939,14 +2015,148 @@ def fill_sql(sql, package, params):
     return sql
 
 
+def sdk_roots():
+    """Las carpetas donde puede estar el SDK de Android, en orden: ANDROID_HOME, ANDROID_SDK_ROOT y las rutas por
+    defecto de Android Studio (~/Library/Android/sdk en macOS, ~/Android/Sdk en Linux). Solo las que existen."""
+    candidates = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT"),
+                  str(home_dir() / "Library" / "Android" / "sdk"), str(home_dir() / "Android" / "Sdk")]
+    out = []
+    for value in candidates:
+        path = pathlib.Path(os.path.expanduser(value)) if value else None
+        if path is not None and path.is_dir() and path not in out:
+            out.append(path)
+    return out
+
+
+ADB_LOOKED = ("ADB=<ruta>, el PATH y platform-tools/adb dentro de ANDROID_HOME, de ANDROID_SDK_ROOT y de las rutas por "
+              "defecto del SDK (~/Library/Android/sdk en macOS, ~/Android/Sdk en Linux)")
+
+
 def adb_binary():
+    """La ruta de adb: ADB, el PATH y platform-tools del SDK (ANDROID_HOME, ANDROID_SDK_ROOT o su ruta por defecto),
+    aunque no esté en el PATH."""
     for candidate in (os.environ.get("ADB"), shutil.which("adb")):
         if candidate:
             return candidate
-    home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
-    if home and (pathlib.Path(home) / "platform-tools" / "adb").is_file():
-        return str(pathlib.Path(home) / "platform-tools" / "adb")
-    raise Precondicion("falta adb: instala las platform-tools del SDK de Android o déjalo en el PATH")
+    for sdk in sdk_roots():
+        path = sdk / "platform-tools" / "adb"
+        if path.is_file():
+            outside_path("adb", path)
+            return str(path)
+    raise Precondicion(
+        "falta adb (habla con el dispositivo: instala la app, la recorre y baja las trazas): es obligatorio para medir.\n"
+        "  Dónde lo busqué: %s.\n"
+        "  Cómo obtenerlo: viene con las platform-tools del SDK de Android. Instálalas desde Android Studio (SDK Manager "
+        "· SDK Tools · \"Android SDK Platform-Tools\") o descárgalas de %s; en la ruta por defecto del SDK perf.py las "
+        "encuentra sin el PATH.\n"
+        "  %s.\n"
+        "  Si ya lo tienes en otra ruta, pásalo con ADB=<ruta> delante del comando. %s."
+        % (ADB_LOOKED, PLATFORM_TOOLS_URL, PATH_IS_YOURS, NO_MACHINE_CHANGES)).con(seguir=[(RETRY, same_command())])
+
+
+def maestro_home():
+    """La carpeta donde el instalador de Maestro deja su ejecutable (~/.maestro/bin)."""
+    return home_dir() / ".maestro" / "bin"
+
+
+MAESTRO_CALL = re.compile(r"(?:^|[\s;&|(])maestro[ \t]+\S")
+
+
+def missing_maestro(command, folder):
+    """El aviso si `preparar` (el comando, o un script que nombra) parece llamar a Maestro y Maestro no está en el PATH
+    ni en ~/.maestro/bin; None si no lo nombra o si está. Es una búsqueda por texto: sirve de aviso, no para detener."""
+    if not command or shutil.which("maestro") or is_executable(maestro_home() / "maestro"):
+        return None
+    texts = [command]
+    for path in named_scripts(command, folder):
+        try:
+            texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    if not any(MAESTRO_CALL.search(line) for text in texts for line in text.splitlines()
+               if not line.lstrip().startswith("#")):
+        return None
+    return ("parece que falta Maestro, que `preparar` de este flujo nombra para llevar la app al punto de partida. Para "
+            "la skill es opcional (un flujo se puede preparar con adb), pero este plan lo usa: si `preparar` falla, es por "
+            "esto (si tu script llega a Maestro por otro camino, ignora este aviso).\n"
+            "  Dónde lo busqué: el PATH y %s.\n"
+            "  Cómo obtenerlo: sigue la guía oficial (%s); necesita Java 17 o superior. Si lo instalas en esa carpeta, "
+            "perf.py lo encuentra sin el PATH.\n"
+            "  %s. %s; si prefieres no usar Maestro, dilo en el chat de la sesión 1 para cambiar `preparar` (la skill no "
+            "lo reemplaza sola)." % (maestro_home(), MAESTRO_URL, PATH_IS_YOURS, NO_MACHINE_CHANGES))
+
+
+def adb_shown():
+    """`adb` para un comando que se pega en la terminal: el nombre si está en el PATH; si no, la ruta donde lo encontró
+    perf.py (un comando con `adb` a secas no correría)."""
+    if shutil.which("adb"):
+        return "adb"
+    try:
+        return q(adb_binary())
+    except PerfError:
+        return "adb"
+
+
+def java_home():
+    """(JAVA_HOME para un proceso hijo o None, de dónde sale, hay Java). None con Java disponible quiere decir que el
+    hijo ya lo encuentra solo (JAVA_HOME válido o `java` en el PATH): no se cambia nada. Si no, el JBR de Android Studio
+    en sus rutas usuales (STUDIO_JBR). Nunca cambia el entorno de quien corre perf.py."""
+    key = (os.environ.get("JAVA_HOME"), os.environ.get("PATH"), os.environ.get("HOME"))
+    if key not in _JAVA_HOME:
+        _JAVA_HOME[key] = _java_home()
+    return _JAVA_HOME[key]
+
+
+_JAVA_HOME = {}
+
+
+def _java_home():
+    current = os.environ.get("JAVA_HOME")
+    if current and is_executable(pathlib.Path(os.path.expanduser(current)) / "bin" / "java"):
+        return None, "JAVA_HOME", True
+    found = shutil.which("java")
+    if found and sys.platform == "darwin" and os.path.realpath(found) == "/usr/bin/java":
+        # En macOS /usr/bin/java existe aunque no haya ningún JDK: /usr/libexec/java_home dice si hay uno instalado.
+        try:
+            found = found if subprocess.run(["/usr/libexec/java_home"], capture_output=True,
+                                            timeout=30).returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            found = None
+    if found:
+        return None, "el PATH", True
+    for raw in STUDIO_JBR:
+        path = pathlib.Path(os.path.expanduser(raw))
+        if is_executable(path / "bin" / "java"):
+            return str(path), "el JBR de Android Studio", True
+    return None, "", False
+
+
+def child_env(base=None, java=False):
+    """El entorno para un proceso hijo que usa las herramientas (un recorrido, `preparar`, retrace, Gradle, el DoD): el
+    de quien corre perf.py más lo que perf.py encontró fuera del PATH, agregado al FINAL del PATH (nunca tapa lo que ya
+    está) y solo para ese hijo. Sin nada que agregar devuelve `base` tal cual (None: el hijo hereda el entorno). Con
+    `java`, también JAVA_HOME si el hijo no encontraría Java por su cuenta."""
+    extra, variables = [], {}
+    if not shutil.which("adb") and not os.environ.get("ADB"):
+        for sdk in sdk_roots():
+            if (sdk / "platform-tools" / "adb").is_file():
+                extra.append(str(sdk / "platform-tools"))
+                break
+    if java:
+        home, origin, _ = java_home()
+        if home:
+            outside_path("Java", home, "; es %s y vale solo para este proceso" % origin)
+            variables["JAVA_HOME"] = home
+            extra.append(str(pathlib.Path(home) / "bin"))
+        if not shutil.which("maestro") and is_executable(maestro_home() / "maestro"):
+            outside_path("Maestro", maestro_home() / "maestro")
+            extra.append(str(maestro_home()))
+    if not extra and not variables:
+        return base
+    env = dict(os.environ if base is None else base)
+    env.update(variables)
+    env["PATH"] = os.pathsep.join([part for part in (env.get("PATH"),) if part] + extra)
+    return env
 
 
 class Adb:
@@ -2010,7 +2220,7 @@ def select_device(serial):
         raise Precondicion("hay %d dispositivos conectados (%s): elige uno con --serial, o guárdalo en el plan con "
                            "'nuevo --serial'" % (len(devices), ", ".join(devices))).con(seguir=[
             ("mira cuál es cuál (el serial es la primera columna; el modelo, model:)",
-             "cd %s && adb devices -l" % shlex.quote(os.getcwd()))]
+             "cd %s && %s devices -l" % (shlex.quote(os.getcwd()), adb_shown()))]
             + [("o repite el comando en %s" % device, same_command() + " --serial " + shlex.quote(device))
                for device in devices])
     return devices[0]
@@ -2484,7 +2694,7 @@ def run_prepare(command, folder, secret_names, capture=None):
     capture = bool(secret_names) if capture is None else capture
     with tempfile.TemporaryFile() as raw:
         result = subprocess.run(command, shell=True, stdout=raw if capture else subprocess.DEVNULL,
-                                stderr=subprocess.STDOUT if capture else raw)
+                                stderr=subprocess.STDOUT if capture else raw, env=child_env(java=True))
         raw.seek(0)
         text = mask_secrets(raw.read().decode("utf-8", "replace"), secret_names)
     lines = [line.rstrip()[:200] for line in text.splitlines() if line.strip()][-40:]
@@ -2719,10 +2929,10 @@ def drive(recorrido, label, cutter=None):
         answer = wait_enter("▶ %s: recorre el flujo y presiona Enter (x + Enter para descartarla) " % label)
         return "descartada por el usuario" if answer == "x" else None
     if cutter is None:
-        result = subprocess.run(recorrido, shell=True)
+        result = subprocess.run(recorrido, shell=True, env=child_env())
         return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
     cutter.empezar()
-    process = subprocess.Popen(recorrido, shell=True, env=cutter.entorno())
+    process = subprocess.Popen(recorrido, shell=True, env=child_env(cutter.entorno()))
     try:
         while True:
             try:
@@ -3710,8 +3920,8 @@ def install_step(plan, root, what, you):
     """El paso de instalar el build: el 'instalar' del plan como comando de terminal o, sin él, una acción que dice qué
     hacer, sin un comando con marcadores que no se puede pegar."""
     if plan.get("instalar"):
-        return terminal(install_command(plan, root), what, you)
-    return {"tipo": "accion", "que": what, "tu": NO_INSTALL}
+        return dict(terminal(install_command(plan, root), what, you), instala=True)
+    return {"tipo": "accion", "que": what, "tu": NO_INSTALL, "instala": True}
 
 
 def install_guide(plan, root, what):
@@ -3850,6 +4060,12 @@ def next_steps(folder, plan, flow=None):
     doubtful = pending_marks_doubt(folder, plan)
     if doubtful:
         steps = marks_choice_steps(folder, project_root(folder).resolve(), doubtful) + steps
+    closed = title.startswith(("investigación cerrada", "triage cerrado"))
+    if not closed:
+        # D: un módulo del alcance que llega como binario (o sin confirmar) se resuelve antes de seguir.
+        steps = module_steps(folder, plan) + steps
+        # A5: con el setup en un parche y fuera del árbol, reponerlo es lo primero de lo que instala, mide o compila.
+        steps = setup_first(folder, plan, steps)
     # Solo en el cierre: antes de medir "después" los cambios temporales tienen que seguir puestos. Con la investigación
     # cerrada, quitarlos es lo único que queda: va primero, y el final lo dice.
     if title.startswith(("sesión 4", "investigación cerrada", "triage cerrado")):
@@ -3883,8 +4099,87 @@ def next_steps(folder, plan, flow=None):
                                   "cambios temporales quitados y el DoD; dicen a qué hora se generaron y que el cierre "
                                   "está hecho", "nada; no abre ningún chat ni mide")
             at = next((i for i, step in enumerate(steps) if step["tipo"] == "fin"), len(steps))
-            steps = steps[:at] + [regenerate] + steps[at:]
+            steps = steps[:at] + [regenerate] + [dict(step, texto=DONE_AFTER_STEP) if step["tipo"] == "fin" else step
+                                                 for step in steps[at:]]
+        if closed and not notice and not dod:
+            # A5: cerrada de verdad solo si el setup quedó como corresponde a su caso (en parche: quitado, o puesto a
+            # pedido con --sin-setup). Antes van los cambios temporales y el DoD.
+            title, steps = setup_after_close(folder, plan, title, steps)
+            if "falta quitar el setup" in title:
+                title = title.replace(" · regenera los reportes con el cierre hecho (sin chat)", "")
     return title, steps
+
+
+SETUP_NEEDED = re.compile(r"sesión [13]\b")
+
+
+def setup_first(folder, plan, steps):
+    """Pone `setup --reponer` (o lo que haga falta para tener el setup) antes de una secuencia que instala, mide o abre una
+    sesión que compila (la 1 y la 3), cuando AGENTS.md dice que el setup está en un parche y su código no está."""
+    needs = [step for step in steps if (step["tipo"] == "terminal" and (" capturar " in step["texto"] or step.get("instala")))
+             or (step["tipo"] == "accion" and step.get("instala"))
+             or (step["tipo"] == "chat" and SETUP_NEEDED.search(step.get("que") or ""))]
+    if not needs:
+        return steps
+    root = project_root(pathlib.Path(folder)).resolve()
+    case = setup_missing(root)
+    if case is None:
+        return steps
+    first = reponer_steps(root, case, folder, plan)
+    lead = 0
+    while lead < len(steps) and steps[lead]["tipo"] == "avisos":
+        lead += 1
+    return steps[:lead] + first + steps[lead:]
+
+
+def setup_after_close(folder, plan, title, steps):
+    """Con la investigación cerrada: si el setup va en un parche (o la investigación lo declaró en filas "setup") y sigue
+    en el árbol sin que nadie pidiera dejarlo (--sin-setup), falta quitarlo. El final dice cómo quedó el setup."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    said = agents_setup(root)
+    state = read_setup_close(folder)
+    pending_files = state.get("archivos") or []
+    if not said["en_parche"] and not said["listo"] and not pending_files:
+        return title, steps  # sin setup: no recorre el proyecto
+    case = setup_case(root)
+    kind = case["caso"]
+
+    def noted(note):
+        return title, [dict(step, texto=step["texto"] + note) if step["tipo"] == "fin" else step for step in steps]
+
+    if kind in ("versionado", "sin"):
+        return title, steps
+    if not case["presente"]:
+        return noted(" El setup quedó quitado y guardado en su parche.") if kind == "parche" else (title, steps)
+    quit_command = setup_command(root, "--quitar", folder=folder) if kind == "parche" else guardar_command(
+        root, argparse.Namespace(quitar=True, paquete=None), folder, pending_files)
+    if str(state.get("setup") or "").startswith("puesto"):
+        return noted(" El setup de medición sigue puesto porque lo pediste (--sin-setup); para quitarlo: `%s`."
+                     % quit_command)
+    if kind != "parche" and not pending_files and not case.get("parche_perdido"):
+        # en el árbol sin versionar ni parche, y nadie lo declaró: no traba el cierre; se dice dónde está la decisión
+        return noted(" El setup de medición sigue en el árbol, sin versionar ni guardar en un parche: `%s` dice cómo "
+                     "guardarlo." % setup_command(root, "--estado"))
+    others = open_investigations(folder, root)
+    remove = terminal(quit_command,
+                      "quita el setup de medición del árbol con su parche (%s): si cambió, guarda antes un parche nuevo; "
+                      "guarda un respaldo, comprueba que revierte limpio y lo quita" % case["parche"].name
+                      if kind == "parche" else
+                      "guarda el setup de medición como parche, con su ficha, y lo quita del árbol (hoy no está en ningún "
+                      "parche: quitarlo sin guardarlo lo perdería)",
+                      "nada; si algo no revierte limpio o hay cambios tuyos en esos archivos, se detiene sin tocar nada")
+    keep = terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root), "--sin-setup"),
+                    "o deja el setup puesto (por ejemplo, para seguir enseguida con otra investigación, o si lo vas a "
+                    "versionar) y lo anota", "elige uno de los dos")
+    lead = [{"tipo": "avisos", "titulo": "Otra investigación necesita el setup", "lineas": [
+        "%s sigue%s abierta%s y usa%s el setup: si lo quitas, su `siguiente` te pide reponerlo antes de instalar o medir. "
+        "Si vas a seguir con ella enseguida, déjalo puesto (--sin-setup)" % (
+            ", ".join(shown_path(other, root) for other in others[:3]), "" if len(others) == 1 else "n",
+            "" if len(others) == 1 else "s", "" if len(others) == 1 else "n")]}] if others else []
+    done = [dict(step, texto=DONE_AFTER_SETUP) if step["tipo"] == "fin" else step for step in steps]
+    at = next((i for i, step in enumerate(done) if step["tipo"] == "fin"), len(done))
+    return title + " · falta quitar el setup", lead + done[:at] + [remove, keep] + done[at:]
 
 
 def version_at_least(version, minimum):
@@ -4027,9 +4322,9 @@ def before_capture(folder, plan, flow, steps):
     if not plan.get("serial"):
         # Sin el serial en el plan, con más de un dispositivo la captura se detiene: lo dice en la primera, con el comando.
         index = steps.index(captures[0])
-        steps[index] = dict(captures[0], tu="%s; con más de un dispositivo conectado, mira cuál es con `cd %s && adb "
+        steps[index] = dict(captures[0], tu="%s; con más de un dispositivo conectado, mira cuál es con `cd %s && %s "
                                             "devices -l` y agrega --serial <serial> al comando" % (
-                                                captures[0]["tu"].rstrip("."), shlex.quote(str(root))))
+                                                captures[0]["tu"].rstrip("."), shlex.quote(str(root)), adb_shown()))
     lead = [{"tipo": "avisos", "titulo": "Antes de medir", "lineas": notes}] if notes else []
     return lead + first + steps
 
@@ -4255,10 +4550,16 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
     return None
 
 
-DONE = "La investigación está completa y analizada: no queda nada por hacer."
-DONE_AFTER_DOD = "Con el DoD en verde después de quitar los cambios temporales, la investigación queda completa."
+# El final también se dice: cuando ya no queda nada, la salida termina con NO_STEPS_LEFT, nunca en silencio.
+NO_STEPS_LEFT = "no queda ningún paso por ejecutar"
+DONE = "Investigación cerrada: %s. Está completa y analizada." % NO_STEPS_LEFT
+DONE_AFTER_DOD = ("Con el DoD en verde después de quitar los cambios temporales, la investigación queda cerrada: no quedará "
+                  "ningún paso por ejecutar.")
+DONE_AFTER_STEP = "Con ese paso, la investigación queda cerrada: no quedará ningún paso por ejecutar."
+DONE_AFTER_SETUP = ("Con el setup quitado (o dejado puesto con --sin-setup), la investigación queda cerrada: no quedará "
+                    "ningún paso por ejecutar.")
 DONE_AFTER_CLOSE = ("Con los cambios temporales quitados y el DoD en verde (`cerrar` lo da al terminar), la investigación queda "
-                    "completa: no queda nada más por hacer.")
+                    "cerrada: no quedará ningún paso por ejecutar.")
 
 
 def flow_env(spec, folder):
@@ -6473,6 +6774,8 @@ def cmd_decidir(args):
         raise PerfError("--archivos y --repo van con --aplicada y una sola mejora: el diff es de esa mejora")
     if getattr(args, "repo", None) and not files:
         raise PerfError("--repo va con --archivos: los archivos de la mejora en ese repo")
+    if applied and blocked_modules(plan):
+        improvement_module_gate(folder, plan, files, getattr(args, "repo", None), applied[0])
     for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
@@ -6712,7 +7015,8 @@ def run_dod(folder, root, tops=()):
                 handle.write("\n$ %s\n" % command)
                 handle.flush()
                 started = time.time()
-                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT)
+                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT,
+                                      env=child_env(java=True))
                 handle.flush()
                 if done.returncode == 0:
                     print("✔ %s (%s)" % (command, elapsed_text(time.time() - started)))
@@ -7062,36 +7366,6 @@ def mark_temp_reverted(folder, notes):
     return marked
 
 
-def note_setup_patch(root, patches):
-    """En la sección de rendimiento de AGENTS.md, la línea que dice que el setup de medición está en un parche y cómo
-    ponerlo y quitarlo; la reemplaza si ya estaba. Devuelve lo que se le dice al usuario."""
-    path = pathlib.Path(root) / "AGENTS.md"
-    text = read_agents(root)
-    if text is None:
-        return "· No hay AGENTS.md en %s: anota a mano que el setup quedó en %s" % (root, ", ".join(map(str, patches)))
-    section = performance_section(text)
-    if section is None:
-        return "· AGENTS.md no tiene una sección de rendimiento: anota a mano que el setup quedó en %s" % ", ".join(
-            map(str, patches))
-    eol = "\r\n" if "\r\n" in text else "\n"
-    apply = " y ".join("`git -C %s apply %s`" % (q(top), q(patch)) for top, patch in patches)
-    back = " y ".join("`git -C %s apply -R %s`" % (q(top), q(patch)) for top, patch in patches)
-    line = "- Setup listo, en parche: %s antes de medir; %s al terminar (lo escribió `perf.py cerrar`)." % (apply, back)
-    start, end = section
-    body = text[start:end]
-    found = re.search(r"^[ \t]*[-*][ \t]+\**setup listo, en parche:.*$", body, re.I | re.M)
-    if found:
-        body = body[:found.start()] + line + body[found.end():]
-    else:
-        body = eol + line + eol + body.lstrip("\r\n") if body.strip() else eol + line + eol
-    try:
-        with open(str(path), "w", encoding="utf-8", newline="") as handle:
-            handle.write(text[:start] + body + text[end:])
-    except OSError as error:
-        return "⚠ No pude escribir %s (%s): anota a mano que el setup quedó en el parche" % (path, error.strerror or error)
-    return "✔ AGENTS.md: la sección de rendimiento dice que el setup está en un parche y cómo ponerlo y quitarlo"
-
-
 # ── Archivos con mejora y marcas, parche de marcas vigente y repos hermanos (0.13.0) ──
 # Un archivo de "Cambios temporales" que también es de una mejora nunca se revierte entero: se quitan solo las marcas, con
 # el parche de marcas vigente de su repo, o el comando se detiene sin tocar nada. Lo que es de una mejora sale de cuatro
@@ -7124,6 +7398,20 @@ def resolve_patch(raw, folder, root):
     return (pathlib.Path(folder) / path).resolve()
 
 
+def unquote_git_path(value):
+    """Una ruta de la cabecera de un parche sin las comillas ni los escapes de git ("di/Inyecci\\303\\263n.kt")."""
+    if not (value.startswith(b'"') and value.endswith(b'"') and len(value) >= 2):
+        return value
+    simple = {b"t": b"\t", b"n": b"\n", b"r": b"\r", b'"': b'"', b"\\": b"\\", b"a": b"\a", b"b": b"\b", b"f": b"\f",
+              b"v": b"\v"}
+
+    def one(found):
+        text = found.group(1)
+        return bytes([int(text, 8)]) if text.isdigit() else simple.get(text, text)
+
+    return re.sub(rb"\\([0-7]{3}|.)", one, value[1:-1])
+
+
 def patch_sections(data):
     """{ruta: bytes de su parte} de un parche de git, en orden. La ruta es la del lado nuevo (la del viejo si el archivo
     se borra), relativa al repo."""
@@ -7134,7 +7422,7 @@ def patch_sections(data):
         name = None
         for line in part.splitlines():
             if line.startswith((b"--- ", b"+++ ")):
-                value = line[4:].strip().strip(b'"')
+                value = unquote_git_path(line[4:].strip())
                 if value != b"/dev/null":
                     name = value[2:] if value[:2] in (b"a/", b"b/") else value
                 if line.startswith(b"+++ "):
@@ -7528,6 +7816,9 @@ def cmd_marcas(args):
     extra = project_repos(folder, root, plan)
     tops = list(dict.fromkeys([root] + [top.resolve() for top in (git_toplevel(path) for path in extra)
                                         if top is not None]))
+    if args.vigente or args.separar:
+        temp_module_gate(folder, root, plan, extra, "las marcas no pueden ir en un módulo binario",
+                         patch=args.vigente, tops=tops)
     if args.vigente:
         patch = pathlib.Path(os.path.expanduser(args.vigente)).resolve()
         if not patch.is_file():
@@ -7704,12 +7995,98 @@ def lost_lines(checks, before, after):
 
 
 def cmd_cerrar(args):
+    """El cierre, en orden: los cambios temporales (marcas y demás) con su parche, el DoD y, si el setup va en un parche,
+    quitarlo (A4). Cada parte se detiene sin tocar nada si algo no es seguro."""
     folder = pathlib.Path(args.carpeta)
-    state = folder / "estado.md"
-    if not state.is_file():
-        raise PerfError("no existe %s" % state)
+    if not (folder / "estado.md").is_file():
+        raise PerfError("no existe %s" % (folder / "estado.md"))
     plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
     root = project_root(folder).resolve()
+    if close_temporary(args, folder, plan, root) == "fin":
+        return
+    close_setup(folder, root, args)
+    if plan:
+        print_next(folder, plan)
+
+
+def close_setup(folder, root, args):
+    """El último paso de `cerrar`: con el setup en un parche (o declarado en filas "setup" de la investigación) y en el
+    árbol, lo quita cuando el DoD ya pasó o no hizo falta. Con el setup versionado no quita nada y lo dice; --sin-setup lo
+    deja puesto y lo anota. Lo que no puede decidir solo (otra investigación abierta, un setup sin parche que nadie
+    declaró) lo dice con los comandos de cada opción."""
+    said = agents_setup(root)
+    pending_files = read_setup_close(folder).get("archivos") or []
+    if not said["en_parche"] and not said["listo"] and not pending_files:
+        return  # el proyecto no tiene setup: nada que mirar
+    simulate = getattr(args, "simular", False)
+    case = setup_case(root)
+    kind = case["caso"]
+    keep_command = perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root), "--sin-setup")
+    quit_command = setup_command(root, "--quitar", folder=folder) if kind == "parche" else guardar_command(
+        root, argparse.Namespace(quitar=True, paquete=None), folder, pending_files)
+    if kind == "versionado":
+        print("· Setup versionado (en git): queda en el repo; `cerrar` no quita nada del setup.")
+        return
+    if kind == "sin" or (kind != "parche" and not case["presente"]):
+        return  # sin setup, o perdido: no hay nada que quitar (`setup --estado` dice cómo recuperarlo)
+    if getattr(args, "sin_setup", False):
+        if not case["presente"]:
+            print("· --sin-setup: el setup no está en el árbol (queda guardado en su parche); no hay nada que dejar puesto.")
+            return
+        if not simulate:
+            save_setup_close(folder, setup="puesto (--sin-setup)")
+        print("· El setup de medición queda puesto (--sin-setup). Para quitarlo cuando termines:\n    %s" % quit_command)
+        return
+    if not case["presente"]:
+        if not simulate and read_setup_close(folder).get("setup") != "quitado":
+            save_setup_close(folder, setup="quitado")
+        print("✔ El setup ya está quitado y guardado en su parche (%s)." % case["parche"])
+        return
+    if kind != "parche" and not pending_files:
+        # En el árbol, sin parche, y ninguna fila lo declara: versionarlo o guardarlo es una decisión del usuario.
+        if case.get("parche_perdido"):
+            print("⚠ El setup está en el árbol y el parche que nombra AGENTS.md no existe: `cerrar` no lo quita (se "
+                  "perdería). Elige:\n    guardarlo como parche nuevo y quitarlo:\n      %s\n    dejarlo puesto y "
+                  "anotarlo:\n      %s" % (quit_command, keep_command))
+        return
+    record = read_close(folder)
+    if record.get("dod") == "falló" or (record.get("quitados") and record.get("dod") not in ("ok", "sin DoD")):
+        print("· El setup se quita después del DoD (el DoD compila la variante medida, que lo necesita): cuando el DoD "
+              "esté en verde, `cerrar --dod` lo quita al terminar.")
+        return
+    others = open_investigations(folder, root)
+    if others:
+        print("⚠ No quité el setup: %s sigue%s abierta%s y lo necesita%s. Elige:\n"
+              "    quitarlo igual (su `siguiente` te pedirá reponerlo):\n      %s\n"
+              "    dejarlo puesto y anotarlo:\n      %s" % (
+                  ", ".join(shown_path(other, root) for other in others[:3]), "" if len(others) == 1 else "n",
+                  "" if len(others) == 1 else "s", "" if len(others) == 1 else "n", quit_command, keep_command))
+        return
+    state = setup_quitar(root, args, folder, explicit=pending_files or None)
+    if state == "quitado":
+        save_setup_close(folder, setup="quitado", archivos=[])
+
+
+def setup_close_preview(folder, root, args):
+    """Con --simular: qué haría `cerrar` con el setup al final, en una línea."""
+    said = agents_setup(root)
+    if getattr(args, "sin_setup", False) or not (said["en_parche"] or said["listo"]):
+        return
+    case = setup_case(root)
+    if case["caso"] == "parche" and case["presente"]:
+        print("· Simulación: al final, después del DoD, quitaría el setup de medición con su parche (%s): un respaldo "
+              "antes, git apply --check -R y git apply -R; si el setup cambió, guardaría antes un parche nuevo. Con "
+              "--sin-setup lo dejaría puesto." % case["parche"])
+    elif case["caso"] == "sin_decidir" and case["presente"]:
+        print("· Simulación: el setup está en el árbol sin parche: si la investigación lo declara en filas \"setup\", al "
+              "final lo guardaría como parche (con su ficha) y lo quitaría; si no, lo dejaría y te daría los comandos para "
+              "decidir.")
+
+
+def close_temporary(args, folder, plan, root):
+    """La parte de `cerrar` que quita los cambios temporales. Devuelve "fin" cuando el comando termina ahí (una
+    simulación, o --corregir-repo, que ya imprimieron lo que sigue)."""
+    state = folder / "estado.md"
     rel_folder = relative_folder(folder, root)
     if getattr(args, "corregir_repo", None):
         old, sep, new = args.corregir_repo.partition("=")
@@ -7725,19 +8102,32 @@ def cmd_cerrar(args):
               "· Ninguna fila de \"Cambios temporales\" dice `%s` en \"Repo o módulo\": no cambié nada" % old.strip())
         if plan:
             print_next(folder, plan)
-        return
+        return "fin"
     pending = [change for change in temp_changes(state.read_text(encoding="utf-8")) if not change["revertido"]]
     if not pending:
         print("✔ No quedan cambios temporales por revertir en %s." % state)
         if args.dod:
             run_dod(folder, root)
-        if plan:
-            print_next(folder, plan)
-        return
+        if args.simular:
+            setup_close_preview(folder, root, args)
+        return None
     extra = project_repos(folder, root, plan)
+    # Las filas que se declaran "setup" no son cambios temporales de esta investigación: si su archivo está en el parche de
+    # setup vigente, lo quita el paso del setup, al final; si el setup está en el árbol sin parche (una investigación de
+    # 0.13.0, que anotaba así el cableado), esos archivos se guardan con el setup entero, también al final. Una fila que
+    # NO es de setup sobre un archivo del parche (una marca en el cliente de red) se quita aquí, sin tocar el cableado.
+    in_setup = setup_patch_files(root)
+    setup_known = known_setup_lines(setup_case(root)["parche"]) if in_setup else {}
+    own_top = git_toplevel(root)
+    own_top = own_top.resolve() if own_top is not None else None
+    # Con el setup en el árbol sin parche, o en un parche que todavía no trae ese archivo, la fila "setup" se guarda con
+    # el setup; con el setup versionado es un cambio temporal más.
+    deferred_setup = setup_case(root)["caso"] in ("sin_decidir", "parche") if any(
+        SETUP_ROW.search(change["que"] or "") for change in pending) else False
+    setup_explicit = []
     touched = improvement_touch(folder, root, plan, extra)
     shared = shared_temp_files(folder, root)
-    problems, fixes, kept, groups, mixed = [], [], [], {}, {}
+    problems, fixes, kept, groups, mixed, setup_rows = [], [], [], {}, {}, []
     for change in pending:
         top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
         if top is None:
@@ -7757,11 +8147,21 @@ def cmd_cerrar(args):
                           "como ruta desde la raíz" % (change["archivo"], hint, os.path.relpath(str(top), str(root))),
                           perf_command(root, "cerrar", "--carpeta", rel_folder, "--corregir-repo",
                                        "%s=%s" % (hint, os.path.relpath(str(top), str(root))))))
+        is_setup_row = bool(SETUP_ROW.search(change["que"] or ""))
+        ids = list(dict.fromkeys(touched.get((top, os.path.normpath(rel)), []) + row_improvements(change, plan)))
+        if is_setup_row and (top, os.path.normpath(rel)) in in_setup:
+            setup_rows.append(change["archivo"])
+            continue
+        # Un archivo que también es de una mejora nunca se da entero por setup: sigue el camino de los archivos con
+        # mejora (solo las marcas, con su parche; si no se puede, se detiene), como en 0.13.0.
+        if is_setup_row and deferred_setup and top == own_top and not ids:
+            setup_rows.append(change["archivo"])
+            setup_explicit.append(rel)
+            continue
         if change["archivo"] in shared:
             kept.append("%s: otra investigación abierta (%s) también lo declara; quita a mano solo lo de esta, o déjalo "
                         "hasta que cierre la otra" % (change["archivo"], ", ".join(shared[change["archivo"]])))
             continue
-        ids = list(dict.fromkeys(touched.get((top, os.path.normpath(rel)), []) + row_improvements(change, plan)))
         if ids:
             known = [item for item in mixed.get(top, []) if item[0] == rel]
             if known:
@@ -7769,7 +8169,7 @@ def cmd_cerrar(args):
             else:
                 mixed.setdefault(top, []).append((rel, change["archivo"], ids, []))
             continue
-        kind = "setup" if SETUP_ROW.search(change["que"] or "") else "temporales"
+        kind = "temporales"  # (0.13.0 separaba las filas "setup" en un parche propio: ahora las maneja `perf.py setup`)
         known = [item for items in groups.get(top, {}).values() for item in items if item[0] == rel]
         if known:  # dos filas del mismo archivo (la original y la del ajuste): un solo diff, las dos filas se marcan
             known[0][2].append(change["archivo"])
@@ -7785,6 +8185,15 @@ def cmd_cerrar(args):
     target_dir = patches_dir(folder, root)
     name = slug("-".join(lexical(folder).parts[-2:]))
     plans, notes, only_marks, stops, doubtful = [], {}, {}, [], {}
+    for name_ in setup_rows:
+        notes[name_] = "sí · es del setup: lo quita y lo repone `perf.py setup` con su parche (%s)" % (
+            datetime.date.today().isoformat())
+    if setup_rows:
+        print("· Del setup (no son cambios temporales; los guarda y los quita el paso del setup, al final): %s" % ", ".join(
+            dict.fromkeys(setup_rows)))
+    if setup_explicit and not args.simular:
+        earlier = read_setup_close(folder).get("archivos") or []
+        save_setup_close(folder, archivos=list(dict.fromkeys(earlier + setup_explicit)))
     for top in list(groups) + [top for top in mixed if top not in groups]:
         kinds = groups.get(top, {})
         changes = git_changes(top)
@@ -7798,12 +8207,33 @@ def cmd_cerrar(args):
                         notes[row_name] = "sí · sin cambios al cerrar (%s)" % datetime.date.today().isoformat()
             if not present:
                 continue
-            print("  Quita (%s): %s" % ("setup de medición" if kind == "setup" else "cambios temporales",
-                                       ", ".join(rel for rel, _, _ in present)))
-            for rel, _, _ in present:
-                print("    · %s: archivo entero (solo temporal)" % rel)
-            text = b"".join(file_patch(top, rel, changes[rel]) for rel, _, _ in present)
-            label = "perf-setup" if kind == "setup" else "%s-temporales" % name
+            print("  Quita (cambios temporales): %s" % ", ".join(rel for rel, _, _ in present))
+            text, kept_present = b"", []
+            for rel, label_, more in present:
+                if (top, os.path.normpath(rel)) not in in_setup:
+                    print("    · %s: archivo entero (solo temporal)" % rel)
+                    text += file_patch(top, rel, changes[rel])
+                    kept_present.append((rel, label_, more))
+                    continue
+                # el archivo también lleva cableado del setup: se quita solo lo que no es del parche de setup
+                part = temp_part(top, rel, changes[rel], setup_known.get(os.path.normpath(rel), set()))
+                if part is None:
+                    stops.append("%s: el cambio temporal está pegado al cableado del setup (mismo hunk) y no los puedo "
+                                 "separar sin riesgo: quita a mano el cambio temporal de ese archivo y repite" % rel)
+                    print("    · %s: se detiene: el cambio temporal está pegado al cableado del setup" % rel)
+                elif not part:
+                    print("    · %s: sin cambios temporales (solo queda el cableado del setup, que se quita al final)" % rel)
+                    for row_name in [label_] + more:
+                        notes[row_name] = "sí · sin cambios temporales al cerrar (%s); el cableado es del setup" % (
+                            datetime.date.today().isoformat())
+                else:
+                    print("    · %s: solo lo temporal (el cableado del setup se queda hasta el paso del setup)" % rel)
+                    text += part
+                    kept_present.append((rel, label_, more))
+            present = kept_present
+            if not present:
+                continue
+            label = "%s-temporales" % name
             plans.append({"repo": top, "tipo": kind, "archivos": present, "texto": text,
                           "ruta": target_dir / ("%s-%s-%s.patch" % (label, slug(top.name), stamp))})
         patch = marks["vigente"].get(top)
@@ -7880,9 +8310,10 @@ def cmd_cerrar(args):
             print("· Simulación: se detendría sin tocar nada:\n  - %s" % "\n  - ".join(stops))
             for what, command in follow:
                 print("  Para seguir, %s:\n    %s" % (what, command))
-            return
-        raise PerfError("hay archivos con código de una mejora y marcas que no puedo separar sin riesgo; no toqué nada "
-                        "(revertir el archivo entero quitaría la mejora y el proyecto seguiría compilando):\n  - %s"
+            return "fin"
+        raise PerfError("hay archivos con código de una mejora (o con el cableado del setup) y marcas que no puedo separar "
+                        "sin riesgo; no toqué nada (revertir el archivo entero quitaría la mejora y el proyecto seguiría "
+                        "compilando):\n  - %s"
                         % "\n  - ".join(stops)).con(guardado="nada: no guardé ni quité nada", seguir=follow)
     touched_repos = sorted({item["repo"] for item in plans} | set(only_marks))
     backups = {top: target_dir / "respaldos" / ("%s-respaldo-%s-%s.patch" % (name, slug(top.name), stamp))
@@ -7896,9 +8327,10 @@ def cmd_cerrar(args):
         for top, item in sorted(only_marks.items()):
             print("· Simulación: en %s quitaría solo las marcas de %s con git apply -R --include del parche %s." % (
                 top, ", ".join(rel for rel, _, _ in item["archivos"]), item["parche"]))
+        setup_close_preview(folder, root, args)
         print("· Simulación: no guardé ni quité nada. Para hacerlo, el mismo comando sin --simular:")
         print("    %s" % same_command(sin=("--simular",)))
-        return
+        return "fin"
     for top in touched_repos:
         own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
                for path in (investigations_base(root), target_dir, folder.resolve())]
@@ -7982,12 +8414,6 @@ def cmd_cerrar(args):
         print("\n".join("    " + line for line in status.stdout.splitlines()) or "    (sin cambios)")
     if notes:
         print("✔ estado.md: %d filas de \"Cambios temporales\" marcadas como revertidas" % mark_temp_reverted(folder, notes))
-    setup = [(item["repo"], item["ruta"]) for item in plans if item["tipo"] == "setup"]
-    if setup:
-        print(note_setup_patch(root, setup))
-        note = update_agents_state(root)
-        if note:
-            print(note)
     if plans or only_marks:
         # Después de quitar, el DoD: un cambio temporal pudo tapar algo, o algo del proyecto dependía de él.
         record = read_close(folder)
@@ -8009,8 +8435,38 @@ def cmd_cerrar(args):
                         print("      · %s" % command)
             else:
                 run_dod(folder, root, record["repos"])  # sin DoD que correr: lo dice y lo anota
-    if plan:
-        print_next(folder, plan)
+    return None
+
+
+def temp_part(top, rel, code, known):
+    """Lo que un archivo tiene de cambio temporal cuando además lleva cableado del setup: su parche solo con los hunks
+    que no tienen ninguna línea del parche de setup vigente (`known`). None si un hunk mezcla las dos cosas; b"" si no
+    queda nada temporal."""
+    out = b""
+    for section in patch_sections(file_patch(top, rel, code)).values():
+        head, hunks = split_hunks(section)
+        keep = []
+        for hunk in hunks:
+            lines = [line for line in hunk_changes(hunk) if not PUNCTUATION_ONLY.match(line[1:].decode("utf-8", "replace"))]
+            own = [line for line in lines if line in known]
+            if own and len(own) != len(lines):
+                return None
+            if not own:
+                keep.append(hunk)
+        if keep:
+            out += head + b"".join(keep)
+    return out
+
+
+def setup_patch_files(root):
+    """{(repo, ruta)} de los archivos del parche de setup vigente del proyecto; vacío si el setup no va en un parche."""
+    if not agents_setup(root)["en_parche"]:
+        return set()
+    case = setup_case(root)
+    if case["caso"] != "parche" or case["repo"] is None:
+        return set()
+    top = case["repo"].resolve()
+    return {(top, os.path.normpath(name)) for name in patch_files(case["parche"])}
 
 
 def improvements_in_tree(folder, plan):
@@ -9092,6 +9548,14 @@ def warnings_lines(folder, plan):
         bucket = (notes.get(kind) or {}).get(phase) if isinstance(notes.get(kind), dict) else None
         return sorted(bucket.items()) if isinstance(bucket, dict) else []
 
+    for item in blocked_modules(plan):
+        lines.append(one_line(
+            "Módulo %s: %s. Ninguna sesión lo edita (marcas, cambios temporales ni mejoras). Si su código está en disco%s, "
+            "el código leído puede no ser la versión del binario: no cites `archivo:línea` de ese módulo como evidencia "
+            "confirmada; un hallazgo ahí va como \"fuera del alcance: módulo compilado\", con la evidencia de la traza" % (
+                item["nombre"], "el build lo toma como binario (%s)" % (item.get("artefacto") or "sin versión")
+                if item.get("tipo") == "binario" else "sin confirmar si se compila desde código",
+                " (%s)" % item["carpeta"] if item.get("carpeta") else "")))
     original = notes.get("ajustes_originales") if isinstance(notes.get("ajustes_originales"), dict) else {}
     if original.get("comando"):
         lines.append(" ".join(("Opciones de desarrollador: el %s, algunas estaban fuera de lo normal (%s). Para volverlas a como "
@@ -9273,9 +9737,11 @@ def performance_section(text):
 
 
 def agents_state(body):
-    """{campo: valor} del bloque de estado que perf.py mantiene en la sección de rendimiento."""
+    """{campo: valor} del bloque de estado que perf.py mantiene en la sección de rendimiento (sin la línea del setup en
+    parche, que es otra línea del mismo bloque)."""
     found = re.search(re.escape(AGENTS_BLOCK[0]) + r"(.*?)" + re.escape(AGENTS_BLOCK[1]), body, re.S)
-    inner = " ".join((found.group(1) if found else "").split())
+    inner = " ".join(" ".join(line for line in (found.group(1) if found else "").splitlines()
+                              if not SETUP_BLOCK_LINE.match(line)).split())
     fields = {}
     for key in AGENTS_FIELDS:
         value = re.search(r"%s: (.*?)(?= · |$)" % re.escape(key), inner)
@@ -9284,11 +9750,13 @@ def agents_state(body):
     return fields
 
 
-def update_agents_state(root, humo=None, http=None):
+def update_agents_state(root, humo=None, http=None, setup=None):
     """Mantiene, dentro de la sección de rendimiento del AGENTS.md del proyecto, un bloque corto entre marcadores con
     el estado del setup: si la instrumentación está en el repo, cómo salió la prueba de humo, si hay secciones HTTP y
-    con qué versión de la skill. Solo cambia los campos que recibe; no toca nada fuera del bloque ni fuera de la
-    sección, y si no hay sección no la crea. Devuelve la línea que se le dice al usuario ('' si nada cambió)."""
+    con qué versión de la skill; y, si el setup va en un parche, una segunda línea `Setup: en parche <ruta>` (`setup`:
+    la ruta del parche vigente; sin él, la línea que ya estaba se conserva). Solo cambia los campos que recibe; no toca
+    nada fuera del bloque ni fuera de la sección, y si no hay sección no la crea. Devuelve la línea que se le dice al
+    usuario ('' si nada cambió)."""
     path = pathlib.Path(root) / "AGENTS.md"
     text = read_agents(root)
     if text is None:
@@ -9300,7 +9768,15 @@ def update_agents_state(root, humo=None, http=None):
     start, end = section
     body = text[start:end]
     fields = agents_state(body)
-    fields["instrumentación en el repo"] = "sí" if find_instrumentation(root)[1] else "no (no encontré PerfHooks.kt)"
+    old_block = re.search(re.escape(AGENTS_BLOCK[0]) + r"(.*?)" + re.escape(AGENTS_BLOCK[1]), body, re.S)
+    setup_line = next((line.strip() for line in (old_block.group(1) if old_block else "").splitlines()
+                       if SETUP_BLOCK_LINE.match(line)), None)
+    if setup is not None:
+        setup_line = ("- Setup: en parche `%s` (lo repone y lo quita `perf.py setup`; su ficha está junto al parche)"
+                      % agents_path(setup, root))
+    present = find_instrumentation(root)[1]
+    fields["instrumentación en el repo"] = "sí" if present else (
+        "no (está en el parche: `perf.py setup --reponer` la repone)" if setup_line else "no (no encontré PerfHooks.kt)")
     if humo:
         fields["prueba de humo"] = humo
     if http:
@@ -9310,7 +9786,7 @@ def update_agents_state(root, humo=None, http=None):
     line = "- %s: %s · hb-performance %s" % (AGENTS_LEAD, " · ".join("%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS),
                                              VERSION)
     eol = "\r\n" if "\r\n" in text else "\n"  # el salto de línea que ya usa el archivo
-    block = eol.join((AGENTS_BLOCK[0], line, AGENTS_BLOCK[1]))
+    block = eol.join([AGENTS_BLOCK[0], line] + ([setup_line] if setup_line else []) + [AGENTS_BLOCK[1]])
     pattern = re.compile(re.escape(AGENTS_BLOCK[0]) + r".*?" + re.escape(AGENTS_BLOCK[1]), re.S)
     if pattern.search(body):
         new_body = pattern.sub(lambda _: block, body, count=1)
@@ -9326,8 +9802,9 @@ def update_agents_state(root, humo=None, http=None):
             handle.write(text[:start] + new_body + text[end:])
     except OSError as error:  # no poder anotarlo no puede romper la prueba de humo ni la corrida de prueba
         return "⚠ No pude escribir %s (%s): el estado del setup no quedó anotado ahí" % (path, error.strerror or error)
-    return "✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento (%s)" % " · ".join(
-        "%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS)
+    return "✔ AGENTS.md: estado del setup actualizado en la sección de rendimiento (%s)%s" % (" · ".join(
+        "%s: %s" % (key, fields[key]) for key in AGENTS_FIELDS), " · setup en parche: %s" % agents_path(setup, root)
+        if setup is not None else "")
 
 
 def http_state(current, seen, source):
@@ -9436,6 +9913,13 @@ def cmd_capturar(args, plan=None):
         raise Precondicion("el recorrido del flujo '%s' tiene una pausa humana (perf.py pausa) y %s"
                            % (flow_name, NO_TTY[0].lower() + NO_TTY[1:]))
     recorrido = args.recorrido or (flow.get("recorrido") if not startup else None) or "manual"
+    if not args.forzar:
+        setup_gate(project_root(folder).resolve(), folder if args.plan else None, plan if args.plan else None)
+        if args.plan and args.prueba:
+            marks_module_gate(folder, project_root(folder).resolve(), plan, flow, Precondicion)
+    no_maestro = missing_maestro(prepare_command, folder)
+    if no_maestro:  # la detección es por texto (el script puede llegar a Maestro por otro camino): avisa y sigue
+        print("⚠ " + no_maestro)
     tp = find_tp(args.tp)
     serial = select_device(args.serial or plan.get("serial"))
     adb = Adb(serial)
@@ -10070,9 +10554,16 @@ def write_summary(csv_path, rows, plan):
 
 # ── desofuscación (R8) ───────────────────────────────────────────────────────
 
-RETRACE_INSTALL = ("instala las Command-line Tools del SDK de Android (Android Studio · SDK Manager · SDK Tools · \"Android SDK "
-                   "Command-line Tools\", o `sdkmanager \"cmdline-tools;latest\"`): traen `retrace` en "
-                   "<sdk>/cmdline-tools/latest/bin. Necesita Java. Si está en otra ruta, pásala con RETRACE=<ruta>")
+RETRACE_INSTALL = ("es opcional (solo sirve para ver los nombres reales en lugar de los ofuscados por R8; la medición "
+                   "sigue igual). Lo busqué en RETRACE=<ruta>, en el PATH y en cmdline-tools/*/bin del SDK (ANDROID_HOME, "
+                   "ANDROID_SDK_ROOT y su ruta por defecto). Viene con las Command-line Tools del SDK de Android: "
+                   "instálalas desde Android Studio (SDK Manager · SDK Tools · \"Android SDK Command-line Tools\") o "
+                   "descárgalas de %s; en el SDK, perf.py las encuentra sin el PATH. Necesita Java. %s"
+                   % (CMDLINE_TOOLS_URL, NO_MACHINE_CHANGES))
+JAVA_MISSING = ("`retrace` necesita Java y no lo encontré en JAVA_HOME, en el PATH ni en el JBR de Android Studio (%s). Es "
+                "opcional: solo sirve para desofuscar. Android Studio trae uno (su JBR); con otro JDK, pásalo con "
+                "JAVA_HOME=<ruta> delante del comando (guía: %s). %s" % (", ".join(STUDIO_JBR[:1] + STUDIO_JBR[2:4]),
+                                                                        JDK_URL, NO_MACHINE_CHANGES))
 MAPPING_ID = re.compile(r"^#[ \t]*pg_map_id:[ \t]*(\S+)", re.M)
 MAPPING_CLASS = re.compile(r"^[^\s#][^\n]* -> [^\s:]+:[ \t]*$", re.M)
 APK_MAP_ID = re.compile(br'"pg-map-id":"([^"]+)"')  # el marcador que R8 deja en cada classes.dex: ~~R8{...,"pg-map-id":"<id>",...}
@@ -10089,15 +10580,15 @@ ENCRYPTED_HINT = ("la app puede usar cifrado de clases u otro ofuscador (ofuscad
 
 
 def find_retrace():
-    """La ruta de `retrace` (cmdline-tools del SDK), o None."""
+    """La ruta de `retrace` (cmdline-tools del SDK), o None: RETRACE, el PATH y cmdline-tools/*/bin del SDK
+    (ANDROID_HOME, ANDROID_SDK_ROOT, su ruta por defecto o el SDK del adb del PATH), aunque no esté en el PATH."""
     candidates = [os.environ.get("RETRACE"), shutil.which("retrace")]
-    homes = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT")]
+    homes = [str(path) for path in sdk_roots()]
     adb = shutil.which("adb")
     if adb:
         homes.append(str(pathlib.Path(adb).resolve().parent.parent))
-    for home in homes:
-        if home:
-            candidates += [str(path) for path in sorted(pathlib.Path(home).glob("cmdline-tools/*/bin/retrace"), reverse=True)]
+    for home in dict.fromkeys(homes):
+        candidates += [str(path) for path in sorted(pathlib.Path(home).glob("cmdline-tools/*/bin/retrace"), reverse=True)]
     for candidate in candidates:
         if candidate and (shutil.which(candidate) or pathlib.Path(candidate).is_file()):
             return candidate
@@ -10288,6 +10779,8 @@ class Deobfuscator:
         if not self.retrace:
             self.note("· Sin desofuscar: falta `retrace`; %s." % RETRACE_INSTALL)
             return False
+        if not shutil.which("retrace") and self.retrace != os.environ.get("RETRACE"):
+            outside_path("retrace", self.retrace)
         self.mapping = mapping
         try:  # relativa a la raíz: esta nota también queda en diagnostico.md
             shown = pathlib.Path(path).resolve().relative_to(pathlib.Path(self.root).resolve())
@@ -10303,7 +10796,7 @@ class Deobfuscator:
             source = f.name
         try:
             result = subprocess.run([self.retrace, str(self.mapping["ruta"]), source], capture_output=True, text=True,
-                                    timeout=300)
+                                    timeout=300, env=child_env(java=True))
         except (OSError, subprocess.SubprocessError) as error:
             self.note("⚠ Sin desofuscar: retrace no corrió (%s)." % str(error)[:120])
             return None
@@ -10311,6 +10804,8 @@ class Deobfuscator:
             os.unlink(source)
         if result.returncode != 0:
             self.note("⚠ Sin desofuscar: retrace falló (%s)." % ((result.stderr or result.stdout).strip().splitlines() or ["sin salida"])[-1][:160])
+            if not java_home()[2]:  # la causa más probable: el script de retrace no encontró Java
+                self.note("· %s." % (JAVA_MISSING[0].upper() + JAVA_MISSING[1:]))
             return None
         return result.stdout.splitlines()
 
@@ -13263,6 +13758,11 @@ def plain_unfilled(body):
     return text
 
 
+OWNER_SECTION = "pedido al equipo dueño"
+OWNER_INTRO = ("> Para enviar al equipo dueño de un módulo que la app consume compilado: esta investigación no puede editar "
+               "ese módulo. Qué se midió, la evidencia de la traza y lo que se propone.\n\n")
+
+
 def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
                   dev_note=""):
     """Escribe las dos versiones de un reporte (`reporte-<tipo>-dev` y `reporte-<tipo>-gerencia`), en markdown y, con
@@ -13647,6 +14147,7 @@ def cmd_reporte(args):
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
                  ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") + capture_table(filled("pendientes"), folder, plan) if filled("pendientes") else ""),
+                 ("Pedido al equipo dueño del módulo", OWNER_INTRO + filled(OWNER_SECTION) if filled(OWNER_SECTION) else ""),
                  ("Costo de la investigación", cost_md(folder, plan)),
                  ("Cómo leer este reporte", GLOSSARY)]
         problems = []
@@ -13713,6 +14214,7 @@ def cmd_reporte(args):
              ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
              ("Comparación completa", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
              ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") + capture_table(filled("pendientes"), folder, plan) if filled("pendientes") else ""),
+             ("Pedido al equipo dueño del módulo", OWNER_INTRO + filled(OWNER_SECTION) if filled(OWNER_SECTION) else ""),
              ("Costo de la investigación", cost_md(folder, plan)),
              ("Cómo leer este reporte", GLOSSARY)]
     charts = "".join(figure(*final_chart(r, plan=plan), title='%s · %s <span class="verdict %s">%s</span>' % (
@@ -14129,6 +14631,8 @@ def cmd_humo(args):
         # la de siempre.
         candidates = [default_folder("setup")[0] / "pedido.json", pathlib.Path(DEFAULT_INVESTIGATIONS) / "setup" / "pedido.json"]
         args.pedido = str(next((path for path in candidates if path.is_file()), candidates[0]))
+    if not args.forzar:  # A5: con el setup en un parche y fuera del árbol, se detiene antes de tocar el dispositivo
+        setup_gate(project_root(pathlib.Path.cwd()).resolve(), None, None)
     serial = select_device(args.serial)
     adb = Adb(serial)
     activity = args.actividad or launcher_activity(adb, args.paquete)
@@ -14141,6 +14645,14 @@ def cmd_humo(args):
     missing_setup = setup_warning(project_root(pathlib.Path.cwd()).resolve())
     if missing_setup:
         print("⚠ " + missing_setup)
+    else:
+        setup_now = setup_case(project_root(pathlib.Path.cwd()).resolve())
+        print("· Setup: %s" % setup_label(setup_now))
+        if setup_now["caso"] == "sin_decidir":
+            print("  Falta decidir cómo se guarda: si se versiona, su commit en su propio PR; si no, cuando esta prueba pase:"
+                  "\n    %s" % guardar_command(project_root(pathlib.Path.cwd()).resolve(),
+                                              argparse.Namespace(quitar=True, paquete=None), None, ())
+                  + "\n  (agrega a --archivos los archivos del proyecto que se editaron a mano para el setup)")
     folder.mkdir(parents=True, exist_ok=True)
     ensure_ignored(folder)
     request = read_request(args.pedido)
@@ -14354,8 +14866,15 @@ def cmd_nuevo(args):
             print("✔ %s: el recorrido medido va ahí, un comentario por paso; cuando esté, el plan apunta a él con "
                   "\"recorrido\": \"bash %s\"" % (route, route))
     ensure_ignored(folder)
-    missing_setup = setup_warning(project_root(folder).resolve())
-    if missing_setup:
+    setup_root = project_root(folder).resolve()
+    missing_setup = setup_warning(setup_root)
+    setup_now = setup_case(setup_root)
+    print("%s Setup: %s" % ("⚠" if missing_setup else "·", setup_label(setup_now)))
+    if missing_setup and setup_now["dice"]["en_parche"]:
+        # A1: con el setup en un parche, lo que sigue es reponerlo; `siguiente` lo trae como primer paso.
+        for line in render_steps(reponer_steps(setup_root, setup_now, folder, plan), markdown=False, root=setup_root, plan=plan):
+            print("  " + line)
+    elif missing_setup:
         print("⚠ " + missing_setup)
     if fixed_hz:
         print("✔ Tasa de refresco ya fija en el dispositivo: %d Hz (%s). Queda en 'hz' del plan: no hace falta cambiarla."
@@ -14374,8 +14893,10 @@ def cmd_nuevo(args):
     if startup:
         print_next(folder, plan)
     else:
-        print("Siguiente: la sesión 1 completa los pasos, las marcas, la ventana y las métricas principales del plan; al "
-              "terminar, perf.py siguiente da los comandos para medir.")
+        print("Siguiente: la sesión 1 completa los pasos, las marcas, la ventana y las métricas principales del plan, y "
+              "registra los módulos del alcance (`setup --estado --carpeta` con --modulos: código o binario, según "
+              "Gradle); al terminar, este comando da los pasos para medir:\n    %s" % perf_command(
+                  setup_root, "siguiente", "--carpeta", relative_folder(folder, setup_root)))
 
 
 # ── instrumentar ─────────────────────────────────────────────────────────────
@@ -15224,11 +15745,11 @@ def setup_warning(root):
             hint = line.strip(" -*\t")[:200]
             if re.search(r"setup\s+listo", line, re.I):
                 break
-    how = ('según AGENTS.md: "%s"' % hint if hint else
-           "si el setup se guarda como parche, aplícalo (git apply <parche>); si se perdió, repite la sesión 0 "
-           "(perf.py instrumentar no pisa lo que exista)")
+    how = ('AGENTS.md dice: "%s". ' % hint if hint else "") + (
+        "`perf.py setup --estado` dice el caso y el comando que la repone (si el setup está en un parche, `setup --reponer` "
+        "lo aplica después de comprobarlo); si se perdió, repite la sesión 0 (perf.py instrumentar no pisa lo que exista)")
     return ('AGENTS.md dice "setup listo" pero %s: las marcas no van a salir y la variante medida puede no compilar. '
-            "Reaplícala antes de seguir: %s" % (missing, how))
+            "Reponla antes de seguir: %s" % (missing, how))
 
 
 def resolve_variant(found, requested):
@@ -15530,6 +16051,2144 @@ def cmd_instrumentar(args):
           "con el log en un archivo (setup.md · DoD)." % (variant[:1].upper() + variant[1:]))
 
 
+# ── El setup lo maneja la skill (0.14.0) ─────────────────────────────────────
+# "El setup" es lo que `instrumentar` genera más el cableado que aplica la sesión 0 (la variante o la propiedad -Pperf, el
+# source set y el manifest de medición, el gancho de red en cada builder, el módulo de inyección y sus tests). Vive de una
+# de tres maneras, y `perf.py` detecta cuál: versionado (en git), en un parche fuera del repo (lo repone antes de medir y
+# lo quita al cerrar) o no existe (sesión 0). Reponer y quitar cambian el código del usuario: antes de aplicar se
+# comprueba (`git apply --check`), antes de quitar se guarda un respaldo, ningún parche se pisa y, ante cualquier duda, el
+# comando se detiene sin tocar nada. Nunca se usa checkout, restore, reset --hard ni clean.
+SETUP_BLOCK_LINE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?[*_]*setup[*_]*[ \t]*:[*_]*[ \t]*en[ \t]+parche\b(.*)$", re.I)
+SETUP_READY = re.compile(r"setup\s+listo", re.I)
+SETUP_PATCH_PREFIX = "perf-setup"
+SETUP_BACKUPS = "respaldos"
+# Lo que delata sin duda una línea del setup en un archivo del proyecto: las clases que genera `instrumentar`, el source
+# set y el manifest de medición y la propiedad -Pperf. Lo que no es inequívoco (un `reportFullyDrawn()`, el build type) no
+# se adivina: esos archivos se pasan con --archivos.
+SETUP_CODE = re.compile(
+    r"\bPerf(?:Hooks|Installer|EventListeners|NetworkModule|HooksModule)\b|\bSectionTracer\b|\bTraceEventListener\b|"
+    r"\b(?:ScreenTraceCallbacks|NavigationTrace|MarkTrace|HttpSectionName)\b|hb-perf|perf-installer|"
+    r"<profileable\b|\bisProfileable\b|\bprofileable\s+true\b|gradleProperty\(\s*[\"']perf[\"']\s*\)|(?<![\w-])-Pperf\b|"
+    r"\bsrc/perf\b|\*\*/perf/\*\*")
+PUNCTUATION_ONLY = re.compile(r"^[\s{}()\[\];,]*$")  # una llave o un paréntesis solos no dicen de quién es un hunk
+SETUP_CLOSE_FILE = "cierre-setup.json"
+SETUP_PATH = re.compile(r"(?:^|/)src/perf/")
+GRADLE_OR_MANIFEST = (".gradle", ".gradle.kts", "AndroidManifest.xml", ".toml", ".pro")
+STAGED = re.compile(r"[MADRC]")
+APP_ID_KEY = re.compile(r"application\s*id|paquete(?:\s+medido)?", re.I)
+APP_ID_VALUE = re.compile(r"[A-Za-z]\w*(?:\.[A-Za-z]\w*)+")
+NO_REMOTE = "sin remoto"
+
+
+def setup_patches_dir(root):
+    """La carpeta de los parches del setup: la de AGENTS.md o, sin ella, setup/parches en la carpeta de investigaciones
+    (que git ignora por .git/info/exclude)."""
+    configured = perf_folders(root)["parches"]
+    return pathlib.Path(os.path.normpath(str(configured))) if configured else \
+        pathlib.Path(os.path.normpath(str(investigations_base(root) / "setup" / "parches")))
+
+
+def agents_path(path, root):
+    """Una ruta para dejar escrita en AGENTS.md: relativa a la raíz si está dentro o justo al lado (`../parches`); si no,
+    con ~ cuando está en la carpeta del usuario (el archivo se versiona: sin el nombre de usuario)."""
+    shown = shown_path(path, root)
+    if not os.path.isabs(shown):
+        return shown
+    beside = os.path.relpath(shown, str(root))
+    if not beside.startswith(os.path.join("..", "..")):  # junto a la raíz (un repo o una carpeta hermana)
+        return beside
+    home = str(home_dir())
+    if shown.startswith(home.rstrip(os.sep) + os.sep):
+        shown = "~" + shown[len(home.rstrip(os.sep)):]
+    return shown
+
+
+def setup_path(raw, root):
+    path = pathlib.Path(os.path.expanduser(str(raw).strip().strip("`'\"")))
+    return pathlib.Path(os.path.normpath(str(path if path.is_absolute() else pathlib.Path(root) / path)))
+
+
+def agents_setup(root):
+    """Lo que AGENTS.md dice del setup: {"listo", "en_parche", "antigua", "parches": [rutas], "linea"}. La línea nueva
+    (`Setup: en parche <ruta>`, en el bloque de estado que mantiene perf.py) manda; si no está, vale la de versiones
+    anteriores ("setup listo, en parche: `git apply <ruta>` antes de medir", con o sin el resto de la frase)."""
+    out = {"listo": False, "en_parche": False, "antigua": False, "parches": [], "linea": ""}
+    text = read_agents(root)
+    if text is None:
+        return out
+    out["listo"] = bool(SETUP_READY.search(text))
+    section = performance_section(text)
+    body = text[section[0]:section[1]] if section else ""
+    block = re.search(re.escape(AGENTS_BLOCK[0]) + r"(.*?)" + re.escape(AGENTS_BLOCK[1]), body, re.S)
+    for line in (block.group(1) if block else "").splitlines():
+        found = SETUP_BLOCK_LINE.match(line)
+        if found:
+            # la ruta es lo que va entre los primeros acentos graves, entera (puede tener espacios)
+            quoted = re.search(r"`([^`]+)`", found.group(1))
+            raw = quoted.group(1) if quoted else patch_path_in(found.group(1))
+            out.update(listo=True, en_parche=True, linea=line.strip(), parches=[setup_path(raw, root)] if raw else [])
+            return out
+    for _, line in prose_lines(text):
+        if SETUP_READY.search(line) and REAPPLY_HINT.search(line):
+            raws = []
+            for span in re.findall(r"`([^`]+)`", line):  # `git -C '<repo con espacios>' apply '<parche>'`: citado con el shell
+                try:
+                    words = shlex.split(span)
+                except ValueError:
+                    words = span.split()
+                raws += [word for word in words if word.endswith((".patch", ".diff"))]
+            raws = raws or [found.group(1) or found.group(2) for found in PATCH_PATH.finditer(line)]
+            out.update(en_parche=True, antigua=True, linea=line.strip(" -*\t\r\n")[:240],
+                       parches=[setup_path(raw, root) for raw in dict.fromkeys(raws) if "<" not in raw])
+            return out
+    return out
+
+
+def find_hooks(root):
+    """La ruta de PerfHooks.kt bajo la raíz (lo que deja `instrumentar` en el código principal), o None."""
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = sorted(d for d in dirs if d not in ("build", "node_modules", "reports", "out") and not d.startswith("."))
+        if "PerfHooks.kt" in files:
+            return pathlib.Path(current) / "PerfHooks.kt"
+    return None
+
+
+def git_tracked(top, path):
+    try:
+        done = subprocess.run(["git", "-C", str(top), "ls-files", "--error-unmatch", "--", str(path)],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def git_out(top, *args):
+    """La salida de un comando de git de solo lectura en el repo, o None si falla."""
+    try:
+        done = subprocess.run(["git", "-C", str(top)] + list(args), capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def clean_remote(url):
+    """Una URL de remoto sin usuario ni clave (`https://usuario:token@host/…` → `https://host/…`): va a la ficha y a la
+    salida, que lee el agente."""
+    return re.sub(r"^([a-z][a-z0-9+.-]*://)[^/@]*@", r"\1", (url or "").strip())
+
+
+def repo_remote(top):
+    return clean_remote(git_out(top, "remote", "get-url", "origin") or "") or NO_REMOTE
+
+
+def same_remote(first, second):
+    """True si dos URL de remoto son el mismo repo: ssh o https, con o sin usuario, puerto, `.git` o barra final."""
+    def normal(url):
+        url = re.sub(r"^[a-z][a-z0-9+.-]*://", "", (url or "").strip().lower())
+        url = re.sub(r"^[^@/]+@", "", url)
+        found = re.match(r"([^:/]+)(?::(\d+)(?=/|$))?[:/]*(.*)$", url)
+        host, path = (found.group(1), found.group(3)) if found else (url, "")
+        return ("%s/%s" % (host, re.sub(r"\.git$", "", path.strip("/")))).lower()
+    return normal(first) == normal(second)
+
+
+def measured_app_id(root, option=None):
+    """El applicationId medido: --paquete o el que dice la sección de rendimiento de AGENTS.md; None si no lo dice."""
+    if option:
+        return option.strip()
+    for key, value in performance_lines(root):
+        found = APP_ID_VALUE.search(value) if APP_ID_KEY.fullmatch(key) else None
+        if found:
+            return found.group(0)
+    return None
+
+
+def ficha_path(patch):
+    return pathlib.Path(str(patch) + ".json")
+
+
+def read_ficha(patch):
+    """La ficha de un parche de setup (<parche>.json), o None si no existe o no se puede leer."""
+    try:
+        data = json.loads(ficha_path(patch).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def sha256_of(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+def write_ficha(patch, root, top, app_id, origin, skill=VERSION, base=True):
+    """Escribe la ficha junto al parche: de qué repo y de qué app es, con qué versión de la skill se hizo, sobre qué
+    commit, qué archivos toca y su SHA-256. No pisa una ficha que ya exista."""
+    ficha = {"parche": pathlib.Path(patch).name, "sha256": sha256_of(patch), "remoto": repo_remote(top),
+             "raiz": pathlib.Path(top).name, "applicationId": app_id, "skill": skill,
+             "commit_base": git_out(top, "rev-parse", "HEAD") if base else None, "archivos": patch_files(patch),
+             "creado": datetime.datetime.now().replace(microsecond=0).isoformat(), "estado": "vigente", "origen": origin}
+    if ficha_path(patch).exists():
+        return read_ficha(patch) or ficha
+    ficha_path(patch).write_text(json.dumps(ficha, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return ficha
+
+
+def mark_replaced(patch, new):
+    """Deja en la ficha de un parche viejo que otro lo reemplazó (no borra ni toca el parche). Sin ficha, escribe una
+    mínima."""
+    ficha = read_ficha(patch) or {"parche": pathlib.Path(patch).name, "sha256": sha256_of(patch),
+                                  "archivos": patch_files(patch), "origen": "parche de una versión anterior, sin ficha"}
+    ficha.update(estado="reemplazado", reemplazado_por=pathlib.Path(new).name,
+                 reemplazado_el=datetime.date.today().isoformat())
+    ficha_path(patch).write_text(json.dumps(ficha, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def setup_candidates(root):
+    """Los parches de setup de la carpeta de parches que nadie reemplazó, por nombre."""
+    base = setup_patches_dir(root)
+    found = sorted(base.glob(SETUP_PATCH_PREFIX + "*.patch")) if base.is_dir() else []
+    return [path for path in found if (read_ficha(path) or {}).get("estado") != "reemplazado"]
+
+
+SETUP_CASES = {"versionado": "versionado (en git)", "parche": "en parche", "sin": "sin setup",
+               "sin_decidir": "en el árbol, sin versionar ni guardar en un parche", "duda": "en parche, sin parche vigente",
+               "perdido": "no está en el código ni en un parche"}
+
+
+def setup_case(root):
+    """El caso del setup del proyecto: {"caso", "presente", "hooks", "parche", "ficha", "candidatos", "dice"}.
+
+    - versionado: PerfHooks.kt está en git y AGENTS.md dice "setup listo": se usa.
+    - parche: AGENTS.md nombra un parche que existe; si el código no está en el árbol, se repone antes de medir.
+    - sin: ni código ni línea en AGENTS.md: falta la sesión 0.
+    - sin_decidir: el código está en el árbol sin commitear y sin parche (la sesión 0 no terminó): se usa.
+    - duda: AGENTS.md dice que está en un parche (o "setup listo" sin código) y hay parches sin uno vigente: se pregunta.
+    - perdido: AGENTS.md dice que el setup está, el código no y no hay ningún parche."""
+    root = pathlib.Path(root)
+    said, hooks = agents_setup(root), find_hooks(root)
+    top = git_toplevel(root)
+    case = {"dice": said, "presente": hooks is not None, "hooks": hooks, "parche": None, "ficha": None, "candidatos": [],
+            "raiz": root, "repo": top}
+    if said["en_parche"]:
+        named = [path for path in said["parches"] if path.is_file()]
+        if len(named) > 1 and top is not None:  # la línea vieja de `cerrar` nombra un parche por repo: vale el de este
+            own = [path for path in named if patch_repo(path, [top.resolve()]) is not None]
+            named = own or named
+        if len(named) == 1:
+            case.update(caso="parche", parche=named[0], ficha=read_ficha(named[0]))
+            return case
+        case["candidatos"] = named or setup_candidates(root)
+        if hooks is not None:  # el código está: se usa; falta guardarlo (el parche que nombra AGENTS.md no existe)
+            case.update(caso="sin_decidir", parche_perdido=True, versionable=top is not None and git_tracked(top, hooks))
+        else:
+            case["caso"] = "duda" if case["candidatos"] else "perdido"
+        return case
+    if hooks is not None:
+        tracked = top is not None and git_tracked(top, hooks)
+        case["caso"] = "versionado" if tracked and said["listo"] else "sin_decidir"
+        case["versionable"] = tracked
+        return case
+    case["candidatos"] = setup_candidates(root)
+    if case["candidatos"]:  # hay parches de setup y AGENTS.md no dice cuál vale (o perdió la línea): se pregunta
+        case["caso"] = "duda"
+    else:
+        case["caso"] = "perdido" if said["listo"] else "sin"
+    return case
+
+
+def setup_missing(root):
+    """El caso del setup cuando AGENTS.md dice que está en un parche y su código no está en el árbol; None si no hay
+    nada que reponer. Sin esa línea no recorre el proyecto (se llama en cada `siguiente`)."""
+    if not agents_setup(root)["en_parche"]:
+        return None
+    case = setup_case(root)
+    return None if case["presente"] else case
+
+
+def setup_label(case):
+    """El caso en palabras, para la primera línea de una sesión: "setup en parche, repuesto"."""
+    kind = case["caso"]
+    if kind == "parche":
+        return "setup en parche, %s" % ("puesto" if case["presente"] else "sin reponer")
+    if kind == "duda":
+        return "setup en parche, falta decir cuál es el parche vigente"
+    if kind == "sin_decidir" and case.get("parche_perdido"):
+        return "setup en el árbol; AGENTS.md nombra un parche que no existe"
+    return {"versionado": "setup versionado", "sin": "sin setup", "sin_decidir": "setup en el árbol, sin versionar ni parche",
+            "perdido": "setup perdido: AGENTS.md lo da por hecho y no está"}[kind]
+
+
+def setup_command(root, *parts, folder=None):
+    extra = ["--carpeta", relative_folder(pathlib.Path(folder), root)] if folder else []
+    return perf_command(root, "setup", *(list(parts) + extra))
+
+
+def session0_step(plan=None):
+    return chat("Usa hb-performance: sesión 0 (setup). El proyecto no tiene el setup de medición en el código", "intermedio",
+                "medio", "sesión 0: genera la instrumentación, la cablea, corre el DoD y la prueba de humo, y te pregunta "
+                "si el setup se versiona o va en un parche", plan or {})
+
+
+def reponer_steps(root, case, folder=None, plan=None):
+    """Los pasos para tener el setup en el árbol según su caso: reponerlo con su parche, decir cuál es el vigente o la
+    sesión 0. [] si no hay nada que hacer."""
+    kind = case["caso"]
+    if case["presente"] or kind in ("versionado", "sin_decidir"):
+        return []
+    if kind == "parche":
+        return [terminal(setup_command(root, "--reponer", folder=folder),
+                         "repone el setup de medición con su parche (%s): comprueba que el parche es de este repo y de esta "
+                         "app, que no cambió y que aplica limpio, y recién entonces lo aplica" % case["parche"].name,
+                         "nada; si algo no coincide o hay cambios tuyos en esos archivos, se detiene sin tocar nada y te "
+                         "dice qué falta")]
+    if kind == "duda":
+        many = len(case["candidatos"]) > 1
+        steps = [{"tipo": "avisos", "titulo": "¿Cuál es el parche del setup?", "lineas": [
+            "%s, el código no está en el árbol y %s: perf.py no adivina. Confirma el "
+            "que corresponde a este repo (el más nuevo, si lo rehiciste)%s" % (
+                "AGENTS.md dice que el setup está listo%s" % (" y en un parche" if case["dice"]["en_parche"] else "")
+                if case["dice"]["listo"] else "AGENTS.md no dice nada del setup",
+                "hay %d parches de setup sin uno vigente (%s)" % (len(case["candidatos"]), ", ".join(
+                    path.name for path in case["candidatos"])) if many else
+                "encontré un parche de setup que nadie confirmó (%s)" % case["candidatos"][0].name,
+                "; si ninguno sirve, repite la sesión 0" if many else "; si no es de este proyecto, repite la sesión 0")]}]
+        for path in case["candidatos"]:
+            steps.append(terminal(setup_command(root, "--vigente", path, folder=folder),
+                                  "deja %s como el parche de setup vigente (lo escribe en AGENTS.md) después de comprobar "
+                                  "que es de este repo; no toca el código" % path.name,
+                                  "corre solo el del parche que corresponde; después, `setup --reponer` lo aplica"))
+        return steps
+    lost = [{"tipo": "avisos", "titulo": "El setup no está", "lineas": [
+        "AGENTS.md dice que el setup está listo%s, pero el código no está en el árbol y no encontré ningún parche de setup "
+        "en %s: se perdió o lo quitaron a mano. Si tienes el parche en otra carpeta, confírmalo con `perf.py setup "
+        "--vigente` seguido de su ruta; si no, la sesión 0 lo genera de nuevo (no pisa lo que exista)" % (
+            " (%s)" % case["dice"]["linea"][:120] if case["dice"]["linea"] else "", setup_patches_dir(root))]}] \
+        if kind == "perdido" else []
+    return lost + [session0_step(plan)]
+
+
+def setup_tokens(top, changes):
+    """Los nombres de las variantes cuyo manifest generó la skill entre los cambios (src/<variante>/AndroidManifest.xml):
+    en un archivo de Gradle o un manifest, una línea que nombra esa variante es del setup."""
+    names = set()
+    for rel in changes:
+        parts = pathlib.PurePosixPath(rel).parts
+        if len(parts) >= 3 and parts[-1] == "AndroidManifest.xml" and parts[-3] == "src" and parts[-2] not in (
+                "main", "debug", "release") and is_generated(pathlib.Path(top) / rel):
+            names.add(parts[-2])
+    if not names:
+        return None, set()
+    return re.compile(r"(?i)(?<![a-z])(?:%s)(?![a-z])|(?:install|assemble|bundle)(?:%s)\b" % (
+        "|".join(re.escape(name) + r"(?:Implementation|Api|CompileOnly|RuntimeOnly)?" for name in sorted(names)),
+        "|".join(re.escape(name[:1].upper() + name[1:]) for name in sorted(names)))), names
+
+
+def code_changes(top, root, folder=None):
+    """Los archivos con cambios del repo ({ruta: estado}), sin la evidencia ni los parches de la skill."""
+    paths = [investigations_base(root), setup_patches_dir(root)] + ([pathlib.Path(folder).resolve()] if folder else [])
+    own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top) for path in paths]
+    own = [str(path).rstrip("/") for path in own if path is not None and str(path) != "."]
+    # AGENTS.md y CLAUDE.md no entran: ahí queda anotado el caso del setup (lo escribe perf.py), no son parte del setup.
+    return {rel: code for rel, code in git_changes(top).items()
+            if not any(rel == path or rel.startswith(path + "/") for path in own)
+            and pathlib.PurePosixPath(rel).name not in NOT_SETUP_FILES}
+
+
+NOT_SETUP_FILES = ("AGENTS.md", "CLAUDE.md")
+
+
+def project_investigations(root):
+    """[(carpeta, abierta)] de las investigaciones del proyecto (con estado.md); abierta = sin reporte final."""
+    base = investigations_base(root)
+    out, seen = [], set()
+    try:
+        states = sorted(list(base.glob("*/estado.md")) + list(base.glob("*/*/estado.md")))[:500] if base.is_dir() else []
+    except OSError:
+        states = []
+    for state in states:
+        folder = state.parent
+        if folder.resolve() in seen or folder.name in ("setup", "humo") or folder.parent.name in ("setup", "humo"):
+            continue
+        seen.add(folder.resolve())
+        out.append((folder, final_report(folder) is None))
+    return out
+
+
+def declared_temp_files(root, top):
+    """{ruta relativa al repo: investigación} de los cambios temporales sin quitar que declaran las investigaciones
+    abiertas del proyecto (los que no son del setup): `setup --guardar` no los mete en el parche del setup."""
+    out = {}
+    for folder, is_open in project_investigations(root):
+        if not is_open:
+            continue
+        try:
+            rows = temp_changes((folder / "estado.md").read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for change in rows:
+            if change["revertido"] or SETUP_ROW.search(change["que"] or ""):
+                continue
+            found, rel = resolve_repo_file(root, change["archivo"], change["repo"], [])
+            if found is not None and found == pathlib.Path(top).resolve():
+                out[os.path.normpath(rel)] = shown_path(folder, root)
+    return out
+
+
+def classify_setup(top, root, explicit=(), known=None):
+    """Clasifica los archivos con cambios del repo: {"setup": [(ruta, estado)], "ajenos": [ruta], "mixtos": [(ruta,
+    línea de ejemplo, motivo)], "temporales": {ruta: investigación}, "nuevos": [ruta]}.
+
+    Es del setup, entero: un archivo que generó la skill, uno del source set de medición, uno que se pasó con --archivos.
+    En los demás se mira línea por línea: una línea es del setup si está en el parche vigente (`known`) o si es
+    inequívoca (SETUP_CODE, o la variante medida en un archivo de Gradle). Un archivo es del setup solo si TODAS sus
+    líneas cambiadas lo son; si tiene líneas del setup y otras que no, es mixto: nadie decide por el usuario qué es de
+    quién, ni se lleva su trabajo dentro del parche. En un archivo que una investigación abierta declara en "Cambios
+    temporales" solo cuentan las líneas del parche vigente (una marca tiene aspecto de setup y no lo es).
+    "nuevos": los archivos con setup que el parche vigente no tiene."""
+    top = pathlib.Path(top)
+    changes = code_changes(top, root)
+    variant, names = setup_tokens(top, changes)
+    temp = declared_temp_files(root, top)
+    explicit = {os.path.normpath(rel) for rel in explicit}
+    known = known or {}
+    out = {"setup": [], "ajenos": [], "mixtos": [], "temporales": {}, "nuevos": []}
+    for rel, code in sorted(changes.items()):
+        path = top / rel
+        norm = os.path.normpath(rel)
+        parts = pathlib.PurePosixPath(rel).parts
+        mine = known.get(norm, set())
+        in_temp = norm in temp
+        whole = norm in explicit or (not in_temp and (
+            (path.is_file() and is_generated(path)) or bool(SETUP_PATH.search(rel)) or (
+                code == "??" and "src" in parts[:-2] and parts[parts.index("src") + 1] in names)))
+        if whole:
+            out["setup"].append((rel, code))
+            if changed_lines(file_patch(top, rel, code)) - mine:
+                out["nuevos"].append(rel)
+            continue
+        if in_temp and not mine:
+            out["temporales"][rel] = temp[norm]
+            continue
+        extra = variant if rel.endswith(GRADLE_OR_MANIFEST) and not in_temp else None
+        kinds, example, fresh = set(), None, False
+        for section in patch_sections(file_patch(top, rel, code)).values():
+            hunks = split_hunks(section)[1]
+            if not hunks:  # un binario, un archivo vacío o un cambio de permisos: no se puede leer de quién es
+                kinds.add("ajeno")
+            for hunk in hunks:
+                own = foreign = 0
+                for line in hunk_changes(hunk):
+                    text = line[1:].decode("utf-8", "replace")
+                    if PUNCTUATION_ONLY.match(text):
+                        continue
+                    if line in mine:
+                        own += 1
+                    elif not in_temp and "TEMPORAL" not in text and (
+                            SETUP_CODE.search(text) or (extra is not None and extra.search(text))):
+                        own += 1
+                        fresh = True
+                    else:
+                        foreign += 1
+                        example = example or text.strip()[:70]
+                if own or foreign:
+                    kinds.add("mezcla" if own and foreign else "setup" if own else "ajeno")
+        if kinds == {"setup"}:
+            out["setup"].append((rel, code))
+            if fresh:
+                out["nuevos"].append(rel)
+        elif "mezcla" in kinds or "setup" in kinds:
+            out["mixtos"].append((rel, example or "", "la investigación %s declara ahí un cambio temporal" % temp[norm]
+                                  if in_temp else ""))
+            if fresh:
+                out["nuevos"].append(rel)
+        elif in_temp:
+            out["temporales"][rel] = temp[norm]
+        else:
+            out["ajenos"].append(rel)
+    return out
+
+
+def known_setup_lines(patch):
+    """{ruta: líneas que agrega o quita} del parche de setup vigente: lo que ya se guardó como setup lo sigue siendo."""
+    data = read_patch(patch) if patch else b""
+    return {os.path.normpath(name): changed_lines(data, name) for name in patch_sections(data)}
+
+
+def legacy_patch_problem(patch):
+    """Un parche de setup sin ficha (de una versión anterior) solo se usa si todos sus archivos son del setup: el motivo
+    por el que no, o None. Es del setup un archivo que generó la skill o del source set de medición, o uno en el que cada
+    hunk lleva alguna línea inequívoca del setup (SETUP_CODE, o la variante de un manifest generado, en un archivo de
+    Gradle). `main`, `debug` y `release` no cuentan como variante medida."""
+    data = read_patch(patch)
+    sections = patch_sections(data)
+    if not sections:
+        return "no tiene el formato de un parche de git (o está vacío)"
+    variants = {pathlib.PurePosixPath(name).parts[-2] for name in sections
+                if name.endswith("AndroidManifest.xml") and GENERATED.encode() in sections[name]
+                and len(pathlib.PurePosixPath(name).parts) >= 3} - {"main", "debug", "release"}
+    variant = re.compile(r"(?i)(?<![a-z])(?:%s)(?![a-z])" % "|".join(re.escape(name) for name in sorted(variants))) \
+        if variants else None
+    foreign = []
+    for name, section in sections.items():
+        parts = pathlib.PurePosixPath(name).parts
+        if GENERATED.encode() in section or SETUP_PATH.search(name) or (
+                "src" in parts[:-2] and parts[parts.index("src") + 1] in variants):
+            continue
+        extra = variant if name.endswith(GRADLE_OR_MANIFEST) else None
+        hunks = split_hunks(section)[1]
+        ok = bool(hunks)
+        for hunk in hunks:
+            texts = [line[1:].decode("utf-8", "replace") for line in hunk_changes(hunk)]
+            if not any(SETUP_CODE.search(text) or (extra is not None and extra.search(text)) for text in texts):
+                ok = False
+        if not ok:
+            foreign.append(name)
+    if foreign:
+        return "toca archivos o cambios que no reconozco como del setup (%s)" % ", ".join(foreign[:5])
+    return None
+
+
+def staged_files(changes, files):
+    """Los archivos de `files` que están en el índice (git add, o git add -N): quitar el setup los dejaría a medias."""
+    return [rel for rel in files if rel in changes and (STAGED.match(changes[rel][0]) or changes[rel] == " A")]
+
+
+def ensure_ignored_in(top, folder):
+    """Como ensure_ignored, con el repo dado: si la carpeta está dentro del repo y git no la ignora, la agrega a
+    .git/info/exclude (local: el repo no cambia)."""
+    inside = under(lexical(folder), pathlib.Path(top)) or under(pathlib.Path(folder).resolve(), pathlib.Path(top).resolve())
+    if inside is None or str(inside) == ".":
+        return
+    try:
+        ignored = subprocess.run(["git", "-C", str(top), "check-ignore", "-q", str(inside)], capture_output=True, timeout=30)
+        if ignored.returncode != 1:
+            return
+        common = git_out(top, "rev-parse", "--git-common-dir")
+        if not common:
+            return
+        exclude = (pathlib.Path(common) if os.path.isabs(common) else pathlib.Path(top) / common) / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(exclude), "a", encoding="utf-8") as handle:
+            handle.write("/%s/\n" % inside.as_posix())
+        print("✔ git ignora %s (en .git/info/exclude, local: el repo no cambia)" % inside.as_posix())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        print("⚠ no pude comprobar si git ignora %s: que los parches no entren a un commit" % folder)
+
+
+def register_setup_patch(root, top, patch, app_id, origin, replaced=()):
+    """Deja el parche como el de setup vigente del repo: su ficha, la línea `Setup: en parche <ruta>` en el bloque de
+    estado de AGENTS.md y, en la ficha de los que reemplaza, que ya no valen. Devuelve las líneas que se le dicen al
+    usuario."""
+    lines = []
+    before = agents_setup(root)
+    ficha = write_ficha(patch, root, top, app_id, origin)
+    for old in replaced:
+        if pathlib.Path(old).resolve() != pathlib.Path(patch).resolve() and pathlib.Path(old).is_file():
+            mark_replaced(old, patch)
+            lines.append("✔ Reemplazado (queda guardado, ya no se usa; bórralo cuando quieras): %s" % old)
+    note = update_agents_state(root, setup=patch)
+    if note:
+        lines.append(note)
+    said = agents_setup(root)
+    if said["antigua"] or not said["en_parche"]:
+        lines.append("⚠ No pude dejar en AGENTS.md que el setup está en este parche (falta la sección de rendimiento, o no "
+                     "se pudo escribir): agrega la sección (## Rendimiento) y corre `%s`" % setup_command(
+                         root, "--vigente", patch))
+    elif before["antigua"]:
+        lines.append("· AGENTS.md todavía tiene la línea de versiones anteriores (\"%s\"): ya no hace falta; puedes "
+                     "borrarla. Manda la del bloque de estado, que mantiene perf.py" % before["linea"][:100])
+    return ficha, lines
+
+
+def read_setup_close(folder):
+    """Cómo quedó el setup al cerrar una investigación ({"setup", "fecha", "archivos"}); también lee lo que 0.14.0 pudo
+    dejar en cierre.json. {} si no hay nada."""
+    try:
+        data = json.loads((pathlib.Path(folder) / SETUP_CLOSE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    return data if isinstance(data, dict) else {}
+
+
+def save_setup_close(folder, **fields):
+    record = read_setup_close(folder)
+    record.update(fields, fecha=datetime.datetime.now().replace(microsecond=0).isoformat())
+    (pathlib.Path(folder) / SETUP_CLOSE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                                                        encoding="utf-8")
+    return record
+
+
+def setup_differs(top, root, case, explicit=()):
+    """True si el setup que hay en el árbol no es el del parche vigente: el parche no revierte limpio, su ficha no
+    coincide con el archivo, o hay setup que el parche no trae (por ejemplo, después de `instrumentar --actualizar`). Un
+    archivo que además tiene una mejora del usuario en otros hunks no cuenta: quitar el setup con su parche la deja como
+    está."""
+    patch = case["parche"]
+    ficha = case.get("ficha") or {}
+    if ficha.get("sha256") and ficha["sha256"] != sha256_of(patch):
+        return True
+    if not git_apply(top, patch, reverse=True, check=True)[0]:
+        return True
+    files = explicit_setup_files(top, explicit)[0] if explicit else ()
+    return bool(classify_setup(top, root, files, known_setup_lines(patch))["nuevos"])
+
+
+def explicit_setup_files(top, given):
+    """Las rutas de --archivos como rutas relativas al repo (se aceptan desde la carpeta actual o desde la raíz del repo), y
+    las que no corresponden a ningún archivo con cambios."""
+    changes = git_changes(top)
+    rels, unknown = [], []
+    for raw in given or ():
+        found = None
+        for base in (pathlib.Path.cwd(), pathlib.Path(top)):
+            path = pathlib.Path(os.path.expanduser(str(raw)))
+            path = pathlib.Path(os.path.normpath(str(path if path.is_absolute() else base / path)))
+            inside = under(path, pathlib.Path(top)) or under(pathlib.Path(os.path.realpath(str(path))), pathlib.Path(top))
+            if inside is not None and inside.as_posix() in changes:
+                found = inside.as_posix()
+                break
+        if found is None:
+            unknown.append(str(raw))
+        elif found not in rels:
+            rels.append(found)
+    return rels, unknown
+
+
+def guardar_command(root, args, folder, files):
+    """`setup --guardar` con todos los --archivos juntos (una sola opción: repetirla dejaría solo los últimos)."""
+    parts = ["--guardar"] + (["--quitar"] if getattr(args, "quitar", False) or getattr(args, "command", "") == "cerrar"
+                             else [])
+    if getattr(args, "paquete", None):
+        parts += ["--paquete", args.paquete]
+    return setup_command(root, *(parts + (["--archivos"] + list(files) if files else [])), folder=folder)
+
+
+def setup_guardar(root, args, folder=None, quiet_same=False, explicit=None):
+    """A2: guarda el setup del árbol como parche con su ficha y lo deja como el vigente. Devuelve (parche o None, caso).
+    `explicit`: archivos que son del setup enteros (los de --archivos, o las filas "setup" de una investigación)."""
+    top = git_toplevel(root)
+    if top is None:
+        raise PerfError("%s no es un repo de git: el setup se guarda como un parche de git" % root).con(guardado="nada")
+    top = top.resolve()
+    case = setup_case(root)
+    given = list(explicit if explicit is not None else getattr(args, "archivos", None) or ())
+    files, unknown = explicit_setup_files(top, given)
+    if unknown and explicit is None:
+        raise PerfError("--archivos nombra %s que no %s cambios sin commitear en %s (la ruta va desde la raíz del repo o "
+                        "desde la carpeta actual): no guardé nada" % (
+                            ", ".join(unknown), "tiene" if len(unknown) == 1 else "tienen", top)).con(
+            guardado="nada: no escribí ningún parche",
+            seguir=[("mira qué archivos tienen cambios y repite con sus rutas", "cd %s && git status --short" % q(top))])
+    if case["caso"] == "versionado":
+        print("✔ El setup está versionado (PerfHooks.kt está en git y AGENTS.md dice \"setup listo\"): no hay nada que "
+              "guardar en un parche.%s" % (" El cableado sin commitear de %s es parte de ese setup: va en su commit (o, si es "
+                                           "de una investigación, en \"Cambios temporales\" de su estado.md)."
+                                           % ", ".join(files) if files else ""))
+        return None, case
+    agents = read_agents(root)
+    if agents is None or performance_section(agents) is None:
+        # Sin dónde anotar el parche vigente, guardarlo dejaría un parche que nadie encuentra (y otro en cada intento).
+        raise PerfError("%s: no hay dónde anotar el parche del setup, así que no guardé nada. La sesión 0 escribe esa "
+                        "sección (setup.md · Cierre del setup); agrégala con el applicationId y \"setup listo\" y repite" % (
+                            "no hay AGENTS.md en %s" % root if agents is None else
+                            "AGENTS.md no tiene una sección de rendimiento (## Rendimiento o ## Performance)")).con(
+            guardado="nada: no escribí ningún parche", seguir=[("con la sección agregada, repite", same_command())])
+    current = case["parche"] if case["caso"] == "parche" else None
+    sorted_ = classify_setup(top, root, files, known_setup_lines(current))
+    if not case["presente"]:
+        # Sin PerfHooks.kt en el árbol no hay un setup completo que guardar: un parche armado con lo que quede suelto (una
+        # marca, un archivo a medias) reemplazaría al parche bueno por uno parcial.
+        stray = [rel for rel, _ in sorted_["setup"]] + [rel for rel, _, _ in sorted_["mixtos"]]
+        loose = (" Hay cambios sueltos con aspecto de setup que no guardé (%s): si son marcas de una investigación, van en "
+                 "\"Cambios temporales\" de su estado.md." % ", ".join(stray[:6])) if stray else ""
+        if current is not None:
+            print("· No hay nada que guardar: el setup no está en el árbol; está en %s.%s" % (current, loose))
+            return current, case
+        raise PerfError("no hay un setup que guardar: no encuentro PerfHooks.kt en el árbol (lo deja `instrumentar` en el "
+                        "código principal).%s" % loose).con(
+            guardado="nada: no escribí ningún parche",
+            seguir=[("mira el caso del setup y el paso que sigue", setup_command(root, "--estado", folder=folder))])
+    if sorted_["mixtos"]:
+        names = [rel for rel, _, _ in sorted_["mixtos"]]
+        loose = [rel for rel, _, why in sorted_["mixtos"] if not why]
+        follow = []
+        if loose:
+            follow.append(("si todo lo de %s es del setup" % ", ".join(loose), guardar_command(root, args, folder,
+                                                                                            files + loose)))
+        follow.append(("o, después de commitear lo que no es del setup (o de cerrar la investigación que declara ahí un "
+                       "cambio temporal), repite", guardar_command(root, args, folder, files)))
+        raise PerfError(
+            "no guardé nada: %s del setup y otros cambios que no son del setup en el mismo archivo:\n  - %s\n"
+            "No decido por ti qué es de quién, ni me llevo tu trabajo dentro del parche del setup. Si todo lo de ese archivo "
+            "es del setup (por ejemplo, el build type que cableó la sesión 0), repite con --archivos y su ruta; si lo otro "
+            "es trabajo tuyo (una mejora, un cambio en curso), haz primero el commit de ese trabajo (solo de lo tuyo: sin "
+            "las líneas del setup) y repite: el parche del setup se arma contra el último commit"
+            % ("este archivo tiene líneas" if len(names) == 1 else "estos archivos tienen líneas",
+               "\n  - ".join("%s%s%s" % (rel, " (por ejemplo: %s)" % example if example else "",
+                                         " · %s: ciérrala primero (`cerrar` quita sus marcas)" % why if why else "")
+                             for rel, example, why in sorted_["mixtos"]))).con(
+            guardado="nada: no escribí ningún parche ni toqué el código", seguir=follow)
+    if not sorted_["setup"]:
+        raise PerfError("no encontré archivos del setup con cambios sin commitear en %s: no hay nada que guardar. Si el "
+                        "setup ya está commiteado, está versionado y no necesita parche; si lo cableaste en archivos que no "
+                        "reconozco, pásalos con --archivos" % top).con(
+            guardado="nada: no escribí ningún parche",
+            seguir=[("mira el caso del setup y el paso que sigue", setup_command(root, "--estado", folder=folder))])
+    rels = [rel for rel, _ in sorted_["setup"]]
+    data = b"".join(file_patch(top, rel, code) for rel, code in sorted_["setup"])
+    for rel, where in sorted(sorted_["temporales"].items()):
+        print("· No entra en el parche del setup: %s (cambio temporal de la investigación %s; lo quita `cerrar`)" % (
+            rel, where))
+    if sorted_["ajenos"]:
+        print("· No entran en el parche del setup (no son del setup; se quedan como están): %s%s" % (
+            ", ".join(sorted_["ajenos"][:8]), " y %d más" % (len(sorted_["ajenos"]) - 8) if len(sorted_["ajenos"]) > 8
+            else ""))
+    ficha = read_ficha(current) if current is not None else None
+    intact = ficha is None or not ficha.get("sha256") or ficha["sha256"] == sha256_of(current)
+    if current is not None and intact and hashlib.sha256(data).hexdigest() == sha256_of(current):
+        if ficha is not None and ficha.get("skill") != VERSION and not getattr(args, "simular", False):
+            # el setup se comprobó con esta versión (por ejemplo, `instrumentar --actualizar` no cambió nada)
+            ficha.update(skill=VERSION, comprobado=datetime.date.today().isoformat())
+            ficha_path(current).write_text(json.dumps(ficha, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if not quiet_same:
+            print("✔ El parche vigente ya tiene este setup (%s): no guardo otro%s." % (
+                current, "" if ficha is None else "; su ficha queda al día con hb-performance %s" % VERSION))
+        return current, case
+    if getattr(args, "simular", False):
+        print("· Simulación: guardaría %d archivo%s del setup (%s) en %s y lo dejaría como parche vigente%s." % (
+            len(rels), "" if len(rels) == 1 else "s", ", ".join(rels[:6]) + (" …" if len(rels) > 6 else ""),
+            setup_patches_dir(root), " (reemplaza a %s)" % current.name if current else ""))
+        return current, case
+    target_dir = setup_patches_dir(root)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ensure_ignored_in(top, target_dir)
+    stamp_ = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    patch = write_new(target_dir / ("%s-%s-%s.patch" % (SETUP_PATCH_PREFIX, VERSION, stamp_)), data)
+    ok, error = git_apply(top, patch, reverse=True, check=True)
+    if not ok:
+        raise PerfError("el parche del setup que armé (%s) no revierte limpio: %s. No lo dejé como vigente ni toqué el "
+                        "código" % (patch, error or "git apply --check -R falló")).con(
+            guardado="el parche, como copia sin usar: %s" % patch,
+            seguir=[("revisa esos archivos (uno que cambió mientras se guardaba) y repite", same_command())])
+    app_id = measured_app_id(root, getattr(args, "paquete", None))
+    replaced = [current] if current is not None else []
+    replaced += [path for path in case["candidatos"] if path not in replaced]
+    ficha, notes = register_setup_patch(root, top, patch, app_id, "perf.py setup --guardar", replaced)
+    print("✔ Setup guardado como parche (no pisa ninguno; revierte limpio): %s" % patch)
+    print("✔ Ficha: %s · repo %s · app %s · hb-performance %s · %d archivo%s" % (
+        ficha_path(patch), ficha["remoto"], ficha["applicationId"] or "sin dato (pásalo con --paquete)", ficha["skill"],
+        len(rels), "" if len(rels) == 1 else "s"))
+    for line in notes:
+        print(line)
+    return patch, setup_case(root)
+
+
+def setup_backup(top, root, folder=None):
+    """Antes de quitar: un respaldo de todo el diff del repo, con fecha y hora y sin pisar otro."""
+    changes = code_changes(top, root, folder)
+    stamp_ = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    path = setup_patches_dir(root) / SETUP_BACKUPS / ("%s-respaldo-%s-%s.patch" % (SETUP_PATCH_PREFIX, slug(top.name), stamp_))
+    return write_new(path, b"".join(file_patch(top, rel, code) for rel, code in sorted(changes.items())))
+
+
+def setup_quitar(root, args, folder=None, explicit=None):
+    """A4: quita el setup del árbol con su parche vigente. Devuelve el estado final: "quitado", "ausente" (ya estaba
+    quitado y guardado), "versionado", "sin", "nada" (ni código ni parche) o "simulado"."""
+    case = setup_case(root)
+    kind = case["caso"]
+    if kind == "versionado":
+        print("✔ El setup está versionado (en git): no se quita nada; queda en el repo.")
+        return "versionado"
+    if kind == "sin":
+        print("· El proyecto no tiene setup de medición: no hay nada que quitar.")
+        return "sin"
+    if kind in ("duda", "perdido"):
+        print("· El setup no está en el árbol y AGENTS.md no nombra un parche vigente que exista: no hay nada que quitar.")
+        return "nada"
+    top = (case["repo"] or pathlib.Path(root)).resolve()
+    if kind == "sin_decidir":
+        # En el árbol y sin un parche que lo reproduzca: quitarlo así lo perdería. Primero se guarda (el mismo comando).
+        if explicit is None:
+            raise PerfError("el setup está en el árbol y no está guardado en ningún parche: si lo quito, se pierde. "
+                            "Guárdalo primero (el mismo comando que lo guarda lo quita)").con(
+                guardado="nada: no toqué el código",
+                seguir=[("guarda el setup como parche, con su ficha, y lo quita", guardar_command(
+                    root, argparse.Namespace(quitar=True, paquete=getattr(args, "paquete", None)), folder, ()))])
+        patch, case = setup_guardar(root, args, folder, quiet_same=True, explicit=explicit)
+        if getattr(args, "simular", False):
+            print("· Simulación: después lo quitaría con git apply -R, con un respaldo de todo el diff antes.")
+            return "simulado"
+        if patch is None or case["caso"] != "parche":
+            raise PerfError("no pude dejar guardado el setup de ahora, así que no lo quité").con(guardado="nada")
+    elif not case["presente"]:
+        print("✔ El setup ya está quitado: su código no está en el árbol y queda guardado en %s." % case["parche"])
+        return "ausente"
+    elif setup_differs(top, root, case, explicit or ()):
+        # El setup cambió respecto del parche vigente (por ejemplo, tras `instrumentar --actualizar`): nunca se pierde.
+        print("· El setup del árbol no es igual al del parche vigente (%s): lo guardo antes de quitar." % case["parche"].name)
+        patch, case = setup_guardar(root, args, folder, quiet_same=True, explicit=explicit)
+        if getattr(args, "simular", False):
+            print("· Simulación: después lo quitaría con git apply -R, con un respaldo de todo el diff antes.")
+            return "simulado"
+        if patch is None or case["caso"] != "parche":
+            raise PerfError("no pude dejar guardado el setup de ahora, así que no lo quité").con(guardado="nada")
+    patch = case["parche"]
+    files = patch_files(patch)
+    changes = git_changes(top)
+    staged = staged_files(changes, files)
+    if staged:
+        raise PerfError("hay archivos del setup en el índice de git (git add): %s. Quitar el setup los dejaría a medias "
+                        "(en el índice y sin archivo), así que no toqué nada" % ", ".join(staged[:8])).con(
+            guardado="nada: no toqué el código",
+            seguir=[("saca esos archivos del índice (no cambia su contenido)",
+                     "cd %s && git reset -q -- %s" % (q(top), " ".join(q(rel) for rel in staged))),
+                    ("después, repite", same_command())])
+    ok, error = git_apply(top, patch, reverse=True, check=True)
+    if not ok:
+        raise PerfError("el parche del setup (%s) no revierte limpio: %s. No toqué nada" % (
+            patch, error or "git apply --check -R falló")).con(
+            guardado="nada: no toqué el código",
+            seguir=[("guarda el setup de ahora como parche nuevo y lo quita", guardar_command(
+                root, argparse.Namespace(quitar=True, paquete=getattr(args, "paquete", None)), folder, ()))])
+    if getattr(args, "simular", False):
+        print("· Simulación: guardaría un respaldo de todo el diff de %s en %s y quitaría el setup con git apply -R %s "
+              "(%d archivo%s). No toqué nada." % (top, setup_patches_dir(root) / SETUP_BACKUPS, patch, len(files),
+                                                   "" if len(files) == 1 else "s"))
+        return "simulado"
+    backup = setup_backup(top, root, folder)
+    print("✔ Respaldo de todo el diff de %s (no pisa ninguno): %s" % (top, backup))
+    ok, error = git_apply(top, patch, reverse=True)
+    if not ok:  # comprobado justo antes: no debería pasar
+        raise PerfError("git apply -R falló en %s después de comprobarlo: %s. El árbol pudo quedar a medias: mira `git "
+                        "status --short`; todo lo que había está en el respaldo" % (top, error)).con(
+            guardado="el parche del setup (%s) y el respaldo de todo el diff (%s)" % (patch, backup),
+            seguir=[("mira cómo quedó el árbol", "cd %s && git status --short" % q(top))])
+    after = classify_setup(top, root)
+    left = [rel for rel, _ in after["setup"]] + [rel for rel, _, _ in after["mixtos"]]
+    hooks = find_hooks(root)
+    status = git_out(top, "status", "--short") or ""
+    print("✔ Setup quitado con su parche (%s). git status --short en %s:" % (patch, top))
+    print("\n".join("    " + line for line in status.splitlines()) or "    (sin cambios)")
+    if left or (hooks is not None and not git_tracked(top, hooks)):
+        print("⚠ Después de quitar siguen en el árbol archivos con aspecto de setup: %s. No los borré: revísalos (el "
+              "respaldo de todo está en %s)." % (", ".join(left[:8] or [shown_path(hooks, root)]), backup))
+    else:
+        print("✔ No quedó ningún archivo del setup en el árbol.")
+    note = update_agents_state(root)
+    if note:
+        print(note)
+    return "quitado"
+
+
+def three_way_check(top, patch):
+    """(aplica sin conflictos, detalle) de `git apply --3way --check` con un índice temporal: el índice del repo no se
+    toca. `--check` con --3way termina en 0 aunque haya conflictos, así que se lee lo que dice (en inglés: LC_ALL=C)."""
+    return _three_way(top, patch, check=True)
+
+
+def _three_way(top, patch, check):
+    git_dir = git_out(top, "rev-parse", "--absolute-git-dir")
+    if not git_dir:
+        return False, "no pude ubicar la carpeta .git"
+    work = tempfile.mkdtemp(prefix="hbperf-indice-")
+    try:
+        index = pathlib.Path(git_dir) / "index"
+        temp = pathlib.Path(work) / "index"
+        if index.is_file():
+            shutil.copyfile(str(index), str(temp))
+        env = dict(os.environ, GIT_INDEX_FILE=str(temp), LC_ALL="C", LANGUAGE="C")
+        done = subprocess.run(["git", "-C", str(top), "apply", "--3way"] + (["--check"] if check else []) + [str(patch)],
+                              capture_output=True, text=True, timeout=180, env=env)
+        said = (done.stderr or "") + (done.stdout or "")
+        # Con conflictos git dice "with conflicts". Un git anterior a 2.32 prueba primero la aplicación directa y deja un
+        # "error:" antes de "Falling back to three-way merge… cleanly": ese error solo cuenta si nada quedó "cleanly".
+        clean = done.returncode == 0 and "conflict" not in said.lower() and (
+            not re.search(r"^error:", said, re.M) or "cleanly" in said)
+        return clean, " ".join(said.split())[:300]
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, str(error)[:200]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def identity_step(root, folder=None):
+    """El paso que sigue cuando un parche no es el que corresponde: ver el caso y los parches que hay."""
+    return ("mira el caso del setup y qué parches hay; si este no sirve, la sesión 0 genera el setup de nuevo",
+            setup_command(root, "--estado", folder=folder))
+
+
+def verify_setup_patch(root, top, patch, app_option=None, write=True, folder=None):
+    """Comprueba que un parche de setup es el de este repo y esta app y que no cambió. Devuelve (ficha, notas) o lanza
+    PerfError con lo que no coincide, sin tocar nada. Un parche sin ficha (de una versión anterior), o con una ficha
+    incompleta, solo vale si todos sus archivos son del setup: la primera vez se le escribe (o se completa) la ficha con
+    lo que se encuentra. Una ficha que existe y no se puede leer detiene: no se baja la comprobación en silencio."""
+    notes = []
+    follow = [identity_step(root, folder)]
+    ficha = read_ficha(patch)
+    if ficha is None and ficha_path(patch).exists():
+        raise PerfError("la ficha del parche (%s) existe pero no se puede leer (no es JSON válido): sin ella no puedo "
+                        "comprobar que el parche sea de este repo. No lo aplico" % ficha_path(patch)).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    complete = ficha is not None and bool(ficha.get("sha256")) and bool(ficha.get("remoto") or ficha.get("raiz"))
+    if not complete:
+        problem = legacy_patch_problem(patch)
+        if problem:
+            raise PerfError("el parche %s no tiene ficha completa (es de una versión anterior) y %s: no lo uso como setup. "
+                            "Si el setup se perdió, la sesión 0 lo genera de nuevo" % (patch, problem)).con(
+                guardado="nada: no toqué el código", seguir=follow)
+        if not (git_apply(top, patch, check=True)[0] or git_apply(top, patch, reverse=True, check=True)[0]):
+            raise PerfError("el parche %s no tiene ficha completa (es de una versión anterior) y no aplica limpio en %s (ni "
+                            "para ponerlo ni para quitarlo): no puedo comprobar que sea de este repo. Si el proyecto "
+                            "cambió desde que se guardó, la sesión 0 genera el setup de nuevo" % (patch, top)).con(
+                guardado="nada: no toqué el código", seguir=follow)
+        found = {"parche": pathlib.Path(patch).name, "sha256": sha256_of(patch), "remoto": repo_remote(top),
+                 "raiz": pathlib.Path(top).name, "applicationId": measured_app_id(root, app_option), "skill": None,
+                 "commit_base": None, "archivos": patch_files(patch), "estado": "vigente",
+                 "origen": "parche de una versión anterior, sin ficha: la escribió perf.py setup"}
+        if ficha is not None:  # incompleta: se conserva lo que traía y se completa lo que falta
+            found.update({key: value for key, value in ficha.items() if value not in (None, "")})
+            found["sha256"] = sha256_of(patch)
+        if write:
+            found.setdefault("creado", datetime.datetime.now().replace(microsecond=0).isoformat())
+            ficha_path(patch).write_text(json.dumps(found, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            notes.append("✔ El parche no tenía ficha completa (es de una versión anterior): todos sus archivos son del "
+                         "setup y aplica limpio, así que le escribí la ficha con lo que encontré (%s)." % ficha_path(patch))
+        return found, notes
+    if ficha["sha256"] != sha256_of(patch):
+        raise PerfError("el parche %s cambió desde que se guardó (su SHA-256 no es el de la ficha): no lo aplico" % patch).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    here, there = repo_remote(top), clean_remote(ficha.get("remoto") or "") or NO_REMOTE
+    if here != NO_REMOTE and there != NO_REMOTE:
+        if not same_remote(here, there):
+            raise PerfError("el parche es de otro repo: %s (este repo es %s). No lo aplico" % (there, here)).con(
+                guardado="nada: no toqué el código", seguir=follow)
+    elif here != there and there != NO_REMOTE:
+        raise PerfError("el parche es de un repo con remoto (%s) y este repo no tiene remoto: no puedo comprobar que sea "
+                        "el mismo. No lo aplico" % there).con(guardado="nada: no toqué el código", seguir=follow)
+    elif ficha.get("raiz") and ficha["raiz"] != pathlib.Path(top).name:
+        raise PerfError("el parche es de otro proyecto: su ficha dice la raíz '%s' y esta es '%s' (sin remoto, se compara "
+                        "la raíz). No lo aplico" % (ficha["raiz"], pathlib.Path(top).name)).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    mine, theirs = measured_app_id(root, app_option), ficha.get("applicationId")
+    if mine and theirs and mine != theirs:
+        raise PerfError("el parche es de otra app: su ficha dice el applicationId %s y este proyecto mide %s (el de la "
+                        "sección de rendimiento de AGENTS.md, o --paquete). No lo aplico" % (theirs, mine)).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    if theirs and not mine:
+        notes.append("· No pude comparar el applicationId (%s en la ficha): la sección de rendimiento de AGENTS.md no lo "
+                     "dice. El remoto del repo sí coincide." % theirs)
+    return ficha, notes
+
+
+def half_applied(top, patch, files, what):
+    """El error cuando una aplicación comprobada falla o queda a medias: dice que el árbol pudo quedar incompleto y cómo
+    mirarlo, sin dar el setup por repuesto."""
+    missing = [rel for rel in files if not (pathlib.Path(top) / rel).exists()]
+    return PerfError(
+        "%s y el árbol pudo quedar a medias%s. No doy el setup por repuesto. Los archivos del parche no tenían cambios tuyos "
+        "antes de empezar: lo que `git status --short` muestre en ellos es del parche a medias, no trabajo tuyo (no lo "
+        "commitees). Suele ser una carpeta sin permiso de escritura: corrígelo, deja esos archivos como en el último "
+        "commit y repite" % (what, " (faltan %s)" % ", ".join(missing[:6]) if missing else "")).con(
+        guardado="el parche sigue intacto en %s" % patch,
+        seguir=[("mira qué quedó a medias", "cd %s && git status --short" % q(top)),
+                ("con el árbol como en el último commit, repite", same_command())])
+
+
+def setup_reponer(root, args, folder=None):
+    """A3: repone el setup con su parche vigente, después de comprobar que es el correcto. Devuelve (estado, ficha):
+    "repuesto", "puesto" (ya estaba) o "simulado"."""
+    case = setup_case(root)
+    kind = case["caso"]
+    if case["presente"]:
+        print("✔ El setup ya está en el árbol (%s): no hay nada que reponer." % setup_label(case))
+        return "puesto", case.get("ficha")
+    if kind != "parche":
+        steps = reponer_steps(root, case, folder)
+        why = {"sin": "el proyecto no tiene setup de medición (ni el código ni una línea en AGENTS.md): falta la sesión 0",
+               "duda": "AGENTS.md no nombra un único parche de setup que exista: falta decir cuál es el vigente",
+               "perdido": "AGENTS.md dice que el setup está, pero no hay código ni parche"}[kind]
+        notes, follow = guide_steps(steps, root, {})
+        raise PerfError("no hay nada que reponer: %s%s" % (why, "".join("\n  %s" % note for note in notes))).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    top = (case["repo"] or pathlib.Path(root)).resolve()
+    patch = case["parche"]
+    files = patch_files(patch)
+    changes = code_changes(top, root, folder)
+    touched = [rel for rel in files if rel in changes]
+
+    def stop_touched():
+        return PerfError("hay cambios tuyos sin commitear en archivos que el parche del setup toca:\n  - %s\nNo apliqué "
+                         "nada: reponer encima podría mezclarlos o fallar a medias" % "\n  - ".join(touched[:12])).con(
+            guardado="nada: no toqué el código",
+            seguir=[("haz el commit de esos cambios (o guárdalos aparte) y repite", same_command())])
+
+    if touched and read_ficha(patch) is None:
+        raise stop_touched()  # un parche sin ficha se comprueba aplicándolo: con cambios encima, el motivo sería otro
+    ficha, notes = verify_setup_patch(root, top, patch, getattr(args, "paquete", None),
+                                      write=not getattr(args, "simular", False), folder=folder)
+    for line in notes:
+        print(line)
+    if touched:
+        raise stop_touched()
+    ok, error = git_apply(top, patch, check=True)
+    three_way = False
+    if not ok:
+        clean, detail = three_way_check(top, patch)
+        if not clean:
+            raise PerfError("el parche del setup no aplica limpio en el código de ahora (%s) y, probado con --3way, tiene "
+                            "conflictos (%s). No apliqué nada: el proyecto cambió desde que se guardó el parche (commit "
+                            "base %s)" % (error or "git apply --check falló", detail or "sin detalle",
+                                          (ficha.get("commit_base") or "sin dato")[:12])).con(
+                guardado="nada: no toqué el código",
+                seguir=[session0_step_guide(root)])
+        three_way = True
+    if getattr(args, "simular", False):
+        print("· Simulación: repondría el setup con %s (%d archivo%s)%s. No toqué el código." % (
+            patch, len(files), "" if len(files) == 1 else "s", ", con --3way porque el proyecto cambió" if three_way else ""))
+        return "simulado", ficha
+    if three_way:
+        clean, detail = _three_way(top, patch, check=False)
+        if not clean:
+            raise half_applied(top, patch, files, "git apply --3way falló después de comprobarlo (%s)" % detail)
+        print("⚠ El parche no aplicaba tal cual porque el proyecto cambió desde que se guardó: lo apliqué con --3way, sin "
+              "conflictos. Compila y corre la prueba de humo antes de medir.")
+    else:
+        ok, error = git_apply(top, patch)
+        if not ok:  # comprobado justo antes: no debería pasar
+            raise half_applied(top, patch, files, "git apply falló después de comprobarlo (%s)" % (error or "sin detalle"))
+    # git puede terminar bien sin haber escrito todo (una carpeta sin permiso): se comprueba antes de darlo por repuesto.
+    sections = patch_sections(read_patch(patch))
+    missing = [rel for rel in files if not (top / rel).exists()
+               and b"deleted file mode" not in sections.get(os.path.normpath(rel), b"")]
+    if missing or (not three_way and not git_apply(top, patch, reverse=True, check=True)[0]):
+        raise half_applied(top, patch, files, "git terminó sin error pero el setup no quedó completo en el árbol")
+    print("✔ Setup repuesto con su parche (%s): %d archivo%s. Repo %s · app %s." % (
+        patch, len(files), "" if len(files) == 1 else "s", ficha.get("remoto") or NO_REMOTE,
+        ficha.get("applicationId") or "sin dato"))
+    if find_hooks(root) is None:
+        print("⚠ Apliqué el parche pero no encuentro PerfHooks.kt en el árbol: revisa que ese parche sea el del setup.")
+    if case["dice"]["antigua"]:  # la línea vieja se reconoce; desde ahora manda la del bloque de estado
+        for line in register_setup_patch(root, top, patch, ficha.get("applicationId"), "perf.py setup --reponer")[1]:
+            print(line)
+    else:
+        note = update_agents_state(root)
+        if note:
+            print(note)
+    return "repuesto", ficha
+
+
+def guide_steps(steps, root, plan):
+    """Los pasos de `siguiente` en la forma de la guía de un fallo (guide_lines): (notas de los avisos, pasos)."""
+    notes, follow = [], []
+    for step in steps:
+        if step["tipo"] == "avisos":
+            notes += ["%s: %s" % (step["titulo"], line) for line in step["lineas"]]
+        elif step["tipo"] == "chat":
+            follow.append(with_openers(step, plan or {}, root))
+        elif step["tipo"] == "terminal":
+            follow.append((step["que"], step["texto"]))
+        elif step["tipo"] == "accion":
+            follow.append(step)
+    return notes, follow
+
+
+def session0_step_guide(root):
+    """La sesión 0, como paso de la salida de un fallo."""
+    return with_openers(session0_step(), {}, root)
+
+
+def setup_vigente(root, args, folder=None):
+    """Deja un parche como el de setup vigente del repo, después de comprobar que es de este repo y de esta app."""
+    top = git_toplevel(root)
+    if top is None:
+        raise PerfError("%s no es un repo de git" % root).con(guardado="nada")
+    top = top.resolve()
+    patch = pathlib.Path(os.path.expanduser(args.vigente))
+    patch = pathlib.Path(os.path.normpath(str(patch if patch.is_absolute() else pathlib.Path.cwd() / patch)))
+    if not patch.is_file():
+        raise PerfError("no existe el parche %s" % patch).con(guardado="nada: no cambié AGENTS.md")
+    agents = read_agents(root)
+    if agents is None or performance_section(agents) is None:
+        raise PerfError("no hay dónde anotar el parche vigente: %s. Agrega la sección (## Rendimiento, con el applicationId "
+                        "y \"setup listo\") y repite" % ("no hay AGENTS.md en %s" % root if agents is None else
+                                                          "AGENTS.md no tiene una sección de rendimiento")).con(
+            guardado="nada: no cambié AGENTS.md ni la ficha", seguir=[("con la sección agregada, repite", same_command())])
+    case = setup_case(root)
+    ficha, notes = verify_setup_patch(root, top, patch, getattr(args, "paquete", None), folder=folder)
+    for line in notes:
+        print(line)
+    if ficha.get("estado") == "reemplazado":
+        ficha["estado"] = "vigente"
+        for key in ("reemplazado_por", "reemplazado_el"):
+            ficha.pop(key, None)
+        ficha_path(patch).write_text(json.dumps(ficha, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    replaced = ([case["parche"]] if case["parche"] is not None else []) + list(case["candidatos"])
+    _, lines = register_setup_patch(root, top, patch, ficha.get("applicationId"), "perf.py setup --vigente",
+                                    [path for path in dict.fromkeys(replaced) if path.resolve() != patch.resolve()])
+    print("✔ Parche de setup vigente: %s" % patch)
+    for line in lines:
+        print(line)
+
+
+def tools_report():
+    """Las herramientas de la máquina, en solo lectura: (líneas, [obligatorias que faltan]). No instala ni cambia nada."""
+    lines, missing = [], []
+
+    def probe(function, *args):
+        saved = QUIET_TOOLS["activo"]
+        QUIET_TOOLS["activo"] = True  # aquí la ruta va en la tabla: no hace falta el aviso "uso … de …"
+        try:
+            return function(*args)
+        except PerfError:
+            return None
+        finally:
+            QUIET_TOOLS["activo"] = saved
+
+    lines.append("  ✔ Python %d.%d.%d (obligatorio; 3.8 o superior)" % sys.version_info[:3])
+    git = shutil.which("git")
+    lines.append("  %s git (obligatorio: los parches y el estado del repo): %s" % ("✔" if git else "✖", git or "falta"))
+    if not git:
+        missing.append("git")
+    adb = probe(adb_binary)
+    lines.append("  %s adb (obligatorio: habla con el dispositivo): %s" % (
+        "✔" if adb else "✖", adb or "falta; viene con las platform-tools del SDK de Android (%s)" % PLATFORM_TOOLS_URL))
+    tp = probe(find_tp, None)
+    lines.append("  %s trace_processor (obligatorio: lee las trazas): %s" % (
+        "✔" if tp else "✖", tp or "falta; cualquier comando que lo use te da el comando que lo descarga en tu usuario, "
+                                 "solo si no existe"))
+    missing += [name for name, found in (("adb", adb), ("trace_processor", tp)) if not found]
+    home, origin, has_java = java_home()
+    lines.append("  %s Java 17 o superior (según el caso: Gradle, retrace y Maestro): %s" % (
+        "✔" if has_java else "·", "en %s%s" % (origin, " (%s; se pasa solo a los procesos de perf.py)" % home if home else "")
+        if has_java else "no lo encontré en JAVA_HOME, en el PATH ni en el JBR de Android Studio (%s)" % JDK_URL))
+    retrace = find_retrace()
+    lines.append("  %s retrace (opcional: desofusca con el mapping de R8): %s" % (
+        "✔" if retrace else "·", retrace or "falta; viene con las Command-line Tools del SDK (%s)" % CMDLINE_TOOLS_URL))
+    maestro = shutil.which("maestro") or (str(maestro_home() / "maestro") if is_executable(maestro_home() / "maestro")
+                                           else None)
+    lines.append("  %s Maestro (opcional: lleva la app al punto de partida en flujos largos): %s" % (
+        "✔" if maestro else "·", maestro or "falta (%s)" % MAESTRO_URL))
+    return lines, missing
+
+
+def open_investigation_steps(root, limit=3):
+    """`siguiente` de cada investigación abierta del proyecto (hasta `limit`), o []."""
+    steps = []
+    for folder, is_open in project_investigations(root):
+        if is_open and (folder / "plan.json").is_file():
+            steps.append(terminal(perf_command(root, "siguiente", "--carpeta", shown_path(folder, root)),
+                                  "dice el paso que sigue de la investigación %s" % shown_path(folder, root),
+                                  "sigue lo que imprime"))
+    return steps[:limit]
+
+
+def setup_ready_steps(root):
+    """Con el setup en el árbol (o versionado): lo que sigue. Las investigaciones abiertas o, sin ninguna, la sesión 1."""
+    steps = open_investigation_steps(root)
+    if steps:
+        return steps
+    return [chat("Usa hb-performance: quiero medir un flujo de la app; pregúntame cuál", "intermedio", "medio",
+                 "sesión 1: arma la ficha y el plan del flujo que le digas y corre la prueba", {})]
+
+
+def print_setup_next(root, title, steps):
+    """Cierra una salida de `setup` con lo que sigue (o con el cierre explícito), como `siguiente`."""
+    print("Siguiente · %s:" % title)
+    for line in render_steps(steps, markdown=False, root=pathlib.Path(root), plan={}):
+        print("  " + line)
+
+
+def end_step(text):
+    return {"tipo": "fin", "texto": text}
+
+
+def after_setup(root, folder, plan, title, steps):
+    """El final de un comando `setup`: con una investigación, su paso siguiente (que queda en estado.md); sin ella, los
+    pasos del setup."""
+    if folder is not None and plan:
+        print_next(folder, plan)
+    else:
+        print_setup_next(root, title, steps)
+
+
+def update_steps_after_restore(root, ficha, folder, plan):
+    """A3: si la skill es más nueva que la del parche, lo que sigue a reponer es actualizar la instrumentación, la prueba
+    de humo y guardar un parche nuevo. A mitad de una investigación medida no se actualiza (cambiaría los nombres de las
+    secciones entre antes y después): se avisa y queda para cuando termine."""
+    version = (ficha or {}).get("skill")
+    if version_at_least(version, VERSION):
+        return None, []
+    folders = [pathlib.Path(folder)] if folder is not None else [other for other, is_open in project_investigations(root)
+                                                                 if is_open]
+    measured = [shown_path(other, root) for other in folders if read_phases(other).get("antes")]
+    shown = "hb-performance %s" % version if version else "una versión anterior (su ficha no dice cuál)"
+    if measured:
+        return ("⚠ El parche del setup es de %s y esta es la %s. No lo actualices ahora: hay una investigación que ya midió "
+                "(%s), y actualizar la instrumentación a mitad cambiaría los nombres entre antes y después. Al cerrarla, "
+                "`setup --estado` te da los pasos para actualizarlo." % (shown, VERSION, ", ".join(measured[:3]))), []
+    update = update_instrumentation_command(root)
+    app_id = (ficha or {}).get("applicationId") or measured_app_id(root)
+    steps = []
+    if update:
+        steps.append(terminal(update, "actualiza los archivos que generó la skill a la versión %s (no pisa lo que se "
+                                      "editó a mano)" % VERSION, "revisa lo que diga que falta"))
+    if (plan or {}).get("instalar"):
+        steps.append(install_step(plan, root, "compila e instala el build de medición con la instrumentación actualizada",
+                                  "espera a que termine"))
+    else:
+        steps.append({"tipo": "accion", "que": "compila e instala el build de medición con la instrumentación actualizada",
+                      "tu": "usa el comando de instalación de la sección de rendimiento de AGENTS.md"})
+    if app_id:
+        steps.append(terminal(perf_command(root, "humo", "--paquete", app_id),
+                              "prueba de humo con la instrumentación actualizada: una corrida de arranque que valida las "
+                              "secciones", "ten el dispositivo conectado; con más de uno, agrega --serial y su serial"))
+    else:
+        steps.append({"tipo": "accion", "que": "prueba de humo con la instrumentación actualizada",
+                      "tu": "corre `perf.py humo --paquete` con el applicationId del build de medición (AGENTS.md no lo "
+                            "dice: anótalo en la sección de rendimiento)"})
+    steps.append(terminal(setup_command(root, "--guardar"),
+                          "guarda el setup actualizado como parche nuevo y lo deja como vigente (el anterior queda "
+                          "reemplazado, sin borrarlo)", "nada"))
+    return ("· El parche del setup es de %s y esta es la %s: conviene actualizar la instrumentación antes de medir."
+            % (shown, VERSION)), steps
+
+
+def cmd_setup(args):
+    """El setup de medición del proyecto: su caso (--estado), guardarlo como parche (--guardar), reponerlo (--reponer),
+    quitarlo (--quitar) o decir cuál es el parche vigente (--vigente)."""
+    folder = pathlib.Path(args.carpeta) if args.carpeta else None
+    if folder is not None and not (folder / "estado.md").is_file():
+        raise PerfError("no existe %s: --carpeta es la carpeta de una investigación" % (folder / "estado.md"))
+    plan = load_plan(folder / "plan.json") if folder is not None and (folder / "plan.json").is_file() else {}
+    root = (project_root(folder) if folder is not None else project_root(pathlib.Path.cwd())).resolve()
+    if folder is None and (args.modulos or args.comprobar_modulos or args.confirmar):
+        raise PerfError("--modulos, --comprobar-modulos y --confirmar van con --carpeta: el mapa de módulos es de una "
+                        "investigación (queda en su plan.json)")
+    if folder is not None and not plan and (args.modulos or args.comprobar_modulos or args.confirmar):
+        raise PerfError("no existe %s: el mapa de módulos se guarda en el plan de la investigación" % (folder / "plan.json"))
+    actions = [name for name in ("guardar", "reponer", "vigente") if getattr(args, name)]
+    if len(actions) > 1 or (args.reponer and args.quitar) or (args.vigente and args.quitar):
+        raise PerfError("elige una acción: --estado, --guardar (con --quitar si además lo quieres quitar), --reponer, "
+                        "--quitar o --vigente <parche>")
+    if args.vigente:
+        setup_vigente(root, args, folder)
+        case = setup_case(root)
+        steps = reponer_steps(root, case, folder, plan) or setup_ready_steps(root)
+        return after_setup(root, folder, plan, "setup %s" % SETUP_CASES[case["caso"]], steps)
+    if args.reponer:
+        state, ficha = setup_reponer(root, args, folder)
+        if state == "simulado":
+            return print_setup_next(root, "para reponerlo de verdad", [terminal(
+                same_command(sin=("--simular",)), "el mismo comando sin --simular: repone el setup", "nada")])
+        note, steps = update_steps_after_restore(root, ficha, folder, plan)
+        if note:
+            print(note)
+        if steps:
+            return print_setup_next(root, "actualiza la instrumentación del setup (sin chat)", steps + (
+                [terminal(perf_command(root, "siguiente", "--carpeta", relative_folder(folder, root)),
+                          "después, el paso que sigue de la investigación", "sigue lo que imprime")] if folder else []))
+        return after_setup(root, folder, plan, "el setup está puesto: ya puedes medir", setup_ready_steps(root))
+    if args.guardar:
+        patch, case = setup_guardar(root, args, folder)
+        if args.simular:
+            if args.quitar:
+                print("· Simulación: después lo quitaría del árbol con ese parche, con un respaldo de todo el diff antes.")
+            return print_setup_next(root, "para hacerlo de verdad", [terminal(
+                same_command(sin=("--simular",)), "el mismo comando sin --simular", "nada")])
+        if not args.quitar:
+            if case["caso"] == "versionado":
+                return after_setup(root, folder, plan, "setup versionado", setup_ready_steps(root))
+            if not case["presente"]:
+                return after_setup(root, folder, plan, "el setup no está en el árbol",
+                                   reponer_steps(root, case, folder, plan) or setup_ready_steps(root))
+            return after_setup(root, folder, plan, "setup guardado; sigue puesto en el árbol", [
+                terminal(setup_command(root, "--quitar", folder=folder),
+                         "quita el setup del árbol con su parche (con un respaldo antes); `siguiente`, `nuevo` y `humo` te "
+                         "dan el comando que lo repone cuando vuelvas a medir",
+                         "córrelo cuando termines de medir; si vas a seguir midiendo, déjalo puesto")]
+                + setup_ready_steps(root))
+    if args.quitar:
+        if folder is not None and not args.simular:
+            others = [other for other in open_investigations(folder, root)]
+        else:
+            others = [other for other, is_open in project_investigations(root) if is_open and (
+                folder is None or other.resolve() != folder.resolve())]
+        state = setup_quitar(root, args, folder)
+        if state == "simulado":
+            return print_setup_next(root, "para quitarlo de verdad", [terminal(
+                same_command(sin=("--simular",)), "el mismo comando sin --simular: guarda el respaldo y quita el setup",
+                "nada")])
+        if state in ("quitado", "ausente") and others:
+            print("⚠ Hay %s que necesita%s el setup: %s. Su `siguiente` te pide reponerlo antes de instalar o medir." % (
+                "otra investigación abierta" if len(others) == 1 else "%d investigaciones abiertas" % len(others),
+                "" if len(others) == 1 else "n", ", ".join(shown_path(other, root) for other in others[:3])))
+        if folder is not None and state in ("quitado", "ausente"):
+            save_setup_close(folder, setup="quitado", archivos=[])
+        if state == "nada":  # ni código ni parche: lo que sigue es recuperar el setup, no "nada más que hacer"
+            return after_setup(root, folder, plan, "no hay setup que quitar",
+                               reponer_steps(root, setup_case(root), folder, plan) or [session0_step(plan)])
+        closing = {"quitado": "Setup quitado y guardado en su parche: %s. Cuando vuelvas a medir, `siguiente`, `nuevo` y "
+                              "`humo` te dan el comando que lo repone." % NO_STEPS_LEFT,
+                   "ausente": "El setup ya estaba quitado y guardado en su parche: %s." % NO_STEPS_LEFT,
+                   "versionado": "Setup versionado: queda en el repo y %s." % NO_STEPS_LEFT,
+                   "sin": "Sin setup que quitar: %s." % NO_STEPS_LEFT}[state]
+        if folder is not None and plan:
+            return print_next(folder, plan)
+        return print_setup_next(root, "setup %s" % ("quitado" if state in ("quitado", "ausente") else state),
+                                (open_investigation_steps(root) if others else []) + [end_step(closing)])
+    return setup_estado(root, args, folder, plan)
+
+
+def setup_estado(root, args, folder, plan):
+    """`setup --estado`: el caso del setup, su parche y su ficha, las herramientas de la máquina y, con una
+    investigación, los módulos del alcance (código o binario). Solo lectura, salvo el mapa de módulos del plan."""
+    case = setup_case(root)
+    kind = case["caso"]
+    print("Setup de medición · %s" % setup_label(case))
+    print("  Caso: %s%s" % (SETUP_CASES[kind], "" if kind != "parche" else
+                             " · el código %s en el árbol" % ("está" if case["presente"] else "no está")))
+    if case["dice"]["linea"]:
+        print("  AGENTS.md: %s%s" % (case["dice"]["linea"][:160], " (línea de una versión anterior: se reconoce)"
+                                     if case["dice"]["antigua"] else ""))
+    if case["parche"] is not None:
+        ficha = case["ficha"]
+        print("  Parche vigente: %s" % case["parche"])
+        if ficha:
+            print("  Ficha: repo %s · app %s · hb-performance %s · commit base %s · %d archivo%s" % (
+                ficha.get("remoto") or NO_REMOTE, ficha.get("applicationId") or "sin dato", ficha.get("skill") or "sin dato",
+                (ficha.get("commit_base") or "sin dato")[:12], len(ficha.get("archivos") or []),
+                "" if len(ficha.get("archivos") or []) == 1 else "s"))
+        else:
+            print("  Ficha: no tiene (parche de una versión anterior): `setup --reponer` la escribe la primera vez, si "
+                  "todos sus archivos son del setup.")
+    for path in case["candidatos"]:
+        print("  Parche sin confirmar: %s" % path)
+    if kind == "sin_decidir":
+        print("  ⚠ El setup está en el árbol pero no está %s: decide si se versiona (su propio commit o PR) o va en un "
+              "parche (`setup --guardar --quitar`)." % ("commiteado ni guardado en un parche" if not case.get("versionable")
+                                                        else "anotado como \"setup listo\" en AGENTS.md"))
+    lines, missing = tools_report()
+    print("Herramientas de la máquina (solo lectura: %s):" % (NO_MACHINE_CHANGES[0].lower() + NO_MACHINE_CHANGES[1:]))
+    for line in lines:
+        print(line)
+    if missing:
+        print("  ⚠ Falta%s %s, obligatorio%s para medir: instálalo%s tú o con tu herramienta de entorno." % (
+            "" if len(missing) == 1 else "n", " y ".join(missing), "" if len(missing) == 1 else "s",
+            "" if len(missing) == 1 else "s"))
+    if folder is not None:
+        modules_report(root, folder, plan, args)
+    if folder is not None and plan:
+        return print_next(folder, plan)  # el paso de la investigación ya trae lo del setup y lo de los módulos
+    steps = [session0_step(plan)] if kind == "sin" else reponer_steps(root, case, folder, plan)
+    title = {"sin": "falta la sesión 0 (setup)", "perdido": "el setup no está",
+             "duda": "falta decir cuál es el parche del setup"}.get(kind, "repón el setup antes de medir")
+    if not steps and kind == "parche":
+        note, steps = update_steps_after_restore(root, case["ficha"], folder, plan)
+        if note:
+            print(note)
+        title = "actualiza la instrumentación del setup (sin chat)"
+    if not steps and kind == "sin_decidir":
+        title = "decide cómo se guarda el setup"
+        steps = [terminal(setup_command(root, "--guardar", "--quitar"),
+                          "si el equipo no acepta el setup en el repo: lo guarda como parche con su ficha, lo deja como "
+                          "vigente en AGENTS.md y lo quita del árbol (perf.py lo repone antes de medir)",
+                          "si el setup se versiona, no corras este comando: haz su commit en su propio PR")] + \
+            setup_ready_steps(root)
+    if not steps:
+        title, steps = "el setup está listo para medir", setup_ready_steps(root)
+    print_setup_next(root, title, steps)
+
+
+# ── Módulos del alcance: código o binario (0.14.0) ───────────────────────────
+# Nunca se edita código de un módulo que la app consume compilado (un AAR o un JAR de un repositorio): la edición no llega
+# al APK, nada falla al compilar y la investigación saca conclusiones falsas. Cada proyecto sustituye binarios por código a
+# su manera, así que no se asume ninguna: se le pregunta a Gradle (`dependencies` de la configuración de la variante
+# medida) y cada módulo del alcance queda en el plan como código o binario. El archivo que controla la sustitución es del
+# usuario: perf.py lo nombra, nunca lo edita.
+MODULE_KINDS = ("codigo", "binario", "sin confirmar")
+MODULE_LABEL = {"codigo": "código", "binario": "binario (llega compilado)", "sin confirmar": "sin confirmar"}
+DEP_ENTRY = re.compile(r"^[ |]*[+\\]---[ \t]+(.+?)[ \t]*$")
+DEP_MARKS = re.compile(r"(?:[ \t]*\((?:\*|c|n)\))+$")
+DEP_HEADER = re.compile(r"^([A-Za-z_]\w*) - \S")  # "profilingRuntimeClasspath - Runtime classpath of …"
+NOT_SUBSTITUTION = re.compile(r"build-?logic|buildSrc|convention|plugins?\b", re.I)  # un includeBuild de la lógica de build
+DEP_PROJECT = re.compile(r"^project[ \t]+['\"]?(:[\w.:-]*)")
+DEP_ARTIFACT = re.compile(r"^([\w.-]+):([\w.-]+)(?::(\S+))?")
+SUBSTITUTION_SIGNALS = (("dependencySubstitution", re.compile(r"\bdependencySubstitution\b")),
+                        ("substitute module(...)", re.compile(r"\bsubstitute\s*\(?\s*module\b")),
+                        ("includeBuild", re.compile(r"\bincludeBuild\b")))
+SETTINGS_READS = re.compile(r"""["']([^"'\s]+\.(?:json|properties|toml|ya?ml))["']""")
+SETTINGS_APPLY = re.compile(r"""apply\s*\(?\s*from\s*[:=]\s*(?:\w+\s*\(\s*)?["']([^"']+\.gradle(?:\.kts)?)["']""")
+SWITCH_FILES = ("gradle.properties", "local.properties")
+BOOLEAN_TEXT = ("true", "false", "0", "1", "yes", "no", "on", "off")
+
+
+def dependencies_block(text, configuration):
+    """(texto de una configuración, su nombre, problema) de una salida de `gradlew dependencies`. La salida de una sola
+    configuración (con `--configuration`) trae un encabezado `<nombre> - <descripción>`; una completa trae uno por
+    configuración. Con varias, vale solo la pedida: mezclarlas daría por código lo que en la variante medida es binario."""
+    blocks, name, current = [], None, []
+    for line in (text or "").splitlines():
+        head = DEP_HEADER.match(line)
+        if head:
+            if name is not None:
+                blocks.append((name, current))
+            name, current = head.group(1), []
+        elif name is not None:
+            current.append(line)
+    if name is not None:
+        blocks.append((name, current))
+    if not blocks:
+        return text or "", None, ""
+    if configuration:
+        for found, lines in blocks:
+            if found == configuration:
+                return "\n".join(lines), found, ""
+        return None, None, "la salida trae %s y no %s: guárdala con --configuration %s" % (
+            ", ".join(found for found, _ in blocks[:4]), configuration, configuration)
+    if len(blocks) == 1:
+        return "\n".join(blocks[0][1]), blocks[0][0], ""
+    return None, None, ("la salida trae %d configuraciones (%s) y no sé cuál es la de la variante medida: dila con "
+                        "--configuracion" % (len(blocks), ", ".join(found for found, _ in blocks[:4])))
+
+
+def parse_dependencies(text):
+    """Lo que dice `gradlew :app:dependencies --configuration <variante>RuntimeClasspath`: {"proyectos": {":a:b"},
+    "artefactos": {"grupo:artefacto": {"version", "proyecto"}}, "sustituidos": {":a:b": "grupo:artefacto:versión"}}.
+    Cada línea es `<pedido> -> <elegido>`: `grupo:artefacto:versión -> project :x` es un artefacto que se compila desde
+    código; `project :x -> grupo:artefacto:versión` es un proyecto que el build cambia por un binario (va a "sustituidos",
+    nunca a "proyectos"). Una dependencia que Gradle no resolvió, `(n)`, no cuenta como nada."""
+    projects, artifacts, replaced = set(), {}, {}
+    for line in (text or "").splitlines():
+        found = DEP_ENTRY.match(line)
+        if not found:
+            continue
+        raw = found.group(1)
+        marks = DEP_MARKS.search(raw)
+        if marks and "(n)" in marks.group(0):
+            continue
+        entry = DEP_MARKS.sub("", raw).strip()
+        left, _, right = entry.partition(" -> ")
+        left, right = left.strip(), right.strip()
+        own, target = DEP_PROJECT.match(left), DEP_PROJECT.match(right)
+        if own:
+            if target:
+                projects.add(target.group(1))
+            elif right:  # el proyecto se cambió por un binario
+                replaced[own.group(1)] = right
+            else:
+                projects.add(own.group(1))
+            continue
+        artifact = DEP_ARTIFACT.match(left)
+        if not artifact:
+            continue
+        key = "%s:%s" % (artifact.group(1), artifact.group(2))
+        record = artifacts.setdefault(key, {"version": None, "proyecto": None})
+        if target:
+            record["proyecto"] = target.group(1)
+            projects.add(target.group(1))
+        version = (artifact.group(3) or "") if target else (right.rsplit(":", 1)[-1] or artifact.group(3) or "")
+        if version and not record["version"] and not version.startswith("{"):
+            record["version"] = version
+    for path in replaced:  # si en otra línea aparece como proyecto, manda la sustitución: no se da por código
+        projects.discard(path)
+    return {"proyectos": projects, "artefactos": artifacts, "sustituidos": replaced}
+
+
+def module_token(name):
+    """El nombre corto de un módulo, para compararlo: el último tramo de `:a:b` o el artefacto de `grupo:artefacto`."""
+    return str(name or "").strip().strip(":").split(":")[-1].split("/")[-1].lower()
+
+
+def project_dir(root, path):
+    """La carpeta de un proyecto de Gradle (`:a:b`): la que le da settings.gradle(.kts) con `projectDir`, la que sigue su
+    ruta bajo la raíz o una de las que settings incluye desde fuera con ese nombre. None si no se puede saber."""
+    root = pathlib.Path(root)
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        try:
+            text = (root / name).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        found = re.search(r"""project\s*\(\s*["']%s["']\s*\)\s*\.\s*projectDir\s*=\s*(?:new\s+)?[fF]ile\s*\(\s*(?:\w+\s*,\s*)?"""
+                          r"""["']([^"']+)["']""" % re.escape(path), text)
+        if found and "$" not in found.group(1):
+            return pathlib.Path(os.path.normpath(str(root / found.group(1))))
+    direct = root / path.strip(":").replace(":", "/")
+    if path.strip(":") and direct.is_dir():
+        return direct
+    token = module_token(path)
+    for other in external_roots(root, read_no_leer(root))[0]:
+        if other.name.lower() == token:
+            return other
+        if (other / path.strip(":").replace(":", "/")).is_dir():
+            return other / path.strip(":").replace(":", "/")
+    return None
+
+
+def module_folder(root, where):
+    """Una carpeta como se guarda en el plan: relativa a la raíz (con `..` si queda fuera)."""
+    inside = under(lexical(where), lexical(root))
+    return str(inside) if inside is not None else os.path.relpath(str(where), str(root))
+
+
+def match_module(name, deps):
+    """(tipo de coincidencia, clave) de un módulo del alcance en lo que dijo Gradle. Primero la coincidencia exacta (la
+    ruta del proyecto o `grupo:artefacto`); solo si no hay, el nombre corto (el último tramo), y solo si señala a un único
+    módulo: dos módulos con el mismo nombre corto (`:a:impl` y `:b:impl`) no se adivinan."""
+    for kind in ("sustituidos", "proyectos", "artefactos"):
+        if name in deps[kind]:
+            return kind, name
+    token = module_token(name)
+    found = [(kind, key) for kind in ("sustituidos", "proyectos", "artefactos") for key in sorted(deps[kind])
+             if module_token(key) == token]
+    if len(found) == 1:
+        return found[0]
+    return ("ambiguo", ", ".join(key for _, key in found[:5])) if found else (None, None)
+
+
+def classify_modules(root, names, deps, folders=None, app=None):
+    """[{"nombre", "tipo", "carpeta", "artefacto", "proyecto", "motivo"}] de los módulos del alcance según lo que dijo
+    Gradle (`deps` de parse_dependencies; None si no se pudo correr: entonces ninguno se da por código). La carpeta se
+    busca siempre que el nombre sea el de un proyecto: sin ella, las compuertas no pueden reconocer sus archivos."""
+    root = pathlib.Path(root)
+    folders = folders or {}
+    app_path = ":" + app.strip(":").replace("/", ":") if app else None
+    out = []
+    for name in names:
+        entry = {"nombre": name, "tipo": "sin confirmar", "origen": "gradle"}
+        given, path = folders.get(name), None
+        if app_path and (name == app_path or name.strip(":") == app_path.strip(":")):
+            entry.update(tipo="codigo", proyecto=app_path, motivo="es el módulo de la app que se compila")
+            path = app_path
+        elif deps is None:
+            entry.update(origen="sin gradle", motivo="no se pudo preguntar a Gradle")
+        else:
+            kind, key = match_module(name, deps)
+            if kind == "proyectos":
+                entry.update(tipo="codigo", proyecto=key)
+                path = key
+            elif kind == "sustituidos":
+                entry.update(tipo="binario", artefacto=deps["sustituidos"][key], proyecto=key,
+                             motivo="el build cambia el proyecto %s por el binario %s" % (key, deps["sustituidos"][key]))
+                path = key  # su código está en el proyecto, pero no es lo que se compila
+            elif kind == "artefactos":
+                record = deps["artefactos"][key]
+                entry["artefacto"] = key + (":%s" % record["version"] if record["version"] else "")
+                if record["proyecto"]:
+                    entry.update(tipo="codigo", proyecto=record["proyecto"],
+                                 motivo="sustitución: %s -> project %s" % (entry["artefacto"], record["proyecto"]))
+                    path = record["proyecto"]
+                else:
+                    entry["tipo"] = "binario"
+                    if given is None:  # su código puede estar en disco (un repo hermano) sin que el build lo use
+                        for candidate in (root.parent / key.split(":")[1], root / key.split(":")[1]):
+                            if candidate.is_dir() and candidate.resolve() != root.resolve():
+                                given = module_folder(root, candidate)
+                                break
+            elif kind == "ambiguo":
+                entry["motivo"] = "el nombre corto coincide con varios módulos (%s): pásalo completo" % key
+            else:
+                entry["motivo"] = "no aparece en las dependencias de esa configuración"
+        if given is None:
+            guess = path or (name if name.startswith(":") else ":" + name if ":" not in name else None)
+            where = project_dir(root, guess) if guess else None
+            if where is not None and where.resolve() != root.resolve():
+                given = module_folder(root, where)
+        if given:
+            entry["carpeta"] = str(given)
+        out.append(entry)
+    return out
+
+
+def substitution_switch(root, module):
+    """D2: dónde controla el proyecto si ese módulo va como binario o como código: {"senales": ["archivo:línea texto"],
+    "archivo", "clave", "valor"}. Busca en settings.gradle(.kts), en los .gradle que aplica, en los archivos de
+    configuración que nombran y en gradle.properties y local.properties una clave con el nombre del módulo. Solo lee."""
+    root = pathlib.Path(root)
+    denied = read_no_leer(root)
+    token = re.sub(r"[^a-z0-9]", "", module_token(module.get("artefacto", "").rsplit(":", 1)[0] if module.get("artefacto")
+                                                  and module["artefacto"].count(":") >= 2 else
+                                                  module.get("artefacto") or module.get("nombre")))
+    scripts, configs, signals = [], [], []
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        if (root / name).is_file() and not is_denied(root / name, root, denied):
+            scripts.append(root / name)
+    for script in list(scripts):
+        try:
+            text = script.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for raw in SETTINGS_APPLY.findall(text):
+            path = pathlib.Path(os.path.normpath(str(script.parent / raw.replace("$rootDir/", "").replace("${rootDir}/", ""))))
+            if path.is_file() and path not in scripts and not is_denied(path, root, denied):
+                scripts.append(path)
+    for script in scripts:
+        try:
+            lines = script.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines, start=1):
+            if line.lstrip().startswith(("//", "*", "/*")):
+                continue
+            for label, pattern in SUBSTITUTION_SIGNALS:
+                if pattern.search(line) and len(signals) < 6 and not (label == "includeBuild"
+                                                                      and NOT_SUBSTITUTION.search(line)):
+                    signals.append("%s:%d (%s)" % (relative_to_root(script, root), number, label))
+            for raw in SETTINGS_READS.findall(line):
+                path = pathlib.Path(os.path.normpath(str(root / raw.replace("$rootDir/", "").replace("${rootDir}/", ""))))
+                if path.is_file() and path not in configs and not is_denied(path, root, denied):
+                    configs.append(path)
+    for name in SWITCH_FILES:
+        if (root / name).is_file() and (root / name) not in configs and not is_denied(root / name, root, denied):
+            configs.append(root / name)
+    out = {"senales": signals, "archivo": None, "clave": None, "valor": None,
+           "archivos": [relative_to_root(path, root) for path in configs]}
+    if not token:
+        return out
+
+    def fits(key):
+        # un nombre corto (ui, api) solo coincide entero: como parte de otra clave señalaría cualquier cosa
+        normal = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        return bool(normal) and (normal == token or (len(token) >= 4 and token in normal)
+                                 or (len(normal) >= 4 and normal in token))
+
+    def shown(value):
+        text = str(value).strip().lower() if isinstance(value, (bool, int, str)) else ""
+        return text if text in BOOLEAN_TEXT else None
+
+    for path in configs:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")[:400_000]
+        except OSError:
+            continue
+        hit = None
+        if path.suffix == ".json":
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            stack = [("", data)]
+            while stack and hit is None:
+                prefix, node = stack.pop()
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        where = "%s.%s" % (prefix, key) if prefix else str(key)
+                        if fits(key) and not isinstance(value, (dict, list)):
+                            hit = (where, shown(value))
+                            break
+                        if fits(key) and isinstance(value, dict):  # {"pagos": {"local": false}}
+                            inner = next(((k, v) for k, v in value.items() if shown(v) is not None), None)
+                            hit = ("%s.%s" % (where, inner[0]), shown(inner[1])) if inner else (where, None)
+                            break
+                        stack.append((where, value))
+                elif isinstance(node, list):
+                    for index, value in enumerate(node):
+                        if isinstance(value, str) and fits(value):
+                            hit = ("%s[%d] (%s)" % (prefix, index, value), None)
+                            break
+                        stack.append(("%s[%d]" % (prefix, index), value))
+        else:
+            for line in text.splitlines():
+                found = re.match(r"^[ \t]*([\w.-]+)[ \t]*[=:][ \t]*(.*?)[ \t]*$", line)
+                if found and not line.lstrip().startswith(("#", "!", "//")) and fits(found.group(1)):
+                    value = shown(found.group(2).strip("\"'"))
+                    if value is not None:  # un interruptor es un sí o un no: gana la clave con valor booleano
+                        hit = (found.group(1), value)
+                        break
+                    hit = hit or (found.group(1), None)
+        if hit:
+            last = re.split(r"[.\[ ]", hit[0].split(" (")[0])[-1] if path.suffix == ".json" else hit[0]
+            out.update(archivo=relative_to_root(path, root), clave=hit[0], valor=hit[1],
+                       exacta=re.sub(r"[^a-z0-9]", "", last.lower()) == token)
+            break
+    return out
+
+
+def switch_text(switch, module):
+    """El interruptor de un módulo binario, en una frase: el archivo y la clave, o que no hay mecanismo."""
+    name = module.get("artefacto") or module.get("nombre")
+    if switch["archivo"] and switch["valor"] and switch.get("exacta"):
+        return ("el proyecto lo controla en `%s`, clave `%s` (hoy: %s)%s. Ese archivo es tuyo: cámbialo tú (perf.py nunca "
+                "lo edita), sincroniza Gradle y comprueba de nuevo" % (
+                    switch["archivo"], switch["clave"], switch["valor"],
+                    "; lo usa %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else ""))
+    if switch["archivo"]:
+        return ("puede que el proyecto lo controle en `%s`, clave `%s`%s (es una coincidencia por nombre: confírmalo tú)%s. "
+                "Ese archivo es tuyo: si es el interruptor, cámbialo tú (perf.py nunca lo edita), sincroniza Gradle y "
+                "comprueba de nuevo" % (switch["archivo"], switch["clave"],
+                                         " (hoy: %s)" % switch["valor"] if switch["valor"] else "",
+                              "; hay sustitución en %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else ""))
+    if switch["senales"]:
+        return ("el proyecto tiene un mecanismo de sustitución (%s), pero no encontré la clave de %s en %s: búscala tú en "
+                "esos archivos, cámbiala (perf.py nunca los edita), sincroniza Gradle y comprueba de nuevo" % (
+                    ", ".join(switch["senales"][:3]), name, ", ".join(switch["archivos"][:4]) or "sus archivos"))
+    return ("no encontré ningún mecanismo de sustitución en settings.gradle(.kts) (dependencySubstitution, substitute "
+            "module(...), includeBuild ni un archivo de configuración): %s llega solo compilado" % name)
+
+
+def plan_modules(plan):
+    """Los módulos del alcance que registró `setup --estado` en el plan ([] en un plan anterior a 0.14.0)."""
+    return [item for item in (plan or {}).get("modulos") or [] if isinstance(item, dict) and item.get("nombre")]
+
+
+def blocked_modules(plan):
+    """Los módulos del alcance que no se pueden editar: binarios o sin confirmar."""
+    return [item for item in plan_modules(plan) if item.get("tipo") in ("binario", "sin confirmar")]
+
+
+def same_or_inside(target, base):
+    """True si `target` es `base` o está dentro, también en un disco que no distingue mayúsculas (se compara el archivo,
+    no el texto de la ruta)."""
+    if under(target, base) is not None:
+        return True
+    if not base.exists():
+        return False
+    for parent in [target] + list(target.parents):
+        try:
+            if parent.exists() and os.path.samefile(str(parent), str(base)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def module_of(plan, root, path=None, hint=None):
+    """El módulo binario (o sin confirmar) al que pertenece un archivo o un repo, o None: el archivo está bajo la carpeta
+    donde vive su código en disco o, si el archivo está fuera de la raíz (o no se sabe dónde está), el repo de la fila
+    se llama como el módulo."""
+    root = pathlib.Path(root)
+    target = pathlib.Path(os.path.realpath(str(path))) if path is not None else None
+    in_root = target is not None and same_or_inside(target, pathlib.Path(os.path.realpath(str(root))))
+    names = [part for part in re.split(r"[\s(),;`]+", str(hint or "")) if part and part not in (".", "—", "-")]
+    for item in blocked_modules(plan):
+        folder = item.get("carpeta")
+        if folder and target is not None:
+            base = pathlib.Path(os.path.expanduser(folder))
+            base = pathlib.Path(os.path.realpath(str(base if base.is_absolute() else root / base)))
+            if same_or_inside(target, base):
+                return item
+        token = module_token(item.get("artefacto", "").rsplit(":", 1)[0] if (item.get("artefacto") or "").count(":") >= 2
+                             else item.get("artefacto") or item["nombre"])
+        if in_root:
+            # El archivo está en el proyecto: el nombre del repo no decide. Si no se sabe la carpeta del módulo, cuenta que
+            # una carpeta de su ruta (antes de `src`) se llame como él: `features/pagos/src/…` es del módulo `pagos`; un
+            # paquete `…/kotlin/…/pagos/` del módulo app, no.
+            if not folder and token:
+                parts = [part.lower() for part in under(target, pathlib.Path(os.path.realpath(str(root)))).parts[:-1]] \
+                    if under(target, pathlib.Path(os.path.realpath(str(root)))) is not None else []
+                if token in (parts[:parts.index("src")] if "src" in parts else parts):
+                    return item
+            continue
+        if token and any(module_token(name) == token for name in names):
+            return item
+    return None
+
+
+def folder_request(modules):
+    """Las líneas que piden la carpeta de cada módulo que no se puede editar y del que no se sabe dónde está su código: sin
+    ella, las compuertas solo lo reconocen por el nombre de una carpeta."""
+    return ["⚠ %s no se edita (%s) y no sé dónde está su código en disco. Si está en esta máquina (en el proyecto o en "
+            "otro repo), dilo con --modulos %s=RUTA (desde la raíz, como features/pagos o ../modulo-pagos): así perf.py "
+            "reconoce sus archivos e impide que se editen." % (item["nombre"], MODULE_LABEL.get(item["tipo"], item["tipo"]),
+                                                              item["nombre"])
+            for item in modules if item.get("tipo") in ("binario", "sin confirmar") and not item.get("carpeta")]
+
+
+def modules_recheck(root, folder):
+    return setup_command(root, "--estado", "--comprobar-modulos", folder=folder)
+
+
+def module_gate(folder, root, plan, files, what, error=PerfError):
+    """D3: se detiene si alguno de los archivos [(ruta absoluta o None, repo de la fila, nombre mostrado)] es de un módulo
+    que el build toma como binario (o que nadie confirmó como código). Dice el motivo y el interruptor del proyecto."""
+    hits = {}
+    for path, hint, shown in files:
+        item = module_of(plan, root, path, hint)
+        if item is not None:
+            hits.setdefault(item["nombre"], (item, []))[1].append(shown)
+    if not hits:
+        return
+    lines = []
+    for name, (item, shown) in sorted(hits.items()):
+        if item["tipo"] == "binario":
+            why = "el build lo toma como binario (%s): lo que edites ahí no llega al APK aunque su código esté en disco" % (
+                item.get("artefacto") or name)
+            lines.append("%s · %s. Interruptor: %s" % (", ".join(dict.fromkeys(shown)), why,
+                                                       switch_text(substitution_switch(root, item), item)))
+        else:
+            lines.append("%s · el módulo %s está sin confirmar (%s): no se da por código" % (
+                ", ".join(dict.fromkeys(shown)), name, item.get("motivo") or "Gradle no lo confirmó"))
+    raise error("%s: no se edita un módulo que la app consume compilado. No toqué nada:\n  - %s" % (
+        what, "\n  - ".join(lines))).con(
+        guardado="nada",
+        seguir=[("cuando el módulo se compile desde código (cambia tú el interruptor y sincroniza), comprueba de nuevo con "
+                 "Gradle", modules_recheck(root, folder)),
+                ("después, repite", same_command())])
+
+
+def setup_gate(root, folder, plan):
+    """A5: con el setup en un parche y fuera del árbol, medir o instalar no tiene sentido: se detiene antes de compilar y
+    de tocar el dispositivo, con el comando que lo repone."""
+    case = setup_missing(root)
+    if case is None:
+        return
+    notes, follow = guide_steps(reponer_steps(root, case, folder, plan), root, plan or {})
+    if plan and plan.get("instalar"):
+        follow.append(install_guide(plan, root, "instala el build de medición, ya con el setup"))
+    else:
+        follow.append({"tipo": "accion", "que": "instala el build de medición, ya con el setup",
+                       "tu": "usa el comando de instalación de la sección de rendimiento de AGENTS.md"})
+    follow.append(("y repite", same_command()))
+    raise Precondicion("el setup de medición no está en el árbol (%s): sin él no salen las marcas ni las secciones, y la "
+                       "variante medida puede no compilar. No compilé ni toqué el dispositivo%s" % (
+                           setup_label(case), "".join("\n  %s" % note for note in notes))).con(
+        guardado="nada", seguir=follow)
+
+
+def temp_module_files(folder, root, plan, extra):
+    """[(ruta absoluta o None, repo de la fila, nombre)] de los cambios temporales sin quitar de la investigación."""
+    try:
+        rows = temp_changes((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    out = []
+    for change in rows:
+        if change["revertido"]:
+            continue
+        top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
+        out.append((top / rel if top is not None else None, change["repo"], change["archivo"]))
+    return out
+
+
+def temp_module_gate(folder, root, plan, extra, what, patch=None, tops=(), error=PerfError):
+    """D3: ni las marcas ni los cambios temporales pueden estar en un módulo que el build toma como binario."""
+    if not blocked_modules(plan):
+        return
+    files = temp_module_files(folder, root, plan, extra)
+    if patch:
+        path = pathlib.Path(os.path.expanduser(str(patch)))
+        top = patch_repo(path, list(tops)) if path.is_file() else None
+        files += [(top / name if top is not None else None, str(top.name) if top is not None else "", name)
+                  for name in patch_files(path)]
+    module_gate(folder, root, plan, files, what, error)
+
+
+def marks_module_gate(folder, root, plan, flow, error=PerfError):
+    """D3, en la corrida de prueba: los archivos donde el código emite las marcas del plan y los de "Cambios temporales"
+    no pueden ser de un módulo binario: la marca nunca llegaría al APK y la prueba saldría con ✖ por la causa equivocada."""
+    if not blocked_modules(plan):
+        return
+    files = temp_module_files(folder, root, plan, project_repos(folder, root, plan))
+    denied = read_no_leer(root)
+    for mark, _ in plan_marks(flow):
+        for place in find_mark_sources(root, mark):
+            rel = place.rsplit(":", 1)[0]
+            files.append((pathlib.Path(os.path.normpath(str(pathlib.Path(root) / rel))), "", "%s (%s)" % (rel, mark)))
+        literal = MARK_LITERAL.fullmatch(mark or "")
+        if not literal:
+            continue
+        # El código de un módulo binario puede estar en disco sin que settings.gradle lo incluya: también se mira ahí.
+        for item in blocked_modules(plan):
+            base = pathlib.Path(os.path.expanduser(item.get("carpeta") or ""))
+            base = base if base.is_absolute() else pathlib.Path(root) / base
+            if not item.get("carpeta") or not base.is_dir():
+                continue
+            for path in walk_files(base, denied, (".kt", ".java"), root):
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore") if path.stat().st_size <= SCAN_MAX_BYTES \
+                        else ""
+                    if '"%s"' % literal.group(1) in text or '"%s"' % mark in text:
+                        files.append((path, "", "%s (%s)" % (os.path.relpath(str(path), str(root)), mark)))
+                        break
+                except OSError:
+                    continue
+    module_gate(folder, root, plan, files, "una marca del plan o un cambio temporal está en un módulo binario", error)
+
+
+def improvement_module_gate(folder, plan, files, repo, ident):
+    """D3, en `decidir --aplicada`: los archivos de la mejora no pueden ser de un módulo binario (el después mediría lo
+    mismo que el antes y el veredicto diría "sin cambio" de una mejora que nunca se instaló)."""
+    root = project_root(pathlib.Path(folder)).resolve()
+    base = pathlib.Path(os.path.expanduser(repo)) if repo else root
+    base = base if base.is_absolute() else pathlib.Path.cwd() / base
+    checks = [(pathlib.Path(os.path.normpath(str(base / name))), repo or "", name) for name in files]
+    if repo and not files:
+        checks.append((base, repo, str(repo)))
+    module_gate(folder, root, plan, checks, "la mejora %s toca un módulo binario" % ident)
+    if files:
+        return
+    # Sin --archivos no se sabe qué tocó la mejora: se avisa si un módulo binario tiene cambios sin commitear.
+    for item in blocked_modules(plan):
+        where = pathlib.Path(os.path.expanduser(item.get("carpeta") or ""))
+        where = where if where.is_absolute() else root / where
+        top = git_toplevel(where) if item.get("carpeta") and where.is_dir() else None
+        if top is None:
+            continue
+        try:
+            changed = [rel for rel in git_changes(top) if same_or_inside(
+                pathlib.Path(os.path.realpath(str(top / rel))), pathlib.Path(os.path.realpath(str(where))))]
+        except PerfError:
+            continue
+        if changed:
+            print("⚠ No pude comprobar los archivos de %s (sin --archivos) y el módulo %s, que el build toma como %s, tiene "
+                  "cambios sin commitear (%s): si son de esta mejora, no llegan al APK. Repite con --archivos para "
+                  "comprobarlo." % (ident, item["nombre"], MODULE_LABEL.get(item["tipo"], item["tipo"]),
+                                    ", ".join(changed[:5])))
+
+
+def gradle_dependencies(root, app, configuration, log):
+    """(salida de `./gradlew -q :<app>:dependencies --configuration <configuración>`, '') o (None, por qué no se pudo
+    correr). Deja la salida en `log`. No cambia nada del proyecto."""
+    root = pathlib.Path(root)
+    if not (root / "gradlew").is_file():
+        return None, "no hay ./gradlew en %s" % root
+    task = ":%s:dependencies" % app.strip(":").replace("/", ":") if app.strip(":") else "dependencies"
+    command = ["./gradlew", "-q", task, "--configuration", configuration]
+    try:
+        done = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=900, env=child_env(java=True))
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, "Gradle no corrió (%s)" % str(error)[:120]
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("$ %s\n%s\n%s" % (" ".join(command), done.stdout, done.stderr), encoding="utf-8")
+    except OSError:
+        pass
+    if done.returncode != 0:
+        last = ((done.stderr or done.stdout).strip().splitlines() or ["sin salida"])[-1][:160]
+        return None, "Gradle terminó con código %d (%s); la salida está en %s" % (done.returncode, last, log)
+    return done.stdout, ""
+
+
+def modules_table(modules, root):
+    rows = []
+    for item in modules:
+        detail = item.get("artefacto") or item.get("proyecto") or item.get("motivo") or "—"
+        if item.get("tipo") == "codigo" and item.get("artefacto") and item.get("proyecto"):
+            detail = "%s -> project %s" % (item["artefacto"], item["proyecto"])
+        note = "se puede editar" if item.get("tipo") == "codigo" else \
+            "no se edita; se mide desde el módulo app" if item.get("aceptado") else "no se edita"
+        rows.append(["`%s`" % item["nombre"], MODULE_LABEL.get(item.get("tipo"), item.get("tipo") or "—"),
+                     "`%s`" % item["carpeta"] if item.get("carpeta") else "—", detail, note])
+    return markdown_table(["Módulo", "Tipo", "Carpeta", "Según Gradle", "Edición"], rows)
+
+
+def write_modules_block(folder, modules, root, configuration, source):
+    """Deja el mapa en la ficha de estado.md: en el bloque perf:modulos o, si la investigación es de una versión anterior
+    y no lo tiene, al final de "Mapa del alcance"."""
+    content = "%s\n\n_Lo escribe `perf.py setup --estado` con %s (%s). Un módulo binario o sin confirmar no se edita._" % (
+        modules_table(modules, root), source, configuration)
+    if update_block(folder, "modulos", content):
+        return True
+    state = pathlib.Path(folder) / "estado.md"
+    try:
+        lines = state.read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return False
+    start = next((i for i, line in enumerate(lines) if line.lower().startswith("## mapa del alcance")), None)
+    if start is None:
+        return False
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    lines[end:end] = ["", "<!-- perf:modulos -->", content, "<!-- /perf:modulos -->"]
+    state.write_text("\n".join(lines), encoding="utf-8")
+    return True
+
+
+def measured_configuration(plan, args):
+    """(módulo app, configuración de Gradle) de la variante medida: --app y --configuracion; si no, lo que se usó la vez
+    anterior (`modulos_gradle` del plan); si no, lo que dice el `instalar` del plan (`:app:installDemoProfiling` → app y
+    demoProfilingRuntimeClasspath, el nombre que AGP le da al classpath de ejecución de cada variante)."""
+    module, variant = install_variant((plan or {}).get("instalar"))
+    saved = (plan or {}).get("modulos_gradle") if isinstance((plan or {}).get("modulos_gradle"), dict) else {}
+    app = getattr(args, "app", None) or saved.get("app") or module or "app"
+    configuration = getattr(args, "configuracion", None) or saved.get("configuracion") or (
+        "%sRuntimeClasspath" % variant if variant else None)
+    return app, configuration
+
+
+def modules_report(root, folder, plan, args):
+    """D1: clasifica los módulos del alcance (--modulos, o los del plan con --comprobar-modulos) y deja el mapa en
+    plan.json y en la ficha. Sin esas opciones, muestra el mapa guardado."""
+    stored = plan_modules(plan)
+    asked = list(getattr(args, "modulos", None) or [])
+    confirm = {}
+    for raw in getattr(args, "confirmar", None) or []:
+        name, sep, kind = raw.partition("=")
+        kind = {"código": "codigo", "codigo": "codigo", "binario": "binario"}.get(kind.strip().lower())
+        if not sep or not name.strip() or kind is None:
+            raise PerfError("--confirmar va como NOMBRE=codigo o NOMBRE=binario (lo que respondió el usuario cuando Gradle "
+                            "no se pudo correr, o que acepta medir un módulo binario desde el módulo app)")
+        confirm[name.strip()] = kind
+    if not asked and not getattr(args, "comprobar_modulos", False) and not confirm:
+        if stored:
+            print("Módulos del alcance (plan.json; para preguntarle de nuevo a Gradle, --comprobar-modulos):")
+            for line in modules_table(stored, root).splitlines():
+                print("  " + line)
+        else:
+            print("Módulos del alcance: sin registrar. La sesión 1 los registra con `setup --estado --carpeta` de esta "
+                  "investigación y --modulos seguido de cada módulo del alcance (ficha.md · Módulos del alcance).")
+        return
+    if confirm and not asked and not getattr(args, "comprobar_modulos", False):
+        return confirm_modules(root, folder, plan, stored, confirm)
+    folders, names = {item["nombre"]: item.get("carpeta") for item in stored if item.get("carpeta")}, []
+    for raw in asked or [item["nombre"] for item in stored]:
+        name, sep, where = raw.partition("=")
+        if name.strip() and name.strip() not in names:
+            names.append(name.strip())
+        if sep and where.strip():
+            folders[name.strip()] = where.strip()
+    for name in confirm:
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise PerfError("no hay módulos que comprobar: pásalos con --modulos (por ejemplo --modulos :feature-pagos "
+                        "com.example:pagos=../modulo-pagos)")
+    app, configuration = measured_configuration(plan, args)
+    deps, why, source = None, "", "Gradle"
+    if getattr(args, "dependencias", None):
+        try:
+            saved_text = pathlib.Path(args.dependencias).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            raise PerfError("no pude leer %s: %s" % (args.dependencias, error.strerror or error))
+        block, used, why = dependencies_block(saved_text, configuration)
+        if block is not None:
+            deps = parse_dependencies(block)
+            configuration = used or configuration
+            source = "la salida guardada en %s" % args.dependencias
+    elif configuration is None:
+        why = ("no sé cuál es la variante medida (el plan no tiene `instalar` con una tarea install<Variante>): pásala con "
+               "--configuracion, por ejemplo --configuracion profilingRuntimeClasspath")
+    else:
+        text, why = gradle_dependencies(root, app, configuration, folder / "logs" / "dependencias.txt")
+        block, _, block_why = dependencies_block(text, configuration) if text is not None else (None, None, "")
+        deps, why = (parse_dependencies(block), why) if block is not None else (None, why or block_why)
+    modules = classify_modules(root, names, deps, folders, app)
+    previous = {item["nombre"]: item for item in stored}
+    for item in modules:
+        old = previous.get(item["nombre"]) or {}
+        if item["nombre"] in confirm:
+            if item["tipo"] == "sin confirmar":  # Gradle no lo dijo: vale lo que respondió el usuario
+                item.update(tipo=confirm[item["nombre"]], origen="usuario")
+                item.pop("motivo", None)
+            if confirm[item["nombre"]] == "binario" and item["tipo"] == "binario":
+                item["aceptado"] = True  # se mide desde el módulo app; `siguiente` deja de preguntar
+        elif old.get("aceptado") and item["tipo"] == "binario":
+            item["aceptado"] = True
+        elif item["tipo"] == "sin confirmar" and old.get("origen") == "usuario" and deps is None:
+            item.update(tipo=old["tipo"], origen="usuario")
+            item.pop("motivo", None)
+    save_modules(folder, plan, modules, {"app": app, "configuracion": configuration} if configuration else None)
+    shown_configuration = configuration or "sin configuración"
+    print("Módulos del alcance, según %s (:%s:dependencies --configuration %s):" % (
+        source, app.strip(":").replace("/", ":"), shown_configuration)
+          if deps is not None else "Módulos del alcance: no pude preguntarle a Gradle (%s). Ninguno se da por código:" % why)
+    for line in modules_table(modules, root).splitlines():
+        print("  " + line)
+    for item in modules:
+        if item["tipo"] == "binario":
+            print("  ⚠ %s: %s." % (item["nombre"], switch_text(substitution_switch(root, item), item)))
+
+        elif item["tipo"] == "sin confirmar":
+            print("  ⚠ %s: sin confirmar (%s). Pregúntale al usuario si ese módulo se compila desde código o llega como "
+                  "binario y regístralo con --confirmar %s=codigo o --confirmar %s=binario." % (
+                      item["nombre"], item.get("motivo") or "Gradle no lo dijo", item["nombre"], item["nombre"]))
+    for line in folder_request(modules):
+        print("  " + line)
+    wrote = write_modules_block(folder, modules, root, shown_configuration, source if deps is not None else
+                                "lo que respondió el usuario (Gradle no se pudo correr)")
+    print("✔ plan.json: `modulos` con %d módulo%s del alcance%s" % (
+        len(modules), "" if len(modules) == 1 else "s", " · estado.md: mapa en la ficha" if wrote else
+        " (estado.md no tiene \"Mapa del alcance\": el mapa queda solo en el plan)"))
+
+
+def save_modules(folder, plan, modules, gradle=None):
+    """Deja el mapa en plan.json y, con `gradle`, el módulo app y la configuración que se usaron (para que comprobar de
+    nuevo pregunte lo mismo sin repetir las opciones)."""
+    plan_path = pathlib.Path(folder) / "plan.json"
+    raw = json.loads(plan_path.read_text(encoding="utf-8"))
+    raw["modulos"] = modules
+    if gradle:
+        raw["modulos_gradle"] = gradle
+        plan["modulos_gradle"] = gradle
+    plan_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    plan["modulos"] = modules
+
+
+def confirm_modules(root, folder, plan, stored, confirm):
+    """`--confirmar` sin --modulos ni --comprobar-modulos: registra lo que respondió el usuario sin preguntarle de nuevo a
+    Gradle. Lo que Gradle ya dijo no se pisa: un módulo que Gradle clasificó como código no pasa a binario por una
+    respuesta, ni al revés; solo se acepta medir desde el módulo app uno que ya es binario."""
+    modules = [dict(item) for item in stored]
+    by_name = {item["nombre"]: item for item in modules}
+    for name, kind in confirm.items():
+        item = by_name.get(name)
+        if item is None:
+            item = {"nombre": name, "tipo": "sin confirmar", "origen": "sin gradle"}
+            modules.append(item)
+            by_name[name] = item
+        if item["tipo"] == "sin confirmar":
+            item.update(tipo=kind, origen="usuario")
+            item.pop("motivo", None)
+        elif item["tipo"] != kind and item.get("origen") == "usuario":
+            item.update(tipo=kind)  # era una respuesta del usuario: se corrige con otra
+            item.pop("aceptado", None)
+        elif item["tipo"] != kind:
+            raise PerfError("Gradle dijo que %s es %s: no lo cambio por una respuesta. Si el proyecto cambió, pregúntale de "
+                            "nuevo a Gradle" % (name, MODULE_LABEL[item["tipo"]])).con(
+                guardado="nada: plan.json sigue igual", seguir=[("pregúntale de nuevo a Gradle", modules_recheck(root, folder))])
+        if kind == "binario":
+            item["aceptado"] = True  # se mide desde el módulo app; `siguiente` deja de preguntar
+    save_modules(folder, plan, modules)
+    print("Módulos del alcance (con lo que respondió el usuario; a Gradle no se le preguntó de nuevo):")
+    for line in modules_table(modules, root).splitlines():
+        print("  " + line)
+    for line in folder_request(modules):
+        print("  " + line)
+    wrote = write_modules_block(folder, modules, root, "sin preguntar de nuevo", "lo que ya decía el plan y lo que respondió "
+                                "el usuario")
+    print("✔ plan.json: `modulos` con %d módulo%s del alcance%s" % (
+        len(modules), "" if len(modules) == 1 else "s", " · estado.md: mapa en la ficha" if wrote else ""))
+
+
+def module_steps(folder, plan):
+    """Para `siguiente`: si un módulo del alcance llega como binario (o está sin confirmar) y nadie decidió qué hacer, lo
+    primero es resolverlo: cambiar el interruptor y comprobar de nuevo, o aceptar que se mide desde el módulo app."""
+    pending = [item for item in blocked_modules(plan) if not item.get("aceptado")]
+    if not pending:
+        return []
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    lines = []
+    for item in pending:
+        if item["tipo"] == "binario":
+            lines.append("%s llega como binario (%s): %s" % (item["nombre"], item.get("artefacto") or "sin versión",
+                                                           switch_text(substitution_switch(root, item), item)))
+        else:
+            lines.append("%s está sin confirmar (%s): pregúntale a Gradle de nuevo o registra lo que diga el usuario" % (
+                item["nombre"], item.get("motivo") or "Gradle no lo dijo"))
+    steps = [{"tipo": "avisos", "titulo": "Módulos del alcance que la app consume compilados (no se editan)",
+              "lineas": lines + [line.lstrip("⚠ ") for line in folder_request(pending)] + ["Ninguna sesión edita ese módulo (marcas, cambios temporales ni mejoras), aunque su "
+                                 "código esté en disco: no llegaría al APK"]},
+             terminal(modules_recheck(root, folder),
+                      "le pregunta a Gradle de nuevo cómo llega cada módulo del alcance y actualiza el mapa del plan y de "
+                      "la ficha", "córrelo después de cambiar tú el interruptor del proyecto y sincronizar Gradle")]
+    for item in pending:
+        if item["tipo"] == "sin confirmar":
+            steps.append(terminal(setup_command(root, "--estado", "--confirmar", "%s=codigo" % item["nombre"], folder=folder),
+                                  "si Gradle no se puede correr: registra que %s se compila desde código (lo que te "
+                                  "confirme quien conoce el proyecto)" % item["nombre"],
+                                  "córrelo solo si es así; si llega como binario, el mismo comando con =binario"))
+    binaries = [item for item in pending if item["tipo"] == "binario"]
+    if binaries:
+        steps.append(terminal(setup_command(root, "--estado", *[part for item in binaries for part in (
+            "--confirmar", "%s=binario" % item["nombre"])], folder=folder),
+            "o deja registrado que %s se queda%s como binario: se mide desde el módulo app (con menos precisión), el "
+            "hallazgo va como \"fuera del alcance: módulo compilado\" y la mejora es del lado de la app o un pedido al "
+            "equipo dueño" % (", ".join(item["nombre"] for item in binaries), "" if len(binaries) == 1 else "n"),
+            "elige este solo si no puedes o no quieres compilar el módulo desde código"))
+    return steps
+
+
 # ── Entrada ──────────────────────────────────────────────────────────────────
 
 MAPPING_HELP = ("mapping.txt de R8 de la variante medida, para desofuscar; si no, el 'mapping' del plan o el de la variante "
@@ -15618,8 +18277,9 @@ def main(argv=None):
                                    "sin pisar otro (en la carpeta de parches de AGENTS.md o en <carpeta>/parches), "
                                    "comprueba que revierte limpio, quita, muestra git status y marca las filas en "
                                    "estado.md. Nunca usa checkout, restore, reset --hard ni clean; si algo no revierte "
-                                   "limpio, se detiene sin tocar nada. Las filas cuyo 'Qué es' dice 'setup' van en un "
-                                   "parche aparte y AGENTS.md dice cómo ponerlo antes de medir.")
+                                   "limpio, se detiene sin tocar nada. Al final, después del DoD, quita el setup de "
+                                   "medición si va en un parche (también el que declaran las filas cuyo 'Qué es' dice "
+                                   "'setup'); --sin-setup lo deja puesto.")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--simular", action="store_true", help="solo muestra qué quitaría y qué quedaría; no toca nada")
     p.add_argument("--dod", action="store_true",
@@ -15628,7 +18288,52 @@ def main(argv=None):
     p.add_argument("--corregir-repo", dest="corregir_repo", metavar="VIEJO=NUEVO",
                    help="cambia la columna 'Repo o módulo' de las filas que dicen VIEJO por NUEVO (una ruta desde la raíz, "
                         "como ../modulo-pagos) y no quita nada")
+    p.add_argument("--sin-setup", dest="sin_setup", action="store_true",
+                   help="con el setup en un parche: no lo quita al final (por ejemplo, para seguir enseguida con otra "
+                        "investigación) y lo deja anotado")
     p.set_defaults(func=cmd_cerrar)
+
+    p = sub.add_parser("setup", help="el setup de medición del proyecto: su caso, guardarlo como parche, reponerlo o quitarlo",
+                       description="El setup es lo que genera `instrumentar` más el cableado de la sesión 0. Sin opciones "
+                                   "(o con --estado) dice su caso (versionado, en parche o sin setup), el parche vigente "
+                                   "y su ficha, y las herramientas de la máquina, en solo lectura. --guardar lo guarda "
+                                   "como parche con su ficha (repo, applicationId, versión, commit base y SHA-256) y lo "
+                                   "deja como vigente; --reponer lo aplica después de comprobar que es de este repo y de "
+                                   "esta app y que aplica limpio; --quitar lo quita con un respaldo antes. Nunca pisa un "
+                                   "parche ni usa checkout, restore, reset --hard ni clean: ante la duda, se detiene sin "
+                                   "tocar nada. Con --carpeta y --modulos, pregunta a Gradle si cada módulo del alcance "
+                                   "se compila desde código o llega como binario.")
+    p.add_argument("--estado", action="store_true", help="el caso del setup, su parche y las herramientas (por defecto)")
+    p.add_argument("--guardar", action="store_true",
+                   help="guarda el setup del árbol como parche (set -C, con fecha y hora) y lo deja como vigente")
+    p.add_argument("--reponer", action="store_true", help="aplica el parche de setup vigente, después de comprobarlo")
+    p.add_argument("--quitar", action="store_true",
+                   help="quita el setup del árbol con su parche (con --guardar: lo guarda y lo quita)")
+    p.add_argument("--vigente", metavar="PARCHE", help="deja ese parche como el de setup vigente del repo (lo confirma el usuario)")
+    p.add_argument("--carpeta", help="la carpeta de una investigación: el paso siguiente queda en su estado.md")
+    p.add_argument("--archivos", nargs="+", metavar="ARCHIVO",
+                   help="con --guardar: archivos que son enteros del setup aunque perf.py no los reconozca (rutas desde la "
+                        "raíz del repo)")
+    p.add_argument("--paquete", help="el applicationId medido, para la ficha (si no, el de la sección de rendimiento de "
+                                     "AGENTS.md)")
+    p.add_argument("--simular", action="store_true", help="solo comprueba y muestra qué haría; no toca nada")
+    p.add_argument("--modulos", nargs="+", metavar="MÓDULO[=CARPETA]",
+                   help="con --carpeta: los módulos del alcance (`:feature-pagos`, `com.example:pagos`); perf.py le "
+                        "pregunta a Gradle si cada uno se compila desde código o llega como binario y lo deja en el plan. "
+                        "=CARPETA dice dónde está el código de un módulo binario en disco (un repo hermano)")
+    p.add_argument("--comprobar-modulos", dest="comprobar_modulos", action="store_true",
+                   help="con --carpeta: le pregunta de nuevo a Gradle por los módulos que ya están en el plan")
+    p.add_argument("--confirmar", action="append", metavar="MÓDULO=codigo|binario",
+                   help="lo que respondió el usuario cuando Gradle no se pudo correr, o que acepta medir un módulo binario "
+                        "desde el módulo app (se repite)")
+    p.add_argument("--app", help="el módulo de la app para `dependencies` (por defecto, el de `instalar` del plan, o app)")
+    p.add_argument("--configuracion",
+                   help="la configuración de Gradle de la variante medida (por defecto <variante>RuntimeClasspath, con la "
+                        "variante de `instalar` del plan)")
+    p.add_argument("--dependencias", metavar="ARCHIVO",
+                   help="la salida ya guardada de `./gradlew -q :<app>:dependencies --configuration <configuración>`, si "
+                        "perf.py no puede correr Gradle")
+    p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("marcas", help="el parche de marcas vigente de cada repo: lo muestra, lo fija o lo arma",
                        description="Un archivo que tiene una mejora y marcas solo se cierra con el parche de marcas "
@@ -15845,6 +18550,7 @@ def main(argv=None):
     argv = glue_dashed_values(sys.argv[1:] if argv is None else list(argv))
     args = parser.parse_args(argv)
     reset_guide(argv)
+    QUIET_TOOLS["activo"] = args.command in ("teclear", "pausa", "nodos")
     # El único lugar que cierra un fallo: qué pasó, qué quedó guardado y el comando para seguir (guide_lines).
     try:
         args.func(args)
