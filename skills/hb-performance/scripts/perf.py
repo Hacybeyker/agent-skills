@@ -16303,6 +16303,40 @@ def known_setup_lines(patch):
     return {os.path.normpath(name): changed_lines(data, name) for name in patch_sections(data)}
 
 
+def legacy_patch_problem(patch):
+    """Un parche de setup sin ficha (de una versión anterior) solo se usa si todos sus archivos son del setup: el motivo
+    por el que no, o None. Es del setup un archivo que generó la skill o del source set de medición, o uno en el que cada
+    hunk lleva alguna línea inequívoca del setup (SETUP_CODE, o la variante de un manifest generado, en un archivo de
+    Gradle). `main`, `debug` y `release` no cuentan como variante medida."""
+    data = read_patch(patch)
+    sections = patch_sections(data)
+    if not sections:
+        return "no tiene el formato de un parche de git (o está vacío)"
+    variants = {pathlib.PurePosixPath(name).parts[-2] for name in sections
+                if name.endswith("AndroidManifest.xml") and GENERATED.encode() in sections[name]
+                and len(pathlib.PurePosixPath(name).parts) >= 3} - {"main", "debug", "release"}
+    variant = re.compile(r"(?i)(?<![a-z])(?:%s)(?![a-z])" % "|".join(re.escape(name) for name in sorted(variants))) \
+        if variants else None
+    foreign = []
+    for name, section in sections.items():
+        parts = pathlib.PurePosixPath(name).parts
+        if GENERATED.encode() in section or SETUP_PATH.search(name) or (
+                "src" in parts[:-2] and parts[parts.index("src") + 1] in variants):
+            continue
+        extra = variant if name.endswith(GRADLE_OR_MANIFEST) else None
+        hunks = split_hunks(section)[1]
+        ok = bool(hunks)
+        for hunk in hunks:
+            texts = [line[1:].decode("utf-8", "replace") for line in hunk_changes(hunk)]
+            if not any(SETUP_CODE.search(text) or (extra is not None and extra.search(text)) for text in texts):
+                ok = False
+        if not ok:
+            foreign.append(name)
+    if foreign:
+        return "toca archivos o cambios que no reconozco como del setup (%s)" % ", ".join(foreign[:5])
+    return None
+
+
 def ensure_ignored_in(top, folder):
     """Como ensure_ignored, con el repo dado: si la carpeta está dentro del repo y git no la ignora, la agrega a
     .git/info/exclude (local: el repo no cambia)."""
@@ -16500,6 +16534,203 @@ def setup_guardar(root, args, folder=None, quiet_same=False, explicit=None):
     return patch, setup_case(root)
 
 
+def three_way_check(top, patch):
+    """(aplica sin conflictos, detalle) de `git apply --3way --check` con un índice temporal: el índice del repo no se
+    toca. `--check` con --3way termina en 0 aunque haya conflictos, así que se lee lo que dice (en inglés: LC_ALL=C)."""
+    return _three_way(top, patch, check=True)
+
+
+def _three_way(top, patch, check):
+    git_dir = git_out(top, "rev-parse", "--absolute-git-dir")
+    if not git_dir:
+        return False, "no pude ubicar la carpeta .git"
+    work = tempfile.mkdtemp(prefix="hbperf-indice-")
+    try:
+        index = pathlib.Path(git_dir) / "index"
+        temp = pathlib.Path(work) / "index"
+        if index.is_file():
+            shutil.copyfile(str(index), str(temp))
+        env = dict(os.environ, GIT_INDEX_FILE=str(temp), LC_ALL="C", LANGUAGE="C")
+        done = subprocess.run(["git", "-C", str(top), "apply", "--3way"] + (["--check"] if check else []) + [str(patch)],
+                              capture_output=True, text=True, timeout=180, env=env)
+        said = (done.stderr or "") + (done.stdout or "")
+        # Con conflictos git dice "with conflicts". Un git anterior a 2.32 prueba primero la aplicación directa y deja un
+        # "error:" antes de "Falling back to three-way merge… cleanly": ese error solo cuenta si nada quedó "cleanly".
+        clean = done.returncode == 0 and "conflict" not in said.lower() and (
+            not re.search(r"^error:", said, re.M) or "cleanly" in said)
+        return clean, " ".join(said.split())[:300]
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, str(error)[:200]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def identity_step(root, folder=None):
+    """El paso que sigue cuando un parche no es el que corresponde: ver el caso y los parches que hay."""
+    return ("mira el caso del setup y qué parches hay; si este no sirve, la sesión 0 genera el setup de nuevo",
+            setup_command(root, "--estado", folder=folder))
+
+
+def verify_setup_patch(root, top, patch, app_option=None, write=True, folder=None):
+    """Comprueba que un parche de setup es el de este repo y esta app y que no cambió. Devuelve (ficha, notas) o lanza
+    PerfError con lo que no coincide, sin tocar nada. Un parche sin ficha (de una versión anterior), o con una ficha
+    incompleta, solo vale si todos sus archivos son del setup: la primera vez se le escribe (o se completa) la ficha con
+    lo que se encuentra. Una ficha que existe y no se puede leer detiene: no se baja la comprobación en silencio."""
+    notes = []
+    follow = [identity_step(root, folder)]
+    ficha = read_ficha(patch)
+    if ficha is None and ficha_path(patch).exists():
+        raise PerfError("la ficha del parche (%s) existe pero no se puede leer (no es JSON válido): sin ella no puedo "
+                        "comprobar que el parche sea de este repo. No lo aplico" % ficha_path(patch)).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    complete = ficha is not None and bool(ficha.get("sha256")) and bool(ficha.get("remoto") or ficha.get("raiz"))
+    if not complete:
+        problem = legacy_patch_problem(patch)
+        if problem:
+            raise PerfError("el parche %s no tiene ficha completa (es de una versión anterior) y %s: no lo uso como setup. "
+                            "Si el setup se perdió, la sesión 0 lo genera de nuevo" % (patch, problem)).con(
+                guardado="nada: no toqué el código", seguir=follow)
+        if not (git_apply(top, patch, check=True)[0] or git_apply(top, patch, reverse=True, check=True)[0]):
+            raise PerfError("el parche %s no tiene ficha completa (es de una versión anterior) y no aplica limpio en %s (ni "
+                            "para ponerlo ni para quitarlo): no puedo comprobar que sea de este repo. Si el proyecto "
+                            "cambió desde que se guardó, la sesión 0 genera el setup de nuevo" % (patch, top)).con(
+                guardado="nada: no toqué el código", seguir=follow)
+        found = {"parche": pathlib.Path(patch).name, "sha256": sha256_of(patch), "remoto": repo_remote(top),
+                 "raiz": pathlib.Path(top).name, "applicationId": measured_app_id(root, app_option), "skill": None,
+                 "commit_base": None, "archivos": patch_files(patch), "estado": "vigente",
+                 "origen": "parche de una versión anterior, sin ficha: la escribió perf.py setup"}
+        if ficha is not None:  # incompleta: se conserva lo que traía y se completa lo que falta
+            found.update({key: value for key, value in ficha.items() if value not in (None, "")})
+            found["sha256"] = sha256_of(patch)
+        if write:
+            found.setdefault("creado", datetime.datetime.now().replace(microsecond=0).isoformat())
+            ficha_path(patch).write_text(json.dumps(found, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            notes.append("✔ El parche no tenía ficha completa (es de una versión anterior): todos sus archivos son del "
+                         "setup y aplica limpio, así que le escribí la ficha con lo que encontré (%s)." % ficha_path(patch))
+        return found, notes
+    if ficha["sha256"] != sha256_of(patch):
+        raise PerfError("el parche %s cambió desde que se guardó (su SHA-256 no es el de la ficha): no lo aplico" % patch).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    here, there = repo_remote(top), clean_remote(ficha.get("remoto") or "") or NO_REMOTE
+    if here != NO_REMOTE and there != NO_REMOTE:
+        if not same_remote(here, there):
+            raise PerfError("el parche es de otro repo: %s (este repo es %s). No lo aplico" % (there, here)).con(
+                guardado="nada: no toqué el código", seguir=follow)
+    elif here != there and there != NO_REMOTE:
+        raise PerfError("el parche es de un repo con remoto (%s) y este repo no tiene remoto: no puedo comprobar que sea "
+                        "el mismo. No lo aplico" % there).con(guardado="nada: no toqué el código", seguir=follow)
+    elif ficha.get("raiz") and ficha["raiz"] != pathlib.Path(top).name:
+        raise PerfError("el parche es de otro proyecto: su ficha dice la raíz '%s' y esta es '%s' (sin remoto, se compara "
+                        "la raíz). No lo aplico" % (ficha["raiz"], pathlib.Path(top).name)).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    mine, theirs = measured_app_id(root, app_option), ficha.get("applicationId")
+    if mine and theirs and mine != theirs:
+        raise PerfError("el parche es de otra app: su ficha dice el applicationId %s y este proyecto mide %s (el de la "
+                        "sección de rendimiento de AGENTS.md, o --paquete). No lo aplico" % (theirs, mine)).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    if theirs and not mine:
+        notes.append("· No pude comparar el applicationId (%s en la ficha): la sección de rendimiento de AGENTS.md no lo "
+                     "dice. El remoto del repo sí coincide." % theirs)
+    return ficha, notes
+
+
+def half_applied(top, patch, files, what):
+    """El error cuando una aplicación comprobada falla o queda a medias: dice que el árbol pudo quedar incompleto y cómo
+    mirarlo, sin dar el setup por repuesto."""
+    missing = [rel for rel in files if not (pathlib.Path(top) / rel).exists()]
+    return PerfError(
+        "%s y el árbol pudo quedar a medias%s. No doy el setup por repuesto. Los archivos del parche no tenían cambios tuyos "
+        "antes de empezar: lo que `git status --short` muestre en ellos es del parche a medias, no trabajo tuyo (no lo "
+        "commitees). Suele ser una carpeta sin permiso de escritura: corrígelo, deja esos archivos como en el último "
+        "commit y repite" % (what, " (faltan %s)" % ", ".join(missing[:6]) if missing else "")).con(
+        guardado="el parche sigue intacto en %s" % patch,
+        seguir=[("mira qué quedó a medias", "cd %s && git status --short" % q(top)),
+                ("con el árbol como en el último commit, repite", same_command())])
+
+
+def setup_reponer(root, args, folder=None):
+    """A3: repone el setup con su parche vigente, después de comprobar que es el correcto. Devuelve (estado, ficha):
+    "repuesto", "puesto" (ya estaba) o "simulado"."""
+    case = setup_case(root)
+    kind = case["caso"]
+    if case["presente"]:
+        print("✔ El setup ya está en el árbol (%s): no hay nada que reponer." % setup_label(case))
+        return "puesto", case.get("ficha")
+    if kind != "parche":
+        steps = reponer_steps(root, case, folder)
+        why = {"sin": "el proyecto no tiene setup de medición (ni el código ni una línea en AGENTS.md): falta la sesión 0",
+               "duda": "AGENTS.md no nombra un único parche de setup que exista: falta decir cuál es el vigente",
+               "perdido": "AGENTS.md dice que el setup está, pero no hay código ni parche"}[kind]
+        notes, follow = guide_steps(steps, root, {})
+        raise PerfError("no hay nada que reponer: %s%s" % (why, "".join("\n  %s" % note for note in notes))).con(
+            guardado="nada: no toqué el código", seguir=follow)
+    top = (case["repo"] or pathlib.Path(root)).resolve()
+    patch = case["parche"]
+    files = patch_files(patch)
+    changes = code_changes(top, root, folder)
+    touched = [rel for rel in files if rel in changes]
+
+    def stop_touched():
+        return PerfError("hay cambios tuyos sin commitear en archivos que el parche del setup toca:\n  - %s\nNo apliqué "
+                         "nada: reponer encima podría mezclarlos o fallar a medias" % "\n  - ".join(touched[:12])).con(
+            guardado="nada: no toqué el código",
+            seguir=[("haz el commit de esos cambios (o guárdalos aparte) y repite", same_command())])
+
+    if touched and read_ficha(patch) is None:
+        raise stop_touched()  # un parche sin ficha se comprueba aplicándolo: con cambios encima, el motivo sería otro
+    ficha, notes = verify_setup_patch(root, top, patch, getattr(args, "paquete", None),
+                                      write=not getattr(args, "simular", False), folder=folder)
+    for line in notes:
+        print(line)
+    if touched:
+        raise stop_touched()
+    ok, error = git_apply(top, patch, check=True)
+    three_way = False
+    if not ok:
+        clean, detail = three_way_check(top, patch)
+        if not clean:
+            raise PerfError("el parche del setup no aplica limpio en el código de ahora (%s) y, probado con --3way, tiene "
+                            "conflictos (%s). No apliqué nada: el proyecto cambió desde que se guardó el parche (commit "
+                            "base %s)" % (error or "git apply --check falló", detail or "sin detalle",
+                                          (ficha.get("commit_base") or "sin dato")[:12])).con(
+                guardado="nada: no toqué el código",
+                seguir=[session0_step_guide(root)])
+        three_way = True
+    if getattr(args, "simular", False):
+        print("· Simulación: repondría el setup con %s (%d archivo%s)%s. No toqué el código." % (
+            patch, len(files), "" if len(files) == 1 else "s", ", con --3way porque el proyecto cambió" if three_way else ""))
+        return "simulado", ficha
+    if three_way:
+        clean, detail = _three_way(top, patch, check=False)
+        if not clean:
+            raise half_applied(top, patch, files, "git apply --3way falló después de comprobarlo (%s)" % detail)
+        print("⚠ El parche no aplicaba tal cual porque el proyecto cambió desde que se guardó: lo apliqué con --3way, sin "
+              "conflictos. Compila y corre la prueba de humo antes de medir.")
+    else:
+        ok, error = git_apply(top, patch)
+        if not ok:  # comprobado justo antes: no debería pasar
+            raise half_applied(top, patch, files, "git apply falló después de comprobarlo (%s)" % (error or "sin detalle"))
+    # git puede terminar bien sin haber escrito todo (una carpeta sin permiso): se comprueba antes de darlo por repuesto.
+    sections = patch_sections(read_patch(patch))
+    missing = [rel for rel in files if not (top / rel).exists()
+               and b"deleted file mode" not in sections.get(os.path.normpath(rel), b"")]
+    if missing or (not three_way and not git_apply(top, patch, reverse=True, check=True)[0]):
+        raise half_applied(top, patch, files, "git terminó sin error pero el setup no quedó completo en el árbol")
+    print("✔ Setup repuesto con su parche (%s): %d archivo%s. Repo %s · app %s." % (
+        patch, len(files), "" if len(files) == 1 else "s", ficha.get("remoto") or NO_REMOTE,
+        ficha.get("applicationId") or "sin dato"))
+    if find_hooks(root) is None:
+        print("⚠ Apliqué el parche pero no encuentro PerfHooks.kt en el árbol: revisa que ese parche sea el del setup.")
+    if case["dice"]["antigua"]:  # la línea vieja se reconoce; desde ahora manda la del bloque de estado
+        for line in register_setup_patch(root, top, patch, ficha.get("applicationId"), "perf.py setup --reponer")[1]:
+            print(line)
+    else:
+        note = update_agents_state(root)
+        if note:
+            print(note)
+    return "repuesto", ficha
+
+
 def guide_steps(steps, root, plan):
     """Los pasos de `siguiente` en la forma de la guía de un fallo (guide_lines): (notas de los avisos, pasos)."""
     notes, follow = [], []
@@ -16632,6 +16863,48 @@ def after_setup(root, folder, plan, title, steps):
         print_next(folder, plan)
     else:
         print_setup_next(root, title, steps)
+
+
+def update_steps_after_restore(root, ficha, folder, plan):
+    """A3: si la skill es más nueva que la del parche, lo que sigue a reponer es actualizar la instrumentación, la prueba
+    de humo y guardar un parche nuevo. A mitad de una investigación medida no se actualiza (cambiaría los nombres de las
+    secciones entre antes y después): se avisa y queda para cuando termine."""
+    version = (ficha or {}).get("skill")
+    if version_at_least(version, VERSION):
+        return None, []
+    folders = [pathlib.Path(folder)] if folder is not None else [other for other, is_open in project_investigations(root)
+                                                                 if is_open]
+    measured = [shown_path(other, root) for other in folders if read_phases(other).get("antes")]
+    shown = "hb-performance %s" % version if version else "una versión anterior (su ficha no dice cuál)"
+    if measured:
+        return ("⚠ El parche del setup es de %s y esta es la %s. No lo actualices ahora: hay una investigación que ya midió "
+                "(%s), y actualizar la instrumentación a mitad cambiaría los nombres entre antes y después. Al cerrarla, "
+                "`setup --estado` te da los pasos para actualizarlo." % (shown, VERSION, ", ".join(measured[:3]))), []
+    update = update_instrumentation_command(root)
+    app_id = (ficha or {}).get("applicationId") or measured_app_id(root)
+    steps = []
+    if update:
+        steps.append(terminal(update, "actualiza los archivos que generó la skill a la versión %s (no pisa lo que se "
+                                      "editó a mano)" % VERSION, "revisa lo que diga que falta"))
+    if (plan or {}).get("instalar"):
+        steps.append(install_step(plan, root, "compila e instala el build de medición con la instrumentación actualizada",
+                                  "espera a que termine"))
+    else:
+        steps.append({"tipo": "accion", "que": "compila e instala el build de medición con la instrumentación actualizada",
+                      "tu": "usa el comando de instalación de la sección de rendimiento de AGENTS.md"})
+    if app_id:
+        steps.append(terminal(perf_command(root, "humo", "--paquete", app_id),
+                              "prueba de humo con la instrumentación actualizada: una corrida de arranque que valida las "
+                              "secciones", "ten el dispositivo conectado; con más de uno, agrega --serial y su serial"))
+    else:
+        steps.append({"tipo": "accion", "que": "prueba de humo con la instrumentación actualizada",
+                      "tu": "corre `perf.py humo --paquete` con el applicationId del build de medición (AGENTS.md no lo "
+                            "dice: anótalo en la sección de rendimiento)"})
+    steps.append(terminal(setup_command(root, "--guardar"),
+                          "guarda el setup actualizado como parche nuevo y lo deja como vigente (el anterior queda "
+                          "reemplazado, sin borrarlo)", "nada"))
+    return ("· El parche del setup es de %s y esta es la %s: conviene actualizar la instrumentación antes de medir."
+            % (shown, VERSION)), steps
 
 
 def cmd_setup(args):

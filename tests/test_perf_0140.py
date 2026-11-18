@@ -764,6 +764,168 @@ class SetupSaveTest(SetupBase):
         self.assertNotIn("Setup: en parche", (self.root / "AGENTS.md").read_text(encoding="utf-8"))
 
 
+class SetupRestoreTest(SetupBase):
+    """A3: reponer el setup correcto, o detenerse sin tocar nada."""
+
+    def test_ficha_con_otro_remoto(self):
+        shutil.copytree(str(FIXTURES / "otro-repo" / "herramientas"), str(self.root / "herramientas"))
+        write(self.root / "AGENTS.md", (FIXTURES / "otro-repo" / "AGENTS.md").read_text(encoding="utf-8"))
+        before = self.tree()
+        error = self.bad("setup", "--reponer")
+        self.assertIn("el parche es de otro repo: git@example.com:otro-equipo/otra-app.git (este repo es %s)" % REMOTE, error)
+        self.assertIn("No lo aplico", error)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.status(), ["?? herramientas/"])
+
+    def test_el_mismo_repo_por_https(self):
+        patch, _ = self.in_patch()
+        git(self.root, "remote", "set-url", "origin", "https://example.com/equipo/app")
+        self.good("setup", "--reponer")
+        self.assertTrue((self.root / HOOKS).is_file())
+
+    def test_hash_app_y_raiz_que_no_coinciden(self):
+        patch, ficha = self.in_patch()
+        path = patch.parent / (patch.name + ".json")
+        before = self.tree()
+        write(path, json.dumps(dict(ficha, sha256="0" * 64)))
+        self.assertIn("cambió desde que se guardó (su SHA-256 no es el de la ficha)", self.bad("setup", "--reponer"))
+        write(path, json.dumps(dict(ficha, applicationId="com.example.otra")))
+        self.assertIn("el parche es de otra app: su ficha dice el applicationId com.example.otra y este proyecto mide %s" % PKG,
+                      self.bad("setup", "--reponer"))
+        write(path, json.dumps(dict(ficha, remoto="sin remoto", raiz="otro-proyecto")))
+        self.assertIn("el parche es de otro proyecto: su ficha dice la raíz 'otro-proyecto' y esta es 'proyecto'",
+                      self.bad("setup", "--reponer"))
+        git(self.root, "remote", "remove", "origin")
+        write(path, json.dumps(ficha))
+        self.assertIn("es de un repo con remoto (%s) y este repo no tiene remoto" % REMOTE, self.bad("setup", "--reponer"))
+        self.assertEqual(self.tree(), before)
+        write(path, json.dumps(dict(ficha, remoto="sin remoto")))  # sin remoto: valen la raíz y el applicationId
+        self.good("setup", "--reponer")
+        self.assertTrue((self.root / HOOKS).is_file())
+
+    def test_cambios_del_usuario_en_los_archivos_del_parche(self):
+        self.in_patch()
+        write(self.root / "app" / "build.gradle.kts", BUILD + "// trabajo mío sin commitear\n")
+        before = self.tree()
+        error = self.bad("setup", "--reponer")
+        self.assertIn("hay cambios tuyos sin commitear en archivos que el parche del setup toca:\n  - app/build.gradle.kts",
+                      error)
+        self.assertIn("No apliqué nada", error)
+        self.assertEqual(self.tree(), before)
+
+    def test_tres_vias_solo_sin_conflictos(self):
+        self.in_patch()
+        client = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "red" / "Red.kt"
+        # el proyecto cambió cerca del gancho (dentro del contexto del parche), sin tocar la misma línea
+        write(client, CLIENT.replace("builder.followRedirects(true)", "builder.followRedirects(false)"))
+        commit_all(self.root, "cambio del equipo")
+        out = self.good("setup", "--reponer")
+        self.assertIn("lo apliqué con --3way, sin conflictos", out)
+        text = client.read_text(encoding="utf-8")
+        self.assertIn("PerfHooks.okHttp(builder)", text)
+        self.assertIn("builder.followRedirects(false)", text)
+        self.assertNotIn("<<<<<<<", text)
+        self.assertEqual(git(self.root, "diff", "--cached", "--name-only"), "")  # el índice del usuario no se toca
+
+    def test_tres_vias_con_conflicto_se_detiene(self):
+        self.in_patch()
+        client = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "red" / "Red.kt"
+        write(client, CLIENT.replace("        val builder = OkHttpClient.Builder()\n",
+                                     "        val builder = OkHttpClient.Builder().cache(null)\n        builder.pingInterval(1)\n"))
+        commit_all(self.root, "cambio del equipo en la misma línea")
+        before = self.tree()
+        error = self.bad("setup", "--reponer")
+        self.assertIn("probado con --3way, tiene conflictos", error)
+        self.assertIn("No apliqué nada", error)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.status(), [])
+
+    def test_parche_sin_ficha_de_una_version_anterior(self):
+        shutil.copytree(str(FIXTURES / "linea-vieja" / "herramientas"), str(self.root / "herramientas"))
+        write(self.root / "AGENTS.md", (FIXTURES / "linea-vieja" / "AGENTS.md").read_text(encoding="utf-8"))
+        patch = self.root / "herramientas" / "perf-setup.patch"
+        out = self.good("setup", "--reponer")
+        self.assertIn("El parche no tenía ficha completa (es de una versión anterior)", out)
+        self.assertTrue((self.root / HOOKS).is_file())
+        ficha = json.loads((patch.parent / "perf-setup.patch.json").read_text(encoding="utf-8"))
+        self.assertEqual((ficha["remoto"], ficha["applicationId"], ficha["skill"], ficha["sha256"]),
+                         (REMOTE, PKG, None, perf.sha256_of(patch)))
+        agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("- Setup: en parche `herramientas/perf-setup.patch`", agents)  # desde ahora manda el bloque
+        self.assertIn("todavía tiene la línea de versiones anteriores", out)
+        # la skill es más nueva que el parche: lo que sigue es actualizar, humo y guardar
+        commands = pasteable(out)[0]
+        self.assertIn("instrumentar --modulo app --paquete %s.perf --actualizar" % PKG, commands[0])
+        self.assertIn("humo --paquete %s" % PKG, commands[1])
+        self.assertTrue(commands[2].endswith("setup --guardar"))
+
+    def test_parche_sin_ficha_con_archivos_ajenos_no_se_usa(self):
+        self.instrument()
+        write(self.root / "docs" / "ajeno.md", "no es del setup\n")
+        git(self.root, "add", "-N", ".")
+        legacy = self.root.parent / "viejo" / "perf-setup.patch"
+        write(legacy, git(self.root, "diff", "--binary"))
+        git(self.root, "reset", "-q")
+        git(self.root, "apply", "-R", str(legacy))
+        write(self.root / "AGENTS.md", AGENTS.replace("- setup listo\n", "- Setup listo, en parche: `git apply %s` antes "
+                                                      "de medir\n" % legacy))
+        before = self.tree()
+        error = self.bad("setup", "--reponer")
+        self.assertIn("no tiene ficha completa (es de una versión anterior) y toca archivos o cambios que no reconozco "
+                      "como del setup (docs/ajeno.md)", error)
+        self.assertEqual(self.tree(), before)
+        self.assertFalse((legacy.parent / "perf-setup.patch.json").exists())
+
+    def test_una_ficha_ilegible_o_incompleta_no_baja_la_comprobacion(self):
+        patch, ficha = self.in_patch()
+        path = patch.parent / (patch.name + ".json")
+        before = self.tree()
+        write(path, "{ esto no es json")
+        self.assertIn("existe pero no se puede leer", self.bad("setup", "--reponer"))
+        self.assertEqual(self.tree(), before)
+        # sin los campos que se comparan vale la regla de los parches sin ficha: se completa con lo que se encuentra
+        write(path, json.dumps({"parche": patch.name, "estado": "vigente"}))
+        self.assertIn("no tenía ficha completa", self.good("setup", "--reponer"))
+        completed = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual((completed["sha256"], completed["remoto"]), (perf.sha256_of(patch), REMOTE))
+
+    def test_parche_sin_ficha_con_ajenos_que_nombran_debug(self):
+        self.instrument()
+        write(self.root / "docs" / "ajeno.md", "notas del modo debug del servidor\n")
+        write(self.root / "app" / "src" / "debug" / "kotlin" / "Herramienta.kt", "object Herramienta\n")
+        git(self.root, "add", "-N", ".")
+        legacy = self.root.parent / "viejo" / "perf-setup.patch"
+        write(legacy, git(self.root, "diff", "--binary"))
+        git(self.root, "reset", "-q")
+        git(self.root, "apply", "-R", str(legacy))
+        write(self.root / "AGENTS.md", AGENTS.replace("- setup listo\n", "- Setup listo, en parche: `git apply %s` antes "
+                                                      "de medir\n" % legacy))
+        error = self.bad("setup", "--reponer")
+        self.assertIn("docs/ajeno.md", error)
+        self.assertIn("app/src/debug/kotlin/Herramienta.kt", error)
+        self.assertFalse((self.root / HOOKS).exists())
+
+    def test_no_actualizar_a_mitad_de_una_investigacion_medida(self):
+        patch, ficha = self.in_patch()
+        write(patch.parent / (patch.name + ".json"), json.dumps(dict(ficha, skill="0.13.0")))
+        folder = self.investigation()
+        write(folder / "fases.json", json.dumps({"antes": {"fecha": "2020-01-01T10:00:00", "corridas": 10}}))
+        for extra in ((), ("--carpeta", folder.relative_to(self.root))):
+            with self.subTest(carpeta=bool(extra)):
+                out = self.good("setup", "--reponer", *extra) if extra else self.good("setup", "--reponer", "--simular")
+        out = self.good("setup", "--estado")  # también sin --carpeta: mira las investigaciones abiertas del proyecto
+        self.assertIn("No lo actualices ahora: hay una investigación que ya midió (reports/perf/pagos/2099-01-01)", out)
+        self.assertNotIn("--actualizar", "\n".join(pasteable(out)[0]))
+
+    def test_ya_puesto_y_simular(self):
+        self.in_patch()
+        before = self.tree()
+        self.assertIn("Simulación: repondría el setup", self.good("setup", "--reponer", "--simular"))
+        self.assertEqual(self.tree(), before)
+        self.good("setup", "--reponer")
+        self.assertIn("El setup ya está en el árbol", self.good("setup", "--reponer"))
+
+
 class SetupGateTest(SetupBase):
     """A5: `siguiente` y los controles previos, con el setup en un parche y fuera del árbol."""
 
