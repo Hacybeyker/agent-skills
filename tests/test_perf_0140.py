@@ -640,7 +640,8 @@ class SetupSaveTest(SetupBase):
         self.good("setup", "--guardar", *WIRING)
         first, _ = self.saved()
         data = first.read_bytes()
-        self.assertIn("El parche vigente ya tiene este setup", self.good("setup", "--guardar", *WIRING))
+        # 0.15.0 · A2: con el mismo contenido nunca dice "guardado": dice qué hizo
+        self.assertIn("Ya estaba guardado en", self.good("setup", "--guardar", *WIRING))
         self.assertEqual(len(list(self.patches.glob("perf-setup-*.patch"))), 1)
         mark = self.root / "app" / "src" / "perf" / "kotlin" / "com" / "example" / "app" / "perf" / "MarkTrace.kt"
         write(mark, mark.read_text(encoding="utf-8") + "// actualizado\n")
@@ -780,7 +781,7 @@ class SetupSaveTest(SetupBase):
         out = self.good("setup", "--reponer")
         self.assertIn("El parche del setup es de hb-performance 0.13.0 y esta es la %s" % perf.VERSION, out)
         out = self.good("setup", "--guardar")  # `instrumentar --actualizar` no cambió nada: no hace falta otro parche
-        self.assertIn("su ficha queda al día con hb-performance %s" % perf.VERSION, out)
+        self.assertIn("le completé la ficha: la versión de la skill", out)  # 0.15.0 · A2
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["skill"], perf.VERSION)
         self.assertEqual(len(list(self.patches.glob("perf-setup-*.patch"))), 1)
         self.assertNotIn("conviene actualizar", self.good("setup", "--estado"))
@@ -900,7 +901,9 @@ class SetupRestoreTest(SetupBase):
                          (REMOTE, PKG, None, perf.sha256_of(patch)))
         agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("- Setup: en parche `herramientas/perf-setup.patch`", agents)  # desde ahora manda el bloque
-        self.assertIn("todavía tiene la línea de versiones anteriores", out)
+        # 0.15.0 · A4: la línea vieja la quita perf.py, con un respaldo de AGENTS.md antes
+        self.assertIn("quité la línea de una versión anterior", out)
+        self.assertNotIn("git apply herramientas/perf-setup.patch", agents)
         # la skill es más nueva que el parche: lo que sigue es actualizar, humo y guardar
         commands = pasteable(out)[0]
         self.assertIn("instrumentar --modulo app --paquete %s.perf --actualizar" % PKG, commands[0])
@@ -919,8 +922,10 @@ class SetupRestoreTest(SetupBase):
                                                       "de medir\n" % legacy))
         before = self.tree()
         error = self.bad("setup", "--reponer")
-        self.assertIn("no tiene ficha completa (es de una versión anterior) y toca archivos o cambios que no reconozco "
-                      "como del setup (docs/ajeno.md)", error)
+        # 0.15.0 · A1: el rechazo da el comando exacto con los archivos que no reconoció
+        self.assertIn("es de una versión anterior (sin ficha) y toca archivos que no reconozco como del setup: "
+                      "docs/ajeno.md", error)
+        self.assertIn("setup --reponer --archivos docs/ajeno.md", error)
         self.assertEqual(self.tree(), before)
         self.assertFalse((legacy.parent / "perf-setup.patch.json").exists())
 
