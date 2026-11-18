@@ -280,6 +280,51 @@ class AdbAndJavaTest(MachineBase):
             self.assertIn("uso Maestro de", "".join(call.args[0] for call in err.write.call_args_list))
 
 
+class NoMachineChangesTest(unittest.TestCase):
+    """B3 y la regla de la sección 2: nada de lo que la skill corre, imprime o documenta escribe en un perfil del shell,
+    cambia variables globales ni pide permisos de administrador."""
+
+    def texts(self):
+        for path in sorted(SKILL.rglob("*")):
+            if path.is_file() and "__pycache__" not in path.parts:
+                try:
+                    yield path, path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue
+        for name in ("README.md", "PROMPTS.md", "CATALOG.md"):
+            yield ROOT / name, (ROOT / name).read_text(encoding="utf-8")
+
+    def test_ningun_archivo_escribe_en_un_perfil_del_shell(self):
+        for path, text in self.texts():
+            with self.subTest(archivo=str(path.relative_to(ROOT))):
+                self.assertIsNone(PROFILE_WRITE.search(text))
+                self.assertIsNone(GLOBAL_ENV.search(text))
+                if SKILL in path.parents:
+                    self.assertNotRegex(text, r"\bsudo\b")
+                    self.assertNotRegex(text, r"export PATH=")
+
+    def test_el_detector_reconoce_lo_que_busca(self):
+        for bad in ("echo 'export PATH=x' >> ~/.zshrc", "echo x > $HOME/.bash_profile", "sed -i '' 's/a/b/' ~/.bashrc",
+                    "echo x | tee -a ~/.profile", "echo x >> ~/.config/fish/config.fish", 'echo x >> "${HOME}/.zprofile"'):
+            self.assertIsNotNone(PROFILE_WRITE.search(bad), bad)
+        for fine in ("cd ~ && mkdir -p ~/.local/bin", "no edita ~/.zshrc", "git diff > parche.patch"):
+            self.assertIsNone(PROFILE_WRITE.search(fine), fine)
+
+    def test_requisitos_documentados(self):
+        setup = (SKILL / "references" / "setup.md").read_text(encoding="utf-8")
+        section = setup.split("## Requisitos de la máquina")[1].split("\n## ")[0]
+        for part in ("no instala ni configura nada", "Python 3.8", "git", "`adb`", "`trace_processor`", "Java 17",
+                     "`retrace`", "Maestro", "solo lectura"):
+            self.assertIn(part, section)
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        compatibility = next(line for line in skill.splitlines() if line.startswith("compatibility:"))
+        for part in ("no instala ni configura nada", "adb", "trace_processor", "Python 3.8", "git", "Java 17"):
+            self.assertIn(part, compatibility)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertRegex(readme, r"hb-performance[^\n]*no las instala")
+
+
+
 # ── A · El setup lo maneja la skill ──────────────────────────────────────────
 AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- applicationId: %s\n- Instalar: `./gradlew :app:installProfiling`\n- setup listo\n\n"
           "## DoD\n\n1. `true`\n\n## Git\n\n- Conventional Commits\n" % PKG)

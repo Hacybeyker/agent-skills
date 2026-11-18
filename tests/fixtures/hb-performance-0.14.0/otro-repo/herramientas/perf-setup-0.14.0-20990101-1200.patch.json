@@ -1,0 +1,29 @@
+{
+  "parche": "perf-setup-0.14.0-20990101-1200.patch",
+  "sha256": "504102a6213582c6e2b5933ae2bcd3615506550e271e7f4a7e5e8f2e7272ad49",
+  "remoto": "git@example.com:otro-equipo/otra-app.git",
+  "raiz": "otra-app",
+  "applicationId": "com.example.otra",
+  "skill": "0.14.0",
+  "commit_base": "0123456789abcdef0123456789abcdef01234567",
+  "archivos": [
+    "app/build.gradle.kts",
+    "app/src/debug/AndroidManifest.xml",
+    "app/src/main/kotlin/com/example/app/perf/PerfHooks.kt",
+    "app/src/main/kotlin/com/example/app/red/Red.kt",
+    "app/src/perf/kotlin/com/example/app/perf/HttpSectionName.kt",
+    "app/src/perf/kotlin/com/example/app/perf/MarkTrace.kt",
+    "app/src/perf/kotlin/com/example/app/perf/NavigationTrace.kt",
+    "app/src/perf/kotlin/com/example/app/perf/PerfInstaller.kt",
+    "app/src/perf/kotlin/com/example/app/perf/ScreenTraceCallbacks.kt",
+    "app/src/perf/kotlin/com/example/app/perf/SectionTracer.kt",
+    "app/src/perf/kotlin/com/example/app/perf/TraceEventListener.kt",
+    "app/src/profiling/AndroidManifest.xml",
+    "app/src/testDebug/kotlin/com/example/app/perf/PerfHooksTest.kt",
+    "app/src/testDebug/kotlin/com/example/app/perf/SectionTracerTest.kt",
+    "app/src/testDebug/kotlin/com/example/app/perf/TraceEventListenerTest.kt"
+  ],
+  "creado": "2099-01-01T12:00:00",
+  "estado": "vigente",
+  "origen": "perf.py setup --guardar"
+}
