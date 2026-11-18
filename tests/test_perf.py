@@ -7740,13 +7740,19 @@ class SafeRevertTest(PerfBase):
                                                         + self.ROW % ("app/Marca.kt", "no")))
         out = self.ok("cerrar", "--carpeta", self.folder.relative_to(self.dir))
         saved = sorted(path.name for path in (self.folder / "parches").glob("*.patch"))
-        self.assertEqual(len(saved), 2, saved)
-        self.assertTrue(any(name.startswith("perf-setup-") for name in saved), saved)
+        self.assertEqual(len(saved), 1, saved)  # el cambio temporal; la fila "setup" ya no va en un parche de la investigación
+        # 0.14.0: la fila "setup" la maneja el paso del setup, al final: guarda el setup entero como parche vigente, con su
+        # ficha, y lo quita. Ya no se escribe en AGENTS.md cómo aplicarlo a mano: lo repone `perf.py setup`.
+        patches = self.dir / "reports" / "perf" / "setup" / "parches"
+        setup = sorted(path.name for path in patches.glob("perf-setup-*.patch"))
+        self.assertEqual(len(setup), 1, setup)
         agents = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
         section = agents.split("## Rendimiento")[1].split("## Git")[0]
-        self.assertIn("- Setup listo, en parche: `git -C %s apply " % self.dir.resolve(), section)
-        self.assertIn("antes de medir;", section)
-        self.assertIn("apply -R", section)
+        self.assertIn("- Setup: en parche `reports/perf/setup/parches/%s`" % setup[0], section)
+        self.assertNotIn("git -C", section)
+        self.assertIn("Del setup (no son cambios temporales; los guarda y los quita el paso del setup, al final)", out)
+        self.assertFalse((self.dir / "app" / "src" / "perf" / "PerfHooks.kt").exists())
+        self.assertTrue((patches / (setup[0] + ".json")).is_file())  # con su ficha
         self.assertIn("instrumentación en el repo: no", section)  # el bloque de estado, al día
         self.assertIn("- Instrumentación: PerfHooks", section)  # lo demás no se toca
 

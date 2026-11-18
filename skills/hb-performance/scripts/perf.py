@@ -4099,8 +4099,87 @@ def next_steps(folder, plan, flow=None):
                                   "cambios temporales quitados y el DoD; dicen a qué hora se generaron y que el cierre "
                                   "está hecho", "nada; no abre ningún chat ni mide")
             at = next((i for i, step in enumerate(steps) if step["tipo"] == "fin"), len(steps))
-            steps = steps[:at] + [regenerate] + steps[at:]
+            steps = steps[:at] + [regenerate] + [dict(step, texto=DONE_AFTER_STEP) if step["tipo"] == "fin" else step
+                                                 for step in steps[at:]]
+        if closed and not notice and not dod:
+            # A5: cerrada de verdad solo si el setup quedó como corresponde a su caso (en parche: quitado, o puesto a
+            # pedido con --sin-setup). Antes van los cambios temporales y el DoD.
+            title, steps = setup_after_close(folder, plan, title, steps)
+            if "falta quitar el setup" in title:
+                title = title.replace(" · regenera los reportes con el cierre hecho (sin chat)", "")
     return title, steps
+
+
+SETUP_NEEDED = re.compile(r"sesión [13]\b")
+
+
+def setup_first(folder, plan, steps):
+    """Pone `setup --reponer` (o lo que haga falta para tener el setup) antes de una secuencia que instala, mide o abre una
+    sesión que compila (la 1 y la 3), cuando AGENTS.md dice que el setup está en un parche y su código no está."""
+    needs = [step for step in steps if (step["tipo"] == "terminal" and (" capturar " in step["texto"] or step.get("instala")))
+             or (step["tipo"] == "accion" and step.get("instala"))
+             or (step["tipo"] == "chat" and SETUP_NEEDED.search(step.get("que") or ""))]
+    if not needs:
+        return steps
+    root = project_root(pathlib.Path(folder)).resolve()
+    case = setup_missing(root)
+    if case is None:
+        return steps
+    first = reponer_steps(root, case, folder, plan)
+    lead = 0
+    while lead < len(steps) and steps[lead]["tipo"] == "avisos":
+        lead += 1
+    return steps[:lead] + first + steps[lead:]
+
+
+def setup_after_close(folder, plan, title, steps):
+    """Con la investigación cerrada: si el setup va en un parche (o la investigación lo declaró en filas "setup") y sigue
+    en el árbol sin que nadie pidiera dejarlo (--sin-setup), falta quitarlo. El final dice cómo quedó el setup."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    said = agents_setup(root)
+    state = read_setup_close(folder)
+    pending_files = state.get("archivos") or []
+    if not said["en_parche"] and not said["listo"] and not pending_files:
+        return title, steps  # sin setup: no recorre el proyecto
+    case = setup_case(root)
+    kind = case["caso"]
+
+    def noted(note):
+        return title, [dict(step, texto=step["texto"] + note) if step["tipo"] == "fin" else step for step in steps]
+
+    if kind in ("versionado", "sin"):
+        return title, steps
+    if not case["presente"]:
+        return noted(" El setup quedó quitado y guardado en su parche.") if kind == "parche" else (title, steps)
+    quit_command = setup_command(root, "--quitar", folder=folder) if kind == "parche" else guardar_command(
+        root, argparse.Namespace(quitar=True, paquete=None), folder, pending_files)
+    if str(state.get("setup") or "").startswith("puesto"):
+        return noted(" El setup de medición sigue puesto porque lo pediste (--sin-setup); para quitarlo: `%s`."
+                     % quit_command)
+    if kind != "parche" and not pending_files and not case.get("parche_perdido"):
+        # en el árbol sin versionar ni parche, y nadie lo declaró: no traba el cierre; se dice dónde está la decisión
+        return noted(" El setup de medición sigue en el árbol, sin versionar ni guardar en un parche: `%s` dice cómo "
+                     "guardarlo." % setup_command(root, "--estado"))
+    others = open_investigations(folder, root)
+    remove = terminal(quit_command,
+                      "quita el setup de medición del árbol con su parche (%s): si cambió, guarda antes un parche nuevo; "
+                      "guarda un respaldo, comprueba que revierte limpio y lo quita" % case["parche"].name
+                      if kind == "parche" else
+                      "guarda el setup de medición como parche, con su ficha, y lo quita del árbol (hoy no está en ningún "
+                      "parche: quitarlo sin guardarlo lo perdería)",
+                      "nada; si algo no revierte limpio o hay cambios tuyos en esos archivos, se detiene sin tocar nada")
+    keep = terminal(perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root), "--sin-setup"),
+                    "o deja el setup puesto (por ejemplo, para seguir enseguida con otra investigación, o si lo vas a "
+                    "versionar) y lo anota", "elige uno de los dos")
+    lead = [{"tipo": "avisos", "titulo": "Otra investigación necesita el setup", "lineas": [
+        "%s sigue%s abierta%s y usa%s el setup: si lo quitas, su `siguiente` te pide reponerlo antes de instalar o medir. "
+        "Si vas a seguir con ella enseguida, déjalo puesto (--sin-setup)" % (
+            ", ".join(shown_path(other, root) for other in others[:3]), "" if len(others) == 1 else "n",
+            "" if len(others) == 1 else "s", "" if len(others) == 1 else "n")]}] if others else []
+    done = [dict(step, texto=DONE_AFTER_SETUP) if step["tipo"] == "fin" else step for step in steps]
+    at = next((i for i, step in enumerate(done) if step["tipo"] == "fin"), len(done))
+    return title + " · falta quitar el setup", lead + done[:at] + [remove, keep] + done[at:]
 
 
 def version_at_least(version, minimum):
@@ -4471,8 +4550,14 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
     return None
 
 
-DONE = "La investigación está completa y analizada: no queda nada por hacer."
-DONE_AFTER_DOD = "Con el DoD en verde después de quitar los cambios temporales, la investigación queda completa."
+# El final también se dice: cuando ya no queda nada, la salida termina con NO_STEPS_LEFT, nunca en silencio.
+NO_STEPS_LEFT = "no queda ningún paso por ejecutar"
+DONE = "Investigación cerrada: %s. Está completa y analizada." % NO_STEPS_LEFT
+DONE_AFTER_DOD = ("Con el DoD en verde después de quitar los cambios temporales, la investigación queda cerrada: no quedará "
+                  "ningún paso por ejecutar.")
+DONE_AFTER_STEP = "Con ese paso, la investigación queda cerrada: no quedará ningún paso por ejecutar."
+DONE_AFTER_SETUP = ("Con el setup quitado (o dejado puesto con --sin-setup), la investigación queda cerrada: no quedará "
+                    "ningún paso por ejecutar.")
 DONE_AFTER_CLOSE = ("Con los cambios temporales quitados y el DoD en verde (`cerrar` lo da al terminar), la investigación queda "
                     "cerrada: no quedará ningún paso por ejecutar.")
 
@@ -7279,36 +7364,6 @@ def mark_temp_reverted(folder, notes):
     return marked
 
 
-def note_setup_patch(root, patches):
-    """En la sección de rendimiento de AGENTS.md, la línea que dice que el setup de medición está en un parche y cómo
-    ponerlo y quitarlo; la reemplaza si ya estaba. Devuelve lo que se le dice al usuario."""
-    path = pathlib.Path(root) / "AGENTS.md"
-    text = read_agents(root)
-    if text is None:
-        return "· No hay AGENTS.md en %s: anota a mano que el setup quedó en %s" % (root, ", ".join(map(str, patches)))
-    section = performance_section(text)
-    if section is None:
-        return "· AGENTS.md no tiene una sección de rendimiento: anota a mano que el setup quedó en %s" % ", ".join(
-            map(str, patches))
-    eol = "\r\n" if "\r\n" in text else "\n"
-    apply = " y ".join("`git -C %s apply %s`" % (q(top), q(patch)) for top, patch in patches)
-    back = " y ".join("`git -C %s apply -R %s`" % (q(top), q(patch)) for top, patch in patches)
-    line = "- Setup listo, en parche: %s antes de medir; %s al terminar (lo escribió `perf.py cerrar`)." % (apply, back)
-    start, end = section
-    body = text[start:end]
-    found = re.search(r"^[ \t]*[-*][ \t]+\**setup listo, en parche:.*$", body, re.I | re.M)
-    if found:
-        body = body[:found.start()] + line + body[found.end():]
-    else:
-        body = eol + line + eol + body.lstrip("\r\n") if body.strip() else eol + line + eol
-    try:
-        with open(str(path), "w", encoding="utf-8", newline="") as handle:
-            handle.write(text[:start] + body + text[end:])
-    except OSError as error:
-        return "⚠ No pude escribir %s (%s): anota a mano que el setup quedó en el parche" % (path, error.strerror or error)
-    return "✔ AGENTS.md: la sección de rendimiento dice que el setup está en un parche y cómo ponerlo y quitarlo"
-
-
 # ── Archivos con mejora y marcas, parche de marcas vigente y repos hermanos (0.13.0) ──
 # Un archivo de "Cambios temporales" que también es de una mejora nunca se revierte entero: se quitan solo las marcas, con
 # el parche de marcas vigente de su repo, o el comando se detiene sin tocar nada. Lo que es de una mejora sale de cuatro
@@ -7935,12 +7990,98 @@ def lost_lines(checks, before, after):
 
 
 def cmd_cerrar(args):
+    """El cierre, en orden: los cambios temporales (marcas y demás) con su parche, el DoD y, si el setup va en un parche,
+    quitarlo (A4). Cada parte se detiene sin tocar nada si algo no es seguro."""
     folder = pathlib.Path(args.carpeta)
-    state = folder / "estado.md"
-    if not state.is_file():
-        raise PerfError("no existe %s" % state)
+    if not (folder / "estado.md").is_file():
+        raise PerfError("no existe %s" % (folder / "estado.md"))
     plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
     root = project_root(folder).resolve()
+    if close_temporary(args, folder, plan, root) == "fin":
+        return
+    close_setup(folder, root, args)
+    if plan:
+        print_next(folder, plan)
+
+
+def close_setup(folder, root, args):
+    """El último paso de `cerrar`: con el setup en un parche (o declarado en filas "setup" de la investigación) y en el
+    árbol, lo quita cuando el DoD ya pasó o no hizo falta. Con el setup versionado no quita nada y lo dice; --sin-setup lo
+    deja puesto y lo anota. Lo que no puede decidir solo (otra investigación abierta, un setup sin parche que nadie
+    declaró) lo dice con los comandos de cada opción."""
+    said = agents_setup(root)
+    pending_files = read_setup_close(folder).get("archivos") or []
+    if not said["en_parche"] and not said["listo"] and not pending_files:
+        return  # el proyecto no tiene setup: nada que mirar
+    simulate = getattr(args, "simular", False)
+    case = setup_case(root)
+    kind = case["caso"]
+    keep_command = perf_command(root, "cerrar", "--carpeta", relative_folder(folder, root), "--sin-setup")
+    quit_command = setup_command(root, "--quitar", folder=folder) if kind == "parche" else guardar_command(
+        root, argparse.Namespace(quitar=True, paquete=None), folder, pending_files)
+    if kind == "versionado":
+        print("· Setup versionado (en git): queda en el repo; `cerrar` no quita nada del setup.")
+        return
+    if kind == "sin" or (kind != "parche" and not case["presente"]):
+        return  # sin setup, o perdido: no hay nada que quitar (`setup --estado` dice cómo recuperarlo)
+    if getattr(args, "sin_setup", False):
+        if not case["presente"]:
+            print("· --sin-setup: el setup no está en el árbol (queda guardado en su parche); no hay nada que dejar puesto.")
+            return
+        if not simulate:
+            save_setup_close(folder, setup="puesto (--sin-setup)")
+        print("· El setup de medición queda puesto (--sin-setup). Para quitarlo cuando termines:\n    %s" % quit_command)
+        return
+    if not case["presente"]:
+        if not simulate and read_setup_close(folder).get("setup") != "quitado":
+            save_setup_close(folder, setup="quitado")
+        print("✔ El setup ya está quitado y guardado en su parche (%s)." % case["parche"])
+        return
+    if kind != "parche" and not pending_files:
+        # En el árbol, sin parche, y ninguna fila lo declara: versionarlo o guardarlo es una decisión del usuario.
+        if case.get("parche_perdido"):
+            print("⚠ El setup está en el árbol y el parche que nombra AGENTS.md no existe: `cerrar` no lo quita (se "
+                  "perdería). Elige:\n    guardarlo como parche nuevo y quitarlo:\n      %s\n    dejarlo puesto y "
+                  "anotarlo:\n      %s" % (quit_command, keep_command))
+        return
+    record = read_close(folder)
+    if record.get("dod") == "falló" or (record.get("quitados") and record.get("dod") not in ("ok", "sin DoD")):
+        print("· El setup se quita después del DoD (el DoD compila la variante medida, que lo necesita): cuando el DoD "
+              "esté en verde, `cerrar --dod` lo quita al terminar.")
+        return
+    others = open_investigations(folder, root)
+    if others:
+        print("⚠ No quité el setup: %s sigue%s abierta%s y lo necesita%s. Elige:\n"
+              "    quitarlo igual (su `siguiente` te pedirá reponerlo):\n      %s\n"
+              "    dejarlo puesto y anotarlo:\n      %s" % (
+                  ", ".join(shown_path(other, root) for other in others[:3]), "" if len(others) == 1 else "n",
+                  "" if len(others) == 1 else "s", "" if len(others) == 1 else "n", quit_command, keep_command))
+        return
+    state = setup_quitar(root, args, folder, explicit=pending_files or None)
+    if state == "quitado":
+        save_setup_close(folder, setup="quitado", archivos=[])
+
+
+def setup_close_preview(folder, root, args):
+    """Con --simular: qué haría `cerrar` con el setup al final, en una línea."""
+    said = agents_setup(root)
+    if getattr(args, "sin_setup", False) or not (said["en_parche"] or said["listo"]):
+        return
+    case = setup_case(root)
+    if case["caso"] == "parche" and case["presente"]:
+        print("· Simulación: al final, después del DoD, quitaría el setup de medición con su parche (%s): un respaldo "
+              "antes, git apply --check -R y git apply -R; si el setup cambió, guardaría antes un parche nuevo. Con "
+              "--sin-setup lo dejaría puesto." % case["parche"])
+    elif case["caso"] == "sin_decidir" and case["presente"]:
+        print("· Simulación: el setup está en el árbol sin parche: si la investigación lo declara en filas \"setup\", al "
+              "final lo guardaría como parche (con su ficha) y lo quitaría; si no, lo dejaría y te daría los comandos para "
+              "decidir.")
+
+
+def close_temporary(args, folder, plan, root):
+    """La parte de `cerrar` que quita los cambios temporales. Devuelve "fin" cuando el comando termina ahí (una
+    simulación, o --corregir-repo, que ya imprimieron lo que sigue)."""
+    state = folder / "estado.md"
     rel_folder = relative_folder(folder, root)
     if getattr(args, "corregir_repo", None):
         old, sep, new = args.corregir_repo.partition("=")
@@ -7956,19 +8097,32 @@ def cmd_cerrar(args):
               "· Ninguna fila de \"Cambios temporales\" dice `%s` en \"Repo o módulo\": no cambié nada" % old.strip())
         if plan:
             print_next(folder, plan)
-        return
+        return "fin"
     pending = [change for change in temp_changes(state.read_text(encoding="utf-8")) if not change["revertido"]]
     if not pending:
         print("✔ No quedan cambios temporales por revertir en %s." % state)
         if args.dod:
             run_dod(folder, root)
-        if plan:
-            print_next(folder, plan)
-        return
+        if args.simular:
+            setup_close_preview(folder, root, args)
+        return None
     extra = project_repos(folder, root, plan)
+    # Las filas que se declaran "setup" no son cambios temporales de esta investigación: si su archivo está en el parche de
+    # setup vigente, lo quita el paso del setup, al final; si el setup está en el árbol sin parche (una investigación de
+    # 0.13.0, que anotaba así el cableado), esos archivos se guardan con el setup entero, también al final. Una fila que
+    # NO es de setup sobre un archivo del parche (una marca en el cliente de red) se quita aquí, sin tocar el cableado.
+    in_setup = setup_patch_files(root)
+    setup_known = known_setup_lines(setup_case(root)["parche"]) if in_setup else {}
+    own_top = git_toplevel(root)
+    own_top = own_top.resolve() if own_top is not None else None
+    # Con el setup en el árbol sin parche, o en un parche que todavía no trae ese archivo, la fila "setup" se guarda con
+    # el setup; con el setup versionado es un cambio temporal más.
+    deferred_setup = setup_case(root)["caso"] in ("sin_decidir", "parche") if any(
+        SETUP_ROW.search(change["que"] or "") for change in pending) else False
+    setup_explicit = []
     touched = improvement_touch(folder, root, plan, extra)
     shared = shared_temp_files(folder, root)
-    problems, fixes, kept, groups, mixed = [], [], [], {}, {}
+    problems, fixes, kept, groups, mixed, setup_rows = [], [], [], {}, {}, []
     for change in pending:
         top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
         if top is None:
@@ -7988,6 +8142,17 @@ def cmd_cerrar(args):
                           "como ruta desde la raíz" % (change["archivo"], hint, os.path.relpath(str(top), str(root))),
                           perf_command(root, "cerrar", "--carpeta", rel_folder, "--corregir-repo",
                                        "%s=%s" % (hint, os.path.relpath(str(top), str(root))))))
+        is_setup_row = bool(SETUP_ROW.search(change["que"] or ""))
+        ids = list(dict.fromkeys(touched.get((top, os.path.normpath(rel)), []) + row_improvements(change, plan)))
+        if is_setup_row and (top, os.path.normpath(rel)) in in_setup:
+            setup_rows.append(change["archivo"])
+            continue
+        # Un archivo que también es de una mejora nunca se da entero por setup: sigue el camino de los archivos con
+        # mejora (solo las marcas, con su parche; si no se puede, se detiene), como en 0.13.0.
+        if is_setup_row and deferred_setup and top == own_top and not ids:
+            setup_rows.append(change["archivo"])
+            setup_explicit.append(rel)
+            continue
         if change["archivo"] in shared:
             kept.append("%s: otra investigación abierta (%s) también lo declara; quita a mano solo lo de esta, o déjalo "
                         "hasta que cierre la otra" % (change["archivo"], ", ".join(shared[change["archivo"]])))
@@ -8015,6 +8180,15 @@ def cmd_cerrar(args):
     target_dir = patches_dir(folder, root)
     name = slug("-".join(lexical(folder).parts[-2:]))
     plans, notes, only_marks, stops, doubtful = [], {}, {}, [], {}
+    for name_ in setup_rows:
+        notes[name_] = "sí · es del setup: lo quita y lo repone `perf.py setup` con su parche (%s)" % (
+            datetime.date.today().isoformat())
+    if setup_rows:
+        print("· Del setup (no son cambios temporales; los guarda y los quita el paso del setup, al final): %s" % ", ".join(
+            dict.fromkeys(setup_rows)))
+    if setup_explicit and not args.simular:
+        earlier = read_setup_close(folder).get("archivos") or []
+        save_setup_close(folder, archivos=list(dict.fromkeys(earlier + setup_explicit)))
     for top in list(groups) + [top for top in mixed if top not in groups]:
         kinds = groups.get(top, {})
         changes = git_changes(top)
@@ -8028,12 +8202,33 @@ def cmd_cerrar(args):
                         notes[row_name] = "sí · sin cambios al cerrar (%s)" % datetime.date.today().isoformat()
             if not present:
                 continue
-            print("  Quita (%s): %s" % ("setup de medición" if kind == "setup" else "cambios temporales",
-                                       ", ".join(rel for rel, _, _ in present)))
-            for rel, _, _ in present:
-                print("    · %s: archivo entero (solo temporal)" % rel)
-            text = b"".join(file_patch(top, rel, changes[rel]) for rel, _, _ in present)
-            label = "perf-setup" if kind == "setup" else "%s-temporales" % name
+            print("  Quita (cambios temporales): %s" % ", ".join(rel for rel, _, _ in present))
+            text, kept_present = b"", []
+            for rel, label_, more in present:
+                if (top, os.path.normpath(rel)) not in in_setup:
+                    print("    · %s: archivo entero (solo temporal)" % rel)
+                    text += file_patch(top, rel, changes[rel])
+                    kept_present.append((rel, label_, more))
+                    continue
+                # el archivo también lleva cableado del setup: se quita solo lo que no es del parche de setup
+                part = temp_part(top, rel, changes[rel], setup_known.get(os.path.normpath(rel), set()))
+                if part is None:
+                    stops.append("%s: el cambio temporal está pegado al cableado del setup (mismo hunk) y no los puedo "
+                                 "separar sin riesgo: quita a mano el cambio temporal de ese archivo y repite" % rel)
+                    print("    · %s: se detiene: el cambio temporal está pegado al cableado del setup" % rel)
+                elif not part:
+                    print("    · %s: sin cambios temporales (solo queda el cableado del setup, que se quita al final)" % rel)
+                    for row_name in [label_] + more:
+                        notes[row_name] = "sí · sin cambios temporales al cerrar (%s); el cableado es del setup" % (
+                            datetime.date.today().isoformat())
+                else:
+                    print("    · %s: solo lo temporal (el cableado del setup se queda hasta el paso del setup)" % rel)
+                    text += part
+                    kept_present.append((rel, label_, more))
+            present = kept_present
+            if not present:
+                continue
+            label = "%s-temporales" % name
             plans.append({"repo": top, "tipo": kind, "archivos": present, "texto": text,
                           "ruta": target_dir / ("%s-%s-%s.patch" % (label, slug(top.name), stamp))})
         patch = marks["vigente"].get(top)
@@ -8110,9 +8305,10 @@ def cmd_cerrar(args):
             print("· Simulación: se detendría sin tocar nada:\n  - %s" % "\n  - ".join(stops))
             for what, command in follow:
                 print("  Para seguir, %s:\n    %s" % (what, command))
-            return
-        raise PerfError("hay archivos con código de una mejora y marcas que no puedo separar sin riesgo; no toqué nada "
-                        "(revertir el archivo entero quitaría la mejora y el proyecto seguiría compilando):\n  - %s"
+            return "fin"
+        raise PerfError("hay archivos con código de una mejora (o con el cableado del setup) y marcas que no puedo separar "
+                        "sin riesgo; no toqué nada (revertir el archivo entero quitaría la mejora y el proyecto seguiría "
+                        "compilando):\n  - %s"
                         % "\n  - ".join(stops)).con(guardado="nada: no guardé ni quité nada", seguir=follow)
     touched_repos = sorted({item["repo"] for item in plans} | set(only_marks))
     backups = {top: target_dir / "respaldos" / ("%s-respaldo-%s-%s.patch" % (name, slug(top.name), stamp))
@@ -8126,9 +8322,10 @@ def cmd_cerrar(args):
         for top, item in sorted(only_marks.items()):
             print("· Simulación: en %s quitaría solo las marcas de %s con git apply -R --include del parche %s." % (
                 top, ", ".join(rel for rel, _, _ in item["archivos"]), item["parche"]))
+        setup_close_preview(folder, root, args)
         print("· Simulación: no guardé ni quité nada. Para hacerlo, el mismo comando sin --simular:")
         print("    %s" % same_command(sin=("--simular",)))
-        return
+        return "fin"
     for top in touched_repos:
         own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
                for path in (investigations_base(root), target_dir, folder.resolve())]
@@ -8212,12 +8409,6 @@ def cmd_cerrar(args):
         print("\n".join("    " + line for line in status.stdout.splitlines()) or "    (sin cambios)")
     if notes:
         print("✔ estado.md: %d filas de \"Cambios temporales\" marcadas como revertidas" % mark_temp_reverted(folder, notes))
-    setup = [(item["repo"], item["ruta"]) for item in plans if item["tipo"] == "setup"]
-    if setup:
-        print(note_setup_patch(root, setup))
-        note = update_agents_state(root)
-        if note:
-            print(note)
     if plans or only_marks:
         # Después de quitar, el DoD: un cambio temporal pudo tapar algo, o algo del proyecto dependía de él.
         record = read_close(folder)
@@ -16337,6 +16528,11 @@ def legacy_patch_problem(patch):
     return None
 
 
+def staged_files(changes, files):
+    """Los archivos de `files` que están en el índice (git add, o git add -N): quitar el setup los dejaría a medias."""
+    return [rel for rel in files if rel in changes and (STAGED.match(changes[rel][0]) or changes[rel] == " A")]
+
+
 def ensure_ignored_in(top, folder):
     """Como ensure_ignored, con el repo dado: si la carpeta está dentro del repo y git no la ignora, la agrega a
     .git/info/exclude (local: el repo no cambia)."""
@@ -16382,6 +16578,39 @@ def register_setup_patch(root, top, patch, app_id, origin, replaced=()):
         lines.append("· AGENTS.md todavía tiene la línea de versiones anteriores (\"%s\"): ya no hace falta; puedes "
                      "borrarla. Manda la del bloque de estado, que mantiene perf.py" % before["linea"][:100])
     return ficha, lines
+
+
+def read_setup_close(folder):
+    """Cómo quedó el setup al cerrar una investigación ({"setup", "fecha", "archivos"}); también lee lo que 0.14.0 pudo
+    dejar en cierre.json. {} si no hay nada."""
+    try:
+        data = json.loads((pathlib.Path(folder) / SETUP_CLOSE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    return data if isinstance(data, dict) else {}
+
+
+def save_setup_close(folder, **fields):
+    record = read_setup_close(folder)
+    record.update(fields, fecha=datetime.datetime.now().replace(microsecond=0).isoformat())
+    (pathlib.Path(folder) / SETUP_CLOSE_FILE).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                                                        encoding="utf-8")
+    return record
+
+
+def setup_differs(top, root, case, explicit=()):
+    """True si el setup que hay en el árbol no es el del parche vigente: el parche no revierte limpio, su ficha no
+    coincide con el archivo, o hay setup que el parche no trae (por ejemplo, después de `instrumentar --actualizar`). Un
+    archivo que además tiene una mejora del usuario en otros hunks no cuenta: quitar el setup con su parche la deja como
+    está."""
+    patch = case["parche"]
+    ficha = case.get("ficha") or {}
+    if ficha.get("sha256") and ficha["sha256"] != sha256_of(patch):
+        return True
+    if not git_apply(top, patch, reverse=True, check=True)[0]:
+        return True
+    files = explicit_setup_files(top, explicit)[0] if explicit else ()
+    return bool(classify_setup(top, root, files, known_setup_lines(patch))["nuevos"])
 
 
 def explicit_setup_files(top, given):
@@ -16532,6 +16761,103 @@ def setup_guardar(root, args, folder=None, quiet_same=False, explicit=None):
     for line in notes:
         print(line)
     return patch, setup_case(root)
+
+
+def setup_backup(top, root, folder=None):
+    """Antes de quitar: un respaldo de todo el diff del repo, con fecha y hora y sin pisar otro."""
+    changes = code_changes(top, root, folder)
+    stamp_ = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    path = setup_patches_dir(root) / SETUP_BACKUPS / ("%s-respaldo-%s-%s.patch" % (SETUP_PATCH_PREFIX, slug(top.name), stamp_))
+    return write_new(path, b"".join(file_patch(top, rel, code) for rel, code in sorted(changes.items())))
+
+
+def setup_quitar(root, args, folder=None, explicit=None):
+    """A4: quita el setup del árbol con su parche vigente. Devuelve el estado final: "quitado", "ausente" (ya estaba
+    quitado y guardado), "versionado", "sin", "nada" (ni código ni parche) o "simulado"."""
+    case = setup_case(root)
+    kind = case["caso"]
+    if kind == "versionado":
+        print("✔ El setup está versionado (en git): no se quita nada; queda en el repo.")
+        return "versionado"
+    if kind == "sin":
+        print("· El proyecto no tiene setup de medición: no hay nada que quitar.")
+        return "sin"
+    if kind in ("duda", "perdido"):
+        print("· El setup no está en el árbol y AGENTS.md no nombra un parche vigente que exista: no hay nada que quitar.")
+        return "nada"
+    top = (case["repo"] or pathlib.Path(root)).resolve()
+    if kind == "sin_decidir":
+        # En el árbol y sin un parche que lo reproduzca: quitarlo así lo perdería. Primero se guarda (el mismo comando).
+        if explicit is None:
+            raise PerfError("el setup está en el árbol y no está guardado en ningún parche: si lo quito, se pierde. "
+                            "Guárdalo primero (el mismo comando que lo guarda lo quita)").con(
+                guardado="nada: no toqué el código",
+                seguir=[("guarda el setup como parche, con su ficha, y lo quita", guardar_command(
+                    root, argparse.Namespace(quitar=True, paquete=getattr(args, "paquete", None)), folder, ()))])
+        patch, case = setup_guardar(root, args, folder, quiet_same=True, explicit=explicit)
+        if getattr(args, "simular", False):
+            print("· Simulación: después lo quitaría con git apply -R, con un respaldo de todo el diff antes.")
+            return "simulado"
+        if patch is None or case["caso"] != "parche":
+            raise PerfError("no pude dejar guardado el setup de ahora, así que no lo quité").con(guardado="nada")
+    elif not case["presente"]:
+        print("✔ El setup ya está quitado: su código no está en el árbol y queda guardado en %s." % case["parche"])
+        return "ausente"
+    elif setup_differs(top, root, case, explicit or ()):
+        # El setup cambió respecto del parche vigente (por ejemplo, tras `instrumentar --actualizar`): nunca se pierde.
+        print("· El setup del árbol no es igual al del parche vigente (%s): lo guardo antes de quitar." % case["parche"].name)
+        patch, case = setup_guardar(root, args, folder, quiet_same=True, explicit=explicit)
+        if getattr(args, "simular", False):
+            print("· Simulación: después lo quitaría con git apply -R, con un respaldo de todo el diff antes.")
+            return "simulado"
+        if patch is None or case["caso"] != "parche":
+            raise PerfError("no pude dejar guardado el setup de ahora, así que no lo quité").con(guardado="nada")
+    patch = case["parche"]
+    files = patch_files(patch)
+    changes = git_changes(top)
+    staged = staged_files(changes, files)
+    if staged:
+        raise PerfError("hay archivos del setup en el índice de git (git add): %s. Quitar el setup los dejaría a medias "
+                        "(en el índice y sin archivo), así que no toqué nada" % ", ".join(staged[:8])).con(
+            guardado="nada: no toqué el código",
+            seguir=[("saca esos archivos del índice (no cambia su contenido)",
+                     "cd %s && git reset -q -- %s" % (q(top), " ".join(q(rel) for rel in staged))),
+                    ("después, repite", same_command())])
+    ok, error = git_apply(top, patch, reverse=True, check=True)
+    if not ok:
+        raise PerfError("el parche del setup (%s) no revierte limpio: %s. No toqué nada" % (
+            patch, error or "git apply --check -R falló")).con(
+            guardado="nada: no toqué el código",
+            seguir=[("guarda el setup de ahora como parche nuevo y lo quita", guardar_command(
+                root, argparse.Namespace(quitar=True, paquete=getattr(args, "paquete", None)), folder, ()))])
+    if getattr(args, "simular", False):
+        print("· Simulación: guardaría un respaldo de todo el diff de %s en %s y quitaría el setup con git apply -R %s "
+              "(%d archivo%s). No toqué nada." % (top, setup_patches_dir(root) / SETUP_BACKUPS, patch, len(files),
+                                                   "" if len(files) == 1 else "s"))
+        return "simulado"
+    backup = setup_backup(top, root, folder)
+    print("✔ Respaldo de todo el diff de %s (no pisa ninguno): %s" % (top, backup))
+    ok, error = git_apply(top, patch, reverse=True)
+    if not ok:  # comprobado justo antes: no debería pasar
+        raise PerfError("git apply -R falló en %s después de comprobarlo: %s. El árbol pudo quedar a medias: mira `git "
+                        "status --short`; todo lo que había está en el respaldo" % (top, error)).con(
+            guardado="el parche del setup (%s) y el respaldo de todo el diff (%s)" % (patch, backup),
+            seguir=[("mira cómo quedó el árbol", "cd %s && git status --short" % q(top))])
+    after = classify_setup(top, root)
+    left = [rel for rel, _ in after["setup"]] + [rel for rel, _, _ in after["mixtos"]]
+    hooks = find_hooks(root)
+    status = git_out(top, "status", "--short") or ""
+    print("✔ Setup quitado con su parche (%s). git status --short en %s:" % (patch, top))
+    print("\n".join("    " + line for line in status.splitlines()) or "    (sin cambios)")
+    if left or (hooks is not None and not git_tracked(top, hooks)):
+        print("⚠ Después de quitar siguen en el árbol archivos con aspecto de setup: %s. No los borré: revísalos (el "
+              "respaldo de todo está en %s)." % (", ".join(left[:8] or [shown_path(hooks, root)]), backup))
+    else:
+        print("✔ No quedó ningún archivo del setup en el árbol.")
+    note = update_agents_state(root)
+    if note:
+        print(note)
+    return "quitado"
 
 
 def three_way_check(top, patch):
@@ -17160,8 +17486,9 @@ def main(argv=None):
                                    "sin pisar otro (en la carpeta de parches de AGENTS.md o en <carpeta>/parches), "
                                    "comprueba que revierte limpio, quita, muestra git status y marca las filas en "
                                    "estado.md. Nunca usa checkout, restore, reset --hard ni clean; si algo no revierte "
-                                   "limpio, se detiene sin tocar nada. Las filas cuyo 'Qué es' dice 'setup' van en un "
-                                   "parche aparte y AGENTS.md dice cómo ponerlo antes de medir.")
+                                   "limpio, se detiene sin tocar nada. Al final, después del DoD, quita el setup de "
+                                   "medición si va en un parche (también el que declaran las filas cuyo 'Qué es' dice "
+                                   "'setup'); --sin-setup lo deja puesto.")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--simular", action="store_true", help="solo muestra qué quitaría y qué quedaría; no toca nada")
     p.add_argument("--dod", action="store_true",
@@ -17170,6 +17497,9 @@ def main(argv=None):
     p.add_argument("--corregir-repo", dest="corregir_repo", metavar="VIEJO=NUEVO",
                    help="cambia la columna 'Repo o módulo' de las filas que dicen VIEJO por NUEVO (una ruta desde la raíz, "
                         "como ../modulo-pagos) y no quita nada")
+    p.add_argument("--sin-setup", dest="sin_setup", action="store_true",
+                   help="con el setup en un parche: no lo quita al final (por ejemplo, para seguir enseguida con otra "
+                        "investigación) y lo deja anotado")
     p.set_defaults(func=cmd_cerrar)
 
     p = sub.add_parser("setup", help="el setup de medición del proyecto: su caso, guardarlo como parche, reponerlo o quitarlo",
