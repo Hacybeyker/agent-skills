@@ -1319,5 +1319,458 @@ class SetupOutputsTest(SetupBase):
 
 
 
+# ── D · Nunca tocar un módulo que el build toma como binario ─────────────────
+DEPS_BINARY = ("\n------------------------------------------------------------\nProject ':app'\n"
+               "------------------------------------------------------------\n\n"
+               "profilingRuntimeClasspath - Runtime classpath of /profiling.\n"
+               "+--- project :core\n"
+               "|    \\--- com.squareup.okhttp3:okhttp:4.12.0\n"
+               "+--- com.example:modulo-pagos:1.2.0\n"
+               "|    \\--- org.jetbrains.kotlin:kotlin-stdlib:2.0.0 -> 2.0.21 (*)\n"
+               "+--- com.example:util:{strictly 1.0} -> 1.0 (c)\n"
+               "\\--- project :feature:inicio (*)\n\n(c) - A dependency constraint, not a dependency.\n"
+               "(*) - Indicates repeated occurrences of a transitive dependency subtree.\n")
+DEPS_CODE = DEPS_BINARY.replace("+--- com.example:modulo-pagos:1.2.0\n",
+                                "+--- com.example:modulo-pagos:1.2.0 -> project :modulo-pagos\n")
+SETTINGS = ('include(":app", ":core", ":feature:inicio")\n'
+            'val locales = groovy.json.JsonSlurper().parse(file("modulos-locales.json")) as Map<String, Boolean>\n'
+            'if (locales["modulo-pagos"] == true) {\n'
+            '    includeBuild("../modulo-pagos") {\n'
+            '        dependencySubstitution { substitute(module("com.example:modulo-pagos")).using(project(":")) }\n'
+            '    }\n}\n')
+SWITCH = '{\n  "modulo-pagos": false,\n  "otro-modulo": true\n}\n'
+SIBLING_FILE = "class Pagos {\n    fun pagar() {\n        cobrar()\n    }\n}\n"
+
+
+class ModulesBase(SetupBase):
+    """Un proyecto cascarón: la app, un módulo en la raíz (:core) y un módulo de otro repo (../modulo-pagos) que el build
+    toma como binario o como código según un archivo propio del proyecto."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.root / "settings.gradle.kts", SETTINGS)
+        write(self.root / "modulos-locales.json", SWITCH)
+        write(self.root / "core" / "build.gradle.kts", 'plugins { id("com.android.library") }\n')
+        write(self.root / "core" / "src" / "main" / "kotlin" / "Core.kt", "object Core\n")
+        self.instrument()
+        commit_all(self.root, "setup versionado y módulos")
+        self.sibling = self.dir / "modulo-pagos"
+        self.sibling.mkdir()
+        init_repo(self.sibling)
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE)
+        commit_all(self.sibling, "base")
+        self.folder = self.investigation(plan={
+            "paquete": PKG, "principales": ["pago_ms"], "instalar": "./gradlew :app:installProfiling",
+            "flujos": {"pagos": {"recorrido": "true", "metricas_usuario": [
+                {"nombre": "pago_ms", "desde": {"marca": "MARK pago_inicio"}, "hasta": {"marca": "MARK pago_visible"}}]}},
+            "mejoras": [{"id": "M1", "titulo": "Precargar el pago", "estado": "aprobada", "metrica": "pago_ms"}]})
+        self.rel = self.folder.relative_to(self.root)
+        self.binary = self.dir / "dependencias-binario.txt"
+        self.code = self.dir / "dependencias-codigo.txt"
+        write(self.binary, DEPS_BINARY)
+        write(self.code, DEPS_CODE)
+
+    def modules(self):
+        return {item["nombre"]: item for item in json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["modulos"]}
+
+    def register(self, deps, *names):
+        return self.good("setup", "--estado", "--carpeta", self.rel, "--modulos", *names, "--dependencias", deps)
+
+
+class DependenciesParseTest(unittest.TestCase):
+    """D1: lo que dice Gradle de cada módulo."""
+
+    def test_proyectos_artefactos_y_sustituciones(self):
+        deps = perf.parse_dependencies(DEPS_BINARY)
+        self.assertEqual(deps["proyectos"], {":core", ":feature:inicio"})
+        self.assertEqual(deps["artefactos"]["com.example:modulo-pagos"], {"version": "1.2.0", "proyecto": None})
+        self.assertEqual(deps["artefactos"]["com.example:util"]["version"], "1.0")
+        self.assertEqual(deps["artefactos"]["org.jetbrains.kotlin:kotlin-stdlib"]["version"], "2.0.21")
+        deps = perf.parse_dependencies(DEPS_CODE)
+        self.assertEqual(deps["artefactos"]["com.example:modulo-pagos"]["proyecto"], ":modulo-pagos")
+        self.assertIn(":modulo-pagos", deps["proyectos"])
+        self.assertEqual(perf.parse_dependencies("No dependencies\n"),
+                         {"proyectos": set(), "artefactos": {}, "sustituidos": {}})
+
+    def test_un_proyecto_cambiado_por_un_binario_no_es_codigo(self):
+        text = ("profilingRuntimeClasspath - Runtime classpath of /profiling.\n"
+                "+--- project :feature:pagos -> com.example.feature:pagos:3.1.0\n"
+                "+--- project :feature:inicio:impl\n"
+                "+--- com.example.cobros:impl:1.0.0\n"
+                "+--- project :sin-resolver (n)\n"
+                "\\--- com.example:viejo:1.0 -> com.example:nuevo:2.0\n")
+        deps = perf.parse_dependencies(text)
+        self.assertEqual(deps["sustituidos"], {":feature:pagos": "com.example.feature:pagos:3.1.0"})
+        self.assertEqual(deps["proyectos"], {":feature:inicio:impl"})  # ni el sustituido ni el que no se resolvió
+        self.assertEqual(deps["artefactos"]["com.example:viejo"]["version"], "2.0")
+        root = Path("/no/existe")
+        kinds = {item["nombre"]: item for item in perf.classify_modules(root, [
+            ":feature:pagos", "com.example.cobros:impl", ":feature:cobros:impl", ":feature:inicio:impl", "impl", ":app"],
+            deps, app="app")}
+        self.assertEqual(kinds[":feature:pagos"]["tipo"], "binario")
+        self.assertEqual(kinds[":feature:pagos"]["artefacto"], "com.example.feature:pagos:3.1.0")
+        self.assertEqual(kinds["com.example.cobros:impl"]["tipo"], "binario")  # la coincidencia exacta gana
+        self.assertEqual(kinds[":feature:cobros:impl"]["tipo"], "sin confirmar")  # el nombre corto no se adivina
+        self.assertIn("coincide con varios módulos", kinds[":feature:cobros:impl"]["motivo"])
+        self.assertEqual(kinds[":feature:inicio:impl"]["tipo"], "codigo")
+        self.assertEqual(kinds["impl"]["tipo"], "sin confirmar")
+        self.assertEqual(kinds[":app"]["tipo"], "codigo")  # el módulo que se compila no aparece como dependencia
+
+    def test_una_salida_con_varias_configuraciones(self):
+        text = ("debugRuntimeClasspath - Runtime classpath of /debug.\n+--- project :pagos\n\n"
+                "profilingRuntimeClasspath - Runtime classpath of /profiling.\n+--- com.example:pagos:1.0.0\n")
+        block, name, why = perf.dependencies_block(text, "profilingRuntimeClasspath")
+        self.assertEqual((name, why), ("profilingRuntimeClasspath", ""))
+        self.assertEqual(perf.parse_dependencies(block)["proyectos"], set())  # lo de debug no cuenta
+        self.assertIn("y no qaRuntimeClasspath", perf.dependencies_block(text, "qaRuntimeClasspath")[2])
+        self.assertIn("2 configuraciones", perf.dependencies_block(text, None)[2])
+        self.assertEqual(perf.dependencies_block("+--- project :a\n", "x")[1], None)  # sin encabezado: se usa tal cual
+
+    def test_la_configuracion_sale_del_instalar_del_plan(self):
+        args = unittest.mock.Mock(app=None, configuracion=None)
+        self.assertEqual(perf.measured_configuration({"instalar": "./gradlew :app:installProfiling"}, args),
+                         ("app", "profilingRuntimeClasspath"))
+        self.assertEqual(perf.measured_configuration({"instalar": "./gradlew :movil:app:installDemoProfiling -Pperf"}, args),
+                         ("movil/app", "demoProfilingRuntimeClasspath"))
+        self.assertEqual(perf.measured_configuration({}, args), ("app", None))
+        args = unittest.mock.Mock(app="movil", configuracion="qaRuntimeClasspath")
+        self.assertEqual(perf.measured_configuration({"instalar": "./gradlew :app:installProfiling"}, args),
+                         ("movil", "qaRuntimeClasspath"))
+
+
+class ModulesMapTest(ModulesBase):
+    """D1 y D2: el mapa código/binario en el plan y en la ficha, y el interruptor del proyecto, sin tocarlo."""
+
+    def test_el_mapa_queda_en_el_plan_y_en_la_ficha(self):
+        out = self.register(self.binary, ":core", "com.example:modulo-pagos", ":feature:inicio", "com.example:no-existe")
+        modules = self.modules()
+        self.assertEqual((modules[":core"]["tipo"], modules[":core"]["carpeta"]), ("codigo", "core"))
+        self.assertEqual(modules["com.example:modulo-pagos"]["tipo"], "binario")
+        self.assertEqual(modules["com.example:modulo-pagos"]["artefacto"], "com.example:modulo-pagos:1.2.0")
+        self.assertEqual(modules["com.example:modulo-pagos"]["carpeta"], "../modulo-pagos")  # su código está en disco
+        self.assertEqual(modules[":feature:inicio"]["tipo"], "codigo")
+        self.assertEqual(modules["com.example:no-existe"]["tipo"], "sin confirmar")  # nunca se da por código
+        self.assertIn("Módulos del alcance, según la salida guardada en", out)
+        self.assertIn(":app:dependencies --configuration profilingRuntimeClasspath", out)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("<!-- perf:modulos -->", state)
+        self.assertIn("| `com.example:modulo-pagos` | binario (llega compilado) | `../modulo-pagos` | "
+                      "com.example:modulo-pagos:1.2.0 | no se edita |", state)
+        self.assertLess(state.index("## Mapa del alcance"), state.index("<!-- perf:modulos -->"))
+        self.assertLess(state.index("<!-- perf:modulos -->"), state.index("## Cambios temporales"))
+        self.assertIn("Módulo com.example:modulo-pagos: el build lo toma como binario (com.example:modulo-pagos:1.2.0)", state)
+        self.assertIn("no cites `archivo:línea` de ese módulo como evidencia confirmada", state)
+
+    def test_el_interruptor_se_nombra_y_nunca_se_edita(self):
+        before = {name: (self.root / name).read_bytes() for name in ("settings.gradle.kts", "modulos-locales.json")}
+        out = self.register(self.binary, "com.example:modulo-pagos")
+        self.assertIn("el proyecto lo controla en `modulos-locales.json`, clave `modulo-pagos` (hoy: false)", out)
+        self.assertIn("Ese archivo es tuyo: cámbialo tú (perf.py nunca lo edita)", out)
+        self.assertIn("settings.gradle.kts:5 (dependencySubstitution)", out)
+        commands = pasteable(out)[0]
+        self.assertTrue(commands[0].endswith("setup --estado --comprobar-modulos --carpeta %s" % self.rel), commands)
+        self.assertIn("--confirmar com.example:modulo-pagos=binario", commands[1])
+        self.good("siguiente", "--carpeta", self.rel)
+        self.good("setup", "--estado", "--carpeta", self.rel)
+        self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
+        self.assertEqual(git(self.root, "status", "--short", "--", *before), "")
+
+    def test_interruptor_en_properties_y_sin_mecanismo(self):
+        module = {"nombre": "com.example:modulo-pagos", "artefacto": "com.example:modulo-pagos:1.2.0", "tipo": "binario"}
+        write(self.root / "settings.gradle.kts", 'include(":app")\n')
+        (self.root / "modulos-locales.json").unlink()
+        text = perf.switch_text(perf.substitution_switch(self.root, module), module)
+        self.assertIn("no encontré ningún mecanismo de sustitución en settings.gradle(.kts)", text)
+        self.assertIn("llega solo compilado", text)
+        write(self.root / "gradle.properties", "org.gradle.jvmargs=-Xmx2g\nusarModuloPagosLocal=false\nclaveSecreta=abc123\n")
+        switch = perf.substitution_switch(self.root, module)
+        self.assertEqual((switch["archivo"], switch["clave"], switch["valor"]), ("gradle.properties", "usarModuloPagosLocal",
+                                                                                 "false"))
+        self.assertNotIn("abc123", json.dumps(switch))  # solo la clave del módulo; ningún otro valor
+
+    def test_sin_gradle_no_se_da_por_codigo(self):
+        result = self.run_perf("setup", "--estado", "--carpeta", self.rel, "--modulos", ":core")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no pude preguntarle a Gradle (no hay ./gradlew en", result.stdout)
+        self.assertIn("Ninguno se da por código", result.stdout)
+        self.assertEqual(self.modules()[":core"]["tipo"], "sin confirmar")
+        self.assertIn("--confirmar :core=codigo o --confirmar :core=binario", result.stdout)
+        out = self.good("siguiente", "--carpeta", self.rel)
+        self.assertIn(":core está sin confirmar", out)
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", ":core=codigo")
+        self.assertEqual((self.modules()[":core"]["tipo"], self.modules()[":core"]["origen"]), ("codigo", "usuario"))
+        self.assertNotIn("sin confirmar", "\n".join(pasteable(out)[0]))
+
+    def test_gradle_de_verdad_recibe_la_configuracion(self):
+        # un gradlew de mentira que deja registrado cómo lo llamaron y responde como Gradle
+        executable(self.root / "gradlew", "#!/bin/sh\necho \"$@\" > \"%s\"\ncat \"%s\"\n" % (self.dir / "gradle.args", self.code))
+        self.good("setup", "--estado", "--carpeta", self.rel, "--modulos", "com.example:modulo-pagos")
+        self.assertEqual((self.dir / "gradle.args").read_text().strip(),
+                         "-q :app:dependencies --configuration profilingRuntimeClasspath")
+        self.assertEqual(self.modules()["com.example:modulo-pagos"]["tipo"], "codigo")
+        self.assertTrue((self.folder / "logs" / "dependencias.txt").is_file())
+        write(self.root / "gradlew", "#!/bin/sh\necho 'FAILURE: Build failed' >&2\nexit 1\n")
+        result = self.run_perf("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--configuracion",
+                               "qaRuntimeClasspath")
+        self.assertIn("Gradle terminó con código 1", result.stdout)
+        self.assertEqual(self.modules()["com.example:modulo-pagos"]["tipo"], "sin confirmar")
+
+
+class ModulesGateTest(ModulesBase):
+    """D3: ninguna sesión edita un archivo de un módulo que el build toma como binario."""
+
+    def setUp(self):
+        super().setUp()
+        self.register(self.binary, ":core", "com.example:modulo-pagos")
+
+    def test_decidir_aplicada_se_detiene_y_sigue_tras_cambiar_el_interruptor(self):
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE.replace("        cobrar()\n", "        precargar()\n        cobrar()\n"))
+        error = self.bad("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "src/Pagos.kt", "--repo",
+                         "../modulo-pagos")
+        self.assertIn("la mejora M1 toca un módulo binario: no se edita un módulo que la app consume compilado", error)
+        self.assertIn("el build lo toma como binario (com.example:modulo-pagos:1.2.0): lo que edites ahí no llega al APK", error)
+        self.assertIn("`modulos-locales.json`, clave `modulo-pagos` (hoy: false)", error)
+        self.assertTrue(pasteable(error)[0][0].endswith("setup --estado --comprobar-modulos --carpeta %s" % self.rel))
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["mejoras"][0]["estado"], "aprobada")  # no registró nada
+        self.assertFalse((self.folder / "cambios").exists())
+        # una mejora del lado de la app sí se puede aplicar
+        write(self.root / "core" / "src" / "main" / "kotlin" / "Core.kt", "object Core { val listo = true }\n")
+        self.good("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "core/src/main/kotlin/Core.kt")
+        # el usuario cambia el interruptor (él: perf.py no lo toca) y Gradle ahora lo compila desde código
+        write(self.root / "modulos-locales.json", SWITCH.replace('"modulo-pagos": false', '"modulo-pagos": true'))
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--dependencias", self.code)
+        self.assertEqual(self.modules()["com.example:modulo-pagos"]["tipo"], "codigo")
+        self.assertIn("com.example:modulo-pagos:1.2.0 -> project :modulo-pagos", out)
+        self.good("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "src/Pagos.kt", "--repo",
+                  "../modulo-pagos")
+        self.assertTrue((self.folder / "cambios").is_dir())
+
+    def test_las_marcas_y_la_prueba_se_detienen(self):
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE.replace(
+            "        cobrar()\n", "        cobrar()\n        android.os.Trace.beginSection(\"MARK pago_visible\")\n"))
+        write(self.folder / "estado.md", STATE % "| `src/Pagos.kt` | ../modulo-pagos | marca pago_visible | — | no |\n")
+        before = (self.sibling / "src" / "Pagos.kt").read_bytes()
+        error = self.bad("marcas", "--carpeta", self.rel, "--separar")
+        self.assertIn("las marcas no pueden ir en un módulo binario", error)
+        self.assertIn("src/Pagos.kt · el build lo toma como binario", error)
+        self.assertFalse((self.folder / "parches").exists())
+        error = self.bad("capturar", "--plan", self.rel / "plan.json", "--prueba", code=perf.Precondicion.code)
+        self.assertIn("una marca del plan o un cambio temporal está en un módulo binario", error)
+        self.assertIn("../modulo-pagos/src/Pagos.kt (MARK pago_visible)", error)
+        self.assertEqual((self.sibling / "src" / "Pagos.kt").read_bytes(), before)
+        # con el módulo compilado desde código, las dos siguen (la prueba pasa a pedir el dispositivo)
+        self.good("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--dependencias", self.code)
+        self.good("marcas", "--carpeta", self.rel, "--separar")
+        result = self.run_perf("capturar", "--plan", self.rel / "plan.json", "--prueba")
+        self.assertNotIn("módulo binario", result.stderr)
+
+    def test_una_marca_en_el_modulo_app_sin_filas_tambien_se_revisa(self):
+        # la marca está en el repo hermano, sin fila en "Cambios temporales": la prueba la encuentra por su nombre
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE + "// PerfHooks.mark(\"pago_inicio\")\n")
+        error = self.bad("capturar", "--plan", self.rel / "plan.json", "--prueba", code=perf.Precondicion.code)
+        self.assertIn("../modulo-pagos/src/Pagos.kt (MARK pago_inicio)", error)
+
+    def test_aceptar_el_binario_mide_desde_la_app_y_sigue_sin_editarlo(self):
+        out = self.good("siguiente", "--carpeta", self.rel)
+        self.assertIn("Módulos del alcance que la app consume compilados (no se editan)", out)
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", "com.example:modulo-pagos=binario")
+        self.assertTrue(self.modules()["com.example:modulo-pagos"]["aceptado"])
+        self.assertNotIn("consume compilados", out)  # `siguiente` deja de preguntar
+        self.assertIn("no se edita; se mide desde el módulo app", (self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.bad("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "src/Pagos.kt", "--repo",
+                 "../modulo-pagos")  # aceptado no quiere decir editable
+        self.good("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--dependencias", self.binary)
+        self.assertTrue(self.modules()["com.example:modulo-pagos"]["aceptado"])  # comprobar de nuevo no lo olvida
+
+    def test_el_pedido_al_equipo_dueno_sale_en_el_reporte_tecnico(self):
+        self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", "com.example:modulo-pagos=binario")
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        write(self.folder / "metricas.csv", "fase,flujo,metrica,corrida,valor,unidad,sentido,familia\n" + "".join(
+            "antes,pagos,pago_ms,%d,%d,ms,menor,app\n" % (index, value) for index, value in enumerate((900, 910, 905, 915, 920), 1)))
+        self.assertEqual(self.run_perf("reporte", "--carpeta", self.rel, "--inicial").returncode, 0)
+        self.assertNotIn("Pedido al equipo dueño", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
+        write(self.folder / "estado.md", state + "\n## Pedido al equipo dueño del módulo\n\n- Se midió el pago: 900 ms antes de "
+              "mostrar el resultado; la traza muestra 600 ms dentro del módulo de pagos. Se propone precargar el catálogo.\n")
+        self.assertEqual(self.run_perf("reporte", "--carpeta", self.rel, "--inicial").returncode, 0)
+        dev = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        self.assertIn("## Pedido al equipo dueño del módulo", dev)
+        self.assertIn("Para enviar al equipo dueño de un módulo que la app consume compilado", dev)
+        self.assertIn("Se propone precargar el catálogo", dev)
+        self.assertNotIn("Pedido al equipo dueño", (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+        template = (SKILL / "assets" / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        section = template.split("## Pedido al equipo dueño del módulo")[1].split("\n## ")[0]
+        self.assertEqual(perf.without_placeholders(section), "")  # sin completar, la sección no se publica
+
+    def test_un_modulo_sin_confirmar_no_se_edita(self):
+        # sin Gradle, :core queda sin confirmar; su carpeta se conoce igual y la compuerta lo protege
+        result = self.run_perf("setup", "--estado", "--carpeta", self.rel, "--modulos", ":core")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.modules()[":core"]["tipo"], self.modules()[":core"]["carpeta"]), ("sin confirmar", "core"))
+        write(self.root / "core" / "src" / "main" / "kotlin" / "Core.kt", "object Core { val listo = true }\n")
+        error = self.bad("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "core/src/main/kotlin/Core.kt")
+        self.assertIn("el módulo :core está sin confirmar", error)
+        out = self.good("siguiente", "--carpeta", self.rel)
+        self.assertIn("--confirmar :core=codigo", "\n".join(pasteable(out)[0]))
+        self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", ":core=codigo")
+        self.good("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "core/src/main/kotlin/Core.kt")
+
+    def test_el_nombre_del_repo_no_bloquea_un_archivo_del_modulo_app(self):
+        marked = WIRED_CLIENT.replace('    fun version() = "1"\n', '    fun version() = "1" // marca\n')
+        write(self.root / RED, marked)
+        write(self.folder / "estado.md", STATE % ("| `%s` | app (alrededor de modulo-pagos) | marca | — | no |\n" % RED))
+        self.good("marcas", "--carpeta", self.rel, "--separar")  # medir desde el módulo app es justo lo recomendado
+
+    def test_un_modulo_bloqueado_sin_carpeta_conocida(self):
+        # por coordenada y sin Gradle no hay forma de saber dónde está su código: se pide, y mientras tanto se reconoce
+        # por el nombre de la carpeta del módulo (no por un paquete del módulo app que se llame igual)
+        write(self.root / "features" / "cobros" / "src" / "Cobros.kt", "class Cobros\n")
+        write(self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "cobros" / "Vista.kt", "class Vista\n")
+        commit_all(self.root, "cobros")
+        result = self.run_perf("setup", "--estado", "--carpeta", self.rel, "--modulos", "com.example:cobros")
+        self.assertIn("com.example:cobros no se edita (sin confirmar) y no sé dónde está su código en disco", result.stdout)
+        self.assertIn("--modulos com.example:cobros=RUTA", result.stdout)
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", "com.example:cobros=binario")
+        self.assertIn("no sé dónde está su código en disco", out)
+        self.assertNotIn("carpeta", self.modules()["com.example:cobros"])
+        write(self.root / "features" / "cobros" / "src" / "Cobros.kt", "class Cobros { val nuevo = 1 }\n")
+        error = self.bad("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "features/cobros/src/Cobros.kt")
+        self.assertIn("la mejora M1 toca un módulo binario", error)
+        write(self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "cobros" / "Vista.kt",
+              "class Vista { val nuevo = 1 }\n")
+        self.good("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos",
+                  "app/src/main/kotlin/com/example/app/cobros/Vista.kt")  # el lado de la app sí se puede
+
+    def test_corregir_lo_que_respondio_el_usuario(self):
+        self.run_perf("setup", "--estado", "--carpeta", self.rel, "--modulos", ":core")  # sin Gradle: sin confirmar
+        self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", ":core=codigo")
+        self.good("setup", "--estado", "--carpeta", self.rel, "--confirmar", ":core=binario")  # se equivocó: lo corrige
+        self.assertEqual((self.modules()[":core"]["tipo"], self.modules()[":core"]["origen"]), ("binario", "usuario"))
+        self.register(self.binary, ":core")  # ahora lo dice Gradle: una respuesta ya no lo cambia
+        self.assertIn("Gradle dijo que :core es código", self.bad("setup", "--estado", "--carpeta", self.rel,
+                                                                 "--confirmar", ":core=binario"))
+
+    def test_modulos_sin_carpeta_o_sin_plan(self):
+        self.assertIn("van con --carpeta", self.bad("setup", "--estado", "--modulos", ":core"))
+        (self.folder / "plan.json").unlink()
+        self.assertIn("el mapa de módulos se guarda en el plan", self.bad("setup", "--estado", "--carpeta", self.rel,
+                                                                       "--modulos", ":core"))
+
+    def test_un_plan_sin_modulos_sigue_como_antes(self):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        del plan["modulos"]
+        write(self.folder / "plan.json", json.dumps(plan))
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE.replace("cobrar()", "cobrar(); precargar()"))
+        self.good("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "src/Pagos.kt", "--repo",
+                  "../modulo-pagos")
+
+
+# ── Ensayo de punta a punta, sin dispositivo ─────────────────────────────────
+class EndToEndSetupTest(ModulesBase):
+    """Sin setup → instrumentar → guardar y quitar → `siguiente` pide reponer → reponer → se detiene con cambios del usuario
+    y con un parche de otro remoto → `instrumentar --actualizar` → `cerrar` guarda el parche nuevo y quita el setup. Un
+    módulo del alcance binario detiene la mejora y la prueba hasta que se compila desde código. Nada toca el HOME."""
+
+    def setUp(self):
+        SetupBase.setUp(self)  # sin el setup versionado de ModulesBase: aquí se recorre desde cero
+        write(self.root / "settings.gradle.kts", SETTINGS)
+        write(self.root / "modulos-locales.json", SWITCH)
+        write(self.root / "core" / "build.gradle.kts", 'plugins { id("com.android.library") }\n')
+        write(self.root / "core" / "src" / "main" / "kotlin" / "Core.kt", "object Core\n")
+        write(self.root / "AGENTS.md", AGENTS.replace("- setup listo\n", ""))
+        commit_all(self.root, "proyecto")
+        self.sibling = self.dir / "modulo-pagos"
+        self.sibling.mkdir()
+        init_repo(self.sibling)
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE)
+        commit_all(self.sibling, "base")
+        self.binary = self.dir / "dependencias-binario.txt"
+        self.code = self.dir / "dependencias-codigo.txt"
+        write(self.binary, DEPS_BINARY)
+        write(self.code, DEPS_CODE)
+
+    def test_ensayo(self):
+        client = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "red" / "Red.kt"
+        # 1. sin setup: la sesión 0
+        out = self.good("setup", "--estado")
+        self.assertIn("Siguiente · falta la sesión 0 (setup)", out)
+        # 2. la sesión 0 genera, cablea y anota "setup listo"; el equipo no lo versiona: va en parche
+        self.instrument()
+        write(self.root / "AGENTS.md", AGENTS)
+        git(self.root, "add", "AGENTS.md")
+        git(self.root, "commit", "-q", "-m", "docs: rendimiento")
+        with_setup = self.tree()
+        self.good("setup", "--guardar", "--quitar", *WIRING)
+        first, ficha = self.saved()
+        self.assertEqual((ficha["remoto"], ficha["applicationId"]), (REMOTE, PKG))
+        self.assertEqual(self.status(), [])
+        # 3. una investigación: `siguiente` pide reponer antes de medir, y `capturar` no arranca sin el setup
+        self.folder = self.investigation(plan={
+            "paquete": PKG, "principales": ["pago_ms"], "instalar": "./gradlew :app:installProfiling",
+            "flujos": {"pagos": {"recorrido": "true", "metricas_usuario": [
+                {"nombre": "pago_ms", "desde": {"marca": "MARK pago_inicio"}, "hasta": {"marca": "MARK pago_visible"}}]}},
+            "mejoras": [{"id": "M1", "titulo": "Precargar el pago", "estado": "aprobada", "metrica": "pago_ms"}]})
+        self.rel = self.folder.relative_to(self.root)
+        out = self.good("siguiente", "--carpeta", self.rel)
+        self.assertTrue(pasteable(out)[0][0].endswith("setup --reponer --carpeta %s" % self.rel))
+        self.bad("capturar", "--plan", self.rel / "plan.json", "--fase", "antes", code=perf.Precondicion.code)
+        # 4. cambios del usuario sin commitear en un archivo del setup: se detiene sin tocar nada
+        write(client, CLIENT + "// trabajo mío\n")
+        before = self.tree()
+        self.assertIn("hay cambios tuyos sin commitear", self.bad("setup", "--reponer", "--carpeta", self.rel))
+        self.assertEqual(self.tree(), before)
+        write(client, CLIENT)
+        # 5. un parche de otro remoto: se detiene
+        path = first.parent / (first.name + ".json")
+        write(path, json.dumps(dict(ficha, remoto="git@example.com:otro-equipo/otra-app.git")))
+        self.assertIn("el parche es de otro repo: git@example.com:otro-equipo/otra-app.git", self.bad("setup", "--reponer"))
+        self.assertEqual(self.status(), [])
+        write(path, json.dumps(ficha))
+        # 6. reponer: vuelve exactamente el setup
+        out = self.good("setup", "--reponer", "--carpeta", self.rel)
+        self.assertEqual(self.tree(), with_setup)
+        self.assertNotIn("setup --reponer", "\n".join(pasteable(out)[0]))
+        # 7. un módulo del alcance llega como binario: la ficha lo marca y nadie lo edita
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--modulos", ":core", "com.example:modulo-pagos",
+                        "--dependencias", self.binary)
+        self.assertIn("`modulos-locales.json`, clave `modulo-pagos` (hoy: false)", out)
+        write(self.sibling / "src" / "Pagos.kt", SIBLING_FILE.replace(
+            "        cobrar()\n", "        precargar()\n        cobrar()\n        android.os.Trace.beginSection(\"MARK pago_visible\")\n"))
+        self.assertIn("la mejora M1 toca un módulo binario", self.bad(
+            "decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "src/Pagos.kt", "--repo", "../modulo-pagos"))
+        self.assertIn("está en un módulo binario", self.bad("capturar", "--plan", self.rel / "plan.json", "--prueba",
+                                                             code=perf.Precondicion.code))
+        # 8. el usuario cambia el interruptor: Gradle lo compila desde código y todo sigue
+        write(self.root / "modulos-locales.json", SWITCH.replace('"modulo-pagos": false', '"modulo-pagos": true'))
+        git(self.root, "commit", "-q", "-am", "chore: módulo de pagos desde código")
+        self.good("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--dependencias", self.code)
+        self.good("decidir", "--carpeta", self.rel, "--aplicada", "M1", "--archivos", "src/Pagos.kt", "--repo",
+                  "../modulo-pagos")
+        self.assertNotIn("módulo binario", self.run_perf("capturar", "--plan", self.rel / "plan.json", "--prueba").stderr)
+        # 9. entre medio, `instrumentar --actualizar` cambió el setup (simulado: una plantilla nueva y un archivo nuevo)
+        mark = self.root / "app" / "src" / "perf" / "kotlin" / "com" / "example" / "app" / "perf" / "MarkTrace.kt"
+        write(mark, mark.read_text(encoding="utf-8") + "// plantilla de la versión nueva\n")
+        # 10. el cierre: guarda el parche nuevo (el viejo queda reemplazado) y quita el setup
+        # (fechas fijas, sin depender del reloj: se midió después de aplicar la mejora y los reportes son posteriores)
+        write(self.folder / "fases.json", json.dumps({phase: {"fecha": "2099-06-01T10:0%d:00" % index, "corridas": 10,
+                                                               "flujos": {"pagos": {"corridas": 10}}}
+                                                      for index, phase in enumerate(("antes", "control", "despues"))}))
+        for name in ("reporte-inicial-dev.md", "reporte-final-dev.md"):
+            write(self.folder / name, "x")
+            os.utime(str(self.folder / name), (4102444800, 4102444800))  # 2100-01-01
+        out = self.good("cerrar", "--carpeta", self.rel, "--dod")
+        self.assertIn("lo guardo antes de quitar", out)
+        second, _ = self.saved()
+        self.assertNotEqual(first, second)
+        self.assertIn(b"// plantilla de la versi", second.read_bytes())
+        self.assertTrue(first.is_file())  # el viejo no se borra
+        self.assertEqual(self.status(), [])  # git status sin archivos del setup
+        self.assertIsNone(perf.find_hooks(self.root))
+        self.assertIn("Investigación cerrada: %s" % perf.NO_STEPS_LEFT, out)
+        self.assertIn("precargar()", (self.sibling / "src" / "Pagos.kt").read_text(encoding="utf-8"))  # la mejora se queda
+        # 11. nada escribió en el HOME (ni perfiles del shell ni otra cosa)
+        self.assertEqual([path.name for path in self.home.iterdir()], [])
+
+
 if __name__ == "__main__":
     unittest.main()

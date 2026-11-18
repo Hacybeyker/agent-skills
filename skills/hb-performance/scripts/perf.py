@@ -6774,6 +6774,8 @@ def cmd_decidir(args):
         raise PerfError("--archivos y --repo van con --aplicada y una sola mejora: el diff es de esa mejora")
     if getattr(args, "repo", None) and not files:
         raise PerfError("--repo va con --archivos: los archivos de la mejora en ese repo")
+    if applied and blocked_modules(plan):
+        improvement_module_gate(folder, plan, files, getattr(args, "repo", None), applied[0])
     for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
@@ -7814,6 +7816,9 @@ def cmd_marcas(args):
     extra = project_repos(folder, root, plan)
     tops = list(dict.fromkeys([root] + [top.resolve() for top in (git_toplevel(path) for path in extra)
                                         if top is not None]))
+    if args.vigente or args.separar:
+        temp_module_gate(folder, root, plan, extra, "las marcas no pueden ir en un módulo binario",
+                         patch=args.vigente, tops=tops)
     if args.vigente:
         patch = pathlib.Path(os.path.expanduser(args.vigente)).resolve()
         if not patch.is_file():
@@ -9543,6 +9548,14 @@ def warnings_lines(folder, plan):
         bucket = (notes.get(kind) or {}).get(phase) if isinstance(notes.get(kind), dict) else None
         return sorted(bucket.items()) if isinstance(bucket, dict) else []
 
+    for item in blocked_modules(plan):
+        lines.append(one_line(
+            "Módulo %s: %s. Ninguna sesión lo edita (marcas, cambios temporales ni mejoras). Si su código está en disco%s, "
+            "el código leído puede no ser la versión del binario: no cites `archivo:línea` de ese módulo como evidencia "
+            "confirmada; un hallazgo ahí va como \"fuera del alcance: módulo compilado\", con la evidencia de la traza" % (
+                item["nombre"], "el build lo toma como binario (%s)" % (item.get("artefacto") or "sin versión")
+                if item.get("tipo") == "binario" else "sin confirmar si se compila desde código",
+                " (%s)" % item["carpeta"] if item.get("carpeta") else "")))
     original = notes.get("ajustes_originales") if isinstance(notes.get("ajustes_originales"), dict) else {}
     if original.get("comando"):
         lines.append(" ".join(("Opciones de desarrollador: el %s, algunas estaban fuera de lo normal (%s). Para volverlas a como "
@@ -13745,6 +13758,11 @@ def plain_unfilled(body):
     return text
 
 
+OWNER_SECTION = "pedido al equipo dueño"
+OWNER_INTRO = ("> Para enviar al equipo dueño de un módulo que la app consume compilado: esta investigación no puede editar "
+               "ese módulo. Qué se midió, la evidencia de la traza y lo que se propone.\n\n")
+
+
 def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
                   dev_note=""):
     """Escribe las dos versiones de un reporte (`reporte-<tipo>-dev` y `reporte-<tipo>-gerencia`), en markdown y, con
@@ -14129,6 +14147,7 @@ def cmd_reporte(args):
                  ("Plan de mejoras", plan_intro + plan_md if plan_md else ""),
                  ("Ficha y condiciones", ficha_subset(pick("ficha"))),
                  ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") + capture_table(filled("pendientes"), folder, plan) if filled("pendientes") else ""),
+                 ("Pedido al equipo dueño del módulo", OWNER_INTRO + filled(OWNER_SECTION) if filled(OWNER_SECTION) else ""),
                  ("Costo de la investigación", cost_md(folder, plan)),
                  ("Cómo leer este reporte", GLOSSARY)]
         problems = []
@@ -14195,6 +14214,7 @@ def cmd_reporte(args):
              ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
              ("Comparación completa", comparison_md), ("Ficha y condiciones", ficha_subset(pick("ficha"))),
              ("Pendientes (no son mejoras)", pending_intro + filled("pendientes") + capture_table(filled("pendientes"), folder, plan) if filled("pendientes") else ""),
+             ("Pedido al equipo dueño del módulo", OWNER_INTRO + filled(OWNER_SECTION) if filled(OWNER_SECTION) else ""),
              ("Costo de la investigación", cost_md(folder, plan)),
              ("Cómo leer este reporte", GLOSSARY)]
     charts = "".join(figure(*final_chart(r, plan=plan), title='%s · %s <span class="verdict %s">%s</span>' % (
@@ -17379,6 +17399,432 @@ def setup_estado(root, args, folder, plan):
     print_setup_next(root, title, steps)
 
 
+# ── Módulos del alcance: código o binario (0.14.0) ───────────────────────────
+# Nunca se edita código de un módulo que la app consume compilado (un AAR o un JAR de un repositorio): la edición no llega
+# al APK, nada falla al compilar y la investigación saca conclusiones falsas. Cada proyecto sustituye binarios por código a
+# su manera, así que no se asume ninguna: se le pregunta a Gradle (`dependencies` de la configuración de la variante
+# medida) y cada módulo del alcance queda en el plan como código o binario. El archivo que controla la sustitución es del
+# usuario: perf.py lo nombra, nunca lo edita.
+MODULE_KINDS = ("codigo", "binario", "sin confirmar")
+MODULE_LABEL = {"codigo": "código", "binario": "binario (llega compilado)", "sin confirmar": "sin confirmar"}
+DEP_ENTRY = re.compile(r"^[ |]*[+\\]---[ \t]+(.+?)[ \t]*$")
+DEP_MARKS = re.compile(r"(?:[ \t]*\((?:\*|c|n)\))+$")
+DEP_HEADER = re.compile(r"^([A-Za-z_]\w*) - \S")  # "profilingRuntimeClasspath - Runtime classpath of …"
+NOT_SUBSTITUTION = re.compile(r"build-?logic|buildSrc|convention|plugins?\b", re.I)  # un includeBuild de la lógica de build
+DEP_PROJECT = re.compile(r"^project[ \t]+['\"]?(:[\w.:-]*)")
+DEP_ARTIFACT = re.compile(r"^([\w.-]+):([\w.-]+)(?::(\S+))?")
+SUBSTITUTION_SIGNALS = (("dependencySubstitution", re.compile(r"\bdependencySubstitution\b")),
+                        ("substitute module(...)", re.compile(r"\bsubstitute\s*\(?\s*module\b")),
+                        ("includeBuild", re.compile(r"\bincludeBuild\b")))
+SETTINGS_READS = re.compile(r"""["']([^"'\s]+\.(?:json|properties|toml|ya?ml))["']""")
+SETTINGS_APPLY = re.compile(r"""apply\s*\(?\s*from\s*[:=]\s*(?:\w+\s*\(\s*)?["']([^"']+\.gradle(?:\.kts)?)["']""")
+SWITCH_FILES = ("gradle.properties", "local.properties")
+BOOLEAN_TEXT = ("true", "false", "0", "1", "yes", "no", "on", "off")
+
+
+def dependencies_block(text, configuration):
+    """(texto de una configuración, su nombre, problema) de una salida de `gradlew dependencies`. La salida de una sola
+    configuración (con `--configuration`) trae un encabezado `<nombre> - <descripción>`; una completa trae uno por
+    configuración. Con varias, vale solo la pedida: mezclarlas daría por código lo que en la variante medida es binario."""
+    blocks, name, current = [], None, []
+    for line in (text or "").splitlines():
+        head = DEP_HEADER.match(line)
+        if head:
+            if name is not None:
+                blocks.append((name, current))
+            name, current = head.group(1), []
+        elif name is not None:
+            current.append(line)
+    if name is not None:
+        blocks.append((name, current))
+    if not blocks:
+        return text or "", None, ""
+    if configuration:
+        for found, lines in blocks:
+            if found == configuration:
+                return "\n".join(lines), found, ""
+        return None, None, "la salida trae %s y no %s: guárdala con --configuration %s" % (
+            ", ".join(found for found, _ in blocks[:4]), configuration, configuration)
+    if len(blocks) == 1:
+        return "\n".join(blocks[0][1]), blocks[0][0], ""
+    return None, None, ("la salida trae %d configuraciones (%s) y no sé cuál es la de la variante medida: dila con "
+                        "--configuracion" % (len(blocks), ", ".join(found for found, _ in blocks[:4])))
+
+
+def parse_dependencies(text):
+    """Lo que dice `gradlew :app:dependencies --configuration <variante>RuntimeClasspath`: {"proyectos": {":a:b"},
+    "artefactos": {"grupo:artefacto": {"version", "proyecto"}}, "sustituidos": {":a:b": "grupo:artefacto:versión"}}.
+    Cada línea es `<pedido> -> <elegido>`: `grupo:artefacto:versión -> project :x` es un artefacto que se compila desde
+    código; `project :x -> grupo:artefacto:versión` es un proyecto que el build cambia por un binario (va a "sustituidos",
+    nunca a "proyectos"). Una dependencia que Gradle no resolvió, `(n)`, no cuenta como nada."""
+    projects, artifacts, replaced = set(), {}, {}
+    for line in (text or "").splitlines():
+        found = DEP_ENTRY.match(line)
+        if not found:
+            continue
+        raw = found.group(1)
+        marks = DEP_MARKS.search(raw)
+        if marks and "(n)" in marks.group(0):
+            continue
+        entry = DEP_MARKS.sub("", raw).strip()
+        left, _, right = entry.partition(" -> ")
+        left, right = left.strip(), right.strip()
+        own, target = DEP_PROJECT.match(left), DEP_PROJECT.match(right)
+        if own:
+            if target:
+                projects.add(target.group(1))
+            elif right:  # el proyecto se cambió por un binario
+                replaced[own.group(1)] = right
+            else:
+                projects.add(own.group(1))
+            continue
+        artifact = DEP_ARTIFACT.match(left)
+        if not artifact:
+            continue
+        key = "%s:%s" % (artifact.group(1), artifact.group(2))
+        record = artifacts.setdefault(key, {"version": None, "proyecto": None})
+        if target:
+            record["proyecto"] = target.group(1)
+            projects.add(target.group(1))
+        version = (artifact.group(3) or "") if target else (right.rsplit(":", 1)[-1] or artifact.group(3) or "")
+        if version and not record["version"] and not version.startswith("{"):
+            record["version"] = version
+    for path in replaced:  # si en otra línea aparece como proyecto, manda la sustitución: no se da por código
+        projects.discard(path)
+    return {"proyectos": projects, "artefactos": artifacts, "sustituidos": replaced}
+
+
+def module_token(name):
+    """El nombre corto de un módulo, para compararlo: el último tramo de `:a:b` o el artefacto de `grupo:artefacto`."""
+    return str(name or "").strip().strip(":").split(":")[-1].split("/")[-1].lower()
+
+
+def project_dir(root, path):
+    """La carpeta de un proyecto de Gradle (`:a:b`): la que le da settings.gradle(.kts) con `projectDir`, la que sigue su
+    ruta bajo la raíz o una de las que settings incluye desde fuera con ese nombre. None si no se puede saber."""
+    root = pathlib.Path(root)
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        try:
+            text = (root / name).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        found = re.search(r"""project\s*\(\s*["']%s["']\s*\)\s*\.\s*projectDir\s*=\s*(?:new\s+)?[fF]ile\s*\(\s*(?:\w+\s*,\s*)?"""
+                          r"""["']([^"']+)["']""" % re.escape(path), text)
+        if found and "$" not in found.group(1):
+            return pathlib.Path(os.path.normpath(str(root / found.group(1))))
+    direct = root / path.strip(":").replace(":", "/")
+    if path.strip(":") and direct.is_dir():
+        return direct
+    token = module_token(path)
+    for other in external_roots(root, read_no_leer(root))[0]:
+        if other.name.lower() == token:
+            return other
+        if (other / path.strip(":").replace(":", "/")).is_dir():
+            return other / path.strip(":").replace(":", "/")
+    return None
+
+
+def module_folder(root, where):
+    """Una carpeta como se guarda en el plan: relativa a la raíz (con `..` si queda fuera)."""
+    inside = under(lexical(where), lexical(root))
+    return str(inside) if inside is not None else os.path.relpath(str(where), str(root))
+
+
+def match_module(name, deps):
+    """(tipo de coincidencia, clave) de un módulo del alcance en lo que dijo Gradle. Primero la coincidencia exacta (la
+    ruta del proyecto o `grupo:artefacto`); solo si no hay, el nombre corto (el último tramo), y solo si señala a un único
+    módulo: dos módulos con el mismo nombre corto (`:a:impl` y `:b:impl`) no se adivinan."""
+    for kind in ("sustituidos", "proyectos", "artefactos"):
+        if name in deps[kind]:
+            return kind, name
+    token = module_token(name)
+    found = [(kind, key) for kind in ("sustituidos", "proyectos", "artefactos") for key in sorted(deps[kind])
+             if module_token(key) == token]
+    if len(found) == 1:
+        return found[0]
+    return ("ambiguo", ", ".join(key for _, key in found[:5])) if found else (None, None)
+
+
+def classify_modules(root, names, deps, folders=None, app=None):
+    """[{"nombre", "tipo", "carpeta", "artefacto", "proyecto", "motivo"}] de los módulos del alcance según lo que dijo
+    Gradle (`deps` de parse_dependencies; None si no se pudo correr: entonces ninguno se da por código). La carpeta se
+    busca siempre que el nombre sea el de un proyecto: sin ella, las compuertas no pueden reconocer sus archivos."""
+    root = pathlib.Path(root)
+    folders = folders or {}
+    app_path = ":" + app.strip(":").replace("/", ":") if app else None
+    out = []
+    for name in names:
+        entry = {"nombre": name, "tipo": "sin confirmar", "origen": "gradle"}
+        given, path = folders.get(name), None
+        if app_path and (name == app_path or name.strip(":") == app_path.strip(":")):
+            entry.update(tipo="codigo", proyecto=app_path, motivo="es el módulo de la app que se compila")
+            path = app_path
+        elif deps is None:
+            entry.update(origen="sin gradle", motivo="no se pudo preguntar a Gradle")
+        else:
+            kind, key = match_module(name, deps)
+            if kind == "proyectos":
+                entry.update(tipo="codigo", proyecto=key)
+                path = key
+            elif kind == "sustituidos":
+                entry.update(tipo="binario", artefacto=deps["sustituidos"][key], proyecto=key,
+                             motivo="el build cambia el proyecto %s por el binario %s" % (key, deps["sustituidos"][key]))
+                path = key  # su código está en el proyecto, pero no es lo que se compila
+            elif kind == "artefactos":
+                record = deps["artefactos"][key]
+                entry["artefacto"] = key + (":%s" % record["version"] if record["version"] else "")
+                if record["proyecto"]:
+                    entry.update(tipo="codigo", proyecto=record["proyecto"],
+                                 motivo="sustitución: %s -> project %s" % (entry["artefacto"], record["proyecto"]))
+                    path = record["proyecto"]
+                else:
+                    entry["tipo"] = "binario"
+                    if given is None:  # su código puede estar en disco (un repo hermano) sin que el build lo use
+                        for candidate in (root.parent / key.split(":")[1], root / key.split(":")[1]):
+                            if candidate.is_dir() and candidate.resolve() != root.resolve():
+                                given = module_folder(root, candidate)
+                                break
+            elif kind == "ambiguo":
+                entry["motivo"] = "el nombre corto coincide con varios módulos (%s): pásalo completo" % key
+            else:
+                entry["motivo"] = "no aparece en las dependencias de esa configuración"
+        if given is None:
+            guess = path or (name if name.startswith(":") else ":" + name if ":" not in name else None)
+            where = project_dir(root, guess) if guess else None
+            if where is not None and where.resolve() != root.resolve():
+                given = module_folder(root, where)
+        if given:
+            entry["carpeta"] = str(given)
+        out.append(entry)
+    return out
+
+
+def substitution_switch(root, module):
+    """D2: dónde controla el proyecto si ese módulo va como binario o como código: {"senales": ["archivo:línea texto"],
+    "archivo", "clave", "valor"}. Busca en settings.gradle(.kts), en los .gradle que aplica, en los archivos de
+    configuración que nombran y en gradle.properties y local.properties una clave con el nombre del módulo. Solo lee."""
+    root = pathlib.Path(root)
+    denied = read_no_leer(root)
+    token = re.sub(r"[^a-z0-9]", "", module_token(module.get("artefacto", "").rsplit(":", 1)[0] if module.get("artefacto")
+                                                  and module["artefacto"].count(":") >= 2 else
+                                                  module.get("artefacto") or module.get("nombre")))
+    scripts, configs, signals = [], [], []
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        if (root / name).is_file() and not is_denied(root / name, root, denied):
+            scripts.append(root / name)
+    for script in list(scripts):
+        try:
+            text = script.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for raw in SETTINGS_APPLY.findall(text):
+            path = pathlib.Path(os.path.normpath(str(script.parent / raw.replace("$rootDir/", "").replace("${rootDir}/", ""))))
+            if path.is_file() and path not in scripts and not is_denied(path, root, denied):
+                scripts.append(path)
+    for script in scripts:
+        try:
+            lines = script.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines, start=1):
+            if line.lstrip().startswith(("//", "*", "/*")):
+                continue
+            for label, pattern in SUBSTITUTION_SIGNALS:
+                if pattern.search(line) and len(signals) < 6 and not (label == "includeBuild"
+                                                                      and NOT_SUBSTITUTION.search(line)):
+                    signals.append("%s:%d (%s)" % (relative_to_root(script, root), number, label))
+            for raw in SETTINGS_READS.findall(line):
+                path = pathlib.Path(os.path.normpath(str(root / raw.replace("$rootDir/", "").replace("${rootDir}/", ""))))
+                if path.is_file() and path not in configs and not is_denied(path, root, denied):
+                    configs.append(path)
+    for name in SWITCH_FILES:
+        if (root / name).is_file() and (root / name) not in configs and not is_denied(root / name, root, denied):
+            configs.append(root / name)
+    out = {"senales": signals, "archivo": None, "clave": None, "valor": None,
+           "archivos": [relative_to_root(path, root) for path in configs]}
+    if not token:
+        return out
+
+    def fits(key):
+        # un nombre corto (ui, api) solo coincide entero: como parte de otra clave señalaría cualquier cosa
+        normal = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        return bool(normal) and (normal == token or (len(token) >= 4 and token in normal)
+                                 or (len(normal) >= 4 and normal in token))
+
+    def shown(value):
+        text = str(value).strip().lower() if isinstance(value, (bool, int, str)) else ""
+        return text if text in BOOLEAN_TEXT else None
+
+    for path in configs:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")[:400_000]
+        except OSError:
+            continue
+        hit = None
+        if path.suffix == ".json":
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            stack = [("", data)]
+            while stack and hit is None:
+                prefix, node = stack.pop()
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        where = "%s.%s" % (prefix, key) if prefix else str(key)
+                        if fits(key) and not isinstance(value, (dict, list)):
+                            hit = (where, shown(value))
+                            break
+                        if fits(key) and isinstance(value, dict):  # {"pagos": {"local": false}}
+                            inner = next(((k, v) for k, v in value.items() if shown(v) is not None), None)
+                            hit = ("%s.%s" % (where, inner[0]), shown(inner[1])) if inner else (where, None)
+                            break
+                        stack.append((where, value))
+                elif isinstance(node, list):
+                    for index, value in enumerate(node):
+                        if isinstance(value, str) and fits(value):
+                            hit = ("%s[%d] (%s)" % (prefix, index, value), None)
+                            break
+                        stack.append(("%s[%d]" % (prefix, index), value))
+        else:
+            for line in text.splitlines():
+                found = re.match(r"^[ \t]*([\w.-]+)[ \t]*[=:][ \t]*(.*?)[ \t]*$", line)
+                if found and not line.lstrip().startswith(("#", "!", "//")) and fits(found.group(1)):
+                    value = shown(found.group(2).strip("\"'"))
+                    if value is not None:  # un interruptor es un sí o un no: gana la clave con valor booleano
+                        hit = (found.group(1), value)
+                        break
+                    hit = hit or (found.group(1), None)
+        if hit:
+            last = re.split(r"[.\[ ]", hit[0].split(" (")[0])[-1] if path.suffix == ".json" else hit[0]
+            out.update(archivo=relative_to_root(path, root), clave=hit[0], valor=hit[1],
+                       exacta=re.sub(r"[^a-z0-9]", "", last.lower()) == token)
+            break
+    return out
+
+
+def switch_text(switch, module):
+    """El interruptor de un módulo binario, en una frase: el archivo y la clave, o que no hay mecanismo."""
+    name = module.get("artefacto") or module.get("nombre")
+    if switch["archivo"] and switch["valor"] and switch.get("exacta"):
+        return ("el proyecto lo controla en `%s`, clave `%s` (hoy: %s)%s. Ese archivo es tuyo: cámbialo tú (perf.py nunca "
+                "lo edita), sincroniza Gradle y comprueba de nuevo" % (
+                    switch["archivo"], switch["clave"], switch["valor"],
+                    "; lo usa %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else ""))
+    if switch["archivo"]:
+        return ("puede que el proyecto lo controle en `%s`, clave `%s`%s (es una coincidencia por nombre: confírmalo tú)%s. "
+                "Ese archivo es tuyo: si es el interruptor, cámbialo tú (perf.py nunca lo edita), sincroniza Gradle y "
+                "comprueba de nuevo" % (switch["archivo"], switch["clave"],
+                                         " (hoy: %s)" % switch["valor"] if switch["valor"] else "",
+                              "; hay sustitución en %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else ""))
+    if switch["senales"]:
+        return ("el proyecto tiene un mecanismo de sustitución (%s), pero no encontré la clave de %s en %s: búscala tú en "
+                "esos archivos, cámbiala (perf.py nunca los edita), sincroniza Gradle y comprueba de nuevo" % (
+                    ", ".join(switch["senales"][:3]), name, ", ".join(switch["archivos"][:4]) or "sus archivos"))
+    return ("no encontré ningún mecanismo de sustitución en settings.gradle(.kts) (dependencySubstitution, substitute "
+            "module(...), includeBuild ni un archivo de configuración): %s llega solo compilado" % name)
+
+
+def plan_modules(plan):
+    """Los módulos del alcance que registró `setup --estado` en el plan ([] en un plan anterior a 0.14.0)."""
+    return [item for item in (plan or {}).get("modulos") or [] if isinstance(item, dict) and item.get("nombre")]
+
+
+def blocked_modules(plan):
+    """Los módulos del alcance que no se pueden editar: binarios o sin confirmar."""
+    return [item for item in plan_modules(plan) if item.get("tipo") in ("binario", "sin confirmar")]
+
+
+def same_or_inside(target, base):
+    """True si `target` es `base` o está dentro, también en un disco que no distingue mayúsculas (se compara el archivo,
+    no el texto de la ruta)."""
+    if under(target, base) is not None:
+        return True
+    if not base.exists():
+        return False
+    for parent in [target] + list(target.parents):
+        try:
+            if parent.exists() and os.path.samefile(str(parent), str(base)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def module_of(plan, root, path=None, hint=None):
+    """El módulo binario (o sin confirmar) al que pertenece un archivo o un repo, o None: el archivo está bajo la carpeta
+    donde vive su código en disco o, si el archivo está fuera de la raíz (o no se sabe dónde está), el repo de la fila
+    se llama como el módulo."""
+    root = pathlib.Path(root)
+    target = pathlib.Path(os.path.realpath(str(path))) if path is not None else None
+    in_root = target is not None and same_or_inside(target, pathlib.Path(os.path.realpath(str(root))))
+    names = [part for part in re.split(r"[\s(),;`]+", str(hint or "")) if part and part not in (".", "—", "-")]
+    for item in blocked_modules(plan):
+        folder = item.get("carpeta")
+        if folder and target is not None:
+            base = pathlib.Path(os.path.expanduser(folder))
+            base = pathlib.Path(os.path.realpath(str(base if base.is_absolute() else root / base)))
+            if same_or_inside(target, base):
+                return item
+        token = module_token(item.get("artefacto", "").rsplit(":", 1)[0] if (item.get("artefacto") or "").count(":") >= 2
+                             else item.get("artefacto") or item["nombre"])
+        if in_root:
+            # El archivo está en el proyecto: el nombre del repo no decide. Si no se sabe la carpeta del módulo, cuenta que
+            # una carpeta de su ruta (antes de `src`) se llame como él: `features/pagos/src/…` es del módulo `pagos`; un
+            # paquete `…/kotlin/…/pagos/` del módulo app, no.
+            if not folder and token:
+                parts = [part.lower() for part in under(target, pathlib.Path(os.path.realpath(str(root)))).parts[:-1]] \
+                    if under(target, pathlib.Path(os.path.realpath(str(root)))) is not None else []
+                if token in (parts[:parts.index("src")] if "src" in parts else parts):
+                    return item
+            continue
+        if token and any(module_token(name) == token for name in names):
+            return item
+    return None
+
+
+def folder_request(modules):
+    """Las líneas que piden la carpeta de cada módulo que no se puede editar y del que no se sabe dónde está su código: sin
+    ella, las compuertas solo lo reconocen por el nombre de una carpeta."""
+    return ["⚠ %s no se edita (%s) y no sé dónde está su código en disco. Si está en esta máquina (en el proyecto o en "
+            "otro repo), dilo con --modulos %s=RUTA (desde la raíz, como features/pagos o ../modulo-pagos): así perf.py "
+            "reconoce sus archivos e impide que se editen." % (item["nombre"], MODULE_LABEL.get(item["tipo"], item["tipo"]),
+                                                              item["nombre"])
+            for item in modules if item.get("tipo") in ("binario", "sin confirmar") and not item.get("carpeta")]
+
+
+def modules_recheck(root, folder):
+    return setup_command(root, "--estado", "--comprobar-modulos", folder=folder)
+
+
+def module_gate(folder, root, plan, files, what, error=PerfError):
+    """D3: se detiene si alguno de los archivos [(ruta absoluta o None, repo de la fila, nombre mostrado)] es de un módulo
+    que el build toma como binario (o que nadie confirmó como código). Dice el motivo y el interruptor del proyecto."""
+    hits = {}
+    for path, hint, shown in files:
+        item = module_of(plan, root, path, hint)
+        if item is not None:
+            hits.setdefault(item["nombre"], (item, []))[1].append(shown)
+    if not hits:
+        return
+    lines = []
+    for name, (item, shown) in sorted(hits.items()):
+        if item["tipo"] == "binario":
+            why = "el build lo toma como binario (%s): lo que edites ahí no llega al APK aunque su código esté en disco" % (
+                item.get("artefacto") or name)
+            lines.append("%s · %s. Interruptor: %s" % (", ".join(dict.fromkeys(shown)), why,
+                                                       switch_text(substitution_switch(root, item), item)))
+        else:
+            lines.append("%s · el módulo %s está sin confirmar (%s): no se da por código" % (
+                ", ".join(dict.fromkeys(shown)), name, item.get("motivo") or "Gradle no lo confirmó"))
+    raise error("%s: no se edita un módulo que la app consume compilado. No toqué nada:\n  - %s" % (
+        what, "\n  - ".join(lines))).con(
+        guardado="nada",
+        seguir=[("cuando el módulo se compile desde código (cambia tú el interruptor y sincroniza), comprueba de nuevo con "
+                 "Gradle", modules_recheck(root, folder)),
+                ("después, repite", same_command())])
+
+
 def setup_gate(root, folder, plan):
     """A5: con el setup en un parche y fuera del árbol, medir o instalar no tiene sentido: se detiene antes de compilar y
     de tocar el dispositivo, con el comando que lo repone."""
@@ -17396,6 +17842,351 @@ def setup_gate(root, folder, plan):
                        "variante medida puede no compilar. No compilé ni toqué el dispositivo%s" % (
                            setup_label(case), "".join("\n  %s" % note for note in notes))).con(
         guardado="nada", seguir=follow)
+
+
+def temp_module_files(folder, root, plan, extra):
+    """[(ruta absoluta o None, repo de la fila, nombre)] de los cambios temporales sin quitar de la investigación."""
+    try:
+        rows = temp_changes((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    out = []
+    for change in rows:
+        if change["revertido"]:
+            continue
+        top, rel = resolve_repo_file(root, change["archivo"], change["repo"], extra)
+        out.append((top / rel if top is not None else None, change["repo"], change["archivo"]))
+    return out
+
+
+def temp_module_gate(folder, root, plan, extra, what, patch=None, tops=(), error=PerfError):
+    """D3: ni las marcas ni los cambios temporales pueden estar en un módulo que el build toma como binario."""
+    if not blocked_modules(plan):
+        return
+    files = temp_module_files(folder, root, plan, extra)
+    if patch:
+        path = pathlib.Path(os.path.expanduser(str(patch)))
+        top = patch_repo(path, list(tops)) if path.is_file() else None
+        files += [(top / name if top is not None else None, str(top.name) if top is not None else "", name)
+                  for name in patch_files(path)]
+    module_gate(folder, root, plan, files, what, error)
+
+
+def marks_module_gate(folder, root, plan, flow, error=PerfError):
+    """D3, en la corrida de prueba: los archivos donde el código emite las marcas del plan y los de "Cambios temporales"
+    no pueden ser de un módulo binario: la marca nunca llegaría al APK y la prueba saldría con ✖ por la causa equivocada."""
+    if not blocked_modules(plan):
+        return
+    files = temp_module_files(folder, root, plan, project_repos(folder, root, plan))
+    denied = read_no_leer(root)
+    for mark, _ in plan_marks(flow):
+        for place in find_mark_sources(root, mark):
+            rel = place.rsplit(":", 1)[0]
+            files.append((pathlib.Path(os.path.normpath(str(pathlib.Path(root) / rel))), "", "%s (%s)" % (rel, mark)))
+        literal = MARK_LITERAL.fullmatch(mark or "")
+        if not literal:
+            continue
+        # El código de un módulo binario puede estar en disco sin que settings.gradle lo incluya: también se mira ahí.
+        for item in blocked_modules(plan):
+            base = pathlib.Path(os.path.expanduser(item.get("carpeta") or ""))
+            base = base if base.is_absolute() else pathlib.Path(root) / base
+            if not item.get("carpeta") or not base.is_dir():
+                continue
+            for path in walk_files(base, denied, (".kt", ".java"), root):
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore") if path.stat().st_size <= SCAN_MAX_BYTES \
+                        else ""
+                    if '"%s"' % literal.group(1) in text or '"%s"' % mark in text:
+                        files.append((path, "", "%s (%s)" % (os.path.relpath(str(path), str(root)), mark)))
+                        break
+                except OSError:
+                    continue
+    module_gate(folder, root, plan, files, "una marca del plan o un cambio temporal está en un módulo binario", error)
+
+
+def improvement_module_gate(folder, plan, files, repo, ident):
+    """D3, en `decidir --aplicada`: los archivos de la mejora no pueden ser de un módulo binario (el después mediría lo
+    mismo que el antes y el veredicto diría "sin cambio" de una mejora que nunca se instaló)."""
+    root = project_root(pathlib.Path(folder)).resolve()
+    base = pathlib.Path(os.path.expanduser(repo)) if repo else root
+    base = base if base.is_absolute() else pathlib.Path.cwd() / base
+    checks = [(pathlib.Path(os.path.normpath(str(base / name))), repo or "", name) for name in files]
+    if repo and not files:
+        checks.append((base, repo, str(repo)))
+    module_gate(folder, root, plan, checks, "la mejora %s toca un módulo binario" % ident)
+    if files:
+        return
+    # Sin --archivos no se sabe qué tocó la mejora: se avisa si un módulo binario tiene cambios sin commitear.
+    for item in blocked_modules(plan):
+        where = pathlib.Path(os.path.expanduser(item.get("carpeta") or ""))
+        where = where if where.is_absolute() else root / where
+        top = git_toplevel(where) if item.get("carpeta") and where.is_dir() else None
+        if top is None:
+            continue
+        try:
+            changed = [rel for rel in git_changes(top) if same_or_inside(
+                pathlib.Path(os.path.realpath(str(top / rel))), pathlib.Path(os.path.realpath(str(where))))]
+        except PerfError:
+            continue
+        if changed:
+            print("⚠ No pude comprobar los archivos de %s (sin --archivos) y el módulo %s, que el build toma como %s, tiene "
+                  "cambios sin commitear (%s): si son de esta mejora, no llegan al APK. Repite con --archivos para "
+                  "comprobarlo." % (ident, item["nombre"], MODULE_LABEL.get(item["tipo"], item["tipo"]),
+                                    ", ".join(changed[:5])))
+
+
+def gradle_dependencies(root, app, configuration, log):
+    """(salida de `./gradlew -q :<app>:dependencies --configuration <configuración>`, '') o (None, por qué no se pudo
+    correr). Deja la salida en `log`. No cambia nada del proyecto."""
+    root = pathlib.Path(root)
+    if not (root / "gradlew").is_file():
+        return None, "no hay ./gradlew en %s" % root
+    task = ":%s:dependencies" % app.strip(":").replace("/", ":") if app.strip(":") else "dependencies"
+    command = ["./gradlew", "-q", task, "--configuration", configuration]
+    try:
+        done = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=900, env=child_env(java=True))
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, "Gradle no corrió (%s)" % str(error)[:120]
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("$ %s\n%s\n%s" % (" ".join(command), done.stdout, done.stderr), encoding="utf-8")
+    except OSError:
+        pass
+    if done.returncode != 0:
+        last = ((done.stderr or done.stdout).strip().splitlines() or ["sin salida"])[-1][:160]
+        return None, "Gradle terminó con código %d (%s); la salida está en %s" % (done.returncode, last, log)
+    return done.stdout, ""
+
+
+def modules_table(modules, root):
+    rows = []
+    for item in modules:
+        detail = item.get("artefacto") or item.get("proyecto") or item.get("motivo") or "—"
+        if item.get("tipo") == "codigo" and item.get("artefacto") and item.get("proyecto"):
+            detail = "%s -> project %s" % (item["artefacto"], item["proyecto"])
+        note = "se puede editar" if item.get("tipo") == "codigo" else \
+            "no se edita; se mide desde el módulo app" if item.get("aceptado") else "no se edita"
+        rows.append(["`%s`" % item["nombre"], MODULE_LABEL.get(item.get("tipo"), item.get("tipo") or "—"),
+                     "`%s`" % item["carpeta"] if item.get("carpeta") else "—", detail, note])
+    return markdown_table(["Módulo", "Tipo", "Carpeta", "Según Gradle", "Edición"], rows)
+
+
+def write_modules_block(folder, modules, root, configuration, source):
+    """Deja el mapa en la ficha de estado.md: en el bloque perf:modulos o, si la investigación es de una versión anterior
+    y no lo tiene, al final de "Mapa del alcance"."""
+    content = "%s\n\n_Lo escribe `perf.py setup --estado` con %s (%s). Un módulo binario o sin confirmar no se edita._" % (
+        modules_table(modules, root), source, configuration)
+    if update_block(folder, "modulos", content):
+        return True
+    state = pathlib.Path(folder) / "estado.md"
+    try:
+        lines = state.read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return False
+    start = next((i for i, line in enumerate(lines) if line.lower().startswith("## mapa del alcance")), None)
+    if start is None:
+        return False
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    lines[end:end] = ["", "<!-- perf:modulos -->", content, "<!-- /perf:modulos -->"]
+    state.write_text("\n".join(lines), encoding="utf-8")
+    return True
+
+
+def measured_configuration(plan, args):
+    """(módulo app, configuración de Gradle) de la variante medida: --app y --configuracion; si no, lo que se usó la vez
+    anterior (`modulos_gradle` del plan); si no, lo que dice el `instalar` del plan (`:app:installDemoProfiling` → app y
+    demoProfilingRuntimeClasspath, el nombre que AGP le da al classpath de ejecución de cada variante)."""
+    module, variant = install_variant((plan or {}).get("instalar"))
+    saved = (plan or {}).get("modulos_gradle") if isinstance((plan or {}).get("modulos_gradle"), dict) else {}
+    app = getattr(args, "app", None) or saved.get("app") or module or "app"
+    configuration = getattr(args, "configuracion", None) or saved.get("configuracion") or (
+        "%sRuntimeClasspath" % variant if variant else None)
+    return app, configuration
+
+
+def modules_report(root, folder, plan, args):
+    """D1: clasifica los módulos del alcance (--modulos, o los del plan con --comprobar-modulos) y deja el mapa en
+    plan.json y en la ficha. Sin esas opciones, muestra el mapa guardado."""
+    stored = plan_modules(plan)
+    asked = list(getattr(args, "modulos", None) or [])
+    confirm = {}
+    for raw in getattr(args, "confirmar", None) or []:
+        name, sep, kind = raw.partition("=")
+        kind = {"código": "codigo", "codigo": "codigo", "binario": "binario"}.get(kind.strip().lower())
+        if not sep or not name.strip() or kind is None:
+            raise PerfError("--confirmar va como NOMBRE=codigo o NOMBRE=binario (lo que respondió el usuario cuando Gradle "
+                            "no se pudo correr, o que acepta medir un módulo binario desde el módulo app)")
+        confirm[name.strip()] = kind
+    if not asked and not getattr(args, "comprobar_modulos", False) and not confirm:
+        if stored:
+            print("Módulos del alcance (plan.json; para preguntarle de nuevo a Gradle, --comprobar-modulos):")
+            for line in modules_table(stored, root).splitlines():
+                print("  " + line)
+        else:
+            print("Módulos del alcance: sin registrar. La sesión 1 los registra con `setup --estado --carpeta` de esta "
+                  "investigación y --modulos seguido de cada módulo del alcance (ficha.md · Módulos del alcance).")
+        return
+    if confirm and not asked and not getattr(args, "comprobar_modulos", False):
+        return confirm_modules(root, folder, plan, stored, confirm)
+    folders, names = {item["nombre"]: item.get("carpeta") for item in stored if item.get("carpeta")}, []
+    for raw in asked or [item["nombre"] for item in stored]:
+        name, sep, where = raw.partition("=")
+        if name.strip() and name.strip() not in names:
+            names.append(name.strip())
+        if sep and where.strip():
+            folders[name.strip()] = where.strip()
+    for name in confirm:
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise PerfError("no hay módulos que comprobar: pásalos con --modulos (por ejemplo --modulos :feature-pagos "
+                        "com.example:pagos=../modulo-pagos)")
+    app, configuration = measured_configuration(plan, args)
+    deps, why, source = None, "", "Gradle"
+    if getattr(args, "dependencias", None):
+        try:
+            saved_text = pathlib.Path(args.dependencias).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            raise PerfError("no pude leer %s: %s" % (args.dependencias, error.strerror or error))
+        block, used, why = dependencies_block(saved_text, configuration)
+        if block is not None:
+            deps = parse_dependencies(block)
+            configuration = used or configuration
+            source = "la salida guardada en %s" % args.dependencias
+    elif configuration is None:
+        why = ("no sé cuál es la variante medida (el plan no tiene `instalar` con una tarea install<Variante>): pásala con "
+               "--configuracion, por ejemplo --configuracion profilingRuntimeClasspath")
+    else:
+        text, why = gradle_dependencies(root, app, configuration, folder / "logs" / "dependencias.txt")
+        block, _, block_why = dependencies_block(text, configuration) if text is not None else (None, None, "")
+        deps, why = (parse_dependencies(block), why) if block is not None else (None, why or block_why)
+    modules = classify_modules(root, names, deps, folders, app)
+    previous = {item["nombre"]: item for item in stored}
+    for item in modules:
+        old = previous.get(item["nombre"]) or {}
+        if item["nombre"] in confirm:
+            if item["tipo"] == "sin confirmar":  # Gradle no lo dijo: vale lo que respondió el usuario
+                item.update(tipo=confirm[item["nombre"]], origen="usuario")
+                item.pop("motivo", None)
+            if confirm[item["nombre"]] == "binario" and item["tipo"] == "binario":
+                item["aceptado"] = True  # se mide desde el módulo app; `siguiente` deja de preguntar
+        elif old.get("aceptado") and item["tipo"] == "binario":
+            item["aceptado"] = True
+        elif item["tipo"] == "sin confirmar" and old.get("origen") == "usuario" and deps is None:
+            item.update(tipo=old["tipo"], origen="usuario")
+            item.pop("motivo", None)
+    save_modules(folder, plan, modules, {"app": app, "configuracion": configuration} if configuration else None)
+    shown_configuration = configuration or "sin configuración"
+    print("Módulos del alcance, según %s (:%s:dependencies --configuration %s):" % (
+        source, app.strip(":").replace("/", ":"), shown_configuration)
+          if deps is not None else "Módulos del alcance: no pude preguntarle a Gradle (%s). Ninguno se da por código:" % why)
+    for line in modules_table(modules, root).splitlines():
+        print("  " + line)
+    for item in modules:
+        if item["tipo"] == "binario":
+            print("  ⚠ %s: %s." % (item["nombre"], switch_text(substitution_switch(root, item), item)))
+
+        elif item["tipo"] == "sin confirmar":
+            print("  ⚠ %s: sin confirmar (%s). Pregúntale al usuario si ese módulo se compila desde código o llega como "
+                  "binario y regístralo con --confirmar %s=codigo o --confirmar %s=binario." % (
+                      item["nombre"], item.get("motivo") or "Gradle no lo dijo", item["nombre"], item["nombre"]))
+    for line in folder_request(modules):
+        print("  " + line)
+    wrote = write_modules_block(folder, modules, root, shown_configuration, source if deps is not None else
+                                "lo que respondió el usuario (Gradle no se pudo correr)")
+    print("✔ plan.json: `modulos` con %d módulo%s del alcance%s" % (
+        len(modules), "" if len(modules) == 1 else "s", " · estado.md: mapa en la ficha" if wrote else
+        " (estado.md no tiene \"Mapa del alcance\": el mapa queda solo en el plan)"))
+
+
+def save_modules(folder, plan, modules, gradle=None):
+    """Deja el mapa en plan.json y, con `gradle`, el módulo app y la configuración que se usaron (para que comprobar de
+    nuevo pregunte lo mismo sin repetir las opciones)."""
+    plan_path = pathlib.Path(folder) / "plan.json"
+    raw = json.loads(plan_path.read_text(encoding="utf-8"))
+    raw["modulos"] = modules
+    if gradle:
+        raw["modulos_gradle"] = gradle
+        plan["modulos_gradle"] = gradle
+    plan_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    plan["modulos"] = modules
+
+
+def confirm_modules(root, folder, plan, stored, confirm):
+    """`--confirmar` sin --modulos ni --comprobar-modulos: registra lo que respondió el usuario sin preguntarle de nuevo a
+    Gradle. Lo que Gradle ya dijo no se pisa: un módulo que Gradle clasificó como código no pasa a binario por una
+    respuesta, ni al revés; solo se acepta medir desde el módulo app uno que ya es binario."""
+    modules = [dict(item) for item in stored]
+    by_name = {item["nombre"]: item for item in modules}
+    for name, kind in confirm.items():
+        item = by_name.get(name)
+        if item is None:
+            item = {"nombre": name, "tipo": "sin confirmar", "origen": "sin gradle"}
+            modules.append(item)
+            by_name[name] = item
+        if item["tipo"] == "sin confirmar":
+            item.update(tipo=kind, origen="usuario")
+            item.pop("motivo", None)
+        elif item["tipo"] != kind and item.get("origen") == "usuario":
+            item.update(tipo=kind)  # era una respuesta del usuario: se corrige con otra
+            item.pop("aceptado", None)
+        elif item["tipo"] != kind:
+            raise PerfError("Gradle dijo que %s es %s: no lo cambio por una respuesta. Si el proyecto cambió, pregúntale de "
+                            "nuevo a Gradle" % (name, MODULE_LABEL[item["tipo"]])).con(
+                guardado="nada: plan.json sigue igual", seguir=[("pregúntale de nuevo a Gradle", modules_recheck(root, folder))])
+        if kind == "binario":
+            item["aceptado"] = True  # se mide desde el módulo app; `siguiente` deja de preguntar
+    save_modules(folder, plan, modules)
+    print("Módulos del alcance (con lo que respondió el usuario; a Gradle no se le preguntó de nuevo):")
+    for line in modules_table(modules, root).splitlines():
+        print("  " + line)
+    for line in folder_request(modules):
+        print("  " + line)
+    wrote = write_modules_block(folder, modules, root, "sin preguntar de nuevo", "lo que ya decía el plan y lo que respondió "
+                                "el usuario")
+    print("✔ plan.json: `modulos` con %d módulo%s del alcance%s" % (
+        len(modules), "" if len(modules) == 1 else "s", " · estado.md: mapa en la ficha" if wrote else ""))
+
+
+def module_steps(folder, plan):
+    """Para `siguiente`: si un módulo del alcance llega como binario (o está sin confirmar) y nadie decidió qué hacer, lo
+    primero es resolverlo: cambiar el interruptor y comprobar de nuevo, o aceptar que se mide desde el módulo app."""
+    pending = [item for item in blocked_modules(plan) if not item.get("aceptado")]
+    if not pending:
+        return []
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    lines = []
+    for item in pending:
+        if item["tipo"] == "binario":
+            lines.append("%s llega como binario (%s): %s" % (item["nombre"], item.get("artefacto") or "sin versión",
+                                                           switch_text(substitution_switch(root, item), item)))
+        else:
+            lines.append("%s está sin confirmar (%s): pregúntale a Gradle de nuevo o registra lo que diga el usuario" % (
+                item["nombre"], item.get("motivo") or "Gradle no lo dijo"))
+    steps = [{"tipo": "avisos", "titulo": "Módulos del alcance que la app consume compilados (no se editan)",
+              "lineas": lines + [line.lstrip("⚠ ") for line in folder_request(pending)] + ["Ninguna sesión edita ese módulo (marcas, cambios temporales ni mejoras), aunque su "
+                                 "código esté en disco: no llegaría al APK"]},
+             terminal(modules_recheck(root, folder),
+                      "le pregunta a Gradle de nuevo cómo llega cada módulo del alcance y actualiza el mapa del plan y de "
+                      "la ficha", "córrelo después de cambiar tú el interruptor del proyecto y sincronizar Gradle")]
+    for item in pending:
+        if item["tipo"] == "sin confirmar":
+            steps.append(terminal(setup_command(root, "--estado", "--confirmar", "%s=codigo" % item["nombre"], folder=folder),
+                                  "si Gradle no se puede correr: registra que %s se compila desde código (lo que te "
+                                  "confirme quien conoce el proyecto)" % item["nombre"],
+                                  "córrelo solo si es así; si llega como binario, el mismo comando con =binario"))
+    binaries = [item for item in pending if item["tipo"] == "binario"]
+    if binaries:
+        steps.append(terminal(setup_command(root, "--estado", *[part for item in binaries for part in (
+            "--confirmar", "%s=binario" % item["nombre"])], folder=folder),
+            "o deja registrado que %s se queda%s como binario: se mide desde el módulo app (con menos precisión), el "
+            "hallazgo va como \"fuera del alcance: módulo compilado\" y la mejora es del lado de la app o un pedido al "
+            "equipo dueño" % (", ".join(item["nombre"] for item in binaries), "" if len(binaries) == 1 else "n"),
+            "elige este solo si no puedes o no quieres compilar el módulo desde código"))
+    return steps
 
 
 # ── Entrada ──────────────────────────────────────────────────────────────────
