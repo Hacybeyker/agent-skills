@@ -280,5 +280,580 @@ class AdbAndJavaTest(MachineBase):
             self.assertIn("uso Maestro de", "".join(call.args[0] for call in err.write.call_args_list))
 
 
+# ── A · El setup lo maneja la skill ──────────────────────────────────────────
+AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- applicationId: %s\n- Instalar: `./gradlew :app:installProfiling`\n- setup listo\n\n"
+          "## DoD\n\n1. `true`\n\n## Git\n\n- Conventional Commits\n" % PKG)
+BUILD = ('plugins { id("com.android.application") }\n\nandroid {\n    buildTypes {\n        release { isMinifyEnabled = true }\n'
+         '    }\n}\n\ndependencies {\n    implementation("com.squareup.okhttp3:okhttp:4.12.0")\n}\n')
+CLIENT = ("package com.example.app.red\n\nimport okhttp3.OkHttpClient\n\nobject Red {\n    fun cliente(): OkHttpClient {\n"
+          "        val builder = OkHttpClient.Builder()\n        builder.retryOnConnectionFailure(true)\n"
+          "        builder.followRedirects(true)\n        return builder.build()\n    }\n\n    fun uno() = 1\n    fun dos() = 2\n"
+          "    fun tres() = 3\n    fun cuatro() = 4\n    fun cinco() = 5\n    fun seis() = 6\n    fun siete() = 7\n"
+          "    fun ocho() = 8\n\n    fun version() = \"1\"\n}\n")
+WIRED_BUILD = BUILD.replace("        release { isMinifyEnabled = true }\n",
+                            "        release { isMinifyEnabled = true }\n        create(\"profiling\") {\n"
+                            "            initWith(getByName(\"release\"))\n        }\n")
+WIRED_CLIENT = CLIENT.replace("        val builder = OkHttpClient.Builder()\n",
+                              "        val builder = OkHttpClient.Builder()\n        PerfHooks.okHttp(builder)\n")
+HOOKS = "app/src/main/kotlin/com/example/app/perf/PerfHooks.kt"
+RED = "app/src/main/kotlin/com/example/app/red/Red.kt"
+# El build type lo cablea la sesión 0 a mano y no es inequívoco (un `initWith(...)` no dice "setup"): se pasa con --archivos.
+WIRING = ("--archivos", "app/build.gradle.kts")
+STATE = ("# Rendimiento · Pagos · 2099-01-01\n\n## Siguiente paso\n\n- x\n\n## Mapa del alcance\n\n- `app/Pagos.kt:1`: la pantalla\n\n"
+         "## Cambios temporales por revertir\n\n| Archivo | Repo o módulo | Qué es | Altera | ¿Revertido? |\n"
+         "| --- | --- | --- | --- | --- |\n%s\n## Advertencias para el diagnóstico\n\n<!-- perf:advertencias -->\n"
+         "<!-- /perf:advertencias -->\n\n## Hallazgos\n\n| # | Síntoma | Evidencia | Causa raíz | Tipo |\n"
+         "| --- | --- | --- | --- | --- |\n\n## Decisiones\n\n- x\n\n## Consumo\n\n| Sesión | Modelo | Costo o tokens | Pasos |\n"
+         "| --- | --- | --- | --- |\n")
+PATCH_NAME = re.compile(r"perf-setup-%s-\d{8}-\d{4}(?:-\d+)?\.patch" % re.escape(perf.VERSION))
+
+
+def make_project(root, agents=AGENTS, remote=REMOTE):
+    """Un proyecto Android mínimo en un repo de git, con un remoto inventado."""
+    root.mkdir(parents=True, exist_ok=True)
+    init_repo(root)
+    if remote:
+        git(root, "remote", "add", "origin", remote)
+    write(root / "settings.gradle.kts", 'include(":app")\n')
+    write(root / "app" / "build.gradle.kts", BUILD)
+    write(root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "red" / "Red.kt", CLIENT)
+    if agents is not None:
+        write(root / "AGENTS.md", agents)
+    commit_all(root, "base")
+    return root
+
+
+class SetupBase(PerfBase):
+    """Un proyecto en un repo de git temporal y un HOME temporal: el setup lo genera `instrumentar` de verdad."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = make_project(self.dir / "proyecto")
+        self.home = self.dir / "home"
+        self.home.mkdir()
+        # un adb de mentira sin dispositivos: ningún test llama al adb real de la máquina (que arranca su servidor y
+        # escribe en la carpeta del usuario)
+        fake_adb = executable(self.dir / "bin" / "adb", "#!/bin/sh\necho 'List of devices attached'\n")
+        self.env = dict(ENV, HOME=str(self.home), ADB=str(fake_adb))
+        self.patches = self.root / "reports" / "perf" / "setup" / "parches"
+
+    def run_perf(self, *args, cwd=None):
+        return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(cwd or self.root),
+                              env=self.env, capture_output=True, text=True, encoding="utf-8")
+
+    def good(self, *args):
+        result = self.run_perf(*args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(ends_with_step(result.stdout), "sin paso al final:\n" + result.stdout)
+        self.assertEqual(pasteable(result.stdout)[1], [], result.stdout)
+        return result.stdout
+
+    def bad(self, *args, code=2):
+        result = self.run_perf(*args)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        self.assertTrue(ends_with_step(result.stderr), "sin paso al final:\n" + result.stderr)
+        self.assertEqual(pasteable(result.stderr)[1], [], result.stderr)
+        return result.stderr
+
+    def instrument(self):
+        """La sesión 0: `instrumentar` y el cableado a mano (el build type y el gancho de red)."""
+        done = self.run_perf("instrumentar", "--modulo", "app", "--paquete", PKG + ".perf")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        write(self.root / "app" / "build.gradle.kts", WIRED_BUILD)
+        write(self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "red" / "Red.kt", WIRED_CLIENT)
+
+    def tree(self):
+        """El contenido de todo lo que hay bajo app/ (lo que el setup toca)."""
+        return {path.relative_to(self.root).as_posix(): path.read_bytes()
+                for path in sorted((self.root / "app").rglob("*")) if path.is_file()}
+
+    def status(self):
+        return [line for line in git(self.root, "status", "--short").splitlines() if not line.endswith("AGENTS.md")]
+
+    def saved(self):
+        """(parche vigente, ficha) según lo que quedó en la carpeta de parches."""
+        found = [path for path in sorted(self.patches.glob("perf-setup-*.patch"))
+                 if json.loads((path.parent / (path.name + ".json")).read_text(encoding="utf-8"))["estado"] == "vigente"]
+        self.assertEqual(len(found), 1, found)
+        return found[0], json.loads((found[0].parent / (found[0].name + ".json")).read_text(encoding="utf-8"))
+
+    def in_patch(self):
+        """Deja el setup guardado en su parche y quitado del árbol."""
+        self.instrument()
+        self.good("setup", "--guardar", "--quitar", *WIRING)
+        return self.saved()
+
+    def investigation(self, name="pagos", rows="", plan=None, closed=False):
+        folder = self.root / "reports" / "perf" / name / "2099-01-01"
+        plan = plan or {"paquete": PKG, "principales": ["pago_ms"], "instalar": "./gradlew :app:installProfiling",
+                        "flujos": {name: {"recorrido": "true", "metricas_usuario": [
+                            {"nombre": "pago_ms", "desde": {"marca": "MARK pago_inicio"},
+                             "hasta": {"marca": "MARK pago_visible"}}]}}, "mejoras": []}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", STATE % rows)
+        exclude = self.root / ".git" / "info" / "exclude"  # como `nuevo`: la evidencia queda fuera de git
+        ignored = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if "/reports/" not in ignored.splitlines():
+            write(exclude, ignored + "/reports/\n")
+        if closed:
+            write(folder / "fases.json", json.dumps({phase: {"fecha": "2020-01-01T10:0%d:00" % index, "corridas": 10,
+                                                              "skill": perf.VERSION, "flujos": {name: {"corridas": 10}}}
+                                                     for index, phase in enumerate(("antes", "control", "despues"))}))
+            write(folder / "reporte-inicial-dev.md", "x")
+            write(folder / "reporte-final-dev.md", "x")
+        return folder
+
+
+class SetupCaseTest(SetupBase):
+    """A1: los tres casos y los raros, cada uno con su paso."""
+
+    def test_sin_setup(self):
+        write(self.root / "AGENTS.md", (FIXTURES / "sin-setup" / "AGENTS.md").read_text(encoding="utf-8"))
+        self.assertEqual(perf.setup_case(self.root)["caso"], "sin")
+        out = self.good("setup", "--estado")
+        self.assertIn("Setup de medición · sin setup", out)
+        self.assertIn("Siguiente · falta la sesión 0 (setup)", out)
+        self.assertIn("Chat nuevo", out)
+        self.assertIn("sesión 0 (setup)", out)
+        self.assertIn("Herramientas de la máquina (solo lectura", out)
+
+    def test_versionado(self):
+        self.instrument()
+        write(self.root / "AGENTS.md", (FIXTURES / "versionado" / "AGENTS.md").read_text(encoding="utf-8"))
+        commit_all(self.root, "build(perf): setup")
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["presente"]), ("versionado", True))
+        out = self.good("setup", "--estado")
+        self.assertIn("Setup de medición · setup versionado", out)
+        self.assertIn("el setup está listo para medir", out)
+        before = self.tree()
+        self.assertIn("no hay nada que guardar en un parche", self.good("setup", "--guardar"))
+        out = self.good("setup", "--quitar")
+        self.assertIn("El setup está versionado (en git): no se quita nada", out)
+        self.assertIn(perf.NO_STEPS_LEFT, out)
+        self.assertEqual(self.tree(), before)
+
+    def test_en_el_arbol_sin_decidir(self):
+        self.instrument()
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["presente"]), ("sin_decidir", True))
+        out = self.good("setup", "--estado")
+        self.assertIn("decide si se versiona (su propio commit o PR) o va en un parche", out)
+        self.assertIn("setup --guardar --quitar", out)
+        before = self.tree()
+        error = self.bad("setup", "--quitar")  # quitarlo sin guardarlo lo perdería
+        self.assertIn("no está guardado en ningún parche: si lo quito, se pierde", error)
+        self.assertEqual(self.tree(), before)
+
+    def test_en_parche_puesto_y_ausente(self):
+        patch, _ = self.in_patch()
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["presente"], case["parche"]), ("parche", False, patch))
+        self.assertEqual(perf.setup_label(case), "setup en parche, sin reponer")
+        out = self.good("setup", "--estado")
+        self.assertIn("Caso: en parche · el código no está en el árbol", out)
+        self.assertIn("setup --reponer", pasteable(out)[0][0])
+        self.good("setup", "--reponer")
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["presente"]), ("parche", True))
+        self.assertEqual(perf.setup_label(case), "setup en parche, puesto")
+        self.assertIsNone(perf.setup_missing(self.root))
+
+    def test_la_linea_de_versiones_anteriores_se_reconoce(self):
+        for line in ("- Setup listo, en parche: `git apply herramientas/perf-setup.patch` antes de medir",
+                     "- setup listo, en parche: `git apply herramientas/perf-setup.patch`",
+                     "- Setup listo, en parche: `git -C . apply herramientas/perf-setup.patch` antes de medir; `git -C . "
+                     "apply -R herramientas/perf-setup.patch` al terminar (lo escribió `perf.py cerrar`)."):
+            with self.subTest(linea=line):
+                write(self.root / "AGENTS.md", "## Rendimiento\n\n- applicationId: %s\n%s\n" % (PKG, line))
+                said = perf.agents_setup(self.root)
+                self.assertTrue(said["en_parche"] and said["antigua"])
+                self.assertEqual(said["parches"], [self.root / "herramientas" / "perf-setup.patch"])
+        # con el fixture de 0.13.0: la línea vieja, el bloque de estado de 0.13.0 y un parche sin ficha
+        shutil.copytree(str(FIXTURES / "linea-vieja" / "herramientas"), str(self.root / "herramientas"))
+        write(self.root / "AGENTS.md", (FIXTURES / "linea-vieja" / "AGENTS.md").read_text(encoding="utf-8"))
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["presente"], case["ficha"]), ("parche", False, None))
+        self.assertIn("línea de una versión anterior: se reconoce", self.good("setup", "--estado"))
+
+    def test_setup_listo_sin_codigo_ni_parche(self):
+        out = self.good("setup", "--estado")
+        self.assertIn("setup perdido: AGENTS.md lo da por hecho y no está", out)
+        self.assertIn("se perdió o lo quitaron a mano", out)
+        self.assertIn("setup --vigente", out)
+        self.assertIn("sesión 0 (setup)", out)
+        error = self.bad("setup", "--reponer")
+        self.assertIn("no hay nada que reponer: AGENTS.md dice que el setup está, pero no hay código ni parche", error)
+        self.assertIn("Chat nuevo", error)
+
+    def test_un_parche_sin_confirmar_se_pregunta(self):
+        patch, _ = self.in_patch()
+        write(self.root / "AGENTS.md", AGENTS)  # alguien descartó la línea del parche: queda "setup listo" y un parche
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["candidatos"]), ("duda", [patch]))
+        out = self.good("setup", "--estado")
+        self.assertIn("encontré un parche de setup que nadie confirmó (%s)" % patch.name, out)
+        self.assertIn("setup --vigente %s" % patch.resolve(), out)
+        before = self.tree()
+        self.bad("setup", "--reponer")  # nunca adivina
+        self.assertEqual(self.tree(), before)
+        out = self.good("setup", "--vigente", patch)
+        self.assertIn("✔ Parche de setup vigente: %s" % patch, out)
+        self.assertEqual(perf.setup_case(self.root)["caso"], "parche")
+
+    def test_el_codigo_en_el_arbol_manda_sobre_un_parche_que_no_existe(self):
+        self.instrument()
+        write(self.root / "AGENTS.md", AGENTS.replace("- setup listo\n", "- Setup listo, en parche: `git apply "
+                                                      "../parches/perf-setup.patch` antes de medir\n"))
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], case["presente"]), ("sin_decidir", True))
+        out = self.good("setup", "--estado")
+        self.assertIn("setup en el árbol; AGENTS.md nombra un parche que no existe", out)
+        self.assertNotIn("setup perdido", out)
+        self.assertIn("setup --guardar --quitar", out)
+
+    def test_la_linea_de_cerrar_de_0130_con_espacios(self):
+        root = make_project(self.dir / "mi proyecto")
+        patch = root / "reports" / "perf" / "x" / "parches" / "perf-setup-proyecto-20990101-1200.patch"
+        write(patch, "x")
+        line = "- Setup listo, en parche: `git -C %s apply %s` antes de medir; `git -C %s apply -R %s` al terminar (lo " \
+               "escribió `perf.py cerrar`)." % ((perf.q(root), perf.q(patch)) * 2)
+        write(root / "AGENTS.md", "## Rendimiento\n\n%s\n" % line)
+        self.assertEqual(perf.agents_setup(root)["parches"], [patch])
+
+    def test_parches_sin_ninguna_linea_en_agents(self):
+        patch, _ = self.in_patch()
+        write(self.root / "AGENTS.md", (FIXTURES / "sin-setup" / "AGENTS.md").read_text(encoding="utf-8"))
+        case = perf.setup_case(self.root)  # AGENTS.md perdió la sección: hay un parche y nadie dice si vale
+        self.assertEqual((case["caso"], case["candidatos"]), ("duda", [patch]))
+        out = self.good("setup", "--estado")
+        self.assertIn("AGENTS.md no dice nada del setup", out)
+        self.assertIn("setup --vigente", out)
+        error = self.bad("setup", "--vigente", patch)  # sin sección de rendimiento no hay dónde anotarlo: se detiene
+        self.assertIn("no hay dónde anotar el parche vigente: AGENTS.md no tiene una sección de rendimiento", error)
+        self.assertEqual(json.loads((patch.parent / (patch.name + ".json")).read_text(encoding="utf-8"))["estado"], "vigente")
+
+    def test_dos_parches_sin_vigente(self):
+        patch, _ = self.in_patch()
+        other = self.patches / "perf-setup-0.13.0-20990101-0900.patch"
+        shutil.copyfile(str(patch), str(other))
+        write(self.root / "AGENTS.md", AGENTS.replace("- setup listo\n", "- Setup listo, en parche: `git apply "
+                                                      "<ruta>/perf-setup.patch` antes de medir\n"))
+        case = perf.setup_case(self.root)
+        self.assertEqual((case["caso"], len(case["candidatos"])), ("duda", 2))
+        out = self.good("setup", "--estado")
+        self.assertIn("hay 2 parches de setup sin uno vigente", out)
+        self.assertEqual(len([command for command in pasteable(out)[0] if "setup --vigente" in command]), 2)
+        before = self.tree()
+        self.assertIn("falta decir cuál es el vigente", self.bad("setup", "--reponer"))
+        self.assertEqual(self.tree(), before)
+        self.good("setup", "--vigente", patch)
+        self.assertEqual(json.loads((other.parent / (other.name + ".json")).read_text(encoding="utf-8"))["estado"],
+                         "reemplazado")
+        self.assertTrue(other.is_file())  # el viejo no se borra
+
+
+class SetupSaveTest(SetupBase):
+    """A2: guardar el setup como parche, con su ficha."""
+
+    def test_guarda_solo_el_setup_con_su_ficha(self):
+        self.instrument()
+        write(self.root / "docs" / "notas.md", "trabajo mío\n")
+        write(self.root / "settings.gradle.kts", 'include(":app")\n// otro cambio mío\n')
+        out = self.good("setup", "--guardar", *WIRING)
+        patch, ficha = self.saved()
+        self.assertTrue(PATCH_NAME.fullmatch(patch.name), patch.name)
+        self.assertEqual(patch.parent, self.patches)
+        self.assertEqual(ficha["remoto"], REMOTE)
+        self.assertEqual(ficha["applicationId"], PKG)
+        self.assertEqual(ficha["skill"], perf.VERSION)
+        self.assertEqual(ficha["commit_base"], git(self.root, "rev-parse", "HEAD").strip())
+        self.assertEqual(ficha["sha256"], perf.sha256_of(patch))
+        self.assertIn(HOOKS, ficha["archivos"])
+        self.assertIn("app/build.gradle.kts", ficha["archivos"])
+        self.assertIn("app/src/main/kotlin/com/example/app/red/Red.kt", ficha["archivos"])
+        self.assertNotIn("docs/notas.md", ficha["archivos"])
+        self.assertNotIn("settings.gradle.kts", ficha["archivos"])
+        self.assertNotIn("AGENTS.md", ficha["archivos"])  # ahí se anota el caso: no es parte del setup
+        self.assertIn("No entran en el parche del setup (no son del setup; se quedan como están): docs/notas.md, "
+                      "settings.gradle.kts", out)
+        agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("- Setup: en parche `reports/perf/setup/parches/%s`" % patch.name, agents)
+        self.assertLess(agents.index("<!-- hb-performance:estado -->"), agents.index("- Setup: en parche"))
+        self.assertLess(agents.index("- Setup: en parche"), agents.index("<!-- /hb-performance:estado -->"))
+        self.assertIn("## DoD\n\n1. `true`", agents)  # nada fuera del bloque cambia
+        self.assertEqual(git(self.root, "apply", "--check", "-R", str(patch)), "")
+        self.assertIn("/reports/perf/setup/parches/", (self.root / ".git" / "info" / "exclude").read_text())
+        self.assertIn("sigue puesto en el árbol", out)
+        self.assertTrue((self.root / HOOKS).is_file())
+
+    def test_no_pisa_y_reemplaza_el_anterior(self):
+        self.instrument()
+        self.good("setup", "--guardar", *WIRING)
+        first, _ = self.saved()
+        data = first.read_bytes()
+        self.assertIn("El parche vigente ya tiene este setup", self.good("setup", "--guardar", *WIRING))
+        self.assertEqual(len(list(self.patches.glob("perf-setup-*.patch"))), 1)
+        mark = self.root / "app" / "src" / "perf" / "kotlin" / "com" / "example" / "app" / "perf" / "MarkTrace.kt"
+        write(mark, mark.read_text(encoding="utf-8") + "// actualizado\n")
+        out = self.good("setup", "--guardar")
+        second, _ = self.saved()
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.read_bytes(), data)  # el viejo sigue intacto
+        old = json.loads((first.parent / (first.name + ".json")).read_text(encoding="utf-8"))
+        self.assertEqual((old["estado"], old["reemplazado_por"]), ("reemplazado", second.name))
+        self.assertIn("Reemplazado (queda guardado, ya no se usa", out)
+        self.assertIn(b"// actualizado", second.read_bytes())
+
+    def test_un_archivo_con_cambios_que_no_son_del_setup_detiene(self):
+        self.instrument()
+        client = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "red" / "Red.kt"
+        write(client, WIRED_CLIENT.replace('fun version() = "1"', 'fun version() = "2"'))  # otro hunk, lejos del gancho
+        error = self.bad("setup", "--guardar", "--quitar", *WIRING)
+        self.assertIn("no guardé nada", error)
+        self.assertIn("app/src/main/kotlin/com/example/app/red/Red.kt (por ejemplo: fun version() = \"1\")", error)
+        self.assertIn("haz primero el commit de ese trabajo", error)
+        commands = pasteable(error)[0]  # un solo --archivos con todos: repetir la opción dejaría solo los últimos
+        self.assertTrue(commands[0].endswith("setup --guardar --quitar --archivos app/build.gradle.kts %s" % RED), commands)
+        self.assertTrue(commands[1].endswith("setup --guardar --quitar --archivos app/build.gradle.kts"), commands)
+        self.assertFalse(self.patches.exists())
+        self.assertTrue((self.root / HOOKS).is_file())  # --quitar no llegó a correr
+        self.assertNotIn("Setup: en parche", (self.root / "AGENTS.md").read_text(encoding="utf-8"))
+        self.good("setup", "--guardar", "--archivos", "app/build.gradle.kts", RED)
+        self.assertIn(b'fun version() = "2"', self.saved()[0].read_bytes())
+
+    def test_el_trabajo_del_usuario_no_viaja_en_el_parche(self):
+        self.instrument()
+        # un archivo nuevo del usuario que llama a una API estándar de Android: no es del setup
+        screen = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "nuevo" / "PantallaNueva.kt"
+        write(screen, "class PantallaNueva {\n    fun listo() { reportFullyDrawn() }\n    val etiqueta = \"perf\"\n}\n")
+        out = self.good("setup", "--guardar", "--quitar", *WIRING)
+        self.assertTrue(screen.is_file())
+        self.assertIn("No entran en el parche del setup", out)
+        self.assertNotIn("PantallaNueva", "\n".join(self.saved()[1]["archivos"]))
+        # un cambio del usuario pegado al gancho de red (mismo hunk): se detiene, no se lo lleva
+        self.good("setup", "--reponer")
+        client = self.root / RED
+        changed = WIRED_CLIENT.replace("builder.retryOnConnectionFailure(true)", "builder.retryOnConnectionFailure(false)")
+        write(client, changed)
+        mark = self.root / "app" / "src" / "perf" / "kotlin" / "com" / "example" / "app" / "perf" / "MarkTrace.kt"
+        write(mark, mark.read_text(encoding="utf-8") + "// plantilla nueva\n")  # hay setup nuevo que guardar
+        before = self.tree()
+        error = self.bad("setup", "--guardar")
+        self.assertIn("no guardé nada", error)
+        self.assertIn("%s (por ejemplo: builder.retryOnConnectionFailure(true))" % RED, error)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(list(self.patches.glob("perf-setup-*.patch"))), 1)
+
+    def test_un_archivo_del_parche_con_una_marca_de_una_investigacion(self):
+        patch, _ = self.in_patch()
+        self.good("setup", "--reponer")
+        write(self.root / RED, WIRED_CLIENT.replace("    fun uno() = 1\n", "    fun uno() = 1.also { PerfHooks.mark(\"x\") }\n"))
+        self.investigation(rows="| `%s` | . | marca pago_inicio | — | no |\n" % RED)
+        mark = self.root / "app" / "src" / "perf" / "kotlin" / "com" / "example" / "app" / "perf" / "MarkTrace.kt"
+        write(mark, mark.read_text(encoding="utf-8") + "// plantilla nueva\n")
+        error = self.bad("setup", "--guardar")  # no arma un parche sin el gancho de red, ni se lleva la marca
+        self.assertIn("declara ahí un cambio temporal: ciérrala primero", error)
+        self.assertEqual(self.saved()[0], patch)  # el parche completo sigue siendo el vigente
+        self.assertIn(RED, self.saved()[1]["archivos"])
+
+    def test_rutas_con_espacios_y_sin_cambios(self):
+        self.instrument()
+        agents = AGENTS.replace("- setup listo\n", "- Carpeta de parches: `../parches de medición`\n- setup listo\n")
+        write(self.root / "AGENTS.md", agents)
+        error = self.bad("setup", "--guardar", "--archivos", "app/build.gradle.kts", "no/existe.kt", "settings.gradle.kts")
+        self.assertIn("--archivos nombra no/existe.kt, settings.gradle.kts que no tienen cambios sin commitear", error)
+        self.good("setup", "--guardar", "--quitar", *WIRING)
+        folder = self.dir / "parches de medición"
+        patch = next(folder.glob("perf-setup-*.patch"))
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("- Setup: en parche `../parches de medición/%s`" % patch.name, text)
+        case = perf.setup_case(self.root)  # perf.py lee su propia línea aunque la ruta tenga espacios
+        self.assertEqual((case["caso"], case["presente"], case["parche"]), ("parche", False, patch))
+        self.good("setup", "--reponer")
+        self.assertTrue((self.root / HOOKS).is_file())
+
+    def test_el_remoto_se_guarda_sin_credenciales(self):
+        git(self.root, "remote", "set-url", "origin", "https://usuario:tok_SECRETO123@example.com/equipo/app.git")
+        self.instrument()
+        out = self.good("setup", "--guardar", *WIRING)
+        ficha = self.saved()[1]
+        self.assertEqual(ficha["remoto"], "https://example.com/equipo/app.git")
+        self.assertNotIn("SECRETO", out + json.dumps(ficha) + self.good("setup", "--estado"))
+        for same in ("git@example.com:equipo/app.git", "ssh://git@example.com:22/equipo/app.git",
+                     "https://example.com:8443/equipo/app", "example.com:equipo/app.git", "HTTPS://Example.com/Equipo/App/"):
+            self.assertTrue(perf.same_remote(ficha["remoto"], same), same)
+        for other in ("git@example.com:equipo/otra.git", "git@otro.example.com:equipo/app.git"):
+            self.assertFalse(perf.same_remote(ficha["remoto"], other), other)
+
+    def test_nombres_con_caracteres_no_ascii(self):
+        write(self.root / "app" / "di" / "Inyección.kt", "object Inyección { val medir = false }\n")
+        commit_all(self.root, "di")
+        self.instrument()
+        write(self.root / "app" / "di" / "Inyección.kt", "object Inyección { val medir = true }\n")
+        self.good("setup", "--guardar", "--archivos", "app/build.gradle.kts", "app/di/Inyección.kt")
+        self.assertIn("app/di/Inyección.kt", self.saved()[1]["archivos"])
+        out = self.good("setup", "--quitar")
+        self.assertNotIn("lo guardo antes de quitar", out)  # el setup es el del parche: lo reconoce por su nombre
+        write(self.root / "app" / "di" / "Inyección.kt", "object Inyección { val medir = false } // mío\n")
+        self.assertIn("app/di/Inyección.kt", self.bad("setup", "--reponer"))  # y ve el cambio del usuario encima
+
+    def test_los_cambios_temporales_de_una_investigacion_no_entran(self):
+        self.instrument()
+        screen = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "Pagos.kt"
+        write(screen, "class Pagos {\n    fun ver() { PerfHooks.mark(\"pago_visible\") }\n}\n")
+        self.investigation(rows="| `app/src/main/kotlin/com/example/app/Pagos.kt` | . | marca pago_visible | — | no |\n")
+        out = self.good("setup", "--guardar", *WIRING)
+        self.assertIn("No entra en el parche del setup: app/src/main/kotlin/com/example/app/Pagos.kt (cambio temporal de la "
+                      "investigación reports/perf/pagos/2099-01-01", out)
+        self.assertNotIn("Pagos.kt", "\n".join(self.saved()[1]["archivos"]))
+
+    def test_guardar_y_quitar(self):
+        self.instrument()
+        before = self.tree()
+        out = self.good("setup", "--guardar", "--quitar", *WIRING)
+        self.assertIn("Respaldo de todo el diff", out)
+        self.assertIn("No quedó ningún archivo del setup en el árbol", out)
+        self.assertIn("Setup quitado y guardado en su parche: %s" % perf.NO_STEPS_LEFT, out)
+        self.assertEqual(self.status(), [])
+        self.assertFalse((self.root / HOOKS).exists())
+        self.assertFalse((self.root / "app" / "src" / "perf").exists())
+        backup = list((self.patches / "respaldos").glob("perf-setup-respaldo-*.patch"))
+        self.assertEqual(len(backup), 1)
+        self.assertIn(b"PerfHooks", backup[0].read_bytes())
+        self.assertIn("instrumentación en el repo: no (está en el parche", (self.root / "AGENTS.md").read_text(encoding="utf-8"))
+        self.good("setup", "--reponer")
+        self.assertEqual(self.tree(), before)  # vuelve exactamente lo que había
+
+    def test_el_mismo_setup_deja_la_ficha_al_dia(self):
+        patch, ficha = self.in_patch()
+        path = patch.parent / (patch.name + ".json")
+        write(path, json.dumps(dict(ficha, skill="0.13.0")))
+        out = self.good("setup", "--reponer")
+        self.assertIn("El parche del setup es de hb-performance 0.13.0 y esta es la %s" % perf.VERSION, out)
+        out = self.good("setup", "--guardar")  # `instrumentar --actualizar` no cambió nada: no hace falta otro parche
+        self.assertIn("su ficha queda al día con hb-performance %s" % perf.VERSION, out)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["skill"], perf.VERSION)
+        self.assertEqual(len(list(self.patches.glob("perf-setup-*.patch"))), 1)
+        self.assertNotIn("conviene actualizar", self.good("setup", "--estado"))
+
+    def test_sin_el_setup_en_el_arbol_no_se_guarda_un_parche_parcial(self):
+        patch, _ = self.in_patch()
+        screen = self.root / "app" / "src" / "main" / "kotlin" / "com" / "example" / "app" / "Pagos.kt"
+        write(screen, "class Pagos {\n    fun ver() { PerfHooks.mark(\"pago_visible\") }\n}\n")  # una marca suelta
+        out = self.good("setup", "--guardar")
+        self.assertIn("No hay nada que guardar: el setup no está en el árbol", out)
+        self.assertIn("Hay cambios sueltos con aspecto de setup que no guardé (app/src/main/kotlin/com/example/app/Pagos.kt)",
+                      out)
+        self.assertEqual(self.saved()[0], patch)  # el parche completo sigue siendo el vigente
+        self.assertEqual(len(list(self.patches.glob("perf-setup-*.patch"))), 1)
+        write(self.root / "AGENTS.md", AGENTS.replace("- setup listo\n", ""))
+        for path in list(self.patches.glob("perf-setup-*")):
+            path.unlink()
+        error = self.bad("setup", "--guardar")  # sin parche ni PerfHooks.kt: no arma uno con lo suelto
+        self.assertIn("no hay un setup que guardar: no encuentro PerfHooks.kt en el árbol", error)
+        self.assertFalse(list(self.patches.glob("perf-setup-*.patch")))
+
+    def test_simular_no_toca_nada(self):
+        self.instrument()
+        before = self.tree()
+        out = self.good("setup", "--guardar", "--simular", *WIRING)
+        self.assertIn("Simulación: guardaría", out)
+        self.assertFalse(self.patches.exists())
+        self.assertEqual(self.tree(), before)
+        self.assertNotIn("Setup: en parche", (self.root / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+class SetupGateTest(SetupBase):
+    """A5: `siguiente` y los controles previos, con el setup en un parche y fuera del árbol."""
+
+    def test_siguiente_pone_reponer_primero(self):
+        self.in_patch()
+        folder = self.investigation()
+        rel = folder.relative_to(self.root)
+        out = self.good("siguiente", "--carpeta", rel)
+        commands = pasteable(out)[0]
+        self.assertTrue(commands[0].endswith("setup --reponer --carpeta %s" % rel), commands)
+        self.assertIn(" capturar ", "\n".join(commands[1:]))
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        self.assertLess(state.index("setup --reponer"), state.index(" capturar "))  # también en "Siguiente paso"
+        out = self.good("setup", "--reponer", "--carpeta", rel)
+        self.assertIn("Setup repuesto con su parche", out)
+        self.assertNotIn("setup --reponer", "\n".join(pasteable(out)[0]))  # ya está: sigue con lo de la investigación
+        self.assertIn(" capturar ", "\n".join(pasteable(out)[0]))
+
+    def test_capturar_se_detiene_antes_de_tocar_el_dispositivo(self):
+        self.in_patch()
+        folder = self.investigation()
+        rel = folder.relative_to(self.root)
+        error = self.bad("capturar", "--plan", rel / "plan.json", "--fase", "antes", code=perf.Precondicion.code)
+        self.assertIn("el setup de medición no está en el árbol (setup en parche, sin reponer)", error)
+        self.assertIn("No compilé ni toqué el dispositivo", error)
+        commands = pasteable(error)[0]
+        self.assertTrue(commands[0].endswith("setup --reponer --carpeta %s" % rel), commands)
+        self.assertIn("./gradlew :app:installProfiling", commands[1])
+        self.assertIn("capturar --plan", commands[2])
+
+    def test_humo_se_detiene_y_nuevo_lo_dice(self):
+        self.in_patch()
+        error = self.bad("humo", "--paquete", PKG, code=perf.Precondicion.code)
+        self.assertIn("el setup de medición no está en el árbol", error)
+        self.assertTrue(pasteable(error)[0][0].endswith("setup --reponer"))
+        result = self.run_perf("nuevo", "--carpeta", "reports/perf/inicio/2099-01-02", "--paquete", PKG, "--flujo", "inicio")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("⚠ Setup: setup en parche, sin reponer", result.stdout)
+        self.assertIn("setup --reponer --carpeta reports/perf/inicio/2099-01-02", result.stdout)
+        self.assertIn("siguiente --carpeta reports/perf/inicio/2099-01-02", pasteable(result.stdout)[0][-1])
+
+    def test_sin_la_linea_en_agents_no_se_recorre_el_proyecto(self):
+        with mock.patch.object(perf, "find_hooks", side_effect=AssertionError("no debe recorrer el proyecto")):
+            self.assertIsNone(perf.setup_missing(self.root))
+
+
+class SetupOutputsTest(SetupBase):
+    """Regla de la versión: cada salida nueva termina con el paso que sigue o con el cierre explícito, y sus comandos se
+    pueden pegar tal cual (lo comprueban `good` y `bad` en cada llamada)."""
+
+    def test_recorrido_de_las_salidas(self):
+        self.assertTrue(ends_with_step(self.good("setup")))  # sin opciones es --estado
+        self.instrument()
+        self.good("setup", "--estado")
+        self.good("setup", "--guardar", "--simular", *WIRING)
+        self.good("setup", "--guardar", *WIRING)
+        self.good("setup", "--quitar", "--simular")
+        self.assertIn(perf.NO_STEPS_LEFT, self.good("setup", "--quitar"))
+        self.assertIn(perf.NO_STEPS_LEFT, self.good("setup", "--quitar"))  # ya quitado: también lo dice
+        self.good("setup", "--estado")
+        self.good("setup", "--reponer", "--simular")
+        self.good("setup", "--reponer")
+        self.good("setup", "--vigente", self.saved()[0])
+        self.bad("setup", "--vigente", "no-existe.patch")
+        self.bad("setup", "--reponer", "--quitar")
+        folder = self.investigation()
+        self.good("setup", "--estado", "--carpeta", folder.relative_to(self.root))
+        self.assertIn("Siguiente paso", (folder / "estado.md").read_text(encoding="utf-8"))
+
+    def test_las_rutas_con_espacios_van_citadas(self):
+        root = make_project(self.dir / "mi proyecto")
+        done = self.run_perf("instrumentar", "--modulo", "app", "--paquete", PKG + ".perf", cwd=root)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        result = self.run_perf("setup", "--guardar", "--quitar", cwd=root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_perf("setup", "--estado", cwd=root)
+        command = pasteable(result.stdout)[0][0]
+        self.assertTrue(command.startswith("cd '%s' && python3 -I " % root.resolve()), command)
+        done = subprocess.run(["sh", "-c", command.replace("python3 -I", "%s -I" % sys.executable)], env=self.env,
+                              capture_output=True, text=True)  # pegado tal cual, repone
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue((root / HOOKS).is_file())
+
+    def test_nada_escribe_en_el_perfil_del_shell(self):
+        self.in_patch()
+        self.good("setup", "--reponer")
+        self.good("setup", "--quitar")
+        self.assertEqual([path.name for path in self.home.iterdir()], [])  # el HOME temporal sigue vacío
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3658,8 +3658,9 @@ class SetupPresentTest(DeviceBase):
                                       "- Setup listo, en parche: `git apply herramientas/perf-setup.patch` antes de medir\n")
         self.assertIn('Reponla antes de seguir: AGENTS.md dice: "Setup listo, en parche: `git apply '
                       'herramientas/perf-setup.patch` antes de medir"', perf.setup_warning(self.dir))
+        self.assertEqual(perf.setup_case(self.dir)["caso"], "perdido")  # la línea vieja se reconoce; ese parche no existe
         write(self.dir / "AGENTS.md", "## Reglas\n\n- Nunca despliegues con parches manuales.\n\n## Rendimiento\n\n- setup listo\n")
-        self.assertIn("si el setup se guarda como parche, aplícalo", perf.setup_warning(self.dir))  # esa línea ajena no se cita
+        self.assertIn("si se perdió, repite la sesión 0", perf.setup_warning(self.dir))  # esa línea ajena no se cita
         self.assertNotIn("despliegues", perf.setup_warning(self.dir))
         (self.dir / "app/src/perf/kotlin").mkdir(parents=True)  # el source set solo, sin PerfHooks: sigue faltando
         self.assertIn("(ni PerfHooks.kt, bajo", perf.setup_warning(self.dir))
@@ -3671,11 +3672,22 @@ class SetupPresentTest(DeviceBase):
     def test_nuevo_y_humo_lo_dicen_antes_de_seguir(self):
         write(self.dir / "AGENTS.md", "## Rendimiento\n\n- setup listo\n")
         out = self.ok("nuevo", "--carpeta", self.dir / "reports/perf/x", "--paquete", PKG, "--flujo", "x")
+        self.assertIn("⚠ Setup: setup perdido: AGENTS.md lo da por hecho y no está", out)
         self.assertIn('⚠ AGENTS.md dice "setup listo" pero no encontré la instrumentación en el repo', out)
         self.tp_outputs(GOOD)
         out = self.ok("humo", "--paquete", PKG)
         self.assertEqual(out.count('AGENTS.md dice "setup listo" pero no encontré la instrumentación'), 2)  # al empezar y al final
         self.assertLess(out.index("⚠ Antes de seguir:"), out.index("Siguiente, según lo que se va a investigar:"))
+        # 0.14.0 (A5): si AGENTS.md dice que el setup va en un parche y el código no está, humo se detiene antes de tocar
+        # el dispositivo; --forzar mide igual, a sabiendas
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- setup listo (parche: git apply herramientas/perf.patch)\n")
+        result = self.perf("humo", "--paquete", PKG, "--carpeta", self.dir / "reports/perf/humo3")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("el setup de medición no está en el árbol", result.stderr)
+        self.assertIn("git apply herramientas/perf.patch", result.stderr)  # cita la línea de AGENTS.md
+        self.assertFalse((self.dir / "reports/perf/humo3").exists())
+        self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "reports/perf/humo3", "--forzar")
+        write(self.dir / "AGENTS.md", "## Rendimiento\n\n- setup listo\n")
         write(self.dir / "app/src/perf/kotlin/x/PerfInstaller.kt", "x")
         write(self.dir / "app/src/main/kotlin/x/PerfHooks.kt", "object PerfHooks")
         out = self.ok("humo", "--paquete", PKG, "--carpeta", self.dir / "reports/perf/humo2")
