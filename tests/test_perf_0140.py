@@ -444,8 +444,11 @@ class SetupBase(PerfBase):
             write(folder / "fases.json", json.dumps({phase: {"fecha": "2020-01-01T10:0%d:00" % index, "corridas": 10,
                                                               "skill": perf.VERSION, "flujos": {name: {"corridas": 10}}}
                                                      for index, phase in enumerate(("antes", "control", "despues"))}))
-            write(folder / "reporte-inicial-dev.md", "x")
-            write(folder / "reporte-final-dev.md", "x")
+            for report in ("reporte-inicial-dev.md", "reporte-final-dev.md"):
+                write(folder / report, "x")
+                # fecha fija, posterior a cualquier cierre: que los reportes sean "anteriores al cierre" no puede depender
+                # de cuánto tarde la máquina entre escribirlos y cerrar
+                os.utime(str(folder / report), (4102444800, 4102444800))  # 2100-01-01
         return folder
 
 
