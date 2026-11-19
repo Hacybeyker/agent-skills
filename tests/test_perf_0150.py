@@ -718,5 +718,138 @@ class BorderRuleTest(unittest.TestCase):
         self.assertIsNone(perf.mixed_rules({"antes": {"corridas": 3}}, plan))
 
 
+class MeasurementCaptureTest(DeviceBase):
+    """C3, C4, C5, C7 y C8 en la captura, con el adb y el trace_processor falsos."""
+
+    def plan_with(self, **flow):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"].update(flow)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        return plan
+
+    def test_servicio_declarado_que_no_aparecio(self):
+        self.plan_with(servicios=["GET items/{id}", "GET entregados"])
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("El servicio declarado 'GET entregados' del flujo home no apareció en ninguna llamada: ¿viene "
+                      "dentro de la respuesta de otro servicio?", out)
+        self.assertIn("quítalo de `servicios`", out)
+        state = perf.warnings_lines(self.plan.parent, perf.load_plan(self.plan))
+        self.assertTrue(any("'GET entregados'" in line for line in state), state)
+
+    def test_memoria_sin_views_dice_por_que(self):
+        self.env["FAKE_MEMINFO"] = "  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Activities:  1"
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--memoria",
+                      "--calentamiento", "0", "--sin-compilar")
+        self.assertIn("--memoria no leyó las vistas vivas", out)
+
+    def test_recorrido_en_palabras_y_video_de_la_prueba(self):
+        script = self.plan.parent / "recorrido.sh"
+        write(script, "#!/bin/sh\n# paso: toca la pestaña Pedidos\nadb shell input tap 100 200\n\n"
+                      "# paso: baja la lista (vertical, 5 swipes lentos)\nadb shell input swipe 1 2 3 4 900\n\n"
+                      "adb shell input tap 5 6\n")
+        self.plan_with(recorrido="sh %s" % script, proposito="abrir los pedidos y bajar la lista")
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba")
+        self.assertIn("Recorrido en palabras (home):", out)
+        self.assertIn("1. toca la pestaña Pedidos", out)
+        self.assertIn("2. baja la lista (vertical, 5 swipes lentos)", out)
+        self.assertIn("1 paso del recorrido sin `# paso:` (recorrido.sh:8)", out)
+        video = self.plan.parent / "prueba-home.mp4"
+        self.assertTrue(video.is_file())
+        self.assertIn("Video de la prueba: %s" % video, out)
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn('"screenrecord", "--time-limit", "180", "/sdcard/hbperf-prueba.mp4"', log)
+        # (el screenrecord falso termina solo: el pkill -INT de verdad se valida en dispositivo)
+        self.assertIn("rm -f /sdcard/hbperf-prueba.mp4", log)
+        ficha = (self.plan.parent / "ficha.md").read_text(encoding="utf-8")
+        self.assertIn("Propósito: abrir los pedidos y bajar la lista", ficha)
+        self.assertIn("1. toca la pestaña Pedidos", ficha)
+        out = self.ok("siguiente", "--carpeta", self.plan.parent)
+        self.assertIn("Mira el video de la corrida de prueba", out)
+
+    def test_uiautomator_en_el_recorrido_se_detiene(self):
+        script = self.plan.parent / "recorrido.sh"
+        write(script, "#!/bin/sh\nadb shell uiautomator dump /sdcard/x.xml\nadb shell input tap 1 2\n")
+        self.plan_with(recorrido="sh %s" % script)
+        result = self.perf("capturar", "--plan", self.plan, "--prueba")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("el recorrido vuelca la pantalla dentro de la parte medida (recorrido.sh:2", result.stderr)
+        self.assertFalse((self.dir / "adb.log").exists() and "perfetto" in (self.dir / "adb.log").read_text())
+
+    def repetition(self, trace, cycles=5):
+        loop = "for i in %s; do python3 -I %s ciclo; done" % (" ".join(str(i) for i in range(cycles)), SCRIPT)
+        self.plan_with(recorrido=loop, tipo="repeticion", ciclos=cycles, traza=trace, invalidar_si=[])
+
+    def test_repeticion_sin_traza_mide_la_memoria_entre_ciclos(self):
+        self.repetition("sin")
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("corrida de prueba (repetición sin traza)", out)
+        self.assertIn("Memoria entre ciclos (prueba): sin evidencia de fuga", out)
+        self.assertNotIn("perfetto", (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.env["FAKE_MEMINFO_CRECE"] = "1"
+        out = self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "2", "--calentamiento", "0",
+                      "--sin-compilar")
+        self.assertIn("memoria entre ciclos: sospecha de fuga", out)
+        data = {(r["fase"], r["metrica"], str(r["corrida"])): r["valor"]
+                for r in perf.read_rows(self.plan.parent / "metricas.csv")}
+        self.assertEqual(data[("antes", "ciclos", "1")], 5)
+        self.assertEqual(data[("antes", "activities_crecimiento", "1")], 6)
+
+    def test_repeticion_con_traza_liviana_estima_los_ciclos(self):
+        self.repetition("liviana")
+        self.env["FAKE_PERFETTO_CONFIG"] = str(self.dir / "config.txt")
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("Captura liviana de hb-performance", (self.dir / "config.txt").read_text(encoding="utf-8"))
+        self.assertRegex(out, r"(?i)la traza de la prueba pesa [\d,.]+ MB en 5 ciclos \(~[\d,.]+ MB por ciclo\): bajo el "
+                              r"tope de 1000 MB caben unos \d+ ciclos")
+
+
+class MeasurementHelpersTest(unittest.TestCase):
+    """C5 y C6 por unidad: el veredicto de memoria, el corte por tope y el ajuste de 'preparar'."""
+
+    def snapshots(self, activities, views=None):
+        views = views or [10] * len(activities)
+        items = [{"etiqueta": "inicio", "memoria": {"activities": activities[0], "views": views[0], "java_heap_mb": 20}}]
+        items += [{"etiqueta": "ciclo %d" % i, "memoria": {"activities": a, "views": v, "java_heap_mb": 20}}
+                  for i, (a, v) in enumerate(zip(activities[1:], views[1:]), start=1)]
+        return items
+
+    def test_veredicto_de_memoria(self):
+        self.assertEqual(perf.leak_verdict(self.snapshots([1, 1, 1, 1, 1, 1]))[0], "sin evidencia de fuga")
+        verdict, why = perf.leak_verdict(self.snapshots([1, 2, 3, 4, 5, 6]))
+        self.assertEqual(verdict, "sospecha de fuga")
+        self.assertIn("las actividades vivas pasan de 1 a 6 en 5 ciclos", why)
+        self.assertEqual(perf.leak_verdict(self.snapshots([1, 1, 1]))[0], "ciclos insuficientes para decirlo")
+
+    def test_corte_por_tope_en_una_linea(self):
+        text = perf.cap_reason({"tipo": "repeticion", "ciclos": 12}, 1000, 1_000_000_000, 90)
+        self.assertEqual(text, "la traza llegó a 1 GB en el ciclo ~11: baja `ciclos` a 8 o usa \"traza\": \"sin\" en el "
+                               "flujo (la memoria se mide igual, entre ciclos)")
+        # con pantallas protegidas, "sin" se mide igual con la liviana: no se ofrece
+        text = perf.cap_reason({"tipo": "repeticion", "ciclos": 12, "invalidar_si": ["SCREEN *Pago*"]}, 1000,
+                               1_000_000_000, 90)
+        self.assertNotIn("\"sin\"", text)
+        self.assertIn("baja `ciclos` a 8", text)
+        self.assertIn("usa el tipo repetición", perf.cap_reason({}, 1000, 1_000_000_000, None))
+
+    def test_preparar_que_falla_igual_propone_el_ajuste(self):
+        failures = [("'preparar' terminó con código 1", ())] * 3
+        lines = perf.invalid_summary(failures, 5, {".Pedidos": ["Continuar"]}, [".Pedidos"] * 3)
+        text = " ".join(lines)
+        self.assertIn("'preparar' falló 3 veces dejando la app en la misma pantalla (.Pedidos)", text)
+        self.assertIn("espera 3 s más", text)
+        self.assertIn("toca el botón con el texto que se ve en esa pantalla ('Continuar')", text)
+        self.assertNotIn("<carpeta>", text)
+        self.assertNotIn("no cambia lo que se mide", text)
+        lines = perf.invalid_summary(failures, 5, {".Pedidos": ["Continuar"]}, [".Pedidos"] * 3,
+                                     lambda label: "cd /p && python3 -I perf.py nodos logs/x.xml --texto %s" % label)
+        self.assertIn("Las coordenadas de ese botón, del volcado de esa pantalla: cd /p && python3 -I perf.py nodos "
+                      "logs/x.xml --texto Continuar", " ".join(lines))
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,7 @@ COLUMNS = REQUIRED + ["unidad", "sentido", "familia"]
 FASES = ("antes", "control", "despues")
 FAMILIAS = ("app", "e2e", "info")
 MIN_RUNS = 5
+REPETITION = "repeticion"  # tipo de flujo "repetición para memoria" (0.15.0 · C5)
 CV_MAX = 10.0
 MAX_ROWS = 30
 REMOTE_DIR = "/data/misc/perfetto-traces"
@@ -115,25 +116,19 @@ VERDICT_TEXT = {"mejora": "funcionó: mejoró más que el ruido de medición",
 STATE_TEXT = {"propuesta": "propuesta · esperando tu decisión", "aprobada": "aprobada · se aplica en la sesión 3",
               "aplicada": "aplicada · implementada; se mide en la fase después", "descartada": "descartada · no se aplica",
               "pendiente": "pendiente · queda para más adelante"}
-GLOSSARY = """- **Mediana:** el valor del medio de las corridas; una corrida rara no la mueve. Es el número que se compara.
-- **P90:** 9 de cada 10 corridas quedaron por debajo de este valor; muestra los peores casos habituales.
-- **Corridas:** cuántas veces se repitió el flujo para esa fase. Menos de 5 es poca evidencia.
-- **Ruido de medición:** cuánto cambia la métrica entre dos mediciones **sin ningún cambio** en la app (antes contra control). Una diferencia menor que esto no prueba nada.
-- **Varía mucho (CV):** las corridas difieren entre sí más de un 10 %; suele ser el backend (red) o el dispositivo. El número sirve, pero con menos confianza.
-- **Depende de:** `solo la app` se puede mejorar desde el código; `app + backend` incluye el servidor y la red, así que sus veredictos son orientativos; `informativa` no tiene veredicto.
-- **Veredictos:** `mejora` o `regresión` solo cuando la mediana de después sale del rango de antes y supera el ruido; `sin cambio` y `dentro del ruido` significan que no se puede afirmar nada; `no comparable`, que la métrica mide otra cosa (cambió la cantidad de frames, o el tramo cambió de duración); `no confiable`, que los frames se midieron en un dispositivo que renderiza por software (emulador sin GPU del host) y no valen; `variación del backend`, que es un tiempo del servidor, que una mejora de la app no mueve; `costo conocido`, que la red sube por una mejora que llama a ese servicio a propósito (su costo, en "Pros y contras"); `servicios ajenos al flujo`, que el cambio viene de servicios que no son del flujo y caen en la ventana por tiempo.
-- **Dos grupos:** las corridas se separan en dos grupos con un hueco grande entre ellos; la mediana puede caer donde no hay ninguna y el ruido entre medianas subestima la variación: el veredicto es orientativo.
-- **Hallazgos:** una causa posible encontrada en el código o en las trazas. Los marcados como `bug` o `mejorable` generan una mejora; `descartado` quiere decir que se investigó y la traza muestra que **no** es la causa (no hay nada que hacer); `sin confirmar` (antes `sin veredicto estadístico`), que no se pudo confirmar ni descartar.
-- **`sin confirmar` no quiere decir que falten trazas ni que la captura fallara.** Separa dos cosas: el **síntoma** puede ser estable (tiene su métrica, medida en todas las corridas) y aun así la **causa** no estar probada, porque nada une ese síntoma con una línea de código. Repetir las mismas corridas no lo cambia: la columna "Qué falta para decidir" dice qué sí (una métrica propia del tramo, otra clase de captura o probar un cambio). Si el síntoma es estable y está fuera de presupuesto, puede ir como mejora a prueba.
-- **Mejoras (M1, M2…):** los cambios concretos que atacan un hallazgo. Su estado dice en qué punto están: propuesta, aprobada, aplicada, descartada o pendiente.
-- **Mejora a prueba:** el síntoma está medido y es estable, pero su causa no se pudo probar. Se aplica el cambio más probable y la medición de después dice si la hipótesis era cierta (`✔ hipótesis confirmada`) o no (`✖ hipótesis refutada`).
-- **Métricas por tramo (`<tramo> …`):** el hilo principal y los frames solo entre dos marcas del flujo (una pantalla, un salto), contando lo que se solapa con ese tramo, para que un pico no se diluya en el recorrido completo.
-- **Red por tramo (`<tramo> red_…`):** las llamadas de red que empiezan dentro de cada tramo: cuántas son, cuánto duran, cuánto tarda el servidor en responder (TTFB) y cuántas se repiten o se solapan.
-- **Gráficos:** la barra es la mediana y la línea fina va de la corrida más rápida a la más lenta; la franja punteada marca el ruido de medición alrededor de antes. Debajo de cada gráfico, una frase dice qué muestra y qué significa.
-- **Unidades:** los tiempos de un segundo o más van en segundos (`1.81 s`) y los más cortos en milisegundos (`450 ms`); el cambio, en porcentaje respecto de antes (`−39 %` es un 39 % menos).
-- **Espera de servicios:** el tiempo del flujo en que hay al menos una llamada a un servicio en curso (lo que se solapa cuenta una vez). Depende del backend y de la red del momento: es informativa.
-- **Servidor (TTFB) y en la app:** el servidor es la espera hasta el primer byte de la respuesta; en la app, la cola antes de salir, la conexión nueva y la lectura de la respuesta. Una mejora de la app mueve lo segundo, no lo primero.
-- **Línea de tiempo:** una corrida representativa (la de duración mediana), con cada llamada a un servicio como una barra proporcional a lo que dura (el eje empieza en el inicio del flujo o, si una llamada empezó antes, en esa llamada) y las marcas del flujo (MARK) como líneas verticales; las de pantalla van atenuadas. Una llamada que empieza cuando terminaron todas las anteriores va en serie."""
+GLOSSARY = """- **Valor típico (mediana):** el del medio de las mediciones de una fase; una medición rara no lo mueve. Es el que se compara.
+- **Peores casos habituales (P90):** 9 de cada 10 mediciones quedaron por debajo.
+- **Mediciones por fase:** cuántas veces se repitió el recorrido. Menos de 5 es poca evidencia.
+- **Variación normal:** cuánto cambia una medida entre dos mediciones **sin ningún cambio** en la app (antes contra la repetición sin cambios). Una diferencia menor que eso no prueba nada.
+- **Varía mucho:** las mediciones difieren entre sí más de un 10 %; suele ser el servidor, la red o el dispositivo. Si el cambio es mucho mayor que esa variación (al menos el doble de lo que varía cada fase y el triple de la variación normal, sin que los rangos se toquen), el resultado no se vuelve orientativo.
+- **Depende de:** "solo la app" se puede mejorar desde el código; "app y servidor" incluye la red y el backend; "informativa" no tiene veredicto.
+- **Etiquetas:** Mejora o Regresión solo cuando el valor de después sale del rango de antes y supera la variación normal; Sin cambio y Dentro del ruido, que no se puede afirmar nada; Orientativo, que cambió pero la comparación no es del todo igual contra igual o varía demasiado; Costo conocido, que sube a propósito por una mejora elegida; No comparable, que antes y después midieron cosas distintas; No confiable, que el dispositivo no representa uno real.
+- **Hallazgos:** solo los confirmados (con evidencia de la traza y el archivo y la línea del código) pasan a ser mejoras. Lo descartado y lo sin confirmar está en "Se revisó y se descartó", para no investigarlo de nuevo.
+- **Mejoras (M1, M2…):** cada una es un panel plegable con por qué se hizo, qué ganó, su costo y su condición, y cada archivo con su riesgo, antes, después, pros, contras y el diff completo.
+- **Tramos:** partes del recorrido entre dos marcas (una pantalla, un salto). Cada pausa del hilo principal y cada cuadro cuentan en un solo tramo: aquel donde empiezan (regla del borde).
+- **Servicios:** se muestran como su método y su ruta real (GET https://…). La línea de tiempo de cada acción va del toque a que se ve el contenido, con una barra por llamada; ×2 marca una llamada repetida.
+- **Gráficos:** la barra es el valor típico y la línea fina va del caso más rápido al más lento; la franja punteada marca la variación normal alrededor de antes.
+- **Unidades:** los tiempos de un segundo o más van en segundos (1.81 s) y los más cortos en milisegundos (450 ms); el cambio, en porcentaje respecto de antes."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
@@ -837,6 +832,8 @@ def scenario_env(plan, flow, plan_path):
     spec = (plan.get("flujos") or {}).get(flow) or {}
     env = {key: str(value) for key, value in (spec.get("variables") or {}).items()}
     env.update(HB_PERF_PLAN=str(pathlib.Path(plan_path).resolve()), HB_PERF_FLUJO=str(flow))
+    if is_repetition(spec) and to_int(spec.get("ciclos")) > 0:  # C5: las vueltas del recorrido salen del plan
+        env["PERF_CICLOS"] = str(to_int(spec["ciclos"]))
     return env
 
 
@@ -3358,6 +3355,10 @@ def forget_flow(folder, csv_path, phase, flow):
     registro sigue (commit, build), sin la fecha, que la pone la tanda nueva; las corridas salen del CSV y el entorno,
     los avisos y las tasas, de lo guardado por flujo. Un registro sin datos por flujo (de una versión anterior), o con
     datos incompletos, conserva los de la fase."""
+    notes = read_notes(folder)
+    if isinstance((notes.get("memoria") or {}).get(flow), dict) and phase in notes["memoria"][flow]:
+        notes["memoria"][flow].pop(phase)  # C5: el veredicto de memoria era de las corridas que se rehacen
+        save_notes(folder, notes)
     phases = read_phases(folder)
     record = phases.get(phase)
     if record is None:
@@ -3560,7 +3561,7 @@ def discard_phase(folder, csv_path, phase, flow):
             writer.writerows(kept)
         print("✔ --rehacer: %d filas de '%s' fuera del CSV" % (dropped, phase))
     old = folder / phase
-    mine = re.compile(r"(?:[0-9a-f]{6}-)?%s_\d+(?:(?:_intento\d+)?(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?|\.linea\.json)"
+    mine = re.compile(r"(?:[0-9a-f]{6}-)?%s_\d+(?:(?:_intento\d+)?(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?|\.linea\.json|\.resumen\.json|\.ciclos\.jsonl)"
                       % re.escape(flow))
     traces = sorted(f for f in old.iterdir() if mine.fullmatch(f.name)) if old.is_dir() else []
     if traces:
@@ -3589,6 +3590,17 @@ def without_options(argv, with_value, flags):
     return out
 
 
+def flow_configs(record, flow):
+    """Las configuraciones con que se midió el flujo en una fase. Con datos por flujo (0.13.0), solo las suyas: otro flujo
+    del plan puede medirse con otra (una repetición con traza liviana); sin ellos (una versión anterior), las de la fase."""
+    tracked = (record.get("flujos") or {}).get(flow)
+    if isinstance(tracked, dict) and tracked.get("configs"):
+        return tracked["configs"]
+    if record.get("flujos"):
+        return [] if flow not in record["flujos"] else record.get("configs") or []
+    return record.get("configs") or []
+
+
 def phase_config_names(folder, phase, flow, redo=False):
     """Los nombres de las configuraciones de Perfetto con que se midieron las otras fases del flujo."""
     phases = read_phases(folder)
@@ -3597,8 +3609,7 @@ def phase_config_names(folder, phase, flow, redo=False):
         if other == phase and redo:
             continue
         record = phases.get(other) if isinstance(phases.get(other), dict) else {}
-        tracked = (record.get("flujos") or {}).get(flow) or {}
-        names |= {str(label).split("@", 1)[0] for label in tracked.get("configs") or record.get("configs") or []
+        names |= {str(label).split("@", 1)[0] for label in flow_configs(record, flow)
                   if label and label != UNKNOWN_CONFIG}
     return sorted(names)
 
@@ -3612,9 +3623,7 @@ def phase_config_mismatch(folder, phase, flow, name, redo=False):
         if other == phase and redo:
             continue
         record = phases.get(other) if isinstance(phases.get(other), dict) else {}
-        tracked = (record.get("flujos") or {}).get(flow) or {}
-        labels = tracked.get("configs") or record.get("configs") or []
-        names = {str(label).split("@", 1)[0] for label in labels if label and label != UNKNOWN_CONFIG}
+        names = {str(label).split("@", 1)[0] for label in flow_configs(record, flow) if label and label != UNKNOWN_CONFIG}
         if names:
             used[other] = names
     distinct = sorted({item for names in used.values() for item in names} - {name})
@@ -3652,7 +3661,7 @@ def resolve_config(plan, folder, override):
     if not path.is_file():
         path = pathlib.Path(name) if pathlib.Path(name).is_absolute() else folder / name
     if not path.is_file():
-        raise PerfError("no existe la configuración de Perfetto '%s' (las de la skill: base, completa, cpu)" % name)
+        raise PerfError("no existe la configuración de Perfetto '%s' (las de la skill: base, completa, cpu, liviana)" % name)
     return path
 
 
@@ -3660,7 +3669,7 @@ CONFIG_SOURCE = re.compile(r'\b(ftrace_events|atrace_categories|atrace_apps|name
 CONFIG_PREFIX = {"ftrace_events": "ftrace:", "atrace_categories": "atrace:", "name": "ds:"}
 TRACE_KEY = re.compile(r"^(.+?_\d+)(?:_intento\d+)?(?:_invalida_.*)?\.perfetto-trace(?:\.gz)?$")
 CONFIG_FILE = "configuracion.json"
-SKILL_CONFIGS = ("base", "cpu", "completa")
+SKILL_CONFIGS = ("base", "cpu", "completa", "liviana")
 
 
 def config_sources(text):
@@ -4201,6 +4210,12 @@ def plan_memory(plan, flow, folder=None):
 
 
 REPETITION_TRACES = ("liviana", "sin", "completa")
+
+
+def repetition_trace(spec):
+    """La traza de un flujo de repetición para memoria (C5): "liviana" (por defecto), "sin" o "completa"."""
+    value = (spec or {}).get("traza")
+    return value if value in REPETITION_TRACES else "liviana"
 
 
 def plan_runs(plan, flow):
@@ -6177,6 +6192,9 @@ def route_block(plan, root, folder=None):
         same = same_route_line(folder, name) if folder is not None else ""
         if same:
             lines.append(same)
+        words = route_words_lines(plan, name, folder) if folder is not None else []
+        if words:  # C7: lo que hace el recorrido, en palabras (de los comentarios `# paso:`)
+            lines.append("- Recorrido en palabras: %s" % " · ".join(words))
         if folder is not None and has_human_pause(flow, folder):
             total, detail = human_runs(plan)
             lines.append("- Paso humano: el recorrido tiene una pausa (`perf.py pausa`), así que cada corrida la atiende una "
@@ -6643,6 +6661,7 @@ def print_next(folder, plan, flow=None):
     update_cost_total(folder, plan)
     update_block(folder, "recorrido", route_block(plan, project_root(pathlib.Path(folder)).resolve(),
                                                   pathlib.Path(folder)))
+    write_route_ficha(folder, plan)
     update_warnings(folder, plan)
 
 
@@ -6651,6 +6670,8 @@ def next_hint(folder, what="sigue con el paso que tenías"):
     root = project_root(pathlib.Path(folder)).resolve()
     return "Siguiente: %s; está en \"Siguiente paso\" de estado.md y este comando lo repite:\n    %s" % (
         what, perf_command(root, "siguiente", "--carpeta", relative_folder(pathlib.Path(folder), root)))
+
+
 # ── Pausar, reanudar, todas las investigaciones y lo que quedó a medias (0.15.0 · B6–B10) ──
 # Un triage que propone mejoras termina con tres caminos excluyentes: aplicar ahora (riguroso), pausar para después o
 # cerrar del todo. Pausar quita las marcas y los cambios temporales guardándolos en su parche (como `cerrar`, con
@@ -10070,6 +10091,24 @@ VIEWS_MISSING = ("--memoria no leyó las vistas vivas: `dumpsys meminfo` no traj
                  "tiene `views`; las demás medidas de memoria sí")
 
 
+def screen_buttons(adb, folder):
+    """C6: los textos de los elementos que se pueden tocar en la pantalla de ahora (uiautomator, fuera de toda traza:
+    solo después de un 'preparar' que falló). [] si no se puede leer."""
+    remote = "/sdcard/hbperf-pantalla.xml"
+    local = pathlib.Path(folder) / "logs" / "pantalla-preparar.xml"
+    try:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        adb.shell("uiautomator dump %s" % remote, timeout=30)
+        adb.run("pull", remote, str(local), timeout=30)
+        adb.shell("rm -f %s" % remote, timeout=20)
+        nodes = ui_nodes(local.read_text(encoding="utf-8", errors="ignore"))
+    except (PerfError, OSError, subprocess.SubprocessError, ValueError):
+        return []
+    texts = [node["attrs"].get("text") or node["attrs"].get("content-desc") for node in nodes
+             if node["attrs"].get("clickable") == "true" and (node["attrs"].get("text") or node["attrs"].get("content-desc"))]
+    return list(dict.fromkeys(text.strip() for text in texts if text and text.strip()))[:4]
+
+
 def save_test_warnings(folder, flow, warnings):
     """Guarda los avisos de la corrida de prueba de un flujo; una corrida sin avisos los da por resueltos."""
     data = read_notes(folder)
@@ -10108,10 +10147,15 @@ def count_invalid(folder, phase, flow, reason):
 UNSTABLE_MARK_SHARE = 0.3
 
 
-def invalid_summary(failures, attempts):
+PREPARE_EXTRA_WAIT_S = 3
+
+
+def invalid_summary(failures, attempts, screens=None, stuck_screens=None, nodes_command=None):
     """Las líneas que resumen el patrón de los intentos inválidos de una tanda: cuántas veces faltó cada marca del plan y
     cuántas veces se repitió cada otro motivo. Si una misma marca faltó en más del 30 % de los intentos, la nombra y
-    sugiere revisar esa marca o ese paso del recorrido entre investigaciones. [] sin intentos inválidos."""
+    sugiere revisar esa marca o ese paso del recorrido entre investigaciones. Si 'preparar' falló varias veces dejando la
+    app en la misma pantalla (C6), propone el ajuste concreto: esperar más o tocar lo que se ve en esa pantalla (`screens`:
+    {pantalla: textos tocables}). [] sin intentos inválidos."""
     if not failures:
         return []
     marks, reasons = {}, {}
@@ -10131,6 +10175,22 @@ def invalid_summary(failures, attempts):
                          "recorrido que lleva a ella, entre investigaciones y no a mitad de una (cambiarla ahora mezclaría "
                          "corridas medidas con dos marcas distintas)" % (mark, count, attempts,
                                                                          round(count * 100 / attempts)))
+    stuck = {}
+    for screen in stuck_screens or ():
+        stuck[screen] = stuck.get(screen, 0) + 1
+    for screen, count in sorted(stuck.items(), key=lambda kv: -kv[1]):
+        if count < 2:
+            continue
+        buttons = (screens or {}).get(screen) or []
+        where = (" Las coordenadas de ese botón, del volcado de esa pantalla: %s" % nodes_command(buttons[0])
+                 if buttons and nodes_command else "")
+        lines.append("⚠ 'preparar' falló %d veces dejando la app en la misma pantalla (%s): ajusta `preparar` antes de "
+                     "seguir. Si la pantalla tarda en irse, espera %d s más antes del paso que la deja atrás (`sleep %d`); "
+                     "si pide un toque, toca %s.%s Cambiar `preparar` cambia la huella del recorrido: si ya mediste una "
+                     "fase con el anterior, `siguiente` te pide medirla de nuevo" % (
+                         count, screen, PREPARE_EXTRA_WAIT_S, PREPARE_EXTRA_WAIT_S,
+                         "el botón con el texto que se ve en esa pantalla (%s)" % ", ".join("'%s'" % b for b in buttons)
+                         if buttons else "el botón que se ve en esa pantalla", where))
     return lines
 
 
@@ -10277,8 +10337,10 @@ def flow_fingerprints(flow_spec, folder=None):
                                  if isinstance(item, dict) else item for item in data["segmentos"]]
         return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
 
+    # C5: en un flujo de repetición, cuántos ciclos y con qué traza cambian lo que se mide (sin esas claves, un plan
+    # anterior conserva su huella)
     out = {"recorrido": digest(("recorrido", "preparar", "inicio", "pausas", "duracion_max_s", "variables",
-                                "traza_desde_preparar")),
+                                "traza_desde_preparar", "tipo", "ciclos", "traza")),
            "metricas": digest(("ventana", "metricas_usuario", "segmentos", "input_slices", "repetidas_ventana_s")),
            "campos": field_prints(spec)}  # C6: qué campo de medición cambió (los de presentación no cuentan)
     if folder is not None:
@@ -10792,6 +10854,11 @@ def warnings_lines(folder, plan):
                               "estaban al terminar la investigación: %s" % (original.get("fecha", "—"),
                                                                               original.get("valores", "—"),
                                                                               original["comando"])).split()))
+    lines += memory_verdict_lines(folder, plan)  # C5: la sesión 2 cita esta línea y no la recalcula
+    infos = notes.get("info_prueba") if isinstance(notes.get("info_prueba"), dict) else {}
+    for flow in sorted(infos):
+        for line in infos[flow] if isinstance(infos[flow], list) else []:
+            lines.append(one_line("Corrida de prueba (%s): %s" % (flow, line)))
     tests = notes.get("prueba") if isinstance(notes.get("prueba"), dict) else {}
     for flow in sorted(tests):
         for item in test_warnings(folder, flow):
@@ -11048,6 +11115,387 @@ def http_state(current, seen, source):
     return "sí (%s, %s)" % (source, today) if seen else "sin medir: la %s del %s no trajo ninguna" % (source, today)
 
 
+# ── Repetición para memoria, recorrido en palabras y video de la prueba (0.15.0 · C5, C7 y C8) ──
+# Un flujo de repetición (`"tipo": "repeticion"`, `"ciclos": N`) repite un ciclo a propósito para ver si la memoria crece:
+# su traza es liviana (o no hay traza) y la memoria se lee con `dumpsys meminfo` antes, después y entre ciclos, fuera
+# del tramo medido. El recorrido se escribe con un comentario `# paso:` por paso: perf.py arma la lista en palabras para
+# que el usuario sepa qué hace sin leer el script, y graba un video de la corrida de prueba como visto bueno.
+CYCLES_ENV = "HB_PERF_CICLOS"
+CYCLE_PACKAGE_ENV = "HB_PERF_PAQUETE"
+CYCLE_SERIAL_ENV = "HB_PERF_SERIAL"
+CYCLE_SUFFIX = ".ciclos.jsonl"
+MEMORY_GROWTH = (("pss_mb", "pss_crecimiento_mb", "MB"), ("java_heap_mb", "java_heap_crecimiento_mb", "MB"),
+                 ("views", "views_crecimiento", "views"), ("activities", "activities_crecimiento", "activities"))
+# Umbrales de la guía de lectura (patrones/memoria-repeticion.md): se repiten allí con su porqué.
+LEAK_MIN_CYCLES = 5
+LEAK_ACTIVITIES_PER_CYCLE = 0.5  # una actividad que no se libera en cada ciclo (o cada dos) es sospecha
+LEAK_VIEWS_SHARE = 0.10  # vistas vivas que crecen en cada ciclo y suman más del 10 % sobre el inicio
+LEAK_HEAP_SHARE = 0.20  # heap de Java que crece en cada ciclo, sin bajar nunca, y suma más del 20 %
+UIAUTOMATOR_IN_ROUTE = re.compile(r"\buiautomator\s+dump\b|perf\.py[\"']?\s+nodos\b[^\n#]*--volcar")
+STEP_COMMENT = re.compile(r"^\s*#\s*paso\s*:\s*(.+?)\s*$", re.I)
+STEP_LINE = re.compile(r"\binput\s+(?:tap|swipe|text|keyevent|draganddrop|press|roll)\b|perf\.py[\"']?\s+"
+                       r"(?:teclear|pausa|ciclo)\b|\bam\s+start\b|\bmonkey\b")
+VIDEO_LIMIT_S = 180  # `adb shell screenrecord --time-limit`: 180 s es el máximo y el valor por defecto (doc. de adb)
+VIDEO_REMOTE = "/sdcard/hbperf-prueba.mp4"
+
+
+def is_repetition(spec):
+    return (spec or {}).get("tipo") == REPETITION
+
+
+def flow_config_name(plan, flow_spec, override):
+    """La configuración de Perfetto de un flujo: la de --config, la liviana para un flujo de repetición (salvo que su
+    `traza` diga otra cosa) o la del plan. Un flujo de repetición sin traza que protege pantallas (`invalidar_si`) se mide
+    con la liviana: sin traza no hay cómo ver qué pantalla se abrió."""
+    if override:
+        return override
+    if is_repetition(flow_spec) and (repetition_trace(flow_spec) == "liviana" or (
+            repetition_trace(flow_spec) == "sin" and flow_spec.get("invalidar_si"))):
+        return "liviana"
+    return plan.get("config", "base")
+
+
+def memory_snapshot(adb, package, path, label):
+    """Una foto de la memoria de la app (`dumpsys meminfo`), agregada como una línea JSON en `path`."""
+    values = {name: value for name, value, _, _ in parse_meminfo(adb.shell("dumpsys meminfo %s" % package).stdout)}
+    with open(str(path), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"etiqueta": label, "hora": datetime.datetime.now().replace(microsecond=0).isoformat(),
+                                 "memoria": values}, ensure_ascii=False) + "\n")
+    return values
+
+
+def read_cycles(path):
+    out = []
+    try:
+        lines = pathlib.Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and isinstance(item.get("memoria"), dict):
+            out.append(item)
+    return out
+
+
+def cycle_metrics(snapshots):
+    """Las métricas de una corrida de repetición: la memoria al final, cuánto creció desde el inicio y cuántos ciclos
+    se anotaron."""
+    if len(snapshots) < 2:
+        return []
+    first, last = snapshots[0]["memoria"], snapshots[-1]["memoria"]
+    out = [("ciclos", sum(1 for item in snapshots if str(item.get("etiqueta", "")).startswith("ciclo")), "ciclos", "info")]
+    for name, unit in (("pss_mb", "MB"), ("java_heap_mb", "MB"), ("native_heap_mb", "MB"), ("activities", "activities"),
+                       ("views", "views")):
+        if name in last:
+            out.append((name, last[name], unit, "app"))
+    for name, growth, unit in MEMORY_GROWTH:
+        if name in first and name in last:
+            out.append((growth, last[name] - first[name], unit, "app"))
+    return out
+
+
+def leak_verdict(snapshots):
+    """C5: "sin evidencia de fuga", "sospecha" o "ciclos insuficientes para decirlo", con su motivo, según la guía de lectura
+    (references/patrones/memoria-repeticion.md)."""
+    cycles = [item["memoria"] for item in snapshots if str(item.get("etiqueta", "")).startswith("ciclo")]
+    if len(cycles) < LEAK_MIN_CYCLES:
+        return "ciclos insuficientes para decirlo", "hacen falta al menos %d ciclos entre fotos (hay %d)" % (LEAK_MIN_CYCLES,
+                                                                                                    len(cycles))
+    first = snapshots[0]["memoria"]
+    reasons = []
+
+    def series(name):
+        return [item[name] for item in cycles if name in item]
+
+    if not any(series(name) for name in ("activities", "views", "java_heap_mb", "pss_mb")):
+        return "sin datos para decirlo", "dumpsys meminfo no devolvió actividades, vistas, heap ni PSS entre ciclos"
+
+    acts = series("activities")
+    if acts and first.get("activities") is not None and acts[-1] - first["activities"] >= LEAK_ACTIVITIES_PER_CYCLE * len(cycles):
+        reasons.append("las actividades vivas pasan de %s a %s en %d ciclos: alguna no se libera al cerrarla" % (
+            fmt(first["activities"]), fmt(acts[-1]), len(cycles)))
+    views = series("views")
+    if len(views) >= 2 and first.get("views") and all(b >= a for a, b in zip(views, views[1:])) and \
+            views[-1] - first["views"] > LEAK_VIEWS_SHARE * first["views"]:
+        reasons.append("las vistas vivas crecen en cada ciclo (%s → %s)" % (fmt(first["views"]), fmt(views[-1])))
+    heap = series("java_heap_mb")
+    if len(heap) >= 2 and first.get("java_heap_mb") and all(b > a for a, b in zip(heap, heap[1:])) and \
+            heap[-1] - first["java_heap_mb"] > LEAK_HEAP_SHARE * first["java_heap_mb"]:
+        reasons.append("el heap de Java crece en cada ciclo sin bajar nunca (%s → %s MB)" % (
+            fmt(round(first["java_heap_mb"], 1)), fmt(round(heap[-1], 1))))
+    pss = series("pss_mb")
+    if reasons and len(pss) >= 2 and first.get("pss_mb") and all(b > a for a, b in zip(pss, pss[1:])):
+        reasons.append("y la memoria total (PSS) crece de forma pareja hasta el final (%s → %s MB)" % (
+            fmt(round(first["pss_mb"], 1)), fmt(round(pss[-1], 1))))
+    if reasons:
+        return "sospecha de fuga", "; ".join(reasons) + ". Para confirmarlo, un heap dump en Android Studio Profiler " \
+                                                        "(fuera de la skill)"
+    return "sin evidencia de fuga", "las actividades y las vistas vuelven a su nivel entre ciclos y el heap no crece en " \
+                                    "cada ciclo"
+
+
+def note_leak(folder, flow, phase, run, verdict, why):
+    """C5: el veredicto de memoria entre ciclos de una corrida válida, para estado.md y los reportes."""
+    data = read_notes(folder)
+    note_bucket(data, "memoria", flow, phase)[str(run)] = [verdict, one_line(why)]
+    save_notes(folder, data)
+
+
+def memory_verdict_lines(folder, plan=None):
+    """C5: una línea por flujo de repetición y fase con su veredicto de memoria entre ciclos. Es firme con 3 corridas o
+    más con el mismo resultado; si no, dice cuántas lo dieron (una sola puede caer en un GC)."""
+    bucket = read_notes(folder).get("memoria")
+    out = []
+    for flow, phases in sorted((bucket or {}).items() if isinstance(bucket, dict) else []):
+        for phase in FASES:
+            runs = (phases or {}).get(phase) if isinstance(phases, dict) else None
+            if not isinstance(runs, dict) or not runs:
+                continue
+            verdicts = [item[0] for _, item in sorted(runs.items(), key=lambda kv: to_int(kv[0]))
+                        if isinstance(item, list) and item]
+            why = next((item[1] for _, item in sorted(runs.items(), key=lambda kv: to_int(kv[0]))
+                        if isinstance(item, list) and len(item) > 1 and item[0] == "sospecha de fuga"), "")
+            common = max(set(verdicts), key=verdicts.count) if verdicts else ""
+            where = "%s, %s" % ((scenario_words(plan or {}, flow) or flow.replace("-", " ")), PHASE_WORDS.get(phase, phase))
+            if len(verdicts) >= 3 and verdicts.count(common) == len(verdicts):
+                out.append("Memoria entre ciclos (%s): %s en las %d corridas%s." % (where, common, len(verdicts),
+                                                                                  ": " + why if why else ""))
+            else:
+                out.append("Memoria entre ciclos (%s): %s en %d de %d corridas; hacen falta 3 o más con el mismo resultado "
+                           "para decirlo%s." % (where, common, verdicts.count(common), len(verdicts),
+                                                ": " + why if why else ""))
+    return out
+
+
+def cap_bytes(config):
+    found = re.search(r"^max_file_size_bytes:\s*(\d+)", config or "", re.M)
+    return int(found.group(1)) if found else None
+
+
+def cycles_fit(size_mb, cycles, cap):
+    """(MB por ciclo, ciclos que caben bajo el 80 % del tope) de una corrida de prueba de repetición."""
+    if not cycles or not size_mb or not cap:
+        return None, None
+    per_cycle = size_mb / float(cycles)
+    return per_cycle, max(1, int((cap / 1e6) * 0.8 / per_cycle)) if per_cycle > 0 else None
+
+
+def cap_reason(flow_spec, size_mb, cap, per_cycle, original=""):
+    """C5: el corte por el tope de la traza, en una línea: qué pasó y qué hacer."""
+    reached = "%s" % (fmt(round(cap / 1e9, 2)) + " GB" if cap and size_mb >= cap / 1e6 * 0.95 else "su tope de duración")
+    # con pantallas protegidas (invalidar_si), "sin" se mide igual con la liviana: no se ofrece
+    no_trace = "" if (flow_spec or {}).get("invalidar_si") else " o usa \"traza\": \"sin\" en el flujo (la memoria se mide " \
+                                                                  "igual, entre ciclos)"
+    if is_repetition(flow_spec) and per_cycle:
+        when = max(1, int((size_mb or 0) / per_cycle))
+        if cap and size_mb >= cap / 1e6 * 0.95:  # el tope de tamaño: cuántos ciclos caben
+            fit = max(1, int(cap / 1e6 * 0.8 / per_cycle))
+            return "la traza llegó a %s en el ciclo ~%d: baja `ciclos` a %d%s" % (reached, when, fit, no_trace)
+        return ("la traza llegó a %s en el ciclo ~%d: baja `ciclos` a %d o menos o sube `duracion_max_s` del flujo%s"
+                % (reached, when, max(1, when - 1), no_trace.replace(" o usa", "; o usa")))
+    if is_repetition(flow_spec):
+        return "la traza llegó a %s antes de terminar los ciclos: baja `ciclos`%s" % (reached, no_trace)
+    if original:
+        return original + ". Si el flujo repite un ciclo para ver la memoria, usa el tipo repetición (\"tipo\": " \
+                          "\"repeticion\", con traza liviana o sin traza)"
+    return ("la traza llegó a %s antes de terminar el recorrido: si el flujo repite un ciclo para ver la memoria, usa el "
+            "tipo repetición (\"tipo\": \"repeticion\", traza liviana o sin traza); si no, sube `duracion_max_s` del flujo"
+            % reached)
+
+
+def route_texts(command, folder):
+    """[(archivo o "recorrido", texto)] del recorrido: el comando del plan y los scripts que nombra."""
+    out = [("recorrido", command or "")]
+    for path in named_scripts(command or "", folder):
+        try:
+            out.append((path, path.read_text(encoding="utf-8", errors="ignore")))
+        except OSError:
+            continue
+    return out
+
+
+def route_dumps(command, folder):
+    """C5: las líneas del recorrido que vuelcan la pantalla (`uiautomator dump`, `perf.py nodos --volcar`): prohibidas en
+    la parte medida. [(archivo, línea, texto)]."""
+    found = []
+    for where, text in route_texts(command, folder):
+        for number, line in enumerate(text.splitlines(), start=1):
+            code = line.split("#", 1)[0] if not line.lstrip().startswith("#") else ""
+            if UIAUTOMATOR_IN_ROUTE.search(code):
+                found.append((where, number, line.strip()[:100]))
+    return found
+
+
+SCROLL_LINE = re.compile(r"\binput\s+(?:swipe|draganddrop|roll)\b")
+SCROLL_DIRECTION = re.compile(r"\b(?:vertical|horizontal|arriba|abajo|izquierda|derecha|baja|sube)\w*", re.I)
+SCROLL_WHAT = re.compile(r"\b(?:pantalla|lista|carrusel|pestañas?|tabs?|página|scroll|contenido|detalle)\b", re.I)
+SCROLL_EXTENT = re.compile(r"\b(?:hasta|final|tope|borde|\d+\s*(?:elementos?|ítems?|items?|swipes?|filas?|veces))\b", re.I)
+
+
+def route_words(command, folder, scrolls=None):
+    """C7: (pasos en palabras, [(archivo, línea)] de los pasos sin `# paso:`) del recorrido. Un `# paso: <texto>` cubre
+    los comandos que lo siguen hasta una línea en blanco o el `# paso:` siguiente. Con `scrolls` (una lista), agrega
+    (archivo, línea, lo que le falta) de cada desplazamiento cuyo `# paso:` no dice dirección, contenedor o alcance (E2)."""
+    steps, unlabeled = [], []
+    for where, text in route_texts(command, folder):
+        if where == "recorrido" and len(route_texts(command, folder)) > 1:
+            continue  # el comando solo llama al script: los pasos están en el script
+        covered, current = False, ""
+        for number, line in enumerate(text.splitlines(), start=1):
+            label = STEP_COMMENT.match(line)
+            if label:
+                if not has_placeholder(label.group(1)):
+                    steps.append(label.group(1).rstrip("."))
+                covered, current = True, label.group(1)
+                continue
+            if not line.strip():
+                covered, current = False, ""
+                continue
+            if line.lstrip().startswith("#"):
+                continue
+            if STEP_LINE.search(line) and not covered:
+                unlabeled.append((where, number))
+            elif scrolls is not None and SCROLL_LINE.search(line) and covered and scroll_gaps(current) and \
+                    (where, number) not in [(w, n) for w, n, _ in scrolls]:
+                scrolls.append((where, number, scroll_gaps(current)))
+    return steps, unlabeled
+
+
+def route_words_lines(plan, flow, folder):
+    """El recorrido en palabras de un flujo, numerado, con su propósito y el aviso de los pasos sin comentario."""
+    spec = (plan.get("flujos") or {}).get(flow) or {}
+    route = spec.get("recorrido") if isinstance(spec.get("recorrido"), str) else None
+    if not route or route == "manual":
+        return []
+    scrolls = []
+    steps, unlabeled = route_words(route, folder, scrolls)
+    lines = ["Propósito: %s" % flow_purpose(plan, flow)]
+    if steps:
+        lines += ["%d. %s" % (index, text) for index, text in enumerate(steps, start=1)]
+    # Con una fase ya medida, cambiar el recorrido (también sus comentarios: son parte de su huella) obliga a medir de
+    # nuevo: el aviso queda para la próxima investigación.
+    phases = read_phases(folder)
+    family = [flow] + [name for name, item in (plan.get("flujos") or {}).items()
+                       if isinstance(item, dict) and item.get("escenario_de") == flow]
+    measured = any(flow_time(phases, phase, name) is not None for phase in FASES for name in family)
+    later = (" Ya hay fases medidas con este recorrido: no lo cambies ahora (su huella cambiaría y habría que medir de "
+             "nuevo); déjalo para la próxima investigación." if measured else "")
+    inline = len(route_texts(route, folder)) == 1
+    if unlabeled:
+        places = ", ".join("%s:%d" % (pathlib.Path(str(where)).name, number) for where, number in unlabeled[:8])
+        lines.append("⚠ %d paso%s del recorrido sin `# paso:` (%s): %s%s" % (
+            len(unlabeled), "" if len(unlabeled) == 1 else "s", places,
+            "el recorrido está escrito en una línea del plan, donde no se puede comentar: pásalo a recorrido.sh, con un "
+            "`# paso:` por paso (lo que toca y lo que tiene que abrirse)" if inline else
+            "agrega uno por paso, con lo que toca y lo que tiene que abrirse, para que el recorrido se entienda sin leer el "
+            "script", later))
+    for where, number, missing in scrolls[:4]:
+        lines.append("⚠ El desplazamiento de %s:%d no dice %s en su `# paso:`: escríbelo, para que el recorrido no dependa "
+                     "de adivinar (ficha.md · Scroll y pestañas).%s" % (pathlib.Path(str(where)).name, number,
+                                                                        ", ".join(missing), later))
+    return lines
+
+
+def write_route_ficha(folder, plan):
+    """C7: el recorrido en palabras de cada flujo en <carpeta>/ficha.md (lo escribe perf.py)."""
+    blocks = []
+    for name in plan.get("flujos") or {}:
+        lines = route_words_lines(plan, name, folder)
+        if lines:
+            blocks += ["## %s" % name, ""] + lines + [""]
+    if not blocks:
+        return
+    text = "\n".join(["# Recorrido en palabras", "", "_Lo escribe `perf.py` a partir de los comentarios `# paso:` del "
+                      "recorrido: no lo edites aquí._", ""] + blocks)
+    path = pathlib.Path(folder) / "ficha.md"
+    try:
+        if not path.is_file() or path.read_text(encoding="utf-8") != text:
+            path.write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def start_video(adb, limit=VIDEO_LIMIT_S):
+    """C8: empieza a grabar la pantalla en el dispositivo (fuera de la traza: solo en la corrida de prueba). Devuelve el
+    proceso local de adb, o None si no se pudo."""
+    try:
+        adb.shell("rm -f %s" % VIDEO_REMOTE, timeout=20)
+        return subprocess.Popen(adb.base + ["shell", "screenrecord", "--time-limit", str(int(limit)), VIDEO_REMOTE],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, PerfError, subprocess.SubprocessError):
+        return None
+
+
+def stop_video(adb, process, target):
+    """C8: detiene la grabación (SIGINT a screenrecord, como Ctrl+C), baja el video y lo borra del dispositivo. Devuelve
+    la ruta local o None. Nunca hace fallar la prueba."""
+    if process is None:
+        return None
+    try:
+        if process.poll() is None:
+            adb.shell("pkill -INT screenrecord", timeout=20)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1")))  # screenrecord termina de escribir el archivo
+        pulled = adb.run("pull", VIDEO_REMOTE, str(target), timeout=120)
+        adb.shell("rm -f %s" % VIDEO_REMOTE, timeout=20)
+        return target if pulled.returncode == 0 and pathlib.Path(target).is_file() else None
+    except (OSError, PerfError, subprocess.SubprocessError):
+        return None
+
+
+def repetition_run(args, folder, plan, flow, flow_name, phase, n, cycles_path, reason, adb, package, csv_path,
+                   prints, build, attempts, run_label):
+    """C5: una corrida de un flujo de repetición sin traza ("traza": "sin"): la memoria antes, después y entre ciclos.
+    Devuelve "prueba" (la prueba terminó e imprimió el paso siguiente), "valida" o el motivo de invalidez."""
+    snapshots = read_cycles(cycles_path)
+    invalid = reason
+    if not invalid and app_died(adb, package):
+        invalid = "la app no estaba viva al terminar la corrida (¿se cayó?)"
+    metrics = with_families(cycle_metrics(snapshots), flow.get("familias"))
+    if not invalid and not metrics:
+        invalid = "no pude leer la memoria (dumpsys meminfo) antes y después de la corrida"
+    if args.prueba:
+        if invalid:
+            raise CorridasInsuficientes("la corrida de prueba fue inválida: %s" % invalid)
+        print("✔ corrida de prueba (repetición sin traza) · %s" % " · ".join(
+            "%s %s" % (name, fmt(value, unit)) for name, value, unit, _ in metrics[:8]))
+        verdict, why = leak_verdict(snapshots)
+        print("· Memoria entre ciclos (prueba): %s: %s" % (verdict, why))
+        if args.plan:
+            save_test_record(folder, flow_name, [], [], prints.get("marcas"), prints.get("plan"), build.get("instalada"))
+            print_next(folder, plan, flow_name)
+        return "prueba"
+    if invalid:
+        print("✖ intento %d (inválido, buscaba la %s): %s" % (attempts, run_label(), invalid))
+        return invalid
+    append_rows(csv_path, [metric_row(phase, flow_name, n, m[0], m[1], m[2], m[3]) for m in metrics])
+    verdict, why = leak_verdict(snapshots)
+    note_leak(folder, flow_name, phase, n, verdict, why)
+    print("✔ %s · %s · memoria entre ciclos: %s" % (run_label()[len("corrida "):], " · ".join(
+        "%s %s" % (name, fmt(value, unit)) for name, value, unit, _ in metrics[:6]), verdict))
+    return "valida"
+
+
+def cmd_ciclo(args):
+    """Desde recorrido.sh, entre dos ciclos de un flujo de repetición: una foto de la memoria (`dumpsys meminfo`) para la
+    corrida en curso. Va fuera del tramo medido (después de la marca de fin de un ciclo y antes de la de inicio del
+    siguiente). Fuera de una captura no anota nada."""
+    path = os.environ.get(CYCLES_ENV)
+    package = os.environ.get(CYCLE_PACKAGE_ENV)
+    if not path or not package:
+        print("· perf.py ciclo: fuera de una captura no anoto nada (lo usa recorrido.sh durante `capturar`)")
+        return
+    count = sum(1 for item in read_cycles(path) if str(item.get("etiqueta", "")).startswith("ciclo")) + 1
+    memory_snapshot(Adb(os.environ.get(CYCLE_SERIAL_ENV) or None), package, path, args.etiqueta or "ciclo %d" % count)
+
+
 def cmd_capturar(args, plan=None):
     if args.plan:
         plan = load_plan(args.plan)
@@ -11157,6 +11605,25 @@ def cmd_capturar(args, plan=None):
         raise Precondicion("el recorrido del flujo '%s' tiene una pausa humana (perf.py pausa) y %s"
                            % (flow_name, NO_TTY[0].lower() + NO_TTY[1:]))
     recorrido = args.recorrido or (flow.get("recorrido") if not startup else None) or "manual"
+    if recorrido != "manual" and not startup:
+        dumps = route_dumps(recorrido, folder)
+        if dumps:  # C5: un volcado de pantalla dentro de la parte medida ensucia tiempos y frames y engorda la traza
+            raise Precondicion("el recorrido vuelca la pantalla dentro de la parte medida (%s): `uiautomator dump` (o `perf.py "
+                               "nodos --volcar`) tarda segundos, ensucia los tiempos y los frames y engorda la traza, así "
+                               "que está prohibido en el recorrido. Usa toques por coordenadas fijas con puntos de control "
+                               "(`en_pantalla`, que mira la actividad con `dumpsys window`) e `invalidar_si` para las "
+                               "pantallas que no deben aparecer; si hace falta buscar un elemento por su texto, hazlo una "
+                               "vez fuera de la captura y deja las coordenadas fijas" % "; ".join(
+                                   "%s:%d `%s`" % (pathlib.Path(str(where)).name, number, text)
+                                   for where, number, text in dumps[:3])).con(
+                guardado="nada: no toqué el dispositivo",
+                seguir=[("con esas líneas fuera del recorrido, repite", same_command())])
+    if args.prueba and args.plan:
+        words = route_words_lines(plan, flow_name, folder)
+        if words:  # C7: lo que hace el recorrido, en palabras, antes de correrlo
+            print("Recorrido en palabras (%s):" % flow_name)
+            for line in words:
+                print("  " + line)
     if not args.forzar:
         setup_gate(project_root(folder).resolve(), folder if args.plan else None, plan if args.plan else None)
         if args.plan and args.prueba:
@@ -11196,6 +11663,7 @@ def cmd_capturar(args, plan=None):
                         ("y repite la medición", same_command())])
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
+    device_id = {"serial": serial, "modelo": adb.shell("getprop ro.product.model").stdout.strip() or None}
     # Antes de la traza y de compilar: las opciones de desarrollador que cambian lo que se mide quedan en fases.json.
     dev_settings = read_dev_settings(adb)
     if dev_settings_text(dev_settings):
@@ -11220,7 +11688,12 @@ def cmd_capturar(args, plan=None):
     free_gb = shutil.disk_usage(str(folder)).free / 1e9
     if free_gb < 3:
         print("⚠ quedan %.1f GB libres: cada traza puede pesar decenas o cientos de MB" % free_gb)
-    config_path = resolve_config(plan, folder, args.config)
+    config_path = resolve_config(plan, folder, flow_config_name(plan, flow, args.config))
+    no_trace = is_repetition(flow) and repetition_trace(flow) == "sin" and not startup  # C5: solo memoria, sin traza
+    if no_trace and flow.get("invalidar_si"):  # sin traza no se ve qué pantalla se abrió: se mide con la liviana
+        no_trace = False
+        print("· %s protege pantallas (invalidar_si) y sin traza no hay cómo verlas: lo mido con la traza liviana, que "
+              "trae las marcas de pantalla y no los cuadros." % flow_name)
     used_config = device_sources(config_record(config_path), sdk)
     if not args.prueba:
         mismatch = phase_config_mismatch(folder, phase, flow_name, used_config["nombre"], args.rehacer)
@@ -11286,6 +11759,8 @@ def cmd_capturar(args, plan=None):
         raise Precondicion("la pantalla activa es '%s' y el flujo empieza en '%s'" % (current or "?", start_screen))
 
     prepare_shown = []
+    prepare_screens = {}  # C6: {pantalla donde quedó la app tras un 'preparar' fallido: textos tocables}
+    stuck_screens = []  # C6: la pantalla de cada intento en que 'preparar' falló
 
     def prepare():
         """Deja la app en el punto de partida antes de cada corrida: el comando 'preparar' del plan o, si la app no
@@ -11322,8 +11797,12 @@ def cmd_capturar(args, plan=None):
                     code, "la app mostró una pantalla de error, %s: revisa el backend o el login y espera un momento "
                           "antes de completar la fase" % screen if screen else
                     "un login que no entró, una pantalla que no cargó a tiempo o el backend caído"))
+                stuck = resumed_activity(adb).rsplit("/", 1)[-1].split(" ")[0].strip() if not screen else ""
                 failure.corto = "'preparar' terminó con código %d%s" % (
                     code, " (pantalla de error: %s)" % screen if screen else "")
+                failure.pantalla = stuck  # C6: dónde quedó la app (para proponer el ajuste si se repite)
+                if stuck and stuck not in prepare_screens:  # qué se puede tocar ahí, una vez por pantalla
+                    prepare_screens[stuck] = screen_buttons(adb, folder)
                 raise failure
             GUIA["previos"] = []  # este 'preparar' funcionó: un corte posterior ya no pide correrlo a mano
         elif start_screen and start_screen not in resumed_activity(adb) and recorrido != "manual":
@@ -11333,7 +11812,7 @@ def cmd_capturar(args, plan=None):
                 settle(3)
         check_start()
 
-    inside_trace = bool(flow.get("traza_desde_preparar")) and bool(prepare_command) and not startup
+    inside_trace = bool(flow.get("traza_desde_preparar")) and bool(prepare_command) and not startup and not no_trace
     if not startup and recorrido != "manual" and not prepare_command and not args.prueba:
         print("⚠ el flujo no tiene 'preparar': entre corridas la app queda donde terminó el recorrido. Si la app es de "
               "una sola actividad, 'inicio' no distingue pantallas: pon en el plan un comando que la devuelva al inicio.")
@@ -11444,25 +11923,27 @@ def cmd_capturar(args, plan=None):
                if valid or start else ("después, mide la fase %s" % phase, same_command())])
 
     def print_invalid_summary():
-        lines = invalid_summary(failures, attempts)
+        lines = invalid_summary(failures, attempts, prepare_screens, stuck_screens, lambda text: perf_command(
+            project_root(folder).resolve(), "nodos", pathlib.Path(folder) / "logs" / "pantalla-preparar.xml", "--texto",
+            text))
         for line in lines:
             print(line)
         if lines and not args.prueba:  # también para la sesión 2: queda en "Advertencias para el diagnóstico"
             save_capture_warnings(folder, phase, flow_name, [line.lstrip("⚠ ") for line in lines])
 
-    def save_record(partial=False, redo_marks=None):
-        """El registro de la fase en fases.json con las corridas válidas de esta tanda. También cuando la tanda se
-        corta (Ctrl+C, inválidas seguidas): lo que ya está en el CSV queda con su build, su commit y su configuración."""
+    def build_record(partial=False, redo_marks=None, quiet=False):
+        """El registro de la fase con las corridas válidas de esta tanda (sin escribirlo)."""
         seen_hz = {h for h in run_hz if h}
         record = {"fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "commit": commit, "sucio": dirty,
                   "corridas": valid, "hz": hz or min(seen_hz, default=None), "compilacion": compilation, "skill": VERSION,
-                  "configs": [config_label(used_config)]}
+                  "configs": [config_label(used_config)], "reglas": CALC_RULES, "dispositivo": device_id}
         if seen_hz:
             record["hz_corridas"] = run_hz
         rate_warning = hz_warning(hz, seen_hz)
         if rate_warning:
             record["avisos"] = [rate_warning]
-            print("⚠ " + rate_warning)
+            if not quiet:
+                print("⚠ " + rate_warning)
         if environment["emulador"] or environment["software"]:
             record["entorno"] = environment
         if dev_settings:
@@ -11475,7 +11956,12 @@ def cmd_capturar(args, plan=None):
         record.update(prints)  # la huella de las marcas y del plan, por flujo (write_phase)
         record["memoria"] = bool(args.memoria)
         record["segundos"] = int(round(time.time() - batch_started))
-        write_phase(folder, phase, record, flow_name)
+        return record
+
+    def save_record(partial=False, redo_marks=None):
+        """El registro de la fase en fases.json con las corridas válidas de esta tanda. También cuando la tanda se
+        corta (Ctrl+C, inválidas seguidas): lo que ya está en el CSV queda con su build, su commit y su configuración."""
+        write_phase(folder, phase, build_record(partial, redo_marks), flow_name)
 
     def mark_invalid(reason):
         if not args.prueba:
@@ -11521,6 +12007,16 @@ def cmd_capturar(args, plan=None):
             # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida
             # nueva del proceso medido dentro de la corrida la invalida.
             exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
+            # C5: la memoria entre ciclos (perf.py ciclo, desde el recorrido) y, en un flujo de repetición, antes y
+            # después de la corrida, siempre fuera del tramo medido.
+            cycles_path = out_dir / ("%s_%d%s" % (flow_name, n, CYCLE_SUFFIX))
+            if cycles_path.exists():
+                cycles_path.unlink()
+            os.environ.update({CYCLES_ENV: str(cycles_path), CYCLE_PACKAGE_ENV: package, CYCLE_SERIAL_ENV: serial or ""})
+            if is_repetition(flow):
+                memory_snapshot(adb, package, cycles_path, "inicio")
+            video = start_video(adb, int(flow.get("video_limite_s") or VIDEO_LIMIT_S)) \
+                if args.prueba and args.plan and not getattr(args, "sin_video", False) else None
             try:
                 if no_trace:
                     reason, extra = drive(recorrido, label, cutter), []
@@ -11558,6 +12054,8 @@ def cmd_capturar(args, plan=None):
             consecutive, last_invalid = consecutive + 1, getattr(error, "corto", str(error))
             mark_invalid(last_invalid)
             note_invalid(last_invalid)
+            if getattr(error, "pantalla", ""):
+                stuck_screens.append(error.pantalla)
             print("✖ intento %d (inválido, buscaba la %s): %s (se repite)" % (attempts, run_label(), last_invalid))
             continue
         if reason == CUT_REASON:
@@ -11570,6 +12068,26 @@ def cmd_capturar(args, plan=None):
             note_invalid(CUT_REASON)
             consecutive, last_invalid = consecutive + 1, CUT_REASON
             continue
+        if no_trace:
+            done_run = repetition_run(args, folder, plan, flow, flow_name, phase, n, cycles_path, reason, adb, package,
+                                      csv_path, prints, build, attempts, run_label)
+            if done_run == "prueba":
+                return
+            if done_run != "valida":
+                mark_invalid(done_run)
+                note_invalid(done_run)
+                consecutive, last_invalid = consecutive + 1, done_run
+                continue
+            consecutive = 0
+            valid += 1
+            n += 1
+            progress["validas"] = valid
+            guide()
+            continue
+        if reason and reason.startswith("la traza terminó antes que el recorrido") and local.is_file():
+            reason = cap_reason(flow, local.stat().st_size / 1e6, cap_bytes(config),
+                                (note_bucket(read_notes(folder), "repeticion").get(flow_name) or {}).get("mb_por_ciclo"),
+                                original="" if is_repetition(flow) else reason)
         save_trace_config(out_dir, local.name, used_config, build.get("instalada"))
         metrics, invalid, info, crash = [], reason, {}, []
         died = not invalid and app_died(adb, package)
@@ -11634,8 +12152,16 @@ def cmd_capturar(args, plan=None):
                     metrics += sql_metrics(header, body, name)
         if not invalid and sdk < 31:
             metrics += parse_gfxinfo(adb.shell("dumpsys gfxinfo %s" % package).stdout)
-        if not invalid and args.memoria:
-            metrics += parse_meminfo(adb.shell("dumpsys meminfo %s" % package).stdout)
+        if not invalid and is_repetition(flow) and read_cycles(cycles_path):
+            names_now = {m[0] for m in metrics}
+            metrics += [m for m in with_families(cycle_metrics(read_cycles(cycles_path)), flow.get("familias"))
+                        if m[0] not in names_now]
+        elif not invalid and args.memoria:
+            memory = parse_meminfo(adb.shell("dumpsys meminfo %s" % package).stdout)
+            metrics += memory
+            if memory and "views" not in {m[0] for m in memory} and not memory_notes:
+                memory_notes.append(VIEWS_MISSING)
+                print("⚠ " + VIEWS_MISSING)
         size_mb = local.stat().st_size / 1e6
         if crash:
             print("✖ La app se cayó durante la corrida. Inicio del crash (logcat -b crash):")
@@ -11704,6 +12230,33 @@ def cmd_capturar(args, plan=None):
                 print("⚠ " + line)
             for line in repeated_lines(info.get("repetidas_tramo") or {}):
                 print("⚠ " + line)
+            informative = []
+            if is_repetition(flow):  # C5: cuánto pesa la traza por ciclo y cuántos ciclos caben bajo el tope
+                done_cycles = sum(1 for item in read_cycles(cycles_path) if str(item.get("etiqueta", "")).startswith("ciclo"))
+                per_cycle, fit = cycles_fit(size_mb, done_cycles or flow.get("ciclos"), cap_bytes(config))
+                if per_cycle:
+                    data = read_notes(folder)
+                    note_bucket(data, "repeticion")[flow_name] = {"mb_por_ciclo": round(per_cycle, 2), "caben": fit}
+                    save_notes(folder, data)
+                    line = ("la traza de la prueba pesa %s MB en %s ciclos (~%s MB por ciclo): bajo el tope de %s MB caben "
+                            "unos %d ciclos" % (fmt(round(size_mb, 2)), done_cycles or flow.get("ciclos"),
+                                                fmt(round(per_cycle, 3)), fmt(round(cap_bytes(config) / 1e6)), fit))
+                    if isinstance(flow.get("ciclos"), int) and flow["ciclos"] > fit:
+                        line += "; el plan pide %d: baja `ciclos` a %d%s" % (
+                            flow["ciclos"], fit, "" if flow.get("invalidar_si") else " o usa \"traza\": \"sin\"")
+                    print(("⚠ " if "baja" in line else "· ") + line[0].upper() + line[1:])
+                    informative.append(line)
+                snapshots = read_cycles(cycles_path)
+                if snapshots:
+                    verdict, why = leak_verdict(snapshots)
+                    print("· Memoria entre ciclos (prueba): %s: %s" % (verdict, why))
+            missing_services = absent_services(flow, info.get("nombres"))
+            if missing_services:  # C3: un servicio declarado que nunca se llamó (vino dentro de otra respuesta)
+                informative.append(absent_services_text(flow_name, missing_services))
+                print("⚠ " + informative[-1][0].upper() + informative[-1][1:])
+            informative += memory_notes
+            if args.plan:
+                save_info_notes(folder, flow_name, informative)
             for name, count in sorted(info.get("marcas_repetidas", {}).items()):
                 print("⚠ '%s' salió %d veces en una misma carga (sin navegación ni otra carga entre ellas): el gancho que la emite se "
                       "llama más de una vez por carga y una métrica con 'cual: ultima' terminaría en la última. Déjalo "
@@ -11767,6 +12320,10 @@ def cmd_capturar(args, plan=None):
         save_timeline(out_dir, flow_name, n, info.get("linea"))
         known |= {m[0] for m in metrics}
         print(run_line(run_label()[len("corrida "):], size_mb, metrics))
+        if is_repetition(flow) and read_cycles(cycles_path):  # C5: el veredicto de memoria de esta corrida
+            verdict, why = leak_verdict(read_cycles(cycles_path))
+            note_leak(folder, flow_name, phase, n, verdict, why)
+            print("  memoria entre ciclos: %s: %s" % (verdict, why))
         if info.get("faltantes"):
             print("  ⚠ sin marcas para: %s" % ", ".join(info["faltantes"]))
         run_hz.append(info.get("hz_traza"))
@@ -15725,17 +16282,19 @@ def cmd_nodos(args):
 # ── nuevo ────────────────────────────────────────────────────────────────────
 
 ROUTE_TEMPLATE = """#!/usr/bin/env bash
-# Recorrido medido del flujo "{{FLUJO}}": solo los toques del tramo que se mide, con adb (nunca Maestro).
-# Un comentario por paso, con el elemento que toca. Las coordenadas salen de `perf.py nodos` (centro de los bounds).
+# Recorrido medido del flujo "{{FLUJO}}": solo los toques del tramo que se mide, con adb (nunca Maestro ni uiautomator).
+# Un comentario `# paso: <qué toca y qué debe abrirse>` por paso: perf.py arma con ellos el recorrido en palabras (lo
+# imprime la corrida de prueba y queda en ficha.md y en estado.md) y avisa los pasos sin comentario. Un `# paso:` cubre
+# los comandos que lo siguen hasta una línea en blanco. Las coordenadas salen de `perf.py nodos` (centro de los bounds).
 # Las esperas (sleep) no entran en las métricas: la ventana va de marca a marca; calíbralas con la corrida de prueba.
 # El plan apunta aquí: "recorrido": "bash {{CARPETA}}/recorrido.sh". Para verlo correr a mano: bash {{CARPETA}}/recorrido.sh
 set -euo pipefail
 SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
 
-# Paso 1: <qué elemento toca y qué debe abrirse>
+# paso: <qué elemento toca y qué debe abrirse>
 # adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
 
-# Paso 2: <qué elemento toca y qué debe abrirse>
+# paso: <qué elemento toca y qué debe abrirse>
 # adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
 
 # Teclado: ciérralo solo si está abierto (BACK con el teclado cerrado sale de la pantalla) y sin cortar el recorrido
@@ -20131,6 +20690,8 @@ def main(argv=None):
                    help="compila aunque la app ya tenga la compilación completa de esta misma instalación")
     p.add_argument("--sin-comprimir", action="store_true", help="deja las trazas sin gzip")
     p.add_argument("--prueba", action="store_true", help="una corrida que imprime las métricas y no escribe el CSV")
+    p.add_argument("--sin-video", dest="sin_video", action="store_true",
+                   help="con --prueba: no graba el video de la corrida de prueba (adb shell screenrecord)")
     p.add_argument("--forzar", action="store_true", help="sigue aunque el dispositivo esté caliente o el build no cambie")
     p.add_argument("--rehacer", action="store_true",
                    help="descarta lo medido de este flujo en esta fase y lo mide de nuevo (lo de otros flujos no se toca)")
@@ -20237,6 +20798,11 @@ def main(argv=None):
     p.add_argument("mensaje", nargs="*", help="lo que la persona tiene que hacer antes de presionar Enter")
     p.set_defaults(func=cmd_pausa)
 
+    p = sub.add_parser("ciclo", help="desde recorrido.sh, entre dos ciclos de un flujo de repetición: una foto de la "
+                                     "memoria (dumpsys meminfo) para la corrida en curso, fuera del tramo medido")
+    p.add_argument("--etiqueta", help="cómo se llama la foto (por defecto, \"ciclo N\")")
+    p.set_defaults(func=cmd_ciclo)
+
     p = sub.add_parser("instrumentar", help="copia la instrumentación y el cableado genéricos a un módulo Android")
     p.add_argument("--modulo", required=True,
                    help="carpeta del módulo que genera el APK (el de com.android.application; normalmente app)")
@@ -20268,7 +20834,7 @@ def main(argv=None):
     argv = glue_dashed_values(sys.argv[1:] if argv is None else list(argv))
     args = parser.parse_args(argv)
     reset_guide(argv)
-    QUIET_TOOLS["activo"] = args.command in ("teclear", "pausa", "nodos")
+    QUIET_TOOLS["activo"] = args.command in ("teclear", "pausa", "nodos", "ciclo")
     # El único lugar que cierra un fallo: qué pasó, qué quedó guardado y el comando para seguir (guide_lines).
     try:
         try:

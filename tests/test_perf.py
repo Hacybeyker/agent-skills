@@ -3153,7 +3153,7 @@ class RouteFileTest(DeviceBase):
         text = route.read_text(encoding="utf-8")
         self.assertIn('Recorrido medido del flujo "detalle"', text)
         self.assertIn('SERIAL="${ANDROID_SERIAL:-emulator-5554}"', text)
-        self.assertIn("# Paso 1:", text)
+        self.assertIn("# paso: <qué elemento toca", text)  # 0.15.0 · C7: un `# paso:` por paso
         self.assertNotIn("{{", text)
         self.assertIn('"recorrido": "bash %s"' % route, out)
         self.assertEqual(subprocess.run(["bash", "-n", str(route)]).returncode, 0)  # el esqueleto es bash válido
