@@ -77,6 +77,10 @@ Todo comando de `perf.py` que falla, se detiene o se corta con Ctrl+C termina co
 
 Si una tanda se corta con corridas válidas, `fases.json` guarda cuántas faltan y `siguiente` ofrece completar esa fase antes de seguir: no la da por medida a medias.
 
+**Interrumpir es seguro.** Si la terminal se cierra o el proceso muere sin poder terminar (no un Ctrl+C, que ya se guía solo), `capturar` y `reporte` dejan en la carpeta qué estaban haciendo (`.en-curso.json`). `siguiente`, y la primera línea de cada sesión, lo detectan y dan el paso exacto: `perf.py recuperar --carpeta <carpeta>`, que detiene la traza que siguió grabando en el dispositivo (Perfetto, con el número de proceso que anotó la captura) y la borra de él, aparta la traza a medias sin borrarla, anota las corridas válidas de la tanda cortada (así `siguiente` ofrece completar desde la que falta) o da el comando del reporte que se cortó. Con `--simular`, solo lo muestra. Si el comando sigue corriendo en otra terminal, `siguiente` lo dice y pide esperar.
+
+**`preparar` que falla igual.** Si las corridas inválidas por `preparar` dejan la app siempre en la misma pantalla, el resumen de las inválidas propone el ajuste concreto: esperar unos segundos más antes del paso que la deja atrás, o tocar el botón con el texto que se ve en esa pantalla (lo lee del dispositivo, fuera de la traza, después del fallo).
+
 Hay una espera corta después de fijar la compilación de ART (que deja la app detenida) y después del calentamiento, antes del `preparar` que sigue, igual que la hay entre dos corridas mientras se cierra y se procesa la traza. Es una precaución para un `preparar` que arranca con la app todavía asentándose; va fuera de toda traza y no cambia lo que se mide.
 
 ## Marcas que cambian y línea base
@@ -117,6 +121,40 @@ Cada comando de `perf.py` termina con el paso siguiente, completo y en orden, y 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py siguiente --carpeta <carpeta>
 ```
+
+## Varios flujos y las opciones del plan
+
+Con más de un flujo en el plan (que no son escenarios uno de otro: por ejemplo, el que mide tiempos y uno de repetición para memoria), `siguiente` ofrece **cada flujo en cada fase**, en el orden del plan, y lo dice ("Flujos del plan, en este orden"): ninguna fase se da por medida hasta que la midieron todos, y si el primero ya pasó a la siguiente, las capturas que faltan van antes del diagnóstico. `diagnostico` procesa la corrida mediana y la peor de **cada** flujo medido (y de cada escenario), o solo el de `--flujo`, y dice cuáles cubrió.
+
+Las opciones de captura son del plan: `memoria` (global o por flujo) va en **todos** los comandos de **todas** las fases, porque va en todas o en ninguna; `capturar` la usa aunque el comando no la traiga y avisa si se la pide en contra del plan. `corridas` (global o por flujo) fija las corridas por fase cuando no son las de siempre.
+
+## Flujo de repetición para memoria
+
+Un flujo con `"tipo": "repeticion"` mide si la memoria crece al repetir un ciclo ([ficha.md](ficha.md) · Flujo de repetición para memoria): traza liviana (`liviana.pbtx`: las secciones de la app y el ciclo de vida de las actividades, sin frames) o sin traza, y `dumpsys meminfo` antes, después y entre ciclos (`perf.py ciclo`), fuera del tramo medido. Cada corrida deja `ciclos`, la memoria al final y cuánto creció; `capturar` y el reporte dicen "sin evidencia de fuga" o "sospecha de fuga" con su motivo ([patrones/memoria-repeticion.md](patrones/memoria-repeticion.md)). `uiautomator dump` en el recorrido detiene la captura antes de tocar el dispositivo. Si la memoria no trae las vistas vivas (`views`), la captura dice por qué.
+
+## Pausar y reanudar
+
+Un triage que propone mejoras termina con **tres caminos excluyentes** ("Elige uno"): **aplicar ahora** (`decidir --profundidad riguroso`), **pausar para después** (`pausar`) o **cerrar del todo** (`cerrar`). Nunca `cerrar` primero: quita las marcas y el setup que la medición necesita.
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py pausar --carpeta <carpeta>
+```
+
+`pausar` quita las marcas y los cambios temporales guardándolos en el parche de cada repo (con respaldo, como `cerrar`), deja el setup puesto (`--quitar-setup` lo quita si ninguna otra investigación abierta lo necesita), anota el commit de cada repo y deja la investigación "En pausa: <fase>, lista para <paso>". Los reportes no cambian. Días o semanas después:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reanudar --carpeta <carpeta>
+```
+
+`reanudar`, en orden y con `--simular` para verlo antes: repone el setup si hace falta; repone las marcas desde su parche (con `git apply --check` antes); dice qué archivos citados por los hallazgos y las mejoras cambiaron desde la pausa (y si las líneas citadas se movieron); dice si la línea base sirve (mismo dispositivo y tasa de refresco, la misma regla de cálculo, el código del flujo sin cambios; si el código o el dispositivo cambiaron, `siguiente` pide `capturar --fase antes --rehacer`, y si solo cambió la regla del borde, `recalcular`, sin medir); avisa si otra investigación aplicó una mejora en el mismo código; y recién entonces da `decidir --profundidad riguroso`. Una investigación que se cerró con `cerrar --sin-setup` en 0.14.0 después de un triage con mejoras sin aplicar se trata como en pausa y se reanuda igual.
+
+**Todas las investigaciones del proyecto**, en la raíz y sin `--carpeta`: estado (abierta, en pausa o cerrada) y fase, las marcas puestas por repo, las mejoras aplicadas y pendientes, el caso del setup y el paso siguiente de cada una. `nuevo` avisa si otra investigación tiene marcas puestas y ofrece pausarla primero.
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py estado
+```
+
+**El parche de marcas vigente es de cada investigación y de cada repo.** `siguiente`, `cerrar` y `pausar` nunca usan los parches de otra investigación (en la carpeta de parches compartida, solo los que llevan su nombre), no preguntan por un repo que la investigación no tocó y, con varios de la misma investigación, usan el más nuevo y lo dicen (`marcas --vigente` elige otro). Las rutas se comparan resueltas: una carpeta enlazada y un repo hermano (`../<repo>`) se reconocen.
 
 ## De triage a riguroso
 
@@ -229,12 +267,12 @@ Las métricas de frames y del hilo principal cubren la ventana entera del flujo.
 | `<tramo> red <servicio> llamadas` | Cuántas llamadas de ese servicio empiezan dentro del tramo: dice en qué tramo se llama cada uno | `info` |
 | `<tramo> red <servicio> repetidas` | Las llamadas de más (veces − 1) al mismo servicio, con la misma marca de query, dentro del tramo y sin límite de tiempo (`repetidas_ventana_s` en el tramo o el flujo lo acota). Una misma acción que pide el mismo servicio 2 o más veces es un hallazgo candidato; entre tramos distintos, no | `app` |
 
-- El tramo va de la marca `desde` a la marca `hasta` (más `margen_ms`, si lo tiene) y cuenta los slices y los frames que **se solapan** con él: el frame o el slice que ya estaba en curso cuando sale la marca de inicio también entra. Se calcula sobre toda la traza, así que un tramo puede quedar fuera de la ventana.
+- El tramo va de la marca `desde` a la marca `hasta` (más `margen_ms`, si lo tiene). **Regla del borde (0.15.0):** cada slice del hilo principal y cada frame cuentan en **un solo tramo**, aquel donde **empiezan**; un slice largo que cruza el borde entre dos tramos contiguos cuenta solo en el primero (antes contaba en los dos y salían iguales). Se calcula sobre toda la traza, así que un tramo puede quedar fuera de la ventana. Cada fase anota en `fases.json` la regla con la que se midió; si las fases mezclan reglas, `siguiente` pide `recalcular`, que la aplica a todas sobre sus trazas guardadas (igual contra igual), y el reporte técnico dice qué regla usó cada fase.
 - Las métricas de la ventana (`hilo_max_ms`, `frame_p90_ms`, `jank_app_pct`) no cambian por declarar tramos.
 - Si falta una marca del tramo, esa corrida no trae sus métricas y la salida lo dice (`sin marcas para: tramo <nombre>`); si una de ellas es principal, la corrida es inválida y se repite.
 - Un tramo sin frames (muy corto, o en Android 11 o anterior, que no tiene FrameTimeline) solo trae `<tramo> hilo_max_ms`: ahí, esa es la que puede ser principal. Con `<tramo> frame_p90_ms` o `<tramo> jank_app_pct` como principal, la corrida sale inválida (`sin frames en el tramo`).
 - Con pocos frames valen las mismas reservas que en la ventana: si `<tramo> frames` cambia más de un 50 % entre antes y después, el P90 y el porcentaje salen `no comparable`; con render por software, `no confiable`.
-- **Tramos que se solapan.** Una marca de fin que sale más de una vez (la lista visible al abrir y otra vez al volver) con `hasta` por defecto (la **última** ocurrencia) hace que el tramo cubra todo el flujo: sus métricas de hilo y frames salen iguales a las de otro tramo. `siguiente` avisa si dos tramos terminan en la misma marca sin `cual`; la corrida de prueba, si dos tramos se solapan, si uno contiene a otro o si la marca de fin sale más de una vez sin `cual`, con el cambio exacto (`"cual": "primera"`); `capturar`, `resumen` y `comparar`, si dos métricas de tramos distintos son idénticas en todas las corridas. `recalcular` lo arregla sobre las trazas guardadas, sin medir de nuevo.
+- **Tramos que se solapan, o un slice que cruza el borde.** Son dos cosas distintas y los avisos las separan. Tocarse en el borde (el fin de un tramo es el inicio del otro) no es solaparse. **Se solapan de verdad** cuando una marca de fin que sale más de una vez (la lista visible al abrir y otra vez al volver) con `hasta` por defecto (la **última** ocurrencia) hace que un tramo cubra a otro: el aviso dice qué tramo cubre a cuál y el cambio exacto del plan (`"cual": "primera"` en `segmentos[i].hasta`, o la marca de inicio del otro tramo). **El mismo slice cruza el borde** cuando el slice más largo contiene el instante de la marca de corte: la corrida de prueba lo dice en palabras, y con la regla del borde cuenta en un solo tramo. `capturar`, `resumen` y `comparar` avisan si dos métricas de tramos distintos son idénticas en todas las corridas, y dicen cuál de los dos casos es según la regla con la que se midió la fase.
 - Agregar un tramo después de medir `antes` deja esa métrica sin línea base: decláralos en la sesión 1, o repite `antes` (y `control`) con `--rehacer`.
 - **Red por tramo.** Cada llamada `HTTP` se asigna al tramo donde **empieza** (si dos tramos se solapan, al primero del plan), aunque termine después; las que empiezan fuera de todos los tramos solo cuentan en las métricas de la corrida entera, que no cambian. Las `<tramo> red_*` salen cuando la corrida tiene red (alguna sección `HTTP`, o la investigación ya la medía); sin tramos, todo queda como siempre. No entran en el resumen compacto salvo que sean principales: se leen en la tabla "Red por tramo" de `diagnostico.md` (la corrida mediana y la peor, con los endpoints de cada tramo y las llamadas que quedan fuera) y del reporte (la mediana entre corridas, por fase).
 - **`"solo_red": true`** en un tramo: no calcula frames, hilo ni jank; solo agrupa sus llamadas, y trae `<tramo> red_llamadas` aunque sea 0. Para los tramos donde la app espera o hace polling ([ficha.md](ficha.md) · Flujos que pasan por otra app).
@@ -252,7 +290,7 @@ Una mejora que depende de un tiempo (una precarga que solo sirve si el usuario t
 ```
 
 - `capturar` pasa las `variables` como variables de entorno a `preparar` y al recorrido; el script las usa con un valor por defecto (`sleep "${PERF_ESPERA_S:-0}"`). `plan.json` guarda solo la diferencia: lo demás sale del flujo base al cargar el plan, así que los dos tienen la misma huella salvo ese parámetro (y la misma de los archivos del recorrido).
-- Cada escenario es un flujo más: se mide con `--flujo <escenario>` en las mismas fases que el base (`siguiente` agrega esos pasos cuando el base ya midió una fase), se compara y se reporta. El reporte final muestra la mejora por escenario y "Pros y contras" lo usa como condición ("tras 4 s: mejora; enseguida: sin cambio").
+- Cada escenario es un flujo más: se mide con `--flujo <escenario>` en las mismas fases que el base (`siguiente` agrega esos pasos cuando el base ya midió una fase), se compara y se reporta. El reporte final muestra la mejora por escenario y el panel de la mejora lo usa como su condición ("tras 4 s: mejora; enseguida: sin cambio").
 - **Costo.** Por defecto el control es solo del flujo base (los escenarios usan su ruido: el mismo build y el mismo dispositivo; `comparar` lo toma en proporción al antes de cada escenario y lo dice con el aviso "ruido del flujo base") y cada escenario mide las mismas corridas que el base. `siguiente` muestra lo que cuestan antes y control de los escenarios (con el tiempo por corrida medido, o 90 s estimados) y las dos opciones, con su consecuencia: `decidir --control-escenarios todos` (el ruido de cada escenario, más firme si uno varía más) o `decidir --corridas-escenario 5` (más barato; el veredicto del escenario solo distingue cambios más grandes que su ruido). Quedan en `escenarios` de `plan.json`.
 - **Un escenario sin efecto.** Si los escenarios tienen la misma secuencia de llamadas y marcas dentro de la ventana en todas las corridas (y la llamada clave terminó antes de la ventana en todas), `capturar` avisa que la variable no tiene efecto con ese `preparar` (por ejemplo, `preparar` reinicia la app y carga la pantalla anterior antes de que empiece la traza, y la precarga ya terminó). Para una mejora de precarga, `"traza_desde_preparar": true` en el flujo hace que `preparar` corra con la traza ya grabando, y la ventana se fija desde la marca de la pantalla anterior: así la espera del escenario cuenta desde algo que se ve en la traza. Es un campo de medición: cambiarlo después de medir pide una línea base nueva.
 - Lo propone la ficha cuando el flujo tiene una espera que el usuario puede acortar, y lo pide la sesión 2 cuando una mejora depende del tiempo. Agregar un escenario después de medir antes no cambia el flujo base (solo pide medir el escenario) si el script ya leía la variable; si hay que editar `recorrido.sh` o `preparar.sh` para que la lea, su huella cambia y `siguiente` pide rehacer la línea base: por eso conviene dejar la variable desde la ficha.
@@ -263,7 +301,7 @@ Una mejora que depende de un tiempo (una precarga que solo sirve si el usuario t
 
 - las métricas de un **servicio ajeno** al flujo (`red <servicio> …`), en cualquier sentido: `servicios ajenos al flujo`, rotuladas "ajeno · sin veredicto" desde `capturar` y sin sumar en las regresiones ni en las mejoras;
 - un aumento de `red_llamadas` que viene solo de **servicios ajenos** al flujo: `servicios ajenos al flujo`, no regresión de la app; el aviso dice cuáles y por qué pueden entrar en la ventana (y si el recorrido cambió entre fases, cuál archivo);
-- un aumento que viene de los servicios que toca una **mejora aplicada**: `costo conocido` de esa mejora, que el reporte presenta en "Pros y contras";
+- un aumento que viene de los servicios que toca una **mejora aplicada**: `costo conocido` de esa mejora, que el reporte presenta en el panel de la mejora;
 - un aumento de un servicio del flujo que ninguna mejora explica: sigue siendo `regresión`.
 
 Sin servicios declarados ni atribuidos, no se separa nada (como antes).

@@ -8,6 +8,7 @@
   "principales": ["home_hasta_datos_ms", "jank_app_pct", "hilo_slices_sobre_presupuesto"],
   "flujos": {
     "home-recarga": {
+      "proposito": "volver a Home desde el detalle y esperar a que cargue",
       "pasos": [
         "Partir en Home con la sesión iniciada",
         "Abrir el detalle del primer ítem",
@@ -51,7 +52,13 @@
       "esperado": "0 llamadas",
       "prioridad": "alta",
       "esfuerzo": "bajo",
-      "riesgo": "bajo",
+      "riesgo": "bajo: toca solo la carga del historial al volver a Home",
+      "archivos": [
+        {"ruta": "app/src/main/kotlin/com/ejemplo/app/home/HomeViewModel.kt", "riesgo": "bajo",
+         "antes": "pedía el historial cada vez que la pantalla volvía a verse",
+         "despues": "lo pide una vez y lo reutiliza mientras la sesión sigue abierta",
+         "pros": "una llamada menos al volver", "contras": "el historial se refresca al deslizar hacia abajo"}
+      ],
       "estado": "propuesta"
     },
     {

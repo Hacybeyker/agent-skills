@@ -29,6 +29,7 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 
 | Sesión | Modelo | Razonamiento | Pasos máx. |
 | --- | --- | --- | --- |
+| 0 · Pedido ("mejora este pedido", sin código ni dispositivo) | Intermedio | Medio | 5 |
 | 0 · Setup | Intermedio | Medio | 40 |
 | 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 (25 en flujos largos) |
 | Mediciones | Ninguno en modo guiado (las corre el usuario); el más económico en modo autónomo | Bajo | — |
@@ -37,7 +38,20 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 | 4 · Cierre | Económico o intermedio | Bajo | 10 |
 | 4 · Cierre tras una línea base nueva (`lineabase`) | Intermedio | Medio | 15 |
 
-Si una sesión llega a su tope de pasos, guarda el estado y se detiene: seguir en el mismo chat cuesta cada vez más por paso.
+## Presupuesto de pasos
+
+Cada referencia de sesión empieza con su presupuesto y su lista concreta de tareas (qué leer, qué consultar, qué no hacer y cuándo detenerse). El presupuesto **ordena el trabajo, no lo corta**: al llegar al 80 %, la IA lo dice en el chat y en una línea de "Pendientes" de `estado.md` (no en "Siguiente paso": `perf.py siguiente` la reescribe) ("80 % del presupuesto de pasos: queda X") y sigue solo con lo que falta para entregar.
+
+| Sesión | Flujo corto (una pantalla, recorrido simple) | Flujo largo (login, scroll con pestañas, varios flujos, repetición) |
+| --- | --- | --- |
+| 0 · Pedido | 5 | 5 |
+| 0 · Setup | 40 | 40 |
+| 1 · Ficha y plan | 15 | 25 |
+| 2 · Diagnóstico | 20 | 25 (30 con trazas pesadas o varios flujos) |
+| 3 · Mejora | 30 | 30 |
+| 4 · Cierre | 10 (15 tras una línea base nueva) | 10 (15 tras una línea base nueva) |
+
+**En un triage**, el diagnóstico puede ir con esfuerzo medio en vez de alto cuando `diagnostico.md` ya trae la respuesta (la red por tramo con la llamada repetida, el slice que se repite): lo que queda es escribir los hallazgos, no buscar la causa.
 
 ## Costos de referencia
 
@@ -56,6 +70,23 @@ Dos investigaciones reales en una app mediana con red (modelo intermedio salvo e
 Con 0.5.0 (recorrido automático por `adb`, `preparar`, ventana entre marcas y reportes nuevos), dos investigaciones más en la misma app: una rigurosa de la pantalla de detalle, ≈ 5,9 USD (setup 1,65 · sesión 1 2,28 · sesión 2 0,69 · sesión 3 1,25 · cierre 0,02), y una de triage y luego rigurosa de favoritos, ≈ 4,6 USD (sesión 1 2,27 · sesión 2 1,15 · sesión 3 1,11 · cierre 0,02), con una mejora medida de −65 %. La sesión 1 es hoy la más cara: la mitad de sus pasos se van en encontrar y validar las coordenadas del recorrido.
 
 Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 0,2 USD: por eso `siguiente` dice en cada paso si va en la terminal o en un chat. Una sesión que cuesta varias veces lo de la tabla suele estar explorando: SQL a mano, leyendo scripts o archivos generados, volcando logs, corriendo el DoD comando por comando o encadenada con otra en el mismo chat.
+
+## Costo esperado por sesión
+
+`perf.py consumo` compara el costo de cada sesión que anotas con esta tabla, según el tipo de sesión y el tamaño del proyecto, y si se pasó lo dice en una frase ("la sesión 2 costó 2,4 USD; lo esperado es 0,5–1,5: consumió más de lo que debía"), en `estado.md` (debajo de la tabla "Consumo") y en el anexo de costo del reporte técnico. **Nunca detiene nada**: se gasta lo que haga falta. Una sesión que cuesta varias veces lo esperado suele estar explorando lo que la skill hace sola; más de 5 USD en una sesión es anormal.
+
+**Tamaño del proyecto:** la línea `Tamaño del proyecto: pequeño | mediano | grande` de la sección de rendimiento de `AGENTS.md`; sin ella, los módulos que incluye `settings.gradle(.kts)`: hasta 5, pequeño; hasta 25, mediano; más, grande.
+
+| Sesión | Pequeño | Mediano | Grande |
+| --- | --- | --- | --- |
+| 0 · pedido | 0,1–0,3 USD | 0,1–0,3 USD | 0,1–0,3 USD |
+| 0 · setup | 0,8–1,5 USD | 1–2 USD | 1,5–3 USD |
+| 1 · ficha | 0,5–1,5 USD | 1,1–2,3 USD | 1,5–2,5 USD |
+| 2 · diagnóstico | 0,3–1 USD | 0,5–1,5 USD | 1–2 USD |
+| 3 · mejora | 0,5–1 USD | 0,8–1,5 USD | 1–2 USD |
+| 4 · cierre | 0,02–0,3 USD | 0,02–0,5 USD | 0,05–1 USD |
+
+**En un proyecto grande** (decenas de módulos, repos hermanos, trazas de cientos de MB), cada sesión tiene su rango en la columna "grande" de la tabla (de 1 a 3 USD según la sesión): el setup y la ficha de un plan con varios flujos largos son las más caras, y el diagnóstico con trazas pesadas llega a 2 USD. Lo que más las encarece: un recorrido que se traba con el scroll (las técnicas de [ficha.md](ficha.md) · Scroll y pestañas lo evitan), consultas a mano sobre trazas que `diagnostico` ya procesó (ahora cubre todos los flujos) y sondear un `reporte` largo (se corre una vez, en primer plano).
 
 ## Cómo aplicarlo
 

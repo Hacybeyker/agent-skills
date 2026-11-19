@@ -3,6 +3,7 @@ pendientes de 0.11.0 (D). Reusa las bases y los datos de test_perf.py."""
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -330,35 +331,26 @@ class TradeoffsReportTest(PerfBase):
     def test_pros_y_contras_en_dev_y_en_gerencia(self):
         self.ok("reporte", "--carpeta", self.folder.relative_to(self.dir), "--html")
         dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        section = dev[dev.index("## Pros y contras de cada mejora"):dev.index("\n## Hallazgos")]
-        self.assertIn("**Qué gana el usuario:** tab_visible_ms (tras 4 s · PERF_ESPERA_S=4): pasó de 2.4 s a 41 ms "
-                      "(−98 %) · mejora", section)
-        self.assertIn("+1 llamada por corrida a GET api/v1/contactos (1 → 2)", section)
-        self.assertIn("una consulta más al abrir la app, aunque no se abra la pestaña (confirmado)", section)
-        self.assertIn("por escenario: tras 4 s: mejora", section)
-        self.assertIn("enseguida: sin cambio", section)
-        self.assertNotIn("regresión", section)
+        # 0.15.0 · H2: el panel de la mejora trae qué ganó, su costo (confirmado) y su condición
+        card = dev[dev.index("<summary>M1 · Cargar la lista por adelantado"):dev.index("## Servicios")]
+        self.assertIn("- **Qué ganó:** abrir la pestaña: 2.4 s → 41 milisegundos (−98 %) [Mejora].", card)
+        self.assertIn("- **Costo conocido:** una consulta más al abrir la app, aunque no se abra la pestaña.", card)
+        self.assertIn("- **Condición:** se nota si se abre la pestaña 4 s o más después de entrar.", card)
+        self.assertNotIn("regresión", card)
+        main = dev.split("\n## Anexo")[0]
+        self.assertIn("| abrir la pestaña · tras 4 s | 2.4 s | 41 milisegundos | −98 % | [Mejora] |", main)
+        self.assertIn("| abrir la pestaña · enseguida |", main)  # el escenario por su título
+        self.assertIn("| GET api/v1/contactos | tras 4 s | 1 → 2 |", main)
+        self.assertEqual(main.count("Ruta real no disponible para GET api/v1/contactos:"), 1)  # sin repetir el nombre
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
-        part = business[business.index("## Qué gana y qué cuesta cada cambio"):business.index("\n## Servicios")]
-        self.assertIn("**Cargar la lista por adelantado**\n\n- Qué gana el usuario: abrir la pestaña (tras 4 s) pasó de 2.4 "
-                      "s a 41 milisegundos (98 % menos): mejora clara.", part)
-        self.assertIn("- Qué cuesta: consultar al servidor 1 vez más cada vez que el usuario hace este recorrido "
-                      "(contactos); según la investigación, una consulta más al abrir la app, aunque no se abra la pestaña.",
-                      part)
-        self.assertIn("**enseguida:**", business)  # "Servicios" por el título del escenario
-        self.assertNotIn("**abrir_enseguida:**", business)
+        self.assertIn("- **abrir la pestaña · tras 4 s:** Antes tardaba 2.4 s; ahora 41 milisegundos: 98 % más rápido.",
+                      business)
+        self.assertIn("- Costo conocido de Cargar la lista por adelantado:", business)
+        self.assertNotIn("abrir_enseguida", business)
+        self.assertNotIn("tab_visible_ms", business)
         html = (self.folder / "reporte-final-gerencia.html").read_text(encoding="utf-8")
-        self.assertIn("abrir la pestaña (enseguida)", html)  # el gráfico dice de qué escenario es
-        self.assertIn("- Cuándo se nota: se nota si se abre la pestaña 4 s o más después de entrar. Según el escenario, "
-                      "tras 4 s: mejora clara", part)
-        self.assertIn("abrir la pestaña (enseguida)", business)  # el escenario por su título, no por el nombre interno
-        # con escenarios, el resultado de la mejora es el de su flujo, no el del último escenario
-        self.assertIn("1 aplicadas → 1 funcionaron", dev)
-        self.assertIn("✔ funcionó", dev)
-        self.assertIn("**Qué mejoró:** `tab_visible_ms` pasó de 2.4 s a 41 ms", dev)
+        self.assertIn("<figcaption>abrir la pestaña · enseguida · ", html)  # el gráfico dice de qué escenario es
         self.assertNotIn("no dio el resultado esperado", business)
-        self.assertNotIn("_", part)
-
     def test_siguiente_pide_medir_cada_escenario(self):
         write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-03-02T10:00:00", "corridas": 10, "flujos": {
             "abrir": {"corridas": 10}}}}))
@@ -629,10 +621,11 @@ class BusinessTextTest(PerfBase):
         text = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
         self.assertNotIn("_sin completar_", text)
         self.assertNotIn("_Sin completar", text)
-        self.assertIn("Sin completar todavía: la investigación no lo anotó.", text)
-        self.assertIn("1 quedó sin confirmar (la lista aparece tarde a veces)", text)
-        self.assertIn("la ficha y el plan", text)
+        self.assertIn("Sin completar todavía: la investigación no lo anotó en la Ficha.", text)
+        # 0.15.0 · G4/G5: lo sin confirmar y el costo no van en gerencia
+        self.assertNotIn("la lista aparece tarde a veces", text)
         self.assertNotIn("1 · ficha", text)
+        self.assertEqual(re.findall(r"^## (.+)$", text, re.M), list(perf.BUSINESS_SECTIONS))
         self.assertEqual(perf.session_words("3 · M1"), "la mejora M1")
 
 
