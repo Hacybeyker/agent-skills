@@ -56,7 +56,7 @@ De 3 a 5 líneas en "Resumen ejecutivo": estado inicial → estado final con las
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
 
-Genera el reporte en **dos versiones**, con los mismos datos. Córrelo una vez, en primer plano y con un tiempo de espera largo, o pásaselo al usuario para la terminal; nunca lo sondees: no vuelve a abrir las trazas (lee `metricas.csv` y el resumen de cada corrida que guardó `capturar`), y en una investigación de una versión anterior procesa una sola vez las corridas sin resumen, con el progreso a la vista ("procesando la traza 2 de 6"). Los HTML son autocontenidos (estilos y gráficos SVG en línea, sin scripts ni nada que se descargue): se abren sin conexión, se adjuntan a un correo y se imprimen o exportan a PDF en modo claro.
+Genera el reporte en **dos versiones**, con los mismos datos. Córrelo una vez, en primer plano y con un tiempo de espera largo, o pásaselo al usuario para la terminal; nunca lo sondees: no vuelve a abrir las trazas (lee `metricas.csv` y la línea de tiempo de cada corrida que guardó `capturar`), y en una investigación de una versión anterior procesa una sola vez las corridas sin resumen, con el progreso a la vista ("procesando la traza 2 de 6"). Los HTML son autocontenidos (estilos y gráficos SVG en línea, sin scripts ni nada que se descargue): se abren sin conexión, se adjuntan a un correo y se imprimen o exportan a PDF en modo claro.
 
 **El técnico (`reporte-final-dev`) se lee en unos 5 minutos.** Su parte principal tiene como mucho 1 500 palabras (sin contar los diffs; `reporte` avisa si pasa):
 

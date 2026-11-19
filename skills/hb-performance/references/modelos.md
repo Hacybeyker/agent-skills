@@ -33,7 +33,7 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 | 0 · Setup | Intermedio | Medio | 40 |
 | 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 (25 en flujos largos) |
 | Mediciones | Ninguno en modo guiado (las corre el usuario); el más económico en modo autónomo | Bajo | — |
-| 2 · Diagnóstico | Diagnóstico (por defecto el intermedio); el alto solo si el caso se complica | Alto | 25 |
+| 2 · Diagnóstico | Diagnóstico (por defecto el intermedio); el alto solo si el caso se complica | Alto | 20 (25 en flujos largos; 30 con trazas pesadas o varios flujos) |
 | 3 · Mejora (una por chat) | Intermedio | Medio | 30 |
 | 4 · Cierre | Económico o intermedio | Bajo | 10 |
 | 4 · Cierre tras una línea base nueva (`lineabase`) | Intermedio | Medio | 15 |
@@ -42,7 +42,9 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 
 Cada referencia de sesión empieza con su presupuesto y su lista concreta de tareas (qué leer, qué consultar, qué no hacer y cuándo detenerse). El presupuesto **ordena el trabajo, no lo corta**: al llegar al 80 %, la IA lo dice en el chat y en una línea de "Pendientes" de `estado.md` (no en "Siguiente paso": `perf.py siguiente` la reescribe) ("80 % del presupuesto de pasos: queda X") y sigue solo con lo que falta para entregar.
 
-| Sesión | Flujo corto (una pantalla, recorrido simple) | Flujo largo (login, scroll con pestañas, varios flujos, repetición) |
+**Flujo largo:** login u otras pantallas que `preparar` recorre antes de lo que se mide, pantallas que solo se ven una vez, scroll con pestañas, varios flujos o un flujo de repetición. Lo demás (una pantalla, recorrido simple) es un flujo corto. Las referencias de cada sesión usan esta definición.
+
+| Sesión | Flujo corto | Flujo largo |
 | --- | --- | --- |
 | 0 · Pedido | 5 | 5 |
 | 0 · Setup | 40 | 40 |

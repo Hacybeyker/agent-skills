@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-from helpers import ENV, ROOT, commit_all, git, init_repo, write
+from helpers import ENV, ROOT, commit_all, git, init_repo, perf_argv, write
 from test_perf import GOOD, HEADER, DeviceBase, PerfBase, perf, rows
 from test_perf_0140 import AGENTS, PKG, WIRING, SetupBase, ends_with_step, executable, pasteable
 
@@ -449,7 +449,7 @@ class MarksPerInvestigationTest(PerfBase):
         patch = self.marks(self.sibling, "pagos/Pago.kt", "catalogo-lista-2026-03-02-marcas-modulo-pagos-20261101-1000.patch")
         os.symlink(str(self.root / "reports"), str(self.root / "informes"))
         linked = self.root / "informes" / "perf" / "parches" / patch.name
-        result = subprocess.run([sys.executable, "-I", str(SCRIPT), "marcas", "--carpeta",
+        result = subprocess.run(perf_argv(SCRIPT) + ["marcas", "--carpeta",
                                  os.path.relpath(str(self.folder), str(self.root)), "--vigente", str(linked)],
                                 cwd=str(self.root), env=dict(ENV, HOME=str(self.dir)), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -502,7 +502,7 @@ class TriageBase(PerfBase):
         self.env = dict(ENV, HOME=str(self.dir))
 
     def run_in(self, *args):
-        return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(self.root),
+        return subprocess.run(perf_argv(SCRIPT) + [str(a) for a in args], cwd=str(self.root),
                               env=self.env, capture_output=True, text=True, encoding="utf-8")
 
     def ok_in(self, *args):
@@ -622,7 +622,9 @@ class InterruptedTest(TriageBase):
     def test_captura_y_traza_en_el_dispositivo(self):
         bin_dir = self.dir / "bin"
         executable(bin_dir / "adb", "#!/bin/sh\necho \"$@\" >> %s\ncase \"$*\" in\n  *devices*) printf 'List of devices "
-                                    "attached\\nemulator-5554\\tdevice\\n' ;;\n  *'echo viva'*) echo viva ;;\nesac\n"
+                                    "attached\\nemulator-5554\\tdevice\\n' ;;\n  *'echo viva'*) echo viva ;;\n"
+                                    # tras el kill -TERM, Perfetto ya no está (sin esto, wait_perfetto espera 30 s)
+                                    "  *'[ -d /proc/'*) exit 1 ;;\nesac\n"
                    % (self.dir / "adb.log"))
         self.env = dict(self.env, PATH="%s:%s" % (bin_dir, os.environ["PATH"]))
         partial = self.folder / "antes" / "catalogo-lista_2.perfetto-trace"
@@ -761,7 +763,7 @@ class MeasurementCaptureTest(DeviceBase):
         self.assertIn("Video de la prueba: %s" % video, out)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn('"screenrecord", "--time-limit", "180", "/sdcard/hbperf-prueba.mp4"', log)
-        # (el screenrecord falso termina solo: el pkill -INT de verdad se valida en dispositivo)
+        # (el screenrecord falso termina solo: VIDEO_STOP lo prueba Fixes0151HelpersTest y en dispositivo se valida)
         self.assertIn("rm -f /sdcard/hbperf-prueba.mp4", log)
         ficha = (self.plan.parent / "ficha.md").read_text(encoding="utf-8")
         self.assertIn("Propósito: abrir los pedidos y bajar la lista", ficha)
@@ -846,8 +848,8 @@ class MeasurementHelpersTest(unittest.TestCase):
         self.assertNotIn("no cambia lo que se mide", text)
         lines = perf.invalid_summary(failures, 5, {".Pedidos": ["Continuar"]}, [".Pedidos"] * 3,
                                      lambda label: "cd /p && python3 -I perf.py nodos logs/x.xml --texto %s" % label)
-        self.assertIn("Las coordenadas de ese botón, del volcado de esa pantalla: cd /p && python3 -I perf.py nodos "
-                      "logs/x.xml --texto Continuar", " ".join(lines))
+        self.assertIn("  Las coordenadas de ese botón, del volcado de esa pantalla:", lines)
+        self.assertIn("    cd /p && python3 -I perf.py nodos logs/x.xml --texto Continuar", lines)  # en su propia línea
 
 
 
@@ -936,7 +938,7 @@ class AcceptanceBase(DeviceBase):
         self.ran = []
 
     def perf_in_root(self, *args):
-        result = subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(self.root),
+        result = subprocess.run(perf_argv(SCRIPT) + [str(a) for a in args], cwd=str(self.root),
                                 env=self.env, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
@@ -1320,7 +1322,7 @@ class CostWarningTest(PerfBase):
 
 
 class ReportSpeedTest(DeviceBase):
-    """F3: `reporte` lee metricas.csv y el resumen de cada corrida; no vuelve a abrir las trazas. Las corridas viejas sin
+    """F3: `reporte` lee metricas.csv y la línea de tiempo de cada corrida; no vuelve a abrir las trazas. Las corridas viejas sin
     resumen se procesan una sola vez y quedan en caché."""
 
     def setUp(self):
@@ -1707,6 +1709,424 @@ class ReviewRound2TriageTest(TriageBase):
         out = self.ok_in("reanudar", "--carpeta", self.rel, "--marcas-a-mano")
         self.assertIn("2. Marcas: las repuso la sesión a mano", out)
         self.assertNotIn("en pausa", self.ok_in("siguiente", "--carpeta", self.rel).split("\n")[0])
+
+
+# ── 0.15.1 · B2 y B8 ─────────────────────────────────────────────────────────
+def flows_at(when, skill=perf.VERSION, **flows):
+    return {name: {"corridas": runs, "fecha": when, "skill": skill} for name, runs in flows.items()}
+
+
+class SecondFlowTest(PerfBase):
+    """B2: el segundo flujo del plan recibe el mismo trato que el primero (completar, rehacer)."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = json.loads(json.dumps(TWO_FLOWS))
+        self.plan["profundidad"] = "riguroso"
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        self.tests = {"prueba": {"flujos": {"catalogo-lista": {"fecha": "2026-11-05T09:00:00", "marcas_ok": True},
+                                            "catalogo-repeticion": {"fecha": "2026-11-05T09:01:00", "marcas_ok": True}}}}
+
+    def texts(self, phases, flow=None):
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "fases.json", json.dumps(dict(self.tests, **phases)))
+        _, steps = perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"), flow)
+        return [step.get("texto", "") for step in steps if step["tipo"] == "terminal"]
+
+    def test_riguroso_desde_un_triage_completa_los_dos_flujos(self):
+        self.plan.update(desde_triage=True, mejoras=[{"id": "M1", "titulo": "x", "estado": "propuesta"}])
+        both = {"catalogo-lista": 3, "catalogo-repeticion": 3}
+        texts = self.texts({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 6, "skill": perf.VERSION,
+                                      "flujos": flows_at("2026-11-05T10:00:00", **both)}})
+        joined = "\n".join(texts)
+        self.assertIn("--flujo catalogo-lista --fase antes --corridas 7", joined)
+        self.assertIn("--flujo catalogo-repeticion --fase antes --corridas 7", joined)
+        self.assertNotIn("--rehacer", joined)
+        self.assertIn("--flujo catalogo-repeticion --fase control --corridas 10", joined)
+
+    def test_un_despues_viejo_se_mide_de_nuevo_en_los_dos(self):
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "x", "estado": "aplicada", "aplicada_en": "2026-11-05T09:30:00"},
+                                {"id": "M2", "titulo": "y", "estado": "aplicada", "aplicada_en": "2026-11-05T14:00:00"}]
+        both = {"catalogo-lista": 10, "catalogo-repeticion": 10}
+        self.tests["prueba"]["flujos"] = {name: {"fecha": "2026-11-05T14:30:00", "marcas_ok": True} for name in both}
+        texts = self.texts({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 20, "skill": perf.VERSION,
+                                      "flujos": flows_at("2026-11-05T10:00:00", **both)},
+                            "control": {"fecha": "2026-11-05T11:00:00", "corridas": 20,
+                                        "flujos": flows_at("2026-11-05T11:00:00", **both)},
+                            "despues": {"fecha": "2026-11-05T12:00:00", "corridas": 20,
+                                        "flujos": flows_at("2026-11-05T12:00:00", **both)}})
+        joined = "\n".join(texts)
+        self.assertIn("--flujo catalogo-repeticion --fase despues --corridas 10 --rehacer", joined)
+
+    def test_con_las_mejoras_quitadas_el_segundo_flujo_se_rehace(self):
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "x", "estado": "aplicada", "aplicada_en": "2026-11-05T09:30:00"}]
+        write(self.folder / "lineabase.json", json.dumps({"estado": "quitadas", "fecha": "2026-11-05T13:00:00",
+                                                          "mejoras": ["M1"], "parches": []}))
+        both = {"catalogo-lista": 10, "catalogo-repeticion": 10}
+        texts = self.texts({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 20, "skill": perf.VERSION,
+                                      "flujos": flows_at("2026-11-05T10:00:00", **both)},
+                            "control": {"fecha": "2026-11-05T11:00:00", "corridas": 20,
+                                        "flujos": flows_at("2026-11-05T11:00:00", **both)}})
+        joined = "\n".join(texts)
+        self.assertIn("--flujo catalogo-repeticion --fase antes --corridas 10 --rehacer", joined)
+        self.assertIn("--flujo catalogo-repeticion --fase control --corridas 10 --rehacer", joined)
+
+
+class StaleBaselineWithImprovementTest(PerfBase):
+    """B8: con una mejora aplicada, si `reanudar` dijo que la línea base no sirve, `siguiente` la rehace quitando la
+    mejora con su parche (y la vuelve a poner al final)."""
+
+    def test_rehace_la_linea_base_quitando_la_mejora(self):
+        folder = self.dir / "inv"
+        plan = {"paquete": PKG, "principales": ["abrir_ms"], "flujos": {"f": {"recorrido": "true"}},
+                "mejoras": [{"id": "M1", "titulo": "x", "estado": "aplicada", "aplicada_en": "2026-11-05T12:00:00"}]}
+        write(folder / "plan.json", json.dumps(plan))
+        write(folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        write(folder / "fases.json", json.dumps({
+            "antes": {"fecha": "2026-11-05T10:00:00", "corridas": 10, "skill": perf.VERSION,
+                      "rehacer": "el código que citan los hallazgos cambió desde la pausa",
+                      "rehacer_desde": "2026-11-06T09:00:00", "flujos": flows_at("2026-11-05T10:00:00", f=10)},
+            "control": {"fecha": "2026-11-05T11:00:00", "corridas": 10, "flujos": flows_at("2026-11-05T11:00:00", f=10)}}))
+        title, steps = perf.next_steps(folder, perf.load_plan(folder / "plan.json"))
+        self.assertEqual(title, "rehacer la línea base: el código cambió desde la pausa (sin chat)")
+        texts = [step.get("texto", "") for step in steps if step["tipo"] == "terminal"]
+        self.assertIn("lineabase --carpeta", texts[0])
+        self.assertTrue(texts[0].endswith("--quitar-mejoras"))
+        self.assertTrue(any("--reaplicar-mejoras" in text for text in texts))
+
+
+
+class Fixes0151Test(PerfBase):
+    """0.15.1: los arreglos chicos que encontró la revisión de 0.15.0."""
+
+    def test_un_proceso_que_no_es_perf_no_cuenta_como_corriendo(self):
+        folder = self.dir / "inv"
+        sleeper = subprocess.Popen(["sleep", "30"])  # vivo, pero no es perf.py (un número reutilizado)
+        try:
+            write(folder / ".en-curso.json", json.dumps({"comando": "capturar", "pid": sleeper.pid}))
+            self.assertFalse(perf.interrupted(folder)["viva"])
+        finally:
+            sleeper.kill()
+            sleeper.wait()
+
+    def test_el_dod_no_corre_lo_que_borra_datos_o_desinstala(self):
+        for command in ("fastlane beta", "./gradlew uninstallAll", "./gradlew :app:uninstallDebug",
+                        "adb shell pm clear com.example.app", "git switch --discard-changes main", "rm --recursive x"):
+            self.assertTrue(perf.DISCARDING.search(command), command)
+        for command in ("./gradlew test", "adb devices", "./gradlew :app:installProfiling"):
+            self.assertFalse(perf.DISCARDING.search(command), command)
+
+    def test_memoria_en_palabras(self):
+        for metric in ("pss_crecimiento_mb", "activities_crecimiento", "views_crecimiento", "ciclos", "activities", "views"):
+            self.assertNotIn("_", perf.plain_metric(metric, {}))
+            self.assertNotIn('"', perf.plain_metric(metric, {}))
+
+    def test_variacion_normal_sin_unos_0(self):
+        self.assertEqual(perf.noise_sentence(0, "llamadas"), "Medir dos veces sin cambiar nada da el mismo valor")
+        self.assertIn("menos de 1 milisegundo", perf.noise_sentence(0.4, "ms"))
+        self.assertIn("unos 12 milisegundos", perf.noise_sentence(12, "ms"))
+
+    def test_titulo_del_grafico_escapado(self):
+        r = {"metrica": "abrir_ms", "flujo": "f", "veredicto": "mejora", "avisos": [], "delta": -10, "ruido": 1,
+             "antes": {"mediana": 100, "min": 90, "max": 110}, "despues": {"mediana": 50, "min": 45, "max": 55}}
+        title = perf.chart_title(r, {"etiquetas": {"abrir_ms": "Lista < 2 s & <i>rápida</i>"}})
+        self.assertNotIn("<i>", title)
+        self.assertIn("&lt;i&gt;", title)
+
+    def test_pasos_de_la_plantilla_de_0140(self):
+        self.assertEqual(perf.STEP_COMMENT.match("# Paso 1: toca Pedidos").group(1), "toca Pedidos")
+        self.assertEqual(perf.STEP_COMMENT.match("# paso: toca Pedidos").group(1), "toca Pedidos")
+
+    def test_tramos_identicos_con_la_regla_del_flujo(self):
+        specs = [{"nombre": "lista", "desde": {"marca": "NAV a"}, "hasta": {"marca": "MARK c"}},
+                 {"nombre": "detalle", "desde": {"marca": "MARK b"}, "hasta": {"marca": "MARK d"}}]
+        rows = [{"fase": "antes", "flujo": "f", "metrica": "%s hilo_max_ms" % name, "corrida": str(run), "valor": value}
+                for run, value in ((1, 41), (2, 47)) for name in ("lista", "detalle")]
+        notes = perf.identical_segment_notes(rows, {"antes": {"corridas": 4, "flujos": {
+            "f": {"corridas": 2, "reglas": perf.CALC_RULES}, "g": {"corridas": 2}}}}, {"flujos": {"f": {"segmentos": specs}}})
+        self.assertNotIn("medidas con la regla anterior", notes[0])  # la regla de este flujo es la de ahora
+        self.assertIn("con la regla del borde (cada slice y cada frame cuentan solo donde empiezan)", notes[0])
+
+    def test_panel_sin_diff_y_riesgo_con_tilde(self):
+        item = {"id": "M1", "titulo": "x", "estado": "aplicada", "metrica": "abrir_ms",
+                "archivos": [{"ruta": "app/Lista.kt", "riesgo": "Crítico", "antes": "a"}]}
+        card = perf.improvement_card(self.dir, {"mejoras": [item]}, item, [], [], "")
+        self.assertIn("- **Código:** sin diff guardado", card)
+        self.assertIn("<summary>app/Lista.kt · riesgo critico</summary>", card)
+
+    def test_la_misma_ruta_en_dos_repos_tiene_su_propia_explicacion(self):
+        diff = "diff --git a/app/X.kt b/app/X.kt\nindex 1..2 100644\n--- a/app/X.kt\n+++ b/app/X.kt\n@@ -1 +1 @@\n-%s\n+%s\n"
+        write(self.dir / "cambios" / "M1.diff", diff % ("uno", "dos"))
+        write(self.dir / "cambios" / "M1-1.diff", diff % ("tres", "cuatro"))
+        item = {"id": "M1", "titulo": "x", "estado": "aplicada", "metrica": "abrir_ms",
+                "cambios": [{"diff": "cambios/M1.diff", "repo": "."}, {"diff": "cambios/M1-1.diff", "repo": "../otro"}],
+                "archivos": [{"ruta": "app/X.kt", "riesgo": "bajo", "antes": "en este repo"}]}
+        self.assertEqual(perf.missing_file_notes(self.dir, item), ["app/X.kt (../otro)"])
+        card = perf.improvement_card(self.dir, {"mejoras": [item]}, item, [], [], "")
+        self.assertIn("<summary>app/X.kt · riesgo bajo</summary>", card)
+        self.assertIn("<summary>app/X.kt (../otro) · riesgo sin evaluar</summary>", card)
+        self.assertIn("necesita \"repo\" (el mismo de `decidir --repo`)", card)
+        item["archivos"].append({"ruta": "app/X.kt", "repo": "../otro/", "riesgo": "alto", "antes": "en el otro repo"})
+        self.assertEqual(perf.missing_file_notes(self.dir, item), [])
+        card = perf.improvement_card(self.dir, {"mejoras": [item]}, item, [], [], "")
+        self.assertIn("<summary>app/X.kt (../otro) · riesgo alto</summary>", card)
+        self.assertLess(card.index("en este repo"), card.index("+dos"))
+        self.assertLess(card.index("+dos"), card.index("en el otro repo"))
+        self.assertLess(card.index("en el otro repo"), card.index("+cuatro"))
+        self.assertEqual(card.count('<details class="file">'), 2)  # ninguna explicación repetida aparte
+
+    def test_el_tope_por_archivo_nombra_el_repo(self):
+        long_text = " ".join(["palabra"] * (perf.FILE_FIELD_WORDS + 2))
+        plan = {"mejoras": [{"id": "M1", "archivos": [{"ruta": "app/X.kt", "antes": long_text},
+                                                      {"ruta": "app/X.kt", "repo": "../otro", "antes": long_text}]}]}
+        names = [name for name, _ in perf.text_cap_problems({}, plan)]
+        self.assertEqual(names, ["M1 · app/X.kt · antes", "M1 · app/X.kt (../otro) · antes"])
+
+    def test_dispositivo_de_cada_flujo_en_reanudar(self):
+        one = {"serial": "emulator-5554", "modelo": "Pixel Test"}
+        other = {"serial": "emulator-5556", "modelo": "Pixel Test"}
+        plan = {"flujos": {"a": {}, "b": {}, "c": {}}}
+        phases = {"antes": {"dispositivo": other, "flujos": {"a": {"corridas": 3, "dispositivo": one},
+                                                             "b": {"corridas": 3, "dispositivo": one}}}}
+        self.assertEqual(perf.baseline_devices(phases, plan), [("Pixel Test (emulator-5554)", [])])
+        phases["antes"]["flujos"]["c"] = {"corridas": 3, "dispositivo": other}
+        self.assertEqual(perf.baseline_devices(phases, plan), [("Pixel Test (emulator-5554)", ["a", "b"]),
+                                                               ("Pixel Test (emulator-5556)", ["c"])])
+        old = {"antes": {"dispositivo": one, "flujos": {"a": {"corridas": 3}}}}  # de antes de 0.15.1: el de la fase
+        self.assertEqual(perf.baseline_devices(old, plan), [("Pixel Test (emulator-5554)", [])])
+        self.assertEqual(perf.baseline_devices({}, plan), [])
+
+    def test_una_mejora_aplicada_no_se_manda_quitar_del_plan(self):
+        findings = "| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n| H1 | x | y | z | sin confirmar |\n"
+        plan = {"mejoras": [{"id": "M1", "hallazgo": "H1", "estado": "aplicada"},
+                            {"id": "M2", "hallazgo": "H1", "estado": "propuesta"}]}
+        self.assertEqual([ident for ident, _ in perf.unconfirmed_improvements(plan, findings)], ["M2"])
+
+    def test_la_linea_del_presupuesto_no_va_al_reporte(self):
+        folder = self.dir / "inv"
+        state = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        state = state.replace("## Pendientes\n\n", "## Pendientes\n\n- 80 % del presupuesto de pasos: queda el plan.\n"
+                                                     "- Falta medir el arranque en frío.\n", 1)
+        write(folder / "estado.md", state)
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {}}}))
+        write(folder / "metricas.csv", HEADER + rows("antes", "f", "abrir_ms", [100, 110, 105]))
+        self.ok("reporte", "--carpeta", folder, "--inicial")
+        md = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        self.assertIn("Falta medir el arranque en frío", md)
+        self.assertNotIn("presupuesto de pasos", md)
+
+    def test_ciclo_fuera_de_una_captura_da_el_paso(self):
+        result = subprocess.run(perf_argv(SCRIPT) + ["ciclo"], cwd=str(self.dir), capture_output=True,
+                                text=True, env=dict(ENV, HOME=str(self.dir)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("perf.py estado", result.stdout)
+        self.assertTrue(result.stdout.strip().splitlines()[-1].strip().startswith("cd "))
+
+
+class Fixes0151TriageTest(TriageBase):
+    """0.15.1: `capturar` sobre algo a medias, `estado` con varias investigaciones y fechas de otras investigaciones."""
+
+    def test_capturar_no_pisa_lo_que_quedo_a_medias(self):
+        dead = int(subprocess.run(["/bin/sh", "-c", "echo $$"], capture_output=True, text=True).stdout)
+        write(self.folder / ".en-curso.json", json.dumps({"comando": "capturar", "pid": dead, "fase": "antes"}))
+        result = self.run_in("capturar", "--plan", self.folder / "plan.json", "--fase", "antes", "--corridas", "3")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recuperar --carpeta %s" % self.rel, result.stdout + result.stderr)
+
+    def test_estado_con_varias_es_elige_uno(self):
+        other = self.root / "reports" / "perf" / "catalogo-lista" / "2026-03-09"
+        write(other / "plan.json", json.dumps(TRIAGE_PLAN))
+        write(other / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        out = self.ok_in("estado")
+        self.assertIn("Elige uno (una investigación por vez", out)
+
+    def test_otra_investigacion_con_solo_la_fecha_del_mismo_dia(self):
+        other = self.root / "reports" / "perf" / "otra" / "2026-03-09"
+        write(other / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {"recorrido": "true"}}, "mejoras": [
+            {"id": "M9", "titulo": "otra", "estado": "aplicada", "aplicada_en": "2026-11-05",
+             "cambios": [{"archivos": ["app/Lista.kt"]}]}]}))
+        write(other / "estado.md", "# otra\n")
+        lines = perf.other_applied(self.folder, self.root.resolve(), self.plan(), "2026-11-05T15:00:00")
+        self.assertTrue(any("M9" in line for line in lines), lines)
+        self.assertEqual(perf.other_applied(self.folder, self.root.resolve(), self.plan(), "2026-11-07T15:00:00"), [])
+
+    def test_otra_investigacion_sin_fecha_de_aplicada_cuenta(self):
+        # sin `aplicada_en` no se sabe si fue antes o después de la pausa: avisa de más, no de menos
+        other = self.root / "reports" / "perf" / "otra" / "2026-03-09"
+        write(other / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {"recorrido": "true"}}, "mejoras": [
+            {"id": "M9", "titulo": "otra", "estado": "aplicada", "cambios": [{"archivos": ["app/Lista.kt"]}]}]}))
+        write(other / "estado.md", "# otra\n")
+        lines = perf.other_applied(self.folder, self.root.resolve(), self.plan(), "2026-11-07T15:00:00")
+        self.assertTrue(any("M9" in line for line in lines), lines)
+
+    def test_reanudar_dice_en_que_dispositivo_se_midio(self):
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        phases["antes"]["dispositivo"] = {"serial": "emulator-5554", "modelo": "Pixel Test"}
+        write(self.folder / "fases.json", json.dumps(phases))
+        self.ok_in("pausar", "--carpeta", self.rel)
+        out = self.ok_in("reanudar", "--carpeta", self.rel)
+        self.assertIn("4. La línea base sirve: las mismas reglas de cálculo y el código del flujo sin cambios; se midió "
+                      "en Pixel Test (emulator-5554): mide en ese mismo dispositivo (`capturar` lo comprueba).", out)
+        self.assertNotIn("mismo dispositivo y tasa de refresco", out)
+
+
+class Fixes0151DeviceTest(DeviceBase):
+    """0.15.1, con el adb y el trace_processor falsos: la red sin instrumentar y las fases de dos dispositivos."""
+
+    def plan_with(self, **flow):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"].update(flow)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def test_sin_ninguna_llamada_http_no_manda_quitar_los_servicios(self):
+        self.plan_with(servicios=["GET items/{id}", "GET entregados"])
+        self.tp_outputs("\n".join(line for line in GOOD.splitlines() if "HTTP " not in line) + "\n")
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("pero la traza no trae ninguna llamada HTTP: la red no está instrumentada en el build instalado", out)
+        self.assertIn("No quites `servicios` del plan", out)
+        self.assertNotIn("quítalo de `servicios`", out)
+        self.assertNotIn("quítalos de `servicios`", out)
+
+    def test_las_fases_de_dos_dispositivos_no_se_comparan(self):
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["dispositivo"], {"serial": "emulator-5554", "modelo": "Pixel Test"})
+        self.assertEqual(phases["antes"]["flujos"]["home"]["dispositivo"]["serial"], "emulator-5554")  # por flujo
+        self.env["FAKE_DEVICES"] = "emulator-5556"  # tras una pausa, otro teléfono conectado
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("la línea base (antes) del flujo home se midió en Pixel Test (emulator-5554) y el dispositivo "
+                      "conectado es Pixel Test (emulator-5556)", result.stderr)
+        self.assertIn("--serial emulator-5554", result.stderr)
+        self.assertIn("--flujo home --fase antes --corridas 10 --rehacer", result.stderr)  # las del plan, no 5
+        self.assertNotIn("control", json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8")))
+        # rehacer antes en el teléfono nuevo no se detiene, y después el control ya se compara con ese
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1", "--rehacer")
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(phases["antes"]["flujos"]["home"]["dispositivo"]["serial"], "emulator-5556")
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+
+    def test_el_primer_antes_de_otro_flujo_en_otro_dispositivo_avisa(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["lista"] = dict(plan["flujos"]["home"])
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
+        self.env["FAKE_DEVICES"] = "emulator-5556"
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "lista", "--fase", "antes", "--corridas", "1")
+        self.assertIn("la línea base de los otros flujos se midió en Pixel Test (emulator-5554) y este flujo se mide en "
+                      "Pixel Test (emulator-5556)", out)
+        self.ok("capturar", "--plan", self.plan, "--flujo", "lista", "--fase", "control", "--corridas", "1")  # su línea base
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)  # la de home sigue en el otro
+        self.assertIn("se midió en Pixel Test (emulator-5554)", result.stderr)
+        phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+        self.assertEqual(perf.baseline_devices(phases, plan), [("Pixel Test (emulator-5554)", ["home"]),
+                                                               ("Pixel Test (emulator-5556)", ["lista"])])
+
+
+class Fixes0151HelpersTest(unittest.TestCase):
+    """0.15.1 por unidad: el veredicto de memoria, el diff del panel, el video y los presupuestos de pasos."""
+
+    def test_sin_evidencia_de_fuga_nombra_solo_lo_que_se_leyo(self):
+        cycles = [{"etiqueta": "inicio", "memoria": {"java_heap_mb": 20}}] + \
+            [{"etiqueta": "ciclo %d" % i, "memoria": {"java_heap_mb": 20}} for i in range(1, 6)]
+        verdict, why = perf.leak_verdict(cycles)
+        self.assertEqual(verdict, "sin evidencia de fuga")
+        self.assertNotIn("vuelven a su nivel", why)
+        self.assertIn("el heap de Java no crece en cada ciclo", why)
+        self.assertIn("sin datos de actividades ni de vistas entre ciclos", why)
+        full = [{"etiqueta": "ciclo %d" % i, "memoria": {"activities": 1, "views": 10, "java_heap_mb": 20}}
+                for i in range(6)]
+        self.assertEqual(perf.leak_verdict(full)[1], "las actividades y las vistas vuelven a su nivel entre ciclos; el "
+                                                     "heap de Java no crece en cada ciclo")
+
+    def test_diff_binario_sin_base85(self):
+        text = ("diff --git a/app/logo.png b/app/logo.png\nindex 1111111..2222222 100644\nGIT binary patch\nliteral 12\n"
+                "zcmV-K0Jfb5i0x\n\nliteral 0\nHcmV?d00001\n")
+        shown = perf.readable_diff(text, "cambios/M1.diff")
+        self.assertIn("diff --git a/app/logo.png b/app/logo.png", shown)
+        self.assertIn("# archivo binario: su contenido no se muestra (el diff completo está en `cambios/M1.diff`)", shown)
+        self.assertNotIn("zcmV", shown)
+        self.assertEqual(perf.readable_diff("@@ -1 +1 @@\n-a\n+b", "x"), "@@ -1 +1 @@\n-a\n+b")
+
+    def test_diff_con_tres_acentos_graves_no_cierra_el_bloque(self):
+        diff = "# README.md\n@@ -1,3 +1,3 @@\n ```kotlin\n-val ttid_ms = 1\n+val ttid_ms = 2\n ```\n después"
+        block = perf.fenced(diff, "diff")
+        self.assertEqual(block[0], "````diff")
+        self.assertEqual(block[-1], "````")
+        text = "Antes: ttid_ms.\n\n" + "\n".join(block) + "\n\nDespués: ttid_ms."
+        page = perf.md_to_html(text)
+        self.assertEqual(page.count('<pre class="diff">'), 1)
+        self.assertIn('<span class="ctx"> después</span>', page)
+        self.assertEqual([code for code, _ in perf.split_code(text)], [False, True, False])
+        human = perf.humanize_metrics(text, ["ttid_ms"], {})
+        self.assertIn("val ttid_ms = 2", human)  # dentro del diff no se toca
+        self.assertNotIn("Después: ttid_ms.", human)
+        self.assertEqual(perf.words_count(text), perf.words_count("Antes: ttid_ms.\n\nDespués: ttid_ms."))
+
+    def test_el_video_se_detiene_solo_con_su_archivo(self):
+        pattern = re.search(r"'(.+)'", perf.VIDEO_STOP).group(1)
+        self.assertIn("-f", perf.VIDEO_STOP.split())
+        self.assertTrue(re.search(pattern, "screenrecord --time-limit 180 /sdcard/hbperf-prueba.mp4"))
+        self.assertFalse(re.search(pattern, "screenrecord /sdcard/mi-grabacion.mp4"))
+        self.assertFalse(re.search(pattern, "sh -c " + perf.VIDEO_STOP))  # ni el propio shell que corre pkill
+
+        class Process:
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        class FakeAdb:
+            def __init__(self):
+                self.calls = []
+
+            def shell(self, command, timeout=None):
+                self.calls.append(command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            def run(self, *args, timeout=None):
+                return subprocess.CompletedProcess(args, 1, "", "")
+
+        adb = FakeAdb()
+        os.environ["HB_PERF_ESPERA"], saved = "0", os.environ.get("HB_PERF_ESPERA")
+        try:
+            perf.stop_video(adb, Process(), Path(os.devnull))
+        finally:
+            os.environ.pop("HB_PERF_ESPERA") if saved is None else os.environ.update(HB_PERF_ESPERA=saved)
+        self.assertEqual(adb.calls[0], perf.VIDEO_STOP)
+
+    def test_mismo_dispositivo(self):
+        self.assertTrue(perf.same_device({"serial": "a", "modelo": "X"}, {"serial": "a", "modelo": "X"}))
+        self.assertFalse(perf.same_device({"serial": "a", "modelo": "X"}, {"serial": "b", "modelo": "X"}))
+        self.assertTrue(perf.same_device({"serial": None, "modelo": "X"}, {"serial": "b", "modelo": "X"}))
+        self.assertFalse(perf.same_device({"modelo": "X"}, {"serial": "b", "modelo": "Y"}))
+        self.assertEqual(perf.device_label({"serial": "b", "modelo": None}), "b")
+
+    def test_presupuestos_de_pasos_iguales_en_todas_las_referencias(self):
+        refs = SKILL / "references"
+        models = (refs / "modelos.md").read_text(encoding="utf-8")
+        table = models.split("## Presupuesto de pasos")[1].split("\n## ")[0]
+        budget = {line.split("|")[1].strip(): (line.split("|")[2].strip(), line.split("|")[3].strip())
+                  for line in table.splitlines() if re.match(r"\| \d · ", line)}
+        self.assertEqual(budget["1 · Ficha y plan"], ("15", "25"))
+        self.assertEqual(budget["2 · Diagnóstico"], ("20", "25 (30 con trazas pesadas o varios flujos)"))
+        self.assertEqual(budget["3 · Mejora"], ("30", "30"))
+        self.assertIn("| 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 (25 en flujos largos) |", models)
+        self.assertIn("| Alto | 20 (25 en flujos largos; 30 con trazas pesadas o varios flujos) |", models)
+        self.assertEqual(models.count("**Flujo largo:**"), 1)
+        ficha = (refs / "ficha.md").read_text(encoding="utf-8")
+        definition = re.search(r"\*\*Flujo largo:\*\* (.+?)\. Lo demás", models).group(1)
+        self.assertIn("**Presupuesto y tareas (sesión 1).** 15 pasos (25 en un flujo largo: %s;" % definition, ficha)
+        self.assertIn("Presupuesto: 15 pasos, o 25 en un flujo largo ([modelos.md](modelos.md) · Presupuesto de pasos)",
+                      ficha)
+        self.assertIn("**Presupuesto y tareas (sesión 2).** 20 pasos en un flujo corto, 25 en uno largo y 30 con trazas "
+                      "pesadas o varios flujos", (refs / "diagnostico.md").read_text(encoding="utf-8"))
+        self.assertIn("**Presupuesto y tareas (sesión 3).** 30 pasos", (refs / "mejoras.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
