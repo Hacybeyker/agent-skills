@@ -18,7 +18,7 @@ Skills para agentes de IA (Claude Code, Copilot, Gemini en Android Studio, Junie
 | Enlazar las skills en esta máquina | `./install.sh` |
 | Quitar los enlaces | `./install.sh --uninstall` |
 | Probar el contrato de `install.sh` (en un `HOME` temporal) | `scripts/test_install.sh` |
-| Correr los tests de los scripts | `python3 -m unittest discover -s tests` |
+| Correr los tests de los scripts | `scripts/run_tests.py` (en paralelo, una clase por proceso; `python3 -m unittest discover -s tests` los corre en serie) |
 | Comprobar que las skills cambiadas suben su versión | `scripts/check_version_bump.py` (compara con `origin/main`) |
 
 ## DoD
@@ -28,7 +28,7 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 1. `for skill in skills/*/; do agentskills validate "$skill"; done`
 2. `python3 scripts/check_conventions.py`
 3. `scripts/check_version_bump.py` (compara con `origin/main`: haz `git fetch` antes)
-4. `python3 -m unittest discover -s tests`
+4. `scripts/run_tests.py`
 5. `scripts/test_install.sh` (contrato de `install.sh`: es la interfaz pública que usan los instaladores externos)
 6. `shellcheck install.sh scripts/test_install.sh`
 
