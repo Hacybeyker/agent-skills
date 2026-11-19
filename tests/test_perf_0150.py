@@ -851,6 +851,36 @@ class MeasurementHelpersTest(unittest.TestCase):
 
 
 
+# ── P · Cierre ───────────────────────────────────────────────────────────────
+class DodFormatsTest(PerfBase):
+    """P1: `## DoD` con viñetas que nombran el comando, bloques de código y `cd ../repo && …`; lo que no se puede usar se
+    cita con su motivo."""
+
+    def test_formatos_y_motivos(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## DoD\n\n- Tests unitarios: `./gradlew :app:testDebugUnitTest`\n"
+                                      "1. **Compilar**: `./gradlew :app:assembleProfiling`\n"
+                                      "- Módulos de otros repos: `cd ../modulo-pagos && ./gradlew test`\n"
+                                      "- Y el del módulo: `./gradlew :<módulo>:test`\n- Revisa el diff a mano\n\n"
+                                      "```bash\n./gradlew lint\n```\n\n## Git\n\n- x\n")
+        commands, skipped = perf.dod_entries(self.dir)
+        root = perf.q(self.dir)
+        self.assertEqual(commands, ["cd %s && ./gradlew :app:testDebugUnitTest" % root,
+                                    "cd %s && ./gradlew :app:assembleProfiling" % root,
+                                    "cd %s && cd ../modulo-pagos && ./gradlew test" % root,
+                                    "cd %s && ./gradlew lint" % root])
+        reasons = dict(skipped)
+        self.assertIn("tiene un marcador sin resolver (<módulo>)", reasons["- Y el del módulo: `./gradlew :<módulo>:test`"])
+        self.assertIn("no tiene un comando entre acentos graves", reasons["- Revisa el diff a mano"])
+        self.assertIn("\"- Y el del módulo: `./gradlew :<módulo>:test`\" (tiene un marcador sin resolver",
+                      perf.dod_skipped_text(self.dir))
+
+    def test_el_formato_de_siempre_sigue(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## DoD\n\n1. `true`\n2. `./gradlew test`\n")
+        self.assertEqual(perf.dod_commands(self.dir), ["cd %s && true" % perf.q(self.dir),
+                                                       "cd %s && ./gradlew test" % perf.q(self.dir)])
+
+
+
 # ── E, F, H: costo, velocidad del reporte y textos ───────────────────────────
 class CostWarningTest(PerfBase):
     """F1: `consumo` compara cada sesión con la referencia de modelos.md según el tipo de sesión y el tamaño del
@@ -921,6 +951,55 @@ class ReportSpeedTest(DeviceBase):
         self.assertEqual(self.calls(), before + 1)
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         self.assertEqual(self.calls(), before + 1)  # quedó en caché
+
+
+class DodSafetyTest(PerfBase):
+    """P1: del DoD solo se corre el código con que empieza una viñeta o el de "Etiqueta: `comando`"; lo que se prohíbe,
+    se condiciona, integra o publica no se corre y se cita con su motivo."""
+
+    def test_no_corre_lo_prohibido_ni_lo_condicional(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## DoD\n\n- No publiques: `./gradlew publish` solo lo hace el CI\n"
+                                      "- Nunca `gh pr merge --squash` sin aprobación\n"
+                                      "- Si cambia la API, `./gradlew apiDump`\n"
+                                      "- Solo lo corre el CI: `./gradlew connectedCheck`\n"
+                                      "- Mensajes en `Conventional Commits`\n"
+                                      "- `git merge main`\n- `adb uninstall com.example.app`\n"
+                                      "- Lint y tests: `./gradlew lint` y `./gradlew test`\n"
+                                      "1. Tests:\n\n    ```bash\n    $ ./gradlew check\n    $ANDROID_HOME/platform-tools/adb devices\n"
+                                      "    ```\n")
+        commands, skipped = perf.dod_entries(self.dir)
+        root = perf.q(self.dir)
+        self.assertEqual(commands, ["cd %s && ./gradlew lint" % root, "cd %s && ./gradlew check" % root,
+                                    "cd %s && $ANDROID_HOME/platform-tools/adb devices" % root])
+        reasons = dict(skipped)
+        self.assertIn("lo prohíbe o lo pone como condición",
+                      reasons["- No publiques: `./gradlew publish` solo lo hace el CI"])
+        self.assertIn("no tiene un comando", reasons["- Si cambia la API, `./gradlew apiDump`"])  # no se corre
+        self.assertIn("lo prohíbe o lo pone como condición", reasons["- Solo lo corre el CI: `./gradlew connectedCheck`"])
+        self.assertIn("no tiene un comando", reasons["- Nunca `gh pr merge --squash` sin aprobación"])
+        self.assertIn("no tiene un comando", reasons["- Mensajes en `Conventional Commits`"])
+        self.assertIn("integra o publica", reasons["- `git merge main`"])
+        self.assertIn("integra o publica", reasons["- `adb uninstall com.example.app`"])
+        self.assertNotIn("1. Tests:", reasons)  # presenta el bloque que sigue
+
+    def test_no_pierde_comandos_validos_ni_corre_lo_condicional_en_ingles(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## Definition of Done\n\n"
+                                      "- Tests unitarios (sin emulador): `./gradlew testDebugUnitTest`\n"
+                                      "- Lint (no bloquea): `./gradlew lint`\n"
+                                      "- Unit tests (no device needed): `./gradlew test`\n"
+                                      "- Only on CI: `./gradlew connectedAndroidTest`\n"
+                                      "- If the public API changed: `./gradlew apiDump`\n"
+                                      "- Nunca en local:\n\n  ```bash\n  ./gradlew connectedCheck\n  ```\n"
+                                      "- Después de `./gradlew test`, `git fetch`: `./gradlew check`\n")
+        commands, skipped = perf.dod_entries(self.dir)
+        root = perf.q(self.dir)
+        self.assertEqual(commands, ["cd %s && ./gradlew testDebugUnitTest" % root, "cd %s && ./gradlew lint" % root,
+                                    "cd %s && ./gradlew test" % root])
+        reasons = dict(skipped)
+        self.assertIn("lo prohíbe o lo pone como condición", reasons["- Only on CI: `./gradlew connectedAndroidTest`"])
+        self.assertIn("lo prohíbe o lo pone como condición", reasons["- If the public API changed: `./gradlew apiDump`"])
+        self.assertIn("que lo prohíbe o lo pone como condición", reasons["./gradlew connectedCheck"])
+        self.assertFalse(any("más de un comando" in why for why in reasons.values()))
 
 
 if __name__ == "__main__":

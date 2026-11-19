@@ -8173,48 +8173,120 @@ DOD_LOG = "dod-cierre.log"
 
 
 def dod_commands(root):
-    """Los comandos de `## DoD` del AGENTS.md del proyecto, en orden y listos para pegar: el primer código en línea de
-    cada viñeta o ítem numerado y las líneas de un bloque de código. Los que no empiezan con `cd ` van con cd a la raíz.
-    [] si no hay AGENTS.md o no tiene la sección."""
+    """Los comandos de `## DoD` del AGENTS.md del proyecto, en orden y listos para pegar (dod_entries)."""
+    return dod_entries(root)[0]
+
+
+DOD_COMMAND_LIKE = re.compile(r"^(?:cd\s|\./|\.\./|[A-Za-z_][\w.+-]*\s+\S)")
+# Una viñeta que prohíbe o condiciona lo que cita ("No publiques: `…`", "Si cambia la API, `…`"): no es un paso del DoD.
+DOD_NOT_A_STEP = re.compile(r"^\W*(?:no|nunca|jam[aá]s|evita\w*|prohib\w*|s[oó]lo|[uú]nicamente|si|cuando|salvo|"
+                            r"excepto|not?|never|don'?t|do\s+not|only|if|when|unless|except)\b", re.I)
+DOD_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def dod_entries(root):
+    """([comandos], [(línea, motivo)]) de `## DoD` del AGENTS.md del proyecto (P1). Un comando es: el código en línea con
+    el que empieza una viñeta o un ítem numerado, el primero de la viñeta que parece un comando ("Tests: ./gradlew test"
+    entre acentos graves), o una línea de un bloque de código. Todos van con cd a la raíz (también `cd ../repo && …`, que es relativo
+    a ella). Las líneas que no se pueden usar vuelven con su motivo, para citarlas en el aviso: un marcador sin resolver
+    (<módulo>), algo que descarta o publica cambios, o una viñeta sin comando. ([], []) sin AGENTS.md o sin la sección."""
     text = read_agents(root)
     if text is None:
-        return []
+        return [], []
     lines = text.splitlines()
-    start = next((i for i, line in enumerate(lines) if DOD_HEADING.match(line)), None)
-    if start is None:
-        return []
-    level = len(re.match(r"^﻿?[ \t]{0,3}(#+)", lines[start]).group(1))
-    out, fence = [], None
-    for line in lines[start + 1:]:
+    start, fence = None, None
+    for index, line in enumerate(lines):
         mark = FENCE.match(line)
+        if fence is None and mark:
+            fence = mark.group(1)
+            continue
+        if fence is not None:
+            if mark and mark.group(1)[0] == fence[0]:
+                fence = None
+            continue
+        if DOD_HEADING.match(line):
+            start = index
+            break
+    if start is None:
+        return [], []
+    level = len(re.match(r"^\ufeff?[ \t]{0,3}(#+)", lines[start]).group(1))
+    found, skipped, fence, pending, skip_block = [], [], None, None, None
+    for line in lines[start + 1:]:
+        mark = DOD_FENCE.match(line)  # también un bloque sangrado dentro de un ítem
         if fence is None and not mark:
             heading = ANY_HEADING.match(line)
             if heading and len(heading.group(1)) <= level:
                 break
-            item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*)?`([^`]+)`", line)  # la viñeta empieza con el comando
-            if item:
-                out.append(item.group(1).strip())
+            item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", line)
+            if not item:
+                continue
+            if pending:
+                skipped.append(pending)
+                pending = None
+            body = item.group(1)
+            lead = re.match(r"^(?:\*\*)?`([^`]+)`", body)
+            # fuera del código con que empieza la viñeta, solo la forma "Etiqueta: `comando`"
+            labeled = re.match(r"^([^`]*?):\s*(?:\*\*)?`([^`]+)`", body) if not lead else None
+            command = lead.group(1) if lead else labeled.group(2) if labeled and DOD_COMMAND_LIKE.match(
+                labeled.group(2).strip()) else None
+            # la etiqueta que empieza prohibiendo o condicionando ("No publiques:", "Si cambia la API:", "Only on CI:")
+            if labeled and command and DOD_NOT_A_STEP.search(labeled.group(1)):
+                skipped.append((line.strip(), "lo prohíbe o lo pone como condición, no es un paso del DoD: no lo corro"))
+                continue
+            if command:
+                found.append((command.strip(), line.strip()))
+            elif body.strip():
+                # sin comando: puede presentar el bloque de código que sigue ("1. Tests:")
+                pending = (line.strip(), "no tiene un comando entre acentos graves al principio ni con la forma "
+                                         "\"Etiqueta: `comando`\"; si es un paso, hazlo a mano")
         elif fence is None:
             fence = mark.group(1)
+            blocked = None
+            if pending and pending[0].rstrip("*_ ").endswith(":"):
+                # la viñeta anterior ("1. Tests:") presenta este bloque; si prohíbe o condiciona, el bloque no se corre
+                label = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?", "", pending[0])
+                blocked = pending[0] if DOD_NOT_A_STEP.search(label) else None
+                pending = None
+            skip_block = blocked
         elif mark and mark.group(1)[0] == fence[0]:
-            fence = None
+            fence, skip_block = None, None
+        elif line.strip() and not line.lstrip().startswith("#") and skip_block:
+            skipped.append((line.strip(), "el bloque lo presenta \"%s\", que lo prohíbe o lo pone como condición: no "
+                                          "lo corro" % skip_block))
         elif line.strip() and not line.lstrip().startswith("#"):
-            text = line.strip().lstrip("$ ").strip()
-            if out and out[-1].endswith("\\"):  # una línea que sigue a la anterior
-                out[-1] = out[-1][:-1].rstrip() + " " + text
+            text_ = re.sub(r"^\$\s+", "", line.strip()).strip()
+            if found and found[-1][0].endswith("\\"):  # una línea que sigue a la anterior
+                found[-1] = (found[-1][0][:-1].rstrip() + " " + text_, found[-1][1])
             else:
-                out.append(text)
+                found.append((text_, line.strip()))
+    if pending:
+        skipped.append(pending)
     commands = []
-    for command in out:
-        if command.startswith("cd ") or not command:
-            commands.append(command)
+    for command, line in found:
+        if not command:
+            continue
+        if DISCARDING.search(command):
+            skipped.append((line, "descarta, integra o publica cambios (git checkout, reset, push, merge, publish…): "
+                                  "un DoD no lo hace"))
+        elif PLACEHOLDER_ARG.search(command):
+            skipped.append((line, "tiene un marcador sin resolver (%s): escribe el valor real"
+                            % PLACEHOLDER_ARG.search(command).group(0)))
         else:
             commands.append("cd %s && %s" % (q(root), command))
-    return [command for command in dict.fromkeys(commands) if command and not DISCARDING.search(command)]
+    return list(dict.fromkeys(commands)), skipped
+
+
+def dod_skipped_text(root):
+    """P1: las líneas de `## DoD` que no se pueden correr, citadas con su motivo ('' si ninguna)."""
+    skipped = dod_entries(root)[1]
+    text = "; ".join("\"%s\" (%s)" % (line if len(line) <= 120 else line[:117] + "…", why) for line, why in skipped[:6])
+    return text + ("; y %d más" % (len(skipped) - 6) if len(skipped) > 6 else "")
 
 
 # Un DoD no descarta ni publica nada: si una línea de `## DoD` lo hace, no se corre.
-DISCARDING = re.compile(r"\bgit\s+(?:checkout|restore|reset|clean|push|commit|rebase|stash)\b|\brm\s+-[a-z]*[rf]", re.I)
+DISCARDING = re.compile(r"\bgit\s+(?:checkout|restore|reset|clean|push|commit|rebase|stash|merge|tag|pull)\b|"
+                        r"\brm\s+-[a-z]*[rf]|\bgh\s+(?:pr\s+merge|release)\b|\bpublish\w*\b|\badb\s+(?:-s\s+\S+\s+)?uninstall\b|"
+                        r"\b(?:npm|pnpm|yarn)\s+publish\b", re.I)
 
 
 PLACEHOLDER_ARG = re.compile(r"<[^<>\s][^<>]*>")
@@ -8226,7 +8298,7 @@ def dod_sets(root, tops=()):
     AGENTS.md con `## DoD`. Los comandos con marcadores (<módulo>) no se pueden correr: quedan fuera."""
     out = []
     for top in [pathlib.Path(root)] + [pathlib.Path(t) for t in tops if pathlib.Path(t).resolve() != pathlib.Path(root).resolve()]:
-        commands = [command for command in dod_commands(top) if not PLACEHOLDER_ARG.search(command)]
+        commands = dod_commands(top)
         if commands:
             out.append((top, commands))
     return out
@@ -8256,10 +8328,18 @@ def run_dod(folder, root, tops=()):
     if not sets:
         record.update(dod="sin DoD", dod_fecha=stamp)
         save_close(folder, record)
-        print("· AGENTS.md no tiene `## DoD` con comandos que se puedan correr (o solo tiene marcadores como <módulo>): "
-              "corre a mano los tests del módulo que tocaron los cambios temporales y la compilación de la variante "
-              "medida. `siguiente` no lo puede comprobar.")
+        skipped = dod_skipped_text(root)
+        text = read_agents(root)
+        print("· %s: corre a mano los tests del módulo que tocaron los cambios temporales y la compilación de la variante "
+              "medida. `siguiente` no lo puede comprobar." % (
+                  "`## DoD` de AGENTS.md no tiene ninguna línea que se pueda correr: %s" % skipped if skipped else
+                  "AGENTS.md no tiene `## DoD`" if text is None or not has_dod(text) else
+                  "`## DoD` de AGENTS.md no tiene comandos (una viñeta con el comando entre acentos graves, o un bloque "
+                  "de código)"))
         return True
+    skipped = dod_skipped_text(root)
+    if skipped:
+        print("· No corro estas líneas de `## DoD`: %s." % skipped)
     log = folder / "logs" / DOD_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
     failed = []
