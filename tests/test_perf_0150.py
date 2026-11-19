@@ -656,5 +656,67 @@ class InterruptedTest(TriageBase):
 
 
 
+# ── C · Medición ─────────────────────────────────────────────────────────────
+MS = 1_000_000
+SEGMENTS = [{"nombre": "abrir", "desde": {"marca": "MARK tab"}, "hasta": {"marca": "MARK lista_visible"}},
+            {"nombre": "lista", "desde": {"marca": "MARK lista_visible"}, "hasta": {"marca": "MARK detalle"}}]
+
+
+def section(ts, name, dur=0):
+    return ("seccion", ts * MS, dur * MS, 0, name)
+
+
+def slice_(ts, dur):
+    return ("hilo", ts * MS, dur * MS, 0, "Choreographer#doFrame")
+
+
+class BorderRuleTest(unittest.TestCase):
+    """C1 y C2: cada slice y cada frame cuentan solo donde empiezan; los avisos distinguen un slice que cruza el borde de
+    tramos que se solapan de verdad, y dan el cambio exacto del plan."""
+
+    markers = sorted([section(0, "MARK tab"), section(100, "MARK lista_visible"), section(300, "MARK detalle")],
+                     key=lambda r: r[1])
+
+    def test_un_slice_que_cruza_el_borde_cuenta_solo_donde_empieza(self):
+        main = [slice_(80, 143), slice_(150, 20)]  # el largo empieza en "abrir" y termina dentro de "lista"
+        frames = [("frame", 90 * MS, 16 * MS, 0, "None"), ("frame", 110 * MS, 16 * MS, 0, "None")]
+        values = {name: value for name, value, _, _ in perf.segment_metrics(self.markers, frames, main, SEGMENTS)[0]}
+        self.assertEqual(values["abrir hilo_max_ms"], 143)
+        self.assertEqual(values["lista hilo_max_ms"], 20)
+        self.assertEqual((values["abrir frames"], values["lista frames"]), (1, 1))
+        warnings = perf.segment_overlap_warnings(self.markers, SEGMENTS, sorted(main, key=lambda r: r[1]))
+        self.assertTrue(any("cruza el borde entre 'abrir' y 'lista'" in line and "no un solapamiento" in line
+                            and "cuenta solo en 'abrir'" in line for line in warnings), warnings)
+
+    def test_tramos_que_se_solapan_de_verdad_dicen_cual_cubre_a_cual_y_el_cambio(self):
+        markers = sorted(self.markers + [section(250, "MARK lista_visible")], key=lambda r: r[1])
+        warnings = perf.segment_overlap_warnings(markers, SEGMENTS)
+        text = " ".join(warnings)
+        self.assertIn("se solapan de verdad", text)
+        self.assertIn("'abrir' termina 150 ms después de que empieza 'lista'", text)
+        self.assertIn("agrega \"cual\": \"primera\" en segmentos[0].hasta (la marca 'MARK lista_visible' sale 2 veces",
+                      text)
+
+    def test_metricas_identicas_segun_la_regla_de_la_fase(self):
+        rows = []
+        for run, value in ((1, 143), (2, 147), (3, 145)):
+            for segment in ("abrir", "lista"):
+                rows.append({"fase": "antes", "flujo": "f", "metrica": "%s hilo_max_ms" % segment, "corrida": str(run),
+                             "valor": value})
+        plan = {"flujos": {"f": {"segmentos": SEGMENTS}}}
+        old = perf.identical_segment_notes(rows, {"antes": {"corridas": 3}}, plan)
+        self.assertIn("puede ser el mismo slice que cruza el borde. `recalcular` aplica la regla del borde", old[0])
+        new = perf.identical_segment_notes(rows, {"antes": {"corridas": 3, "reglas": perf.CALC_RULES}}, plan)
+        self.assertIn("se solapan de verdad", new[0])
+        self.assertIn("cambia segmentos[0].hasta", new[0]) if "cual" in json.dumps(SEGMENTS[0]["hasta"]) else \
+            self.assertIn("agrega \"cual\": \"primera\" en segmentos[0].hasta", new[0])
+
+    def test_fases_con_reglas_distintas_piden_recalcular(self):
+        plan = {"flujos": {"f": {"segmentos": SEGMENTS}}}
+        phases = {"antes": {"corridas": 3}, "control": {"corridas": 3, "reglas": perf.CALC_RULES}}
+        self.assertEqual(perf.mixed_rules(phases, plan), (["antes"], ["control"]))
+        self.assertIsNone(perf.mixed_rules({"antes": {"corridas": 3}}, plan))
+
+
 if __name__ == "__main__":
     unittest.main()

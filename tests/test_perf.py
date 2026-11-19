@@ -488,7 +488,16 @@ elif cmd.startswith("[ -d /proc/"):
     if os.environ.get("FAKE_PERFETTO_VIVA"):  # 0.15.0: una traza que siguió grabando en el dispositivo
         print("viva")
 elif cmd.startswith("dumpsys meminfo"):
-    print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
+    # 0.15.0: FAKE_MEMINFO cambia la salida; con FAKE_MEMINFO_CRECE, las actividades suben en cada llamada (una fuga)
+    if os.environ.get("FAKE_MEMINFO_CRECE"):
+        counter = os.environ["FAKE_LOG"] + ".meminfo"
+        n = int(open(counter).read()) if os.path.exists(counter) else 0
+        open(counter, "w").write(str(n + 1))
+        print("  Java Heap:  %d\n  TOTAL PSS:  %d   TOTAL RSS: 1\n  Views:  %d\n  Activities:  %d"
+              % (2048 + 512 * n, 51200 + 1024 * n, 10 + 5 * n, 1 + n))
+    else:
+        print(os.environ.get("FAKE_MEMINFO", "  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n"
+                                             "  Activities:  1"))
 elif cmd.startswith("uiautomator dump") and os.environ.get("FAKE_PULL_FALLA"):
     sys.stderr.write("ERROR: could not get idle state.\n")  # uiautomator falla así, con código 0
 elif cmd.startswith('echo "always_finish_activities='):
@@ -2305,13 +2314,14 @@ class SegmentsTest(PerfBase):
         without, _ = self.metrics(self.trace(), flow)
         self.assertEqual({k: v for k, v in with_segments.items() if not k.startswith("detalle ")}, without)
 
-    def test_cuenta_lo_que_se_solapa_con_el_tramo_aunque_empiece_antes_y_lo_que_queda_fuera_de_la_ventana(self):
+    def test_cuenta_solo_lo_que_empieza_en_el_tramo_y_lo_que_queda_fuera_de_la_ventana(self):
+        # 0.15.0 · C1 (regla del borde): un slice cuenta solo en el tramo donde empieza
         rows = self.trace() + [("hilo", 1080 * MS, 90 * MS, 0, "deliverInputEvent"),  # empezó antes del NAV y sigue
                                ("hilo", 2000 * MS, 300 * MS, 0, "tarde")]  # después del tramo: no cuenta
         flow = self.flow()
         flow["ventana"] = {"desde": {"marca": "NAV lista"}, "hasta": {"marca": "NAV detalle"}}  # el tramo queda fuera
         m, _ = self.metrics(rows, flow)
-        self.assertEqual(m["detalle hilo_max_ms"][1], 90)
+        self.assertNotEqual(m["detalle hilo_max_ms"][1], 90)  # el de 1080 ms empezó antes del tramo: no cuenta aquí
         self.assertEqual(m["hilo_max_ms"][1], 90)  # la ventana sigue contando por inicio: el slice de 1080 ms entra
         flow["segmentos"][0]["margen_ms"] = 800
         self.assertEqual(self.metrics(rows, flow)[0]["detalle hilo_max_ms"][1], 300)
@@ -2397,7 +2407,8 @@ class SegmentsCaptureTest(DeviceBase):
         self.assertIn("corrida 2 de 2", out)
         data = self.read_csv_at(self.plan.parent / "metricas.csv")
         values = sorted((k[2], v["valor"], v["familia"]) for k, v in data.items() if k[1] == "detalle hilo_max_ms")
-        self.assertEqual(values, [("1", "30", "app"), ("2", "30", "app")])
+        # 0.15.0 · C1: el slice del hilo principal empieza en 0, antes del tramo (5 ms): cuenta donde empieza, no aquí
+        self.assertEqual(values, [("1", "0", "app"), ("2", "0", "app")])
         self.assertEqual(len([k for k in data if k[1] == "detalle frame_p90_ms"]), 2)
         self.assertIn("detalle hilo_max_ms", out[out.index("| Fase |"):])  # en el resumen compacto de la fase
 

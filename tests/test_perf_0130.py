@@ -660,8 +660,10 @@ class SegmentOverlapTest(unittest.TestCase):
         lines = perf.segment_overlap_warnings(markers, self.SEGMENTS)
         self.assertTrue(any("'MARK lista_visible') sale 2 veces" in line and '"cual": "primera" en segmentos[0].hasta'
                             in line and "recalcular" in line for line in lines), lines)
-        self.assertIn("el tramo 'abrir' contiene al tramo 'detalle': sus métricas de hilo y frames incluyen las del otro",
-                      lines)
+        # 0.15.0 · C2: dice que se solapan de verdad y el cambio exacto del plan
+        self.assertTrue(any(line.startswith("el tramo 'abrir' contiene al tramo 'detalle' (se solapan de verdad): sus "
+                                            "métricas de hilo y frames incluyen las del otro. Para corregirlo, ")
+                            for line in lines), lines)
         segments = [dict(self.SEGMENTS[0], hasta={"marca": "MARK lista_visible", "cual": "primera"}), self.SEGMENTS[1]]
         self.assertEqual(perf.segment_overlap_warnings(markers, segments), [])
 

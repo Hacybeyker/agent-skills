@@ -1457,13 +1457,37 @@ def resolve_window(markers, spec):
     return start, end + int(spec.get("margen_ms", 0)) * 1_000_000
 
 
+BORDER_SNAP_NS = 5_000_000  # una marca de borde (beginSection + endSection) dura microsegundos, no milisegundos
+
+
+def segment_windows(markers, specs):
+    """C1: [(spec, (inicio, fin) o None)] de los tramos. Cuando un tramo termina en la misma marca con la que empieza el
+    siguiente, `hasta` toma el fin de la marca y `desde` su inicio: se solaparían los microsegundos que dura la marca. Ese
+    borde es un solo instante de corte (el inicio del siguiente), así nada cuenta en los dos tramos."""
+    specs = [spec for spec in specs or [] if isinstance(spec, dict)]
+    bounds = [resolve_window(markers, spec) for spec in specs]
+    for i, (spec, window) in enumerate(zip(specs, bounds)):
+        if not window or int(spec.get("margen_ms", 0) or 0):
+            continue
+        end_mark = (spec.get("hasta") or {}).get("marca")
+        for j, (other, later) in enumerate(zip(specs, bounds)):
+            if j == i or not later or (other.get("desde") or {}).get("marca") != end_mark:
+                continue
+            if 0 < window[1] - later[0] <= BORDER_SNAP_NS and window[0] < later[0]:
+                bounds[i] = (window[0], later[0])
+    return list(zip(specs, bounds))
+
+
 def segment_metrics(markers, frames, main, specs):
     """Métricas por tramo (segmentos del flujo): el slice más largo del hilo principal, el P90 de frame y el jank de la
-    app entre dos marcas, con los slices y los frames que se solapan con el tramo. Así un pico de una sola pantalla no
-    se diluye en la ventana del flujo. `frames` y `main` son los de toda la traza. Devuelve (métricas, tramos sin marcas)."""
+    app entre dos marcas. Así un pico de una sola pantalla no se diluye en la ventana del flujo. `frames` y `main` son
+    los de toda la traza. Devuelve (métricas, tramos sin marcas).
+
+    Regla del borde (0.15.0 · C1): cada slice del hilo principal y cada frame cuentan en un solo tramo, aquel donde
+    empiezan ([inicio, fin) del tramo). Antes contaban en todos los tramos con los que se solapaban, y un slice largo que
+    cruzaba el borde entre dos tramos contiguos salía igual en los dos. `recalcular` la aplica a las trazas guardadas."""
     out, missing = [], []
-    for spec in specs:
-        bounds = resolve_window(markers, spec)
+    for spec, bounds in segment_windows(markers, specs):
         if not bounds:
             missing.append(spec["nombre"])
             continue
@@ -1471,9 +1495,9 @@ def segment_metrics(markers, frames, main, specs):
             continue
         start, end = bounds
         name = spec["nombre"]
-        top = [r for r in main if r[3] == 0 and r[2] >= MAIN_SLICE_MIN_NS and r[1] <= end and r[1] + r[2] >= start]
+        top = [r for r in main if r[3] == 0 and r[2] >= MAIN_SLICE_MIN_NS and start <= r[1] < end]
         out.append(("%s hilo_max_ms" % name, max((r[2] for r in top), default=0) / 1e6, "ms", "app"))
-        inside = [f for f in frames if f[1] <= end and f[1] + max(f[2], 0) >= start]
+        inside = [f for f in frames if start <= f[1] < end]
         if not inside:
             continue
         out += [("%s frames" % name, len(inside), "frames", "info"),
@@ -1652,7 +1676,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
         hit = next((s[4] for s in sections if fnmatch.fnmatchcase(s[4], pattern)), None)
         if hit:
             return [], "apareció '%s'" % hit, info
-    if sdk >= 31 and not frames:
+    if sdk >= 31 and not frames and not is_repetition(flow_spec):
         return [], "no hay frames de la app%s" % (" en la ventana del flujo" if window else " (¿estaba visible?)"), info
     out = []
     if window:
@@ -1706,7 +1730,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     # 0.13.0 (C2): el mismo servicio más de una vez en un mismo tramo, al final para no cambiar el orden de lo anterior
     repeated, info["repetidas_tramo"] = repeated_metrics(markers, sections, specs, flow_spec.get("repetidas_ventana_s"))
     out += repeated
-    info["tramos_avisos"] = segment_overlap_warnings(markers, specs)  # C1
+    info["tramos_avisos"] = segment_overlap_warnings(markers, specs, all_main)  # C1 y C2
     info["faltantes"] = missing + ["tramo %s" % name for name in missing_segments] \
         + (["ventana"] if info.get("ventana_faltante") else [])
     return with_families(out, flow_spec.get("familias")), None, info
@@ -1848,8 +1872,8 @@ def parse_meminfo(text):
     out = []
     for name, pattern, unit in (("pss_mb", r"TOTAL PSS:\s*(\d+)", "MB"), ("java_heap_mb", r"Java Heap:\s*(\d+)", "MB"),
                                 ("native_heap_mb", r"Native Heap:\s*(\d+)", "MB"),
-                                ("activities", r"Activities:\s*(\d+)", "activities"),
-                                ("views", r"Views:\s*(\d+)", "views")):
+                                ("activities", r"(?<![\w])Activities:\s*(\d+)", "activities"),
+                                ("views", r"(?<![\w])Views:\s*(\d+)", "views")):
         match = re.search(pattern, text)
         if match:
             value = int(match.group(1))
@@ -3278,6 +3302,11 @@ def write_phase(folder, phase, data, flow=None):
                 data.setdefault("avisos", [])
                 if note not in data["avisos"]:
                     data["avisos"].append(note)
+        if data.get("reglas"):  # C1: la regla del borde es del flujo; una tanda que completa otra conserva la vieja
+            if not before_flow.get("corridas") or before_flow.get("reglas") == data["reglas"]:
+                flows[flow]["reglas"] = data["reglas"]
+            else:
+                flows[flow].pop("reglas", None)
         if "skill" in data:
             # Si el flujo ya tenía corridas, vale la versión que las midió (sin dato, una anterior a 0.9.0).
             flows[flow]["skill"] = (phase_skill(previous, flow) or "anterior a 0.9.0") if before_flow.get("corridas") \
@@ -3307,8 +3336,21 @@ def write_phase(folder, phase, data, flow=None):
         data["skill"] = previous.get("skill") or "anterior a 0.9.0"
     if flows:
         data["flujos"] = flows
+    if previous.get("corridas") and data.get("reglas"):
+        # C1: la fase dice la regla de ahora solo si todas sus corridas se calcularon con ella
+        if not rules_complete(data):
+            data.pop("reglas", None)
     phases[phase] = data
     save_phases(folder, phases)
+
+
+def rules_complete(record):
+    """C1: True si todas las corridas de la fase se calcularon con la regla del borde de ahora. Desde 0.15.0 la regla se
+    anota por flujo; una fase de una versión anterior (sin datos por flujo) vale lo que diga la fase."""
+    tracked = [data for data in (record.get("flujos") or {}).values() if isinstance(data, dict) and data.get("corridas")]
+    if tracked and sum(to_int(data.get("corridas")) for data in tracked) >= to_int(record.get("corridas")):
+        return all(data.get("reglas") == CALC_RULES for data in tracked)
+    return record.get("reglas") == CALC_RULES and not tracked
 
 
 def forget_flow(folder, csv_path, phase, flow):
@@ -4685,6 +4727,17 @@ def closing_level(folder, plan):
     return "economico", "bajo", ""
 
 
+def mixed_rules(phases, plan):
+    """C1: ([fases con la regla anterior], [fases con la de ahora]) si un plan con tramos mezcla reglas de cálculo entre
+    sus fases medidas; None si no las mezcla."""
+    if not any((spec or {}).get("segmentos") for spec in (plan.get("flujos") or {}).values() if isinstance(spec, dict)):
+        return None
+    measured = [phase for phase in FASES if isinstance(phases.get(phase), dict) and phases[phase].get("corridas")]
+    old = [phase for phase in measured if phases[phase].get("reglas") != CALC_RULES]
+    new = [phase for phase in measured if phases[phase].get("reglas") == CALC_RULES]
+    return (old, new) if old and new else None
+
+
 def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, triage):
     """(título, pasos) cuando la línea base hay que rehacerla o recalcularla, o None. En orden: las mejoras quitadas con
     `lineabase --quitar-mejoras` (la secuencia sigue hasta reaplicarlas); las marcas o el recorrido que cambiaron
@@ -4725,6 +4778,14 @@ def baseline_steps(folder, plan, flow, phases, command, capture, runs, you_run, 
             steps.append(measure("control", "mide el control de nuevo, con el mismo build sin las mejoras: el ruido del "
                                             "antes nuevo"))
         return "rehacer la línea base sin las mejoras (sin chat)", steps + [reapply, install_with, test]
+    mixed = mixed_rules(phases, plan)
+    if mixed:
+        return "recalcular las métricas con la regla del borde (sin chat)", [
+            terminal(command("recalcular", "--carpeta", rel),
+                     "aplica la regla del borde de los tramos (cada slice y cada frame cuentan solo donde empiezan) a "
+                     "todas las fases sobre sus trazas guardadas: %s se midieron con la regla anterior y %s con la de "
+                     "ahora, y así no se comparan igual contra igual" % (", ".join(mixed[0]), ", ".join(mixed[1])),
+                     "nada; si una traza no está, te lo dice")]
     marks, route, metrics, files = baseline_changes(folder, plan, flow, phases)
     # C6: con la huella por campo (0.13.0), qué campo de medición del plan cambió; los de presentación no avisan.
     fields = changed_fields(phase_flow_record(phases, "antes", flow).get("plan"),
@@ -5601,14 +5662,37 @@ def segment_plan_warnings(plan):
     return [line.replace("no dice\"cual\"", "no dice \"cual\"") for line in out]
 
 
-def segment_overlap_warnings(markers, specs):
-    """C1 (1), en una traza: los tramos que se solapan o contienen a otro, y los que terminan en una marca que sale más
-    de una vez sin `cual` explícito (por defecto toman la última). [aviso]."""
+def overlap_fix(specs, first, second, markers=None):
+    """C2: el cambio exacto del plan para que el tramo `first` (índice en segmentos) no cubra al `second`."""
+    spec, other = specs[first], specs[second]
+    end = spec.get("hasta") or {}
+    start = other.get("desde") or {}
+    if end.get("marca") and "cual" not in end:
+        if markers is None:  # sin la traza no se sabe cuántas veces sale: se dice como hipótesis
+            return ("si la marca '%s' sale más de una vez en el recorrido, agrega \"cual\": \"primera\" en "
+                    "segmentos[%d].hasta (sin \"cual\", el tramo toma la última)" % (end["marca"], first))
+        count = sum(1 for s in markers if fnmatch.fnmatchcase(s[4], end["marca"]))
+        if count > 1:
+            return ("agrega \"cual\": \"primera\" en segmentos[%d].hasta (la marca '%s' sale %d veces y el tramo toma la "
+                    "última)" % (first, end["marca"], count))
+    if end.get("marca") and start.get("marca") and end["marca"] != start["marca"]:
+        return ("cambia segmentos[%d].hasta a la marca de inicio de '%s': {\"marca\": \"%s\"%s}" % (
+            first, other.get("nombre"), start["marca"], ", \"cual\": \"%s\"" % start["cual"] if start.get("cual") else ""))
+    return ("haz que segmentos[%d].hasta y segmentos[%d].desde señalen la misma ocurrencia de '%s' (el mismo \"cual\")"
+            % (first, second, end.get("marca") or start.get("marca") or "la marca de corte"))
+
+
+def segment_overlap_warnings(markers, specs, main=None):
+    """C1 y C2, en una traza: los tramos que se solapan de verdad o contienen a otro (con qué tramo cubre a cuál y el
+    cambio exacto del plan), los que terminan en una marca que sale más de una vez sin `cual` explícito (por defecto
+    toman la última) y, con `main`, el slice que cruza el borde entre dos tramos contiguos (cuenta solo donde empieza:
+    no es un solapamiento). [aviso]."""
     out, bounds = [], []
+    windows = dict((id(spec), limits) for spec, limits in segment_windows(markers, specs))
     for index, spec in enumerate(specs or []):
         if not isinstance(spec, dict):
             continue
-        limits = resolve_window(markers, spec)
+        limits = windows.get(id(spec))
         if limits:
             bounds.append((index, spec, limits))
         end = spec.get("hasta") or {}
@@ -5619,23 +5703,43 @@ def segment_overlap_warnings(markers, specs):
                 out.append("la marca de fin del tramo '%s' ('%s') sale %d veces y el tramo toma la última: si el tramo es "
                            "la primera, agrega \"cual\": \"primera\" en segmentos[%d].hasta del plan (%s)" % (
                                spec.get("nombre"), end["marca"], count, index, OVERLAP_FIX))
-    for position, (_, first, (a0, a1)) in enumerate(bounds):
-        for _, second, (b0, b1) in bounds[position + 1:]:
-            if a0 <= b0 and b1 <= a1 or b0 <= a0 and a1 <= b1:
-                outer, inner = (first, second) if a0 <= b0 and b1 <= a1 else (second, first)
-                out.append("el tramo '%s' contiene al tramo '%s': sus métricas de hilo y frames incluyen las del otro"
-                           % (outer.get("nombre"), inner.get("nombre")))
+    top = [r for r in main or () if r[3] == 0 and r[2] >= MAIN_SLICE_MIN_NS]
+    for position, (i, first, (a0, a1)) in enumerate(bounds):
+        for j, second, (b0, b1) in bounds[position + 1:]:
+            if (a0 <= b0 and b1 <= a1 or b0 <= a0 and a1 <= b1) and (a0, a1) != (b0, b1):
+                (o, outer), (n, inner) = ((i, first), (j, second)) if a0 <= b0 and b1 <= a1 else ((j, second), (i, first))
+                out.append("el tramo '%s' contiene al tramo '%s' (se solapan de verdad): sus métricas de hilo y frames "
+                           "incluyen las del otro. Para corregirlo, %s" % (
+                               outer.get("nombre"), inner.get("nombre"), overlap_fix(specs, o, n, markers)))
             elif a0 < b1 and b0 < a1:
-                out.append("los tramos '%s' y '%s' se solapan" % (first.get("nombre"), second.get("nombre")))
+                (o, early), (n, late) = ((i, first), (j, second)) if a0 <= b0 else ((j, second), (i, first))
+                out.append("los tramos '%s' y '%s' se solapan de verdad: '%s' termina %s ms después de que empieza '%s'. "
+                           "Para corregirlo, %s" % (early.get("nombre"), late.get("nombre"), early.get("nombre"),
+                                                    fmt(round((min(a1, b1) - max(a0, b0)) / 1e6, 1)), late.get("nombre"),
+                                                    overlap_fix(specs, o, n, markers)))
+            elif top and (a1 == b0 or b1 == a0):
+                cut = a1 if a1 == b0 else b1
+                before, after, since = (first, second, a0) if a1 == b0 else (second, first, b0)
+                crossing = [r for r in top if r[1] < cut < r[1] + r[2]]
+                if crossing:
+                    longest = max(crossing, key=lambda r: r[2])
+                    out.append("el slice más largo que cruza el borde entre '%s' y '%s' (%s ms, '%s') contiene el instante "
+                               "de la marca de corte: es el mismo slice que cruza el borde, no un solapamiento de tramos; "
+                               "con la regla del borde cuenta solo %s" % (
+                                   before.get("nombre"), after.get("nombre"), fmt(round(longest[2] / 1e6, 1)), longest[4],
+                                   "en '%s', donde empieza" % before.get("nombre") if longest[1] >= since else
+                                   "en el tramo donde empieza (antes de '%s')" % before.get("nombre")))
     return out
 
 
 SEGMENT_PART = re.compile(r"^(?P<tramo>[A-Za-z][\w-]*) (?P<metrica>hilo_max_ms|frame_p90_ms|jank_app_pct|frames)$")
 
 
-def identical_segment_notes(rows):
-    """C1 (2): dos métricas iguales de tramos distintos con los mismos valores en todas las corridas de una fase: los
-    tramos casi seguro se solapan (uno toma la última ocurrencia de su marca de fin)."""
+def identical_segment_notes(rows, phases=None, plan=None):
+    """C1 (2): dos métricas iguales de tramos distintos con los mismos valores en todas las corridas de una fase. Con la
+    regla del borde de 0.15.0 (`reglas` de la fase en fases.json) un slice cuenta en un solo tramo: valores idénticos
+    quieren decir que los tramos se solapan de verdad, y va el cambio exacto del plan. Con la regla anterior también
+    puede ser el mismo slice que cruza el borde: `recalcular` lo resuelve."""
     by_key = {}
     for row in rows:
         found = SEGMENT_PART.match(row["metrica"])
@@ -5653,9 +5757,27 @@ def identical_segment_notes(rows):
             key = (flow, metric, segment, other)
             if values == other_values and len(set(values.values())) > 1 and key not in seen:
                 seen.add(key)
-                out.append("%s: '%s %s' y '%s %s' son idénticas en las %d corridas de %s: los tramos probablemente se "
-                           "solapan (revisa \"hasta\" y \"cual\" en el plan; %s)" % (
-                               flow, segment, metric, other, metric, len(values), phase, OVERLAP_FIX))
+                record = (phases or {}).get(phase) if isinstance((phases or {}).get(phase), dict) else {}
+                specs = [spec for spec in ((plan or {}).get("flujos") or {}).get(flow, {}).get("segmentos") or []
+                         if isinstance(spec, dict)]
+                names = [spec.get("nombre") for spec in specs]
+                if segment in names and other in names:
+                    # el que cubre es el que va antes en el plan (su `hasta` se pasa del inicio del otro)
+                    first, second = sorted((names.index(segment), names.index(other)))
+                    fix = overlap_fix(specs, first, second)
+                else:
+                    fix = "revisa \"hasta\" y \"cual\" de esos tramos en el plan (%s)" % OVERLAP_FIX
+                if record.get("reglas") == CALC_RULES:
+                    out.append("%s: '%s %s' y '%s %s' son idénticas en las %d corridas de %s: con la regla del borde (cada "
+                               "slice y cada frame cuentan solo donde empiezan) eso quiere decir que los tramos se solapan "
+                               "de verdad. Para corregirlo, %s" % (flow, segment, metric, other, metric, len(values),
+                                                                  phase, fix))
+                else:
+                    out.append("%s: '%s %s' y '%s %s' son idénticas en las %d corridas de %s, medidas con la regla anterior "
+                               "(un slice que cruzaba el borde contaba en los dos tramos): puede ser el mismo slice que "
+                               "cruza el borde. `recalcular` aplica la regla del borde a todas las fases; si siguen "
+                               "idénticas, se solapan de verdad: %s" % (flow, segment, metric, other, metric,
+                                                                       len(values), phase, fix))
     return out
 
 
@@ -5869,7 +5991,8 @@ def origin_lines(folder, plan, phase, flow):
 
 # C6: qué campos del plan cambian lo que se mide (entran en la huella) y cuáles solo cambian cómo se presenta.
 MEASURE_FIELDS = ("recorrido", "preparar", "inicio", "pausas", "duracion_max_s", "variables", "traza_desde_preparar",
-                  "ventana", "metricas_usuario", "segmentos", "input_slices", "repetidas_ventana_s")
+                  "ventana", "metricas_usuario", "segmentos", "input_slices", "repetidas_ventana_s", "tipo", "ciclos",
+                  "traza")
 PRESENTATION_FIELDS = ("titulo", "etiquetas", "min_frames", "servicios", "pasos", "preparar_reinicia",
                        "preparar_limpia", "escenarios")
 
@@ -5899,7 +6022,8 @@ def changed_fields(recorded, now):
 def phase_notes(folder, plan, rows, phase, flow):
     """Lo que `capturar` (y `recalcular`) dicen al terminar una fase: tramos idénticos (C1), el mismo servicio más de una
     vez en un tramo (C2), escenarios sin efecto en la ventana (C3) y el origen del dato de las mejoras (C4)."""
-    lines = ["⚠ " + line for line in identical_segment_notes([r for r in rows if r["fase"] == phase and r["flujo"] == flow])]
+    lines = ["⚠ " + line for line in identical_segment_notes([r for r in rows if r["fase"] == phase and r["flujo"] == flow],
+                                                             read_phases(folder), plan)]
     lines += ["⚠ " + line for line in repeated_phase_lines(rows, phase, flow)]
     try:
         lines += ["⚠ " + line for line in scenario_effect_notes(folder, plan, phase, flow)]
@@ -9898,6 +10022,54 @@ def save_dev_restore(folder, settings, command):
         pass  # sin carpeta donde guardarlo (un humo sin investigación): el comando ya se imprimió
 
 
+def save_info_notes(folder, flow, lines):
+    """Lo informativo de la corrida de prueba de un flujo (no traba la medición): queda en "Advertencias para el
+    diagnóstico" hasta la próxima prueba del flujo."""
+    data = read_notes(folder)
+    bucket = note_bucket(data, "info_prueba")
+    if lines:
+        bucket[flow] = [one_line(line) for line in lines]
+    elif flow in bucket:
+        bucket.pop(flow)
+    else:
+        return
+    save_notes(folder, data)
+
+
+def absent_services(flow_spec, names):
+    """C3: los servicios que el flujo declara en `servicios` y no aparecen en ninguna llamada de la corrida."""
+    endpoints = {endpoint_of(name) for name in names or () if name.startswith("HTTP ")}
+    return [str(item) for item in flow_spec.get("servicios") or []
+            if not any(service_matches(endpoint, [item]) for endpoint in endpoints)]
+
+
+def absent_services_text(flow, missing):
+    return ("el servicio declarado %s del flujo %s no apareció en ninguna llamada: ¿viene dentro de la respuesta de otro "
+            "servicio? Si es así, quítalo de `servicios` del flujo en plan.json (no hay una llamada propia que medir)" % (
+                ", ".join("'%s'" % item for item in missing), flow)) if len(missing) == 1 else (
+        "los servicios declarados %s del flujo %s no aparecieron en ninguna llamada: ¿vienen dentro de la respuesta de "
+        "otro servicio? Si es así, quítalos de `servicios` del flujo en plan.json" % (
+            ", ".join("'%s'" % item for item in missing), flow))
+
+
+def absent_from_rows(plan, rows, flow):
+    """C3 en el reporte: los servicios declarados del flujo sin ninguna llamada en ninguna corrida medida."""
+    spec = (plan.get("flujos") or {}).get(flow) or {}
+    if not spec.get("servicios"):
+        return []
+    mine = [r for r in rows if r["flujo"] == flow]
+    if not any(SERVICE_ROW.fullmatch(r["metrica"]) for r in mine):
+        return []  # sin corridas del flujo o sin red por servicio medida (un escenario sin medir, sin traza): no se dice
+    seen = {r["metrica"][4:-9] for r in mine if r["metrica"].startswith("red ")
+            and r["metrica"].endswith(" llamadas") and r["valor"] > 0}
+    return [str(item) for item in spec["servicios"] if not any(service_matches(endpoint, [item]) for endpoint in seen)]
+
+
+VIEWS_MISSING = ("--memoria no leyó las vistas vivas: `dumpsys meminfo` no trajo la línea \"Views:\" de su sección Objects "
+                 "en esta corrida (algunas versiones de Android o algunos procesos no la imprimen), así que la tabla no "
+                 "tiene `views`; las demás medidas de memoria sí")
+
+
 def save_test_warnings(folder, flow, warnings):
     """Guarda los avisos de la corrida de prueba de un flujo; una corrida sin avisos los da por resueltos."""
     data = read_notes(folder)
@@ -11216,6 +11388,7 @@ def cmd_capturar(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
+    memory_notes = []  # C4: por qué la tabla de memoria no trae `views` (una vez por tanda)
     # Una sola numeración: la de la fase ("corrida 6 de 10"), la misma de metricas.csv, del diagnóstico y del reporte.
     # Un intento inválido no gasta un número de corrida: va como "intento N (inválido)".
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
@@ -11349,14 +11522,29 @@ def cmd_capturar(args, plan=None):
             # nueva del proceso medido dentro de la corrida la invalida.
             exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
             try:
-                # C3: con "traza_desde_preparar", 'preparar' corre con la traza ya grabando (lo de antes de la pantalla
-                # medida, como una precarga, entra en la traza).
-                reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter,
-                                           before=prepare if inside_trace else None)
+                if no_trace:
+                    reason, extra = drive(recorrido, label, cutter), []
+                else:
+                    # C3: con "traza_desde_preparar", 'preparar' corre con la traza ya grabando (lo de antes de la
+                    # pantalla medida, como una precarga, entra en la traza).
+                    reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter,
+                                               before=prepare if inside_trace else None,
+                                               on_start=(lambda pid, remote: mark_running(
+                                                   folder, perfetto={"pid": pid, "remota": remote, "serial": serial}))
+                                               if args.plan else None)
             except Precondicion as error:
                 if not inside_trace:
                     raise
                 failure = error
+            finally:
+                if video is not None:
+                    shot = stop_video(adb, video, folder / ("prueba-%s.mp4" % slug(flow_name)))
+                    print("Video de la prueba: %s · míralo antes de medir: es el visto bueno de que el recorrido hace lo "
+                          "que esperas%s" % (shot, " (graba hasta %d s)" % int(flow.get("video_limite_s") or VIDEO_LIMIT_S))
+                          if shot else "· No pude grabar el video de la prueba (adb shell screenrecord): la prueba sigue "
+                          "igual; míralo en el dispositivo mientras corre")
+            if is_repetition(flow) and failure is None:
+                memory_snapshot(adb, package, cycles_path, "fin")
         if failure is not None:
             error = failure
             if not prepare_command or args.prueba:
@@ -11588,6 +11776,8 @@ def cmd_capturar(args, plan=None):
         guide()
     GUIA["al_fallar"] = None
     print_invalid_summary()
+    if memory_notes:  # C4: por qué no hay `views`, para la sesión 2
+        save_capture_warnings(folder, phase, flow_name, warnings + build_warnings + memory_notes)
     save_service_urls(folder, read_service_log(adb))  # la ruta real de cada servicio, fuera de la traza
     save_record()
     GUIA.update(guardado="las %d corridas válidas de %s en %s y su registro en fases.json" % (valid, phase, csv_path),
@@ -12802,9 +12992,24 @@ def cmd_recalcular(args):
     # La huella del plan de las fases recalculadas: sus métricas ya son las del plan de ahora.
     now = read_phases(folder)
     stamp_now = datetime.datetime.now().replace(microsecond=0).isoformat()
-    for phase, _ in done:
-        if isinstance(now.get(phase), dict):
-            now[phase]["recalculada"] = stamp_now  # un reporte anterior ya no muestra estos valores (X3)
+    for phase, flow_name in done:
+        record = now.get(phase)
+        if not isinstance(record, dict):
+            continue
+        record["recalculada"] = stamp_now  # un reporte anterior ya no muestra estos valores (X3)
+        if (phase, flow_name) in incomplete:
+            continue
+        if isinstance((record.get("flujos") or {}).get(flow_name), dict):  # C1: la regla de ahora, en este flujo
+            record["flujos"][flow_name]["reglas"] = CALC_RULES
+        elif not record.get("flujos") and len({r["flujo"] for r in rows if r["fase"] == phase}) == 1:
+            record["reglas"] = CALC_RULES  # una fase de una versión anterior, de un solo flujo
+    for phase in {phase for phase, _ in done}:
+        record = now.get(phase)
+        if isinstance(record, dict):
+            if rules_complete(record) or (record.get("reglas") == CALC_RULES and not record.get("flujos")):
+                record["reglas"] = CALC_RULES
+            else:
+                record.pop("reglas", None)
     for phase, flow_name in done:
         record = now.get(phase)
         if isinstance(record, dict) and isinstance((record.get("flujos") or {}).get(flow_name), dict):
@@ -12874,7 +13079,7 @@ def cmd_comparar(args):
     builds, notes = builds_table(folder)
     notes += jit_note(rows) + definition_notes(results)
     notes += config_notes(folder, sorted({r["flujo"] for r in rows})) + marks_moved + typing_notes(results)
-    notes += identical_segment_notes(rows)
+    notes += identical_segment_notes(rows, read_phases(folder), plan)
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -15225,6 +15430,23 @@ def warn_jargon(problems):
               "punto. Qué hacer: reescríbelo en palabras, sin nombres de métricas, de código ni términos de la traza (la "
               "lista está en cierre.md · Reporte), y genera de nuevo:" % (field, ", ".join(terms[:6]), UNFILLED))
         print("    %s" % same_command())
+
+
+def border_rule_md(folder, plan=None):
+    """C1: qué regla del borde se usó en cada fase ('' en un plan sin tramos: ahí no cambia nada)."""
+    if plan is not None and not any((spec or {}).get("segmentos") for spec in (plan.get("flujos") or {}).values()
+                                    if isinstance(spec, dict)):
+        return ""
+    phases = read_phases(folder)
+    used = [(phase, phases[phase].get("reglas", "")) for phase in FASES if isinstance(phases.get(phase), dict)
+            and phases[phase].get("corridas")]
+    if not used:
+        return ""
+    lines = ["- %s: %s." % (PHASE_WORDS.get(phase, phase).capitalize(), CALC_RULES_TEXT.get(rule, rule))
+             for phase, rule in used]
+    if len({rule for _, rule in used}) > 1:
+        lines.append("- Las fases usan reglas distintas: `perf.py recalcular` aplica la de ahora a todas.")
+    return "Cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan.\n\n" + "\n".join(lines)
 
 
 def cmd_reporte(args):
