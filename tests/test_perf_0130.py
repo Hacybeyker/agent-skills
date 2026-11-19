@@ -918,7 +918,9 @@ class VerdictLabelTest(PerfBase):
         for metric in plan["principales"]:
             r = next(item for item in results if item["metrica"] == metric)
             label = perf.verdict_label(r)
-            row = next(line for line in dev.splitlines() if line.startswith("| contactos | %s |" % metric))
+            # 0.15.0 · H3: la comparación completa (en el anexo) nombra cada medida en palabras
+            row = next(line for line in dev.splitlines() if line.startswith("| contactos | %s |" % perf.plain_metric(
+                metric, plan)))
             self.assertTrue(row.rstrip(" |").endswith("[%s]" % label), row)
             line = next(line for line in business.splitlines() if line.startswith("- **%s:**" % perf.plain_metric(metric,
                                                                                                                   plan)))

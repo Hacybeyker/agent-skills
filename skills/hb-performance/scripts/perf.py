@@ -8048,6 +8048,13 @@ def cmd_decidir(args):
                     print("✔ Diff de %s guardado: %s (%d %s, +%d −%d líneas)" % (
                         item["id"], folder / entry["diff"], len(entry["archivos"]),
                         "archivo" if len(entry["archivos"]) == 1 else "archivos", entry["agregadas"], entry["quitadas"]))
+                    missing = missing_file_notes(folder, item)  # H2: cada archivo del diff con su explicación
+                    if missing:
+                        print("⚠ Falta la explicación por archivo de %s para %s. Agrégala en plan.json, en la mejora %s: "
+                              "\"archivos\": [{\"ruta\", \"riesgo\" (critico, alto, medio o bajo), \"antes\", "
+                              "\"despues\", \"pros\", \"contras\"}], una entrada por archivo y como mucho %d palabras "
+                              "por campo; después repite este mismo comando:\n    %s" % (
+                                  item["id"], ", ".join(missing), item["id"], FILE_FIELD_WORDS, same_command()))
                 elif not item.get("cambios"):
                     print("· %s quedó aplicada sin diff guardado: el reporte final dirá \"sin diff guardado\" en sus "
                           "cambios de código. Para guardarlo, repite con --archivos <archivos de la mejora> (y --repo "
@@ -14494,7 +14501,7 @@ def inline_md(text):
 NUMERIC_CELL = re.compile(r"[-+−]?[\d.,]+ ?[a-zA-Z%]{0,3}( \([-+−]?[\d.,]+ ?%?\))?( ?[–/] ?[-+−]?[\d.,]+ ?[a-zA-Z%]{0,3})?|—")
 
 
-RAW_HTML = re.compile(r"^\s*(?:<details(?: open)?>|</details>|<summary>[^<>]*</summary>)\s*$")
+RAW_HTML = re.compile(r"^\s*(?:<details(?: open)?(?: class=\"[\w -]+\")?>|</details>|<summary>[^<>]*</summary>)\s*$")
 
 
 def md_to_html(text):
@@ -15030,9 +15037,9 @@ SERVICE_HEADERS = ["Servicio", "Veces por corrida", "Empieza (desde el inicio de
 
 
 def service_label(service, urls):
-    """La celda del servicio: el nombre corto (el de la traza) y, si el log de rutas lo trae, la ruta real completa."""
-    url = (urls or {}).get(service)
-    return "`%s`%s" % (service, " · ruta: `%s`" % url if url else "")
+    """La celda del servicio (H3): MÉTODO y su ruta real ("GET https://api.example.com/v2/pedidos"); sin el log de rutas,
+    el nombre corto de la traza (la tabla dice una vez que la ruta real no está disponible)."""
+    return "`%s`" % route_text(service, urls)
 
 
 def services_md(rows, plan, phases=("antes",), urls=None):
@@ -15118,7 +15125,7 @@ def services_md(rows, plan, phases=("antes",), urls=None):
                     continue
                 first, last = found[0]["ttfb"], found[-1]["ttfb"]
                 if abs(last - first) > max(BACKEND_SHIFT[0] * abs(first), BACKEND_SHIFT[1]):
-                    shifts.append("`%s` (%s → %s)" % (service, nice(first, "ms"), nice(last, "ms")))
+                    shifts.append("`%s` (%s → %s)" % (route_text(service, urls), nice(first, "ms"), nice(last, "ms")))
             if shifts:
                 lines.append("")
                 lines.append("El servidor cambió entre fases en %s: es variación del backend o de la red del momento, no "
@@ -16129,17 +16136,34 @@ PLAIN_FOOTER = "Cada valor resume varias mediciones del mismo recorrido; el deta
 
 
 def render_report(folder, name, title, subtitle, parts, charts="", extras=None, plain=False):
-    """Escribe <name>.md y devuelve el HTML. `extras`: HTML propio por sección (gráficos, franjas) que va antes del texto."""
+    """Escribe <name>.md y devuelve el HTML. `extras`: HTML propio por sección (gráficos, franjas) que va antes del texto.
+    Una sección cuyo contenido es una lista de (título, texto) es el anexo (H1): en el HTML va plegado y cerrado."""
     md = "# %s\n\n_%s_\n" % (title, subtitle)
-    md += "".join("\n## %s\n\n%s\n" % (section, body) for section, body in parts if body)
+    for section, body in parts:
+        if isinstance(body, list):
+            inner = "".join("\n### %s\n\n%s\n" % (sub, text) for sub, text in body if text)
+            md += "\n## %s\n%s" % (section, inner) if inner else ""
+        elif body and not section:  # un párrafo de entrada, sin título (el resumen para gerencia)
+            md += "\n%s\n" % body
+        elif body:
+            md += "\n## %s\n\n%s\n" % (section, body)
     (folder / ("%s.md" % name)).write_text(md, encoding="utf-8")
     extras = dict(extras or {})
     if charts:
         extras["Métricas principales"] = '<div class="charts">%s</div>' % charts
-    shown = [(section, content) for section, content in parts if content]
+    lead = "".join('<section class="lead">%s</section>' % md_to_html(content) for section, content in parts
+                   if not section and content and not isinstance(content, list))
+    shown = [(section, content) for section, content in parts if section and content and not (
+        isinstance(content, list) and not any(text for _, text in content))]
     nav = "".join('<a href="#s%d">%s</a>' % (i, e(section)) for i, (section, _) in enumerate(shown))
-    body = '<nav class="toc">%s</nav>' % nav
+    body = '<nav class="toc">%s</nav>' % nav + lead
     for i, (section, content) in enumerate(shown):
+        if isinstance(content, list):
+            inner = "".join('<h3>%s</h3>%s%s' % (e(sub), extras.get(sub, ""), md_to_html(text)) for sub, text in content
+                            if text)
+            body += ('<section id="s%d" class="anexo"><details><summary>%s: %s</summary>%s</details></section>' % (
+                i, e(section), e(", ".join(sub for sub, text in content if text)), inner))
+            continue
         body += '<section id="s%d"%s><h2>%s</h2>%s%s</section>' % (
             i, ' class="resultado"' if section == "Resultado" else "", e(section), extras.get(section, ""),
             md_to_html(content))
@@ -16266,6 +16290,203 @@ def warn_jargon(problems):
         print("    %s" % same_command())
 
 
+# ── Reportes en 5 minutos (0.15.0 · H y G) ───────────────────────────────────
+# El técnico tiene una parte principal corta (resumen, métricas principales, un panel por mejora, servicios y lo
+# pendiente) y todo lo demás en un anexo plegado. El de gerencia tiene siete secciones y nada más. Los dos salen de los
+# mismos datos; nunca muestran nombres internos de métricas, los servicios van como MÉTODO y su ruta real, y los diffs de
+# las mejoras van completos (los saca perf.py de cambios/<id>.diff, nunca la IA).
+CLEAR_CHANGE_SPREAD = 2.0  # H4: el cambio es al menos el doble de lo que varía cada fase…
+CLEAR_CHANGE_NOISE = 3.0  # …y el triple de la variación normal (antes contra control), sin que los rangos se toquen
+MAIN_WORDS_MAX = 1500  # H1: la parte principal del técnico, legible en unos 5 minutos
+TEXT_CAPS = (("resumen ejecutivo", "Resumen ejecutivo", "lineas", 5), ("resumen para gerencia", "Resumen para gerencia",
+                                                                        "lineas", 5),
+             ("lectura de la comparación", "Lectura de la comparación", "palabras", 400))
+FILE_FIELD_WORDS = 40  # H6: cada campo de la explicación por archivo de una mejora (antes, después, pros, contras)
+RISK_LEVELS = ("critico", "alto", "medio", "bajo")
+BUSINESS_SECTIONS = ("Qué notaba el usuario", "Qué se encontró", "Qué se hizo", "Resultado", "Riesgo de hacer el cambio",
+                     "Qué tan firme es la medición", "Lo pendiente")
+READ_CHART = "Cada barra es el tiempo típico; la línea fina va del caso más rápido al más lento."
+READ_CHART_VALUE = "Cada barra es el valor típico; la línea fina va del menor al mayor."
+NOTICEABLE_MS = 100  # G2: un empeoramiento secundario de tiempo menor que esto no lo nota el usuario (queda en el técnico)
+ANNEX = "Anexo"
+
+
+def route_text(service, urls):
+    """H3: un servicio como MÉTODO y su ruta real ("GET https://api.example.com/v2/pedidos"); sin la ruta real, el método
+    y el nombre corto con "ruta real no disponible"."""
+    method = service.split(" ", 1)[0] if " " in service else ""
+    url = (urls or {}).get(service) or (urls or {}).get(QUERY_TAG.sub("", service))
+    if url:
+        return "%s %s" % (method, url) if method and not url.startswith(method) else url
+    return QUERY_TAG.sub("", service)  # sin la ruta real: el nombre corto; quien arma la tabla lo dice una vez
+
+
+def service_version(url):
+    found = re.search(r"/(v\d+(?:\.\d+)?)(?:/|$)", url or "")
+    return found.group(1) if found else ""
+
+
+def words_count(markdown_text):
+    """Palabras de un texto markdown sin los bloques de código (los diffs) ni las etiquetas HTML."""
+    text = re.sub(r"```.*?```", " ", markdown_text or "", flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return len(re.findall(r"[^\s|`*_#>\-]+", text))
+
+
+def findings_rows(findings_text):
+    """[{"id", "sintoma", "evidencia", "causa", "tipo", "falta"}] de la tabla Hallazgos de estado.md."""
+    headers, rows = parse_table(findings_text or "")
+    lower = [header.strip().lower() for header in headers]
+
+    def column(*prefixes):
+        return next((i for i, header in enumerate(lower) if header.startswith(prefixes)), None)
+
+    where = {"sintoma": column("síntoma", "sintoma"), "evidencia": column("evidencia"), "causa": column("causa"),
+             "tipo": column("tipo"), "falta": column("qué falta", "que falta")}
+    out = []
+    for row in rows:
+        if not row or not row[0].strip() or has_placeholder(row[0]):
+            continue
+        item = {"id": row[0].strip().strip("*")}
+        for key, index in where.items():
+            value = row[index].strip() if index is not None and index < len(row) else ""
+            item[key] = "" if value in ("—", "-") or has_placeholder(value) else value
+        item["clase"] = finding_kind(item["tipo"])
+        out.append(item)
+    return out
+
+
+def improvement_result_line(item, plan, results):
+    """La línea de "qué ganó" de una mejora aplicada: su métrica antes → después y su etiqueta."""
+    r = improvement_metric(plan, item, results)
+    if r is None:
+        return "sin medición de antes y después para su métrica"
+    return "%s: %s → %s (%s) %s" % (plain_metric(r["metrica"], plan), plain_value(r["antes"]["mediana"], r["unidad"]),
+                                    plain_value(r["despues"]["mediana"], r["unidad"]),
+                                    change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—",
+                                    label_token(verdict_label(r)))
+
+
+def diff_by_file(folder, item):
+    """{ruta: texto del diff completo de ese archivo} de los diffs que guardó `decidir --aplicada` (cambios/<id>.diff)."""
+    out = {}
+    for entry in item.get("cambios") or []:
+        if not isinstance(entry, dict) or not entry.get("diff"):
+            continue
+        data = read_patch(pathlib.Path(folder) / entry["diff"]) if (pathlib.Path(folder) / entry["diff"]).is_file() else b""
+        for name, section in patch_sections(data).items():
+            out[name] = section.decode("utf-8", "replace").rstrip("\n")
+    return out
+
+
+def file_notes(item):
+    """{ruta: explicación} del campo `archivos` de una mejora (la escribe la sesión 3)."""
+    out = {}
+    for entry in item.get("archivos") or []:
+        if isinstance(entry, dict) and entry.get("ruta"):
+            out[os.path.normpath(str(entry["ruta"]))] = entry
+    return out
+
+
+def missing_file_notes(folder, item):
+    """H2: los archivos del diff de una mejora sin su explicación en `archivos`."""
+    notes = file_notes(item)
+    return [name for name in diff_by_file(folder, item) if os.path.normpath(name) not in notes]
+
+
+def improvement_card(folder, plan, item, findings, results, applied_text):
+    """H2: el panel plegable de una mejora, al estilo del reporte de las otras skills: encabezado con id, título,
+    veredicto y riesgo; adentro, por qué, qué ganó, costo y condición, cada archivo con su riesgo, antes, después, pros,
+    contras y su diff completo (plegable), y los tests y el DoD."""
+    final = results is not None and item.get("estado") == "aplicada"
+    r = improvement_metric(plan, item, results) if results is not None else None
+    verdict = label_token(verdict_label(r)) if final and r else STATE_TEXT.get(item.get("estado", "propuesta"),
+                                                                                item.get("estado", "propuesta"))
+    risk = str(item.get("riesgo") or "").split(":", 1)
+    head = "%s · %s · %s · riesgo %s" % (item.get("id"), improvement_title(item), verdict,
+                                         risk[0].strip() or "sin evaluar")
+    lines = ['<details class="card">', "<summary>%s</summary>" % e(head).replace("&quot;", '"'), ""]
+    finding = next((row for row in findings if row["id"] == str(item.get("hallazgo") or "").strip()), None)
+    if finding:
+        lines.append("- **Por qué:** %s (%s). Causa: %s. Evidencia: %s." % (
+            finding["sintoma"].rstrip("."), finding["id"], finding["causa"].rstrip(".") or "sin anotar",
+            finding["evidencia"].rstrip(".") or "sin anotar"))
+    if item.get("hipotesis"):
+        lines.append("- **Hipótesis%s:** %s." % (" (a prueba)" if item.get("a_prueba") else "",
+                                                 str(item["hipotesis"]).rstrip(".")))
+    if final:
+        outcome = improvement_result(item, r) if r is not None else ""
+        lines.append("- **Qué ganó:** %s%s." % (improvement_result_line(item, plan, results),
+                                                " · %s" % outcome if outcome and item.get("a_prueba") else ""))
+    elif item.get("esperado"):
+        lines.append("- **Qué se espera:** %s." % str(item["esperado"]).rstrip("."))
+    notes_ = improvement_notes(applied_text, str(item.get("id")))  # lo confirmado en la sesión 4 manda
+    for key, name in (("costo", "Costo conocido"), ("condicion", "Condición"), ("alternativas", "Alternativas")):
+        text, origin = improvement_note(item, notes_, key)
+        if text:
+            lines.append("- **%s:** %s%s." % (name, text.rstrip("."), " (anticipado en el plan)" if origin.startswith(
+                "anticipado") and final else ""))
+    if len(risk) > 1 and risk[1].strip():
+        lines.append("- **Riesgo de hacer el cambio:** %s: %s." % (risk[0].strip(), risk[1].strip().rstrip(".")))
+    diffs = diff_by_file(folder, item) if final else {}
+    notes = file_notes(item)
+    for name in list(diffs) + [path for path in notes if path not in {os.path.normpath(n) for n in diffs}]:
+        note = notes.get(os.path.normpath(name), {})
+        level = str(note.get("riesgo") or "").strip().lower()
+        lines += ["", '<details class="file">', "<summary>%s · riesgo %s</summary>" % (
+            e(name), level if level in RISK_LEVELS else "sin evaluar"), ""]
+        if note:
+            for key, label_ in (("antes", "Antes"), ("despues", "Después"), ("pros", "Pros"), ("contras", "Contras")):
+                if str(note.get(key) or "").strip():
+                    lines.append("- **%s:** %s" % (label_, str(note[key]).strip()))
+        elif final:
+            lines.append("- Sin explicación por archivo (la mejora es de una versión anterior, o la sesión 3 no la "
+                         "escribió).")
+        if name in diffs:  # el diff completo: nunca se trunca
+            lines += ["", "```diff", diffs[name], "```"]
+        lines += ["", "</details>"]
+    extra = [line.strip("- ").strip() for line in (applied_text or "").splitlines()
+             if re.match(r"^\s*[-*]\s*%s\b" % re.escape(str(item.get("id"))), line)]
+    if item.get("tests") or extra:
+        lines += ["", "- **Tests y DoD:** %s" % (str(item.get("tests") or "").strip() or extra[0])]
+    lines += ["", "</details>"]
+    return "\n".join(lines)
+
+
+def reviewed_md(findings):
+    """H1: "Se revisó y se descartó": lo descartado y lo sin confirmar, una línea cada uno con su motivo, para no
+    investigarlo de nuevo."""
+    rows = [row for row in findings if row["clase"] in ("descartado", "sin confirmar")]
+    if not rows:
+        return ""
+
+    def reason(row):
+        # lo descartado se explica por su causa (por qué no es) y su evidencia; lo sin confirmar, por su evidencia
+        order = ("causa", "evidencia") if row["clase"] == "descartado" else ("evidencia", "causa")
+        texts = [str(row.get(key) or "").strip().rstrip(".") for key in order]
+        texts = [text for text in texts if text and text not in ("—", "-", "sin probar")]
+        return ". ".join(dict.fromkeys(texts if row["clase"] == "descartado" else texts[:1])) or "sin motivo anotado"
+
+    def missing(row):
+        text = str(row.get("falta") or "").strip().rstrip(".")
+        if row["clase"] != "sin confirmar" or not text or text in ("—", "-"):
+            return ""
+        return " Falta para decidir: %s%s." % (text[:1].lower(), text[1:])
+
+    return "\n".join("- %s · %s · %s: %s.%s" % (row["id"], row["clase"], row["sintoma"].rstrip(".") or "—", reason(row),
+                                                missing(row)) for row in rows)
+
+
+def unimproved_md(findings, plan):
+    """H1: los hallazgos confirmados que ninguna mejora ataca y los que son consecuencia de otro: en el anexo, para que
+    no se pierdan (la parte principal solo tiene las mejoras)."""
+    attacked = {str(item.get("hallazgo") or "").strip() for item in plan.get("mejoras") or []}
+    rows = [row for row in findings if row["clase"] not in ("descartado", "sin confirmar") and row["id"] not in attacked]
+    return "\n".join("- %s · %s · %s%s." % (row["id"], row["tipo"] or row["clase"], row["sintoma"].rstrip(".") or "—",
+                                           ": %s" % row["causa"].rstrip(".") if row["causa"] and row["causa"] not in (
+                                               "—", "-") else "") for row in rows)
+
+
 def border_rule_md(folder, plan=None):
     """C1: qué regla del borde se usó en cada fase ('' en un plan sin tramos: ahí no cambia nada)."""
     if plan is not None and not any((spec or {}).get("segmentos") for spec in (plan.get("flujos") or {}).values()
@@ -16283,11 +16504,141 @@ def border_rule_md(folder, plan=None):
     return "Cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan.\n\n" + "\n".join(lines)
 
 
+def changed_services_md(rows, plan, phases, urls):
+    """H1: la tabla de servicios de la parte principal: solo los que cambiaron entre fases o se repiten."""
+    table = []
+    for flow in list(plan.get("flujos") or {}):
+        by_phase = {phase: {item["servicio"]: item for item in flow_services(rows, flow, phase)} for phase in phases}
+        names = list(dict.fromkeys(name for phase in phases for name in by_phase[phase]))
+        for name in names:
+            found = [by_phase[phase].get(name) for phase in phases]
+            calls = [item["llamadas"] if item else 0 for item in found]
+            repeated = any(item and (item.get("repetidas") or 0) > 0 for item in found if item)
+            changed = len(phases) > 1 and calls[0] != calls[-1]
+            if not (repeated or changed):
+                continue
+            why = []
+            if repeated:
+                why.append("se repite")
+            if changed:
+                why.append("cambió la cantidad de llamadas")
+            durations = " → ".join(plain_value(item["ms"], "ms") if item and item.get("ms") is not None else "—"
+                                   for item in found)
+            table.append([route_text(name, urls)] + ([scenario_words(plan, flow) or flow.replace("-", " ")]
+                                                     if len(plan.get("flujos") or {}) > 1 else []) +
+                         [" → ".join(fmt(value) for value in calls), durations, " y ".join(why)])
+    if not table:
+        if not any(SERVICE_ROW.fullmatch(row["metrica"]) for row in rows):
+            # sin filas por servicio (red sin instrumentar o una investigación de una versión anterior) no se afirma nada
+            measured = any(row["metrica"] in ("red_llamadas", "red_solapadas") for row in rows)
+            return ("Las mediciones no traen datos por servicio%s: no se puede decir qué servicio cambió (la "
+                    "comparación completa, en el anexo, trae el total de llamadas)." % (
+                        " (solo el total de llamadas)" if measured else ""))
+        return "Ningún servicio cambió entre fases ni se repite."
+    missing = list(dict.fromkeys(row[0] for row in table if "https://" not in row[0] and "http://" not in row[0]))
+    headers = ["Servicio"] + (["Flujo"] if len(plan.get("flujos") or {}) > 1 else []) + [
+        "Llamadas por recorrido%s" % (" (antes → después)" if len(phases) > 1 else ""),
+        "Duración típica%s" % (" (antes → después)" if len(phases) > 1 else ""), "Por qué está aquí"]
+    note = ("\n\nRuta real no disponible para %s: la instrumentación de red de esas corridas no la anotó (se muestra el "
+            "nombre corto de la traza)." % ", ".join(missing[:4])) if missing else ""
+    return markdown_table(headers, table) + note
+
+
+def equal_line(folder, plan, results):
+    """H1: "igual contra igual" en una línea."""
+    moved = [r for r in results or [] if MARK_CHANGED in (r.get("avisos") or []) or ROUTE_CHANGED in (r.get("avisos") or [])]
+    if moved:
+        return ("Igual contra igual: **no** para %s (cambiaron las marcas o el recorrido entre fases): esos veredictos son "
+                "orientativos." % ", ".join(sorted({plain_metric(r["metrica"], plan) for r in moved})[:4]))
+    if mixed_rules(read_phases(folder), plan):
+        return ("Igual contra igual: **no** del todo: las fases usan reglas distintas para el borde entre tramos; "
+                "`perf.py recalcular` aplica la de ahora a todas sobre las trazas guardadas.")
+    return "Igual contra igual: sí (mismas marcas, mismo recorrido, mismas reglas de cálculo en todas las fases)."
+
+
+def report_main_and_annex(folder, plan, rows, sections, results, filled, pick):
+    """H1: (secciones de la parte principal, secciones del anexo) del reporte técnico."""
+    final = results is not None
+    urls = service_urls(folder)
+    findings = findings_rows(pick("hallazgos"))
+    principales = plan.get("principales") or []
+    phases = ("antes", "despues") if final and any(row["fase"] == "despues" for row in rows) else ("antes",)
+    if final:
+        primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
+        table = markdown_table(["Medida", "Antes", "Después", "Cambio", "Veredicto"], [
+            [metric_words(r["metrica"], plan, urls) + (" · %s" % scenario_words(plan, r["flujo"])
+                                                       if scenario_words(plan, r["flujo"]) else ""),
+             plain_value(r["antes"]["mediana"], r["unidad"]), plain_value(r["despues"]["mediana"], r["unidad"]),
+             change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—", label_token(verdict_label(r))]
+            for r in primary]) if primary else "No hay medidas principales con antes y después."
+        metrics_md = table + "\n\n" + equal_line(folder, plan, results)
+    else:
+        groups = group(rows)
+        found = [(flow, metric, entry) for (flow, metric), entry in sorted(groups.items())
+                 if metric in principales and entry["fases"].get("antes")]
+        metrics_md = markdown_table(["Medida", "Hoy (lo típico)", "Entre", "Estable"], [
+            [metric_words(metric, plan, urls) + (" · %s" % scenario_words(plan, flow) if scenario_words(plan, flow) else ""),
+             plain_value(describe(entry["fases"]["antes"])["mediana"], entry["unidad"]),
+             "%s y %s" % (plain_value(min(entry["fases"]["antes"]), entry["unidad"]),
+                          plain_value(max(entry["fases"]["antes"]), entry["unidad"])),
+             "no: varía mucho" if "inestable" in describe(entry["fases"]["antes"])["avisos"] else "sí"]
+            for flow, metric, entry in found]) if found else "No hay medidas principales medidas todavía."
+    memory = memory_verdict_lines(folder, plan)  # C5
+    if memory:
+        metrics_md += "\n\n" + "\n".join("- %s" % line for line in memory)
+    items = [m for m in plan.get("mejoras") or [] if (m.get("estado") == "aplicada") == final or not final]
+    if final:
+        items = [m for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada"]
+    cards = "\n\n".join(improvement_card(folder, plan, item, findings, results, filled("mejoras aplicadas"))
+                        for item in items) if items else ("No se aplicó ninguna mejora." if final else
+                                                          "No se propone ninguna mejora.")
+    absent = []
+    for flow in plan.get("flujos") or {}:
+        missing = absent_from_rows(plan, rows, flow)
+        if missing:
+            absent.append("⚠ " + absent_services_text(flow, missing)[0].upper() + absent_services_text(flow, missing)[1:]
+                          + ".")
+    services = changed_services_md(rows, plan, phases, urls) + ("\n\n" + "\n\n".join(absent) if absent else "")
+    main = [("Resumen", filled("resumen ejecutivo")), ("Métricas principales", metrics_md),
+            ("Mejoras" if final else "Mejoras propuestas", cards), ("Servicios", services)]
+    if final:
+        main.append(("Lo pendiente", pending_improvements(plan, True)))
+    comparison = ""
+    if final:
+        chosen = compact_compare(results, plan, everything=True)
+        comparison = markdown_table(["Flujo", "Medida", "Antes", "Después", "Cambio", "Veredicto"], [
+            [scenario_words(plan, r["flujo"]) or r["flujo"].replace("-", " "), metric_words(r["metrica"], plan, urls),
+             plain_value(r["antes"]["mediana"], r["unidad"]), plain_value(r["despues"]["mediana"], r["unidad"]),
+             change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—", label_token(verdict_label(r))]
+            for r in chosen]) if chosen else ""
+    pending_intro = ("> Lo que la investigación no pudo cerrar (no son mejoras): síntoma, qué falta, cuánto cuesta y la "
+                     "acción sugerida.\n\n")
+    annex = [("Comparación completa", comparison),
+             ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
+             ("Servicios del flujo, completos", services_md(rows, plan, phases, urls=urls)),
+             ("Red por tramo", segment_network_md(rows, plan, phases)),
+             ("Hallazgos confirmados sin mejora", unimproved_md(findings, plan)),
+             ("Se revisó y se descartó", reviewed_md(findings)),
+             ("Pendientes que no son mejoras", pending_intro + filled("pendientes") + capture_table(
+                 filled("pendientes"), folder, plan) if filled("pendientes") else ""),
+             ("Pedido al equipo dueño del módulo", OWNER_INTRO + filled(OWNER_SECTION) if filled(OWNER_SECTION) else ""),
+             ("Ficha y condiciones", ficha_subset(pick("ficha"))),
+             ("Costo de la investigación", cost_md(folder, plan)),
+             ("Cómo leer este reporte", GLOSSARY),
+             ("Regla del borde de los tramos", border_rule_md(folder, plan))]
+    return main, annex
+
+
 def cmd_reporte(args):
+    """Los dos reportes (técnico y gerencia), inicial o final, de los mismos datos. El técnico: una parte principal que se
+    lee en unos 5 minutos (H1) y un anexo plegado; el de gerencia: siete secciones (G). Lee metricas.csv y el resumen de
+    cada corrida: no vuelve a abrir las trazas (F3)."""
     folder = pathlib.Path(args.carpeta)
     state_path, csv_path = folder / "estado.md", folder / "metricas.csv"
     if not state_path.is_file():
         raise PerfError("no existe %s" % state_path)
+    mark_running(folder, comando="reporte", argv=list(GUIA.get("argv") or ["reporte", "--carpeta", str(folder)]),
+                 inicio=datetime.datetime.now().replace(microsecond=0).isoformat())
     title, sections = state_sections(state_path.read_text(encoding="utf-8"))
     plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
     rows = read_rows(csv_path) if csv_path.is_file() else []
@@ -16328,19 +16679,43 @@ def cmd_reporte(args):
         groups = group(rows)
         found = [(flow, metric, entry) for (flow, metric), entry in sorted(
             groups.items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan)))
-            if metric in (plan.get("principales") or []) and entry["fases"].get("antes")]
-        figures = "".join(figure(*initial_chart(flow, metric, entry)) for flow, metric, entry in principal)
-        extras = {"Estado inicial": '<div class="charts">%s</div>' % figures} if figures else {}
-        services_html = services_chart(rows, plan) + timeline_chart(rows, plan, folder=folder)
-        if services_html:
-            extras["Servicios del flujo"] = services_html
-        plain_figures = "".join(figure(*initial_chart(flow, metric, entry, plain=True, plan=plan))
-                                for flow, metric, entry in principal[:3])
-        write_reports(folder, "inicial", title, date, parts, business, args.html, extras=extras,
-                      business_extras={"Cómo está hoy": '<div class="charts">%s</div>' % plain_figures}
-                      if plain_figures else None)
-        warn_jargon(problems)
-        warn_untitled(plan)
+            if metric in principales and entry["fases"].get("antes")]
+        charts = "".join(figure(*initial_chart(flow, metric, entry, plan=plan)) for flow, metric, entry in found)
+        plain_charts = "".join(figure(*initial_chart(flow, metric, entry, plain=True, plan=plan))
+                               for flow, metric, entry in found[:3])
+    else:
+        primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
+        charts = "".join(figure(*final_chart(r, plan=plan), title=chart_title(r, plan)) for r in primary)
+        plain_charts = "".join(figure(*final_chart(r, plain=True, plan=plan), title=chart_title(r, plan))
+                               for r in primary[:3])
+    actions, _ = actions_html(rows, plan, phases, folder, urls)  # G6: compartida por los dos reportes
+    extras = {"Métricas principales": '<div class="charts">%s</div>' % charts if charts else "",
+              "Servicios": actions}
+    business = business_parts(folder, plan, rows, sections, results, problems)
+    business_extras = {"Resultado": ('<div class="charts">%s</div>' % plain_charts if plain_charts else "") + (
+        actions if results is not None else ""), "Qué se encontró": actions if results is None else ""}
+    kind = "inicial" if args.inicial else "final"
+    internal = any(item.get("estado") == "aplicada" and item.get("cambios") for item in plan.get("mejoras") or [])
+    names = {row["metrica"] for row in rows if "_" in row["metrica"] and " " not in row["metrica"]} | {
+        row["metrica"] for row in rows if re.search(r"_(?:ms|pct|mb)$", row["metrica"])}
+    main, annex = humanize_parts(main, names, plan), humanize_parts(annex, names, plan)  # H5
+    write_reports(folder, kind, title, date, main + [(ANNEX, annex)], business, args.html, "", extras, business_extras,
+                  " · interno: contiene código" if internal and not args.inicial else "")
+    words = words_count("\n".join(body for _, body in main if body))
+    if words > MAIN_WORDS_MAX:
+        print("⚠ La parte principal del reporte técnico tiene %d palabras (el tope es %d, unos 5 minutos de lectura): "
+              "acorta el resumen y las explicaciones por archivo de las mejoras." % (words, MAIN_WORDS_MAX))
+    for field, extra in text_cap_problems(sections, plan):  # H6
+        print("⚠ %s pasa su tope: %s. Acórtalo y vuelve a generar." % (field, extra))
+    warn_unconfirmed(plan, pick("hallazgos"))  # E5
+    for item in plan.get("mejoras") or []:  # H2
+        if item.get("estado") == "aplicada" and missing_file_notes(folder, item):
+            print("⚠ %s: falta la explicación de %s en `archivos` de la mejora (ruta, riesgo, antes, despues, pros, contras): "
+                  "el panel los muestra \"sin explicación por archivo\"." % (item["id"], ", ".join(
+                      missing_file_notes(folder, item))))
+    warn_jargon(problems)
+    warn_untitled(plan)
+    if args.inicial:
         if not plan.get("mejoras"):
             print("⚠ plan.json no tiene 'mejoras': el reporte sale sin el plan de mejoras.")
     else:

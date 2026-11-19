@@ -953,6 +953,64 @@ class ReportSpeedTest(DeviceBase):
         self.assertEqual(self.calls(), before + 1)  # quedó en caché
 
 
+class ImprovementTextsTest(PerfBase):
+    """E5, H2 y H6: una mejora sale de un hallazgo confirmado, su panel trae el diff completo y la explicación por
+    archivo, y los textos de la IA tienen tope."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        state = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8").replace(
+            "| --- | --- | --- | --- | --- | --- |\n",
+            "| --- | --- | --- | --- | --- | --- |\n| H1 | La lista tarda | 1 s · `app/Lista.kt:7` | dos llamadas | bug | — |\n"
+            "| H2 | Un tirón | 1 | — | sin confirmar | una captura |\n", 1)
+        state = state.replace("<3 a 5 líneas. Para el reporte inicial", "uno\ndos\ntres\ncuatro\ncinco\nseis\n<x", 1)
+        write(self.folder / "estado.md", state)
+        self.plan = {"paquete": PKG, "principales": ["abrir_ms"], "flujos": {"f": {}}, "etiquetas": {"abrir_ms": "Abrir"},
+                     "mejoras": [{"id": "M1", "hallazgo": "H1", "titulo": "Una sola llamada", "metrica": "abrir_ms",
+                                  "estado": "aplicada", "riesgo": "medio: toca la carga de la lista",
+                                  "cambios": [{"diff": "cambios/M1.diff", "repo": ".", "archivos": ["app/Lista.kt"]}],
+                                  "archivos": [{"ruta": "app/Lista.kt", "riesgo": "medio", "antes": "pedía dos veces",
+                                                "despues": "pide una vez", "pros": "más rápido",
+                                                "contras": " ".join(["palabra"] * 50)}]},
+                                 {"id": "M2", "hallazgo": "H2", "titulo": "Otra cosa", "estado": "propuesta"}]}
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        diff = "".join("+    fun f%d() = %d\n" % (i, i) for i in range(150))
+        write(self.folder / "cambios" / "M1.diff", "diff --git a/app/Lista.kt b/app/Lista.kt\n--- a/app/Lista.kt\n"
+                                                  "+++ b/app/Lista.kt\n@@ -1,0 +1,150 @@\n" + diff)
+        write(self.folder / "metricas.csv", HEADER + rows("antes", "f", "abrir_ms", [1000, 1010, 990, 1005, 995])
+              + rows("despues", "f", "abrir_ms", [500, 505, 495, 502, 498]))
+
+    def test_paneles_topes_y_hallazgos(self):
+        out = self.ok("reporte", "--carpeta", self.folder, "--html")
+        dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        self.assertIn("<summary>M1 · Una sola llamada · [Mejora] · riesgo medio</summary>", dev)
+        self.assertIn("<summary>app/Lista.kt · riesgo medio</summary>", dev)
+        self.assertIn("- **Antes:** pedía dos veces", dev)
+        self.assertIn("+    fun f149() = 149", dev)  # el diff completo
+        self.assertIn("- **Por qué:** La lista tarda (H1)", dev)
+        self.assertIn("La mejora M2: su hallazgo H2 está sin confirmar. Solo los hallazgos confirmados", out)  # E5
+        self.assertIn("Resumen ejecutivo pasa su tope: 2 líneas de más (tiene 7; el tope es 5)", out)  # H6
+        self.assertIn("M1 · app/Lista.kt · contras pasa su tope: 10 palabras de más", out)
+        business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("- Una sola llamada: Toca la carga de la lista: riesgo medio.", business)  # G1
+        self.assertNotIn("Un tirón", business)
+
+    def test_decidir_aplicada_pide_la_explicacion_de_cada_archivo(self):
+        root = init_repo(self.dir)
+        write(self.dir / "app" / "Lista.kt", "a\n")
+        write(self.dir / "app" / "Otro.kt", "b\n")
+        commit_all(root, "base")
+        write(self.dir / "app" / "Lista.kt", "a\nc\n")
+        write(self.dir / "app" / "Otro.kt", "b\nd\n")
+        self.plan["mejoras"][0]["estado"] = "aprobada"
+        self.plan["mejoras"][0].pop("cambios")
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        out = self.ok("decidir", "--carpeta", self.folder, "--aplicada", "M1", "--archivos", "app/Lista.kt,app/Otro.kt")
+        self.assertIn("⚠ Falta la explicación por archivo de M1 para app/Otro.kt", out)
+        self.assertIn("decidir --carpeta", out.split("Falta la explicación")[1])
+
+
 class DodSafetyTest(PerfBase):
     """P1: del DoD solo se corre el código con que empieza una viñeta o el de "Etiqueta: `comando`"; lo que se prohíbe,
     se condiciona, integra o publica no se corre y se cita con su motivo."""

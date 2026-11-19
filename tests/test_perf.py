@@ -1171,21 +1171,23 @@ class ReportTest(PerfBase):
         out = self.ok("reporte", "--carpeta", folder, "--html")
         self.assertIn("no_existe", out)
         md = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
+        # 0.15.0 · H1: la parte principal en palabras y el anexo al final
         self.assertIn("## Métricas principales", md)
-        self.assertIn("| Depende de | Antes | Después | Cambio | Veredicto | Qué significa |", md)
-        self.assertIn("| solo la app | 9 % | 3 % | −6 % (−67 %) | mejora | Mejora clara · funcionó", md)
-        self.assertIn("## Cómo leer este reporte", md)
+        self.assertIn("| Medida | Antes | Después | Cambio | Veredicto |", md)
+        self.assertIn("| Cuadros que se ven trabados | 9 % | 3 % | −67 % | [Mejora] |", md)
+        self.assertIn("## Anexo", md)
+        self.assertIn("### Cómo leer este reporte", md)
         self.assertIn("El jank bajó **mucho**.", md)
+        self.assertNotIn("jank_app_pct", md)
         self.assertFalse((folder / "reporte.md").exists())
         page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn("<title>Rendimiento · &lt;Home&gt; · 2026-01-02</title>", page)
-        self.assertIn("Doble &lt;carga&gt;", page)
         self.assertIn("<strong>mucho</strong>", page)
-        self.assertIn('class="verdict v-better">mejora', page)
+        self.assertIn('class="verdict label v-better">Mejora', page)
         self.assertIn('<nav class="toc"><a href="#s0">', page)
+        self.assertIn('class="anexo"><details><summary>Anexo:', page)  # plegado y cerrado
         self.assertIn("<svg", page)
         self.assertNotIn("{{", page)
-
     def test_reporte_marca_no_confiable_una_principal_de_frames_medida_con_render_por_software(self):
         folder = self.dir / "inv"
         write(folder / "estado.md", "# Rendimiento · Home · 2026-11-09\n\n## Resumen ejecutivo\n\nTexto.\n")
@@ -1198,12 +1200,12 @@ class ReportTest(PerfBase):
                                                   "despues": {"entorno": {"emulador": True, "software": True, "frames": "no"}}}))
         self.ok("reporte", "--carpeta", folder, "--html")
         md = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| no confiable | no confiable: los frames se midieron con render por software", md)
-        self.assertNotIn("| mejora |", md)
-        self.assertIn("— sin veredicto", md)  # la mejora no se declara lograda con frames que no valen
+        self.assertIn("| Cuadros que se ven trabados | 9 % | 3 % | −67 % | [No confiable] |", md)
+        self.assertNotIn("[Mejora]", md)  # la mejora no se declara lograda con frames que no valen
         page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
-        self.assertIn('class="verdict v-same">no confiable', page)
-
+        self.assertIn('class="verdict label v-same">No confiable', page)
+        business = (folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("La fluidez se midió en un dispositivo que no representa uno real", business)
     def test_reporte_inicial_con_plan_y_final_con_propuesto_contra_logrado(self):
         folder = self.dir / "inv"
         write(folder / "estado.md", "# Rendimiento · Arranque · 2026-11-05\n\n## Ficha\n\n| Campo | Valor |\n| --- | --- |\n"
@@ -1218,12 +1220,12 @@ class ReportTest(PerfBase):
         write(folder / "metricas.csv", HEADER + rows("antes", "a", "ttid_ms", [400, 410, 405, 395, 402]))
         self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
         initial = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("## Plan de mejoras", initial)
-        self.assertIn("> Lo que se propone cambiar", initial)
-        self.assertIn("| M1 | Clave raw | H0 | ttid_ms | 402 ms | -20 % | alta |", initial)
-        self.assertIn("| Depende de | Mediana | P90 | Mín – máx | Corridas | Ruido de medición | Avisos |", initial)
-        self.assertIn("| a | ttid_ms | solo la app | 402 ms | 410 ms | 395 ms – 410 ms | 5 | — | — |", initial)
-        self.assertIn("## Cómo leer este reporte", initial)
+        # 0.15.0 · H1 y H2: un panel por mejora propuesta; el plan sigue en estado.md
+        self.assertIn("## Mejoras propuestas", initial)
+        self.assertIn("<summary>M1 · Clave raw · aprobada", initial)
+        self.assertIn("- **Qué se espera:** -20 %.", initial)
+        self.assertIn("| Tiempo hasta que aparece la primera pantalla | 0.4 s | 0.4 s y 0.41 s | sí |", initial)
+        self.assertIn("### Cómo leer este reporte", initial)
         self.assertIn("Arranque en frío", initial)
         self.assertNotIn("secreto", initial)
         self.assertNotIn("Set fijo", initial)
@@ -1233,22 +1235,18 @@ class ReportTest(PerfBase):
               + rows("despues", "a", "ttid_ms", [300, 310, 305, 295, 302]))
         self.ok("reporte", "--carpeta", folder)
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("## Mejoras: esperado contra logrado", final)
-        self.assertIn("| M1 | Clave raw | ttid_ms | 402 ms | -20 % | 302 ms | −25 % | mejora | aprobada | — no aplicada |", final)
-        self.assertIn("## De los hallazgos al resultado", final)
-        self.assertIn("1 hallazgos → 1 mejoras propuestas → 0 aplicadas → 0 funcionaron", final)
+        self.assertIn("## Lo pendiente\n\n- M1 · Clave raw (aprobada, falta aplicarla): -20 %", final)
         self.assertIn("El TTID bajó.", final)
         plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
         plan["mejoras"][0]["estado"] = "aplicada"
         write(folder / "plan.json", json.dumps(plan))
         self.ok("reporte", "--carpeta", folder, "--html")
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| M1 | Clave raw | H0 | ✔ funcionó | ttid_ms: 402 ms → 302 ms (−25 %) · funcionó", final)
+        self.assertIn("<summary>M1 · Clave raw · [Mejora] · riesgo sin evaluar</summary>", final)
+        self.assertIn("- **Qué ganó:** Tiempo hasta que aparece la primera pantalla: 0.4 s → 0.3 s (−25 %) [Mejora].", final)
+        self.assertIn("## Lo pendiente\n\nNo queda nada pendiente.", final)
         page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
-        self.assertIn('<div class="step ok"><b>1</b><span>Funcionaron</span></div>', page)
-        self.assertIn('<td class="ok">✔ funcionó</td>', page)
-        self.assertIn('<span class="state s-aplicada" title="aplicada · implementada; se mide en la fase después">aplicada</span>', page)
-
+        self.assertIn('<details class="card">', page)
     def test_hallazgos_dicen_que_pasa_con_cada_uno_y_su_resultado(self):
         folder = self.dir / "inv"
         write(folder / "estado.md", "# Rendimiento · Favoritos · 2026-11-06\n\n## Hallazgos\n\n"
@@ -1279,12 +1277,8 @@ class ReportTest(PerfBase):
               + rows("despues", "f", "carga_ms", [46, 45, 47, 46, 44]))
         self.ok("reporte", "--carpeta", folder)
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Resultado |", final)
-        self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | ✔ M1 funcionó: carga_ms |", final)
-        self.assertIn("| H4 | GC | 1 | Lista | mejorable | M2: no se aplicó (descartada) |", final)
-        self.assertIn("4 hallazgos → 2 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
-        self.assertIn("| M2 | Lista | H4 | — no aplicada | descartada · no se aplica |", final)
-
+        self.assertIn("<summary>M1 · Caché · [Mejora]", final)
+        self.assertIn("- M2 · Lista (se decidió no hacerla)", final)
     def test_reporte_exige_estado(self):
         self.assertEqual(self.perf("reporte", "--carpeta", self.dir).returncode, 2)
 
@@ -2480,13 +2474,10 @@ class TrialImprovementTest(PerfBase):
     def test_el_reporte_inicial_la_propone_con_su_hipotesis_y_el_usuario_la_decide_como_cualquier_otra(self):
         self.ok("reporte", "--carpeta", self.folder, "--inicial")
         initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| M1 | Caché | H1 | carga_ms | 131 ms |", initial)
-        self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | detalle hilo_max_ms | 44 ms | ≤ 16 ms |", initial)
-        self.assertIn("| propuesta |\n\n**Mejoras a prueba**", initial)  # con línea en blanco: no es una fila de la tabla
-        self.assertIn("- **M2** · hipótesis: el pico es la decodificación de la imagen de cabecera · se confirma si `detalle hilo_max_ms` mejora "
-                      "(esperado: ≤ 16 ms)", initial)
-        self.assertIn("| H2 | Frame largo al abrir el detalle | 44 ms en las 10 corridas | sin probar | sin confirmar | M2 (propuesta) |",
-                      initial)
+        # 0.15.0 · H2: un panel por mejora propuesta; el de una mejora a prueba trae su hipótesis
+        self.assertIn("<summary>M1 · Caché · propuesta", initial)
+        self.assertIn("<summary>M2 · Decodificar la imagen fuera del hilo principal (a prueba) · propuesta", initial)
+        self.assertIn("- **Hipótesis (a prueba):** el pico es la decodificación de la imagen de cabecera", initial)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
         self.assertIn("- **M3** · hipótesis: el pico es el layout del texto largo", state)
         out = self.ok("decidir", "--carpeta", self.folder, "--aprobar", "M2,M3", "--pendiente", "M1")
@@ -2507,19 +2498,13 @@ class TrialImprovementTest(PerfBase):
               + rows("despues", "f", "cierre hilo_max_ms", [37, 38, 36, 37, 38]))
         self.ok("reporte", "--carpeta", self.folder, "--html")
         final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| M1 | Caché | H1 | ✔ funcionó | carga_ms: 131 ms → 46 ms", final)
-        self.assertIn("| M2 | Decodificar la imagen fuera del hilo principal (a prueba) | H2 | ✔ hipótesis confirmada | hipótesis: el pico es la "
-                      "decodificación de la imagen de cabecera · detalle hilo_max_ms: 44 ms → 11 ms (−75 %)", final)
-        self.assertIn("| M3 | Precalcular el layout del texto (a prueba) | H3 | ✖ hipótesis refutada | hipótesis: el pico es el layout del texto largo · "
-                      "cierre hilo_max_ms: se mantuvo en 37 ms", final)
-        self.assertIn("| sin confirmar | ✔ M2: hipótesis confirmada (detalle hilo_max_ms mejora) |", final)
-        self.assertIn("| sin confirmar | ✖ M3: hipótesis refutada (cierre hilo_max_ms sin cambio) |", final)
-        self.assertIn("3 hallazgos → 3 mejoras propuestas → 3 aplicadas → 2 funcionaron", final)
-        self.assertIn("| ≤ 16 ms | 11 ms | −75 % | mejora | aplicada | ✔ hipótesis confirmada |", final)
-        page = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
-        self.assertIn('<td class="ok">✔ hipótesis confirmada</td>', page)
-        self.assertIn('<td class="ko">✖ hipótesis refutada</td>', page)
-        self.assertIn("Mejora a prueba:", final)  # el glosario la explica
+        # 0.15.0 · H2: el panel de cada mejora dice qué ganó y, a prueba, si la hipótesis se confirmó o se refutó
+        self.assertIn("<summary>M1 · Caché · [Mejora]", final)
+        self.assertIn("- **Qué ganó:** Tiempo de \"carga\": 0.13 s → 46 milisegundos (−65 %) [Mejora].", final)
+        self.assertIn("✔ hipótesis confirmada.", final)
+        self.assertIn("✖ hipótesis refutada.", final)
+        self.assertIn("<summary>M2 · ", final)
+        self.assertIn("**Mejoras (M1, M2…):**", final)  # el glosario las explica
         out = self.ok("comparar", self.folder / "metricas.csv")
         self.assertIn("estado.md actualizado (Plan de mejoras", out)
         self.assertIn("✖ hipótesis refutada", (self.folder / "estado.md").read_text(encoding="utf-8"))
@@ -2751,7 +2736,7 @@ class RedoFlowTest(DeviceBase):
         self.assertEqual(len(phase["hz_corridas"]), 4)
         self.assertEqual((self.runs("detalle"), self.runs("home")), (["1", "2", "3"], ["1"]))
         kept = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name != perf.CONFIG_FILE
-                      and not p.name.endswith(perf.TIMELINE_SUFFIX))
+                      and not p.name.endswith((perf.TIMELINE_SUFFIX, perf.SUMMARY_SUFFIX)))
         self.assertEqual(kept, ["detalle_1.perfetto-trace.gz", "detalle_2.perfetto-trace.gz", "detalle_3.perfetto-trace.gz",
                                 "home_1.perfetto-trace.gz"])
         timelines = sorted(p.name for p in (self.folder / "antes").iterdir() if p.name.endswith(perf.TIMELINE_SUFFIX))
@@ -3261,7 +3246,7 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertIn("| Síntoma | El detalle tarda |", md)
         self.assertIn("| Modos | sin completar |", md)
         self.assertIn("| Build y ambiente | sin completar |", md)
-        self.assertIn("| H1 | Frame largo | 48 ms | — | sin confirmar | sin completar |", md)
+        self.assertIn("- H1 · sin confirmar · Frame largo: 48 ms.", md)  # 0.15.0 · H1: en el anexo, con su motivo
         self.ok("reporte", "--carpeta", folder)
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         for leftover in ("3 a 5 líneas", "qué dice cada métrica principal", "test que la fija", "guiado o autónomo"):
@@ -3279,7 +3264,7 @@ class UnfilledTemplateTest(DeviceBase):
         self.assertNotIn("tiene partes sin completar", out)
         md = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
         self.assertIn("La lista usa List<Item> y <carpeta> propia.", md)
-        self.assertIn("| H1 | Doble <carga> en <profileable> | bug |", md)
+        self.assertNotIn("sin completar", md)  # 0.15.0: el hallazgo confirmado sale en el panel de su mejora
 
     def test_con_la_receta_de_arranque_la_ficha_sale_completa_porque_no_hay_sesion_1(self):
         folder = self.dir / "arranque"
@@ -3327,22 +3312,16 @@ class ResultBoxTest(PerfBase):
                 "| H2 | Frame largo al cerrar el detalle | 37 ms en 10 corridas | sin probar | sin confirmar | una captura con muestreo de CPU |\n" \
                 "| H3 | Red solapada | n=3 | — | sin veredicto estadístico | |\n"
         md, page = self.report(table, [])
-        self.assertTrue(md.index("## Resultado") < md.index("## Resumen") < md.index("## Hallazgos"))
-        self.assertIn("**Sin mejoras aplicables.** 3 hallazgos (`descartado`: 1, `sin confirmar`: 2). Por qué, uno por uno:", md)
-        self.assertIn("- **H1** · Jank en la lista · `descartado` · El camino lento no corrió: 0 slices", md)
-        self.assertIn("- **H2** · Frame largo al cerrar el detalle · `sin confirmar` · falta: una captura con muestreo de CPU", md)
-        self.assertIn("- **H3** · Red solapada · `sin confirmar` · no se pudo confirmar ni descartar con estos datos; sin acción", md)
-        self.assertIn('<section id="s0" class="resultado"><h2>Resultado</h2>', page)
-        self.assertIn("section.resultado", page)
-        # la columna opcional se conserva en la tabla de hallazgos, y el rótulo anterior se sigue leyendo
-        self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué falta para decidir | Qué pasa con él |", md)
-        self.assertIn("| sin confirmar | una captura con muestreo de CPU | no se pudo confirmar ni descartar con estos datos; "
-                      "sin acción |", md)
-        self.assertIn("| H3 | Red solapada | n=3 | — | sin veredicto estadístico | — | no se pudo confirmar ni descartar", md)
-        self.assertIn("## Pendientes (no son mejoras)", md)
-        self.assertNotIn("Queda abierto", md)
-        self.assertIn("qué falta para cerrarlo, cuánto cuesta y la acción sugerida", md)
-        self.assertIn("`sin confirmar` no quiere decir que falten trazas ni que la captura fallara", md)  # el glosario
+        # 0.15.0 · H1: sin mejoras, la parte principal lo dice; lo descartado y lo sin confirmar van al anexo, con su motivo
+        self.assertIn("## Mejoras propuestas\n\nNo se propone ninguna mejora.", md)
+        annex = md[md.index("## Anexo"):]
+        self.assertIn("### Se revisó y se descartó", annex)
+        self.assertIn("- H1 · descartado · Jank en la lista: El camino lento no corrió: 0 slices. 2 %.", annex)  # su porqué
+        self.assertIn("- H2 · sin confirmar · Frame largo al cerrar el detalle: 37 ms en 10 corridas. Falta para decidir: "
+                      "una captura con muestreo de CPU.", annex)
+        self.assertIn("- H3 · sin confirmar · Red solapada: n=3.", annex)
+        self.assertNotIn("Jank en la lista", md[:md.index("## Anexo")])
+        self.assertIn('class="anexo"', page)
 
     def test_con_mejoras_dice_cuantas_y_cuales(self):
         table = "| # | Síntoma | Evidencia | Causa raíz | Tipo |\n| --- | --- | --- | --- | --- |\n" \
@@ -3351,11 +3330,11 @@ class ResultBoxTest(PerfBase):
             {"id": "M1", "titulo": "Caché", "hallazgo": "H1", "metrica": "carga_ms", "esperado": "-30 %"},
             {"id": "M2", "titulo": "Decodificar la imagen fuera del hilo principal", "hallazgo": "H2", "a_prueba": True, "hipotesis": "es la imagen de cabecera",
              "metrica": "detalle hilo_max_ms", "esperado": "≤ 16 ms"}])
-        self.assertIn("## Resultado\n\n**2 mejoras propuestas** para 2 hallazgos (1 a prueba: la causa no está probada y la "
-                      "medición de después la confirma o la refuta). Tú decides cuáles se aplican.", md)
-        self.assertIn("- **M1** · Caché · ataca H1 · mide `carga_ms` · esperado: -30 %", md)
-        self.assertIn("- **M2** · Decodificar la imagen fuera del hilo principal (a prueba) · ataca H2 · mide `detalle hilo_max_ms` · esperado: ≤ 16 ms", md)
-        self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | M1 (propuesta) |", md)  # tabla de 0.6.0: igual que antes
+        # 0.15.0 · H2: un panel por mejora propuesta
+        self.assertIn("<summary>M1 · Caché · propuesta", md)
+        self.assertIn("- **Por qué:** Carga lenta (H1). Causa: Red en el hilo. Evidencia: 131 ms.", md)
+        self.assertIn("- **Qué se espera:** -30 %.", md)
+        self.assertIn("<summary>M2 · Decodificar la imagen fuera del hilo principal (a prueba) · propuesta", md)
 
     def test_sin_tabla_de_hallazgos_lo_dice(self):
         self.assertEqual(perf.result_md("", {"mejoras": []}),
@@ -3399,11 +3378,10 @@ class Compat060Test(PerfBase):
         self.assertNotIn("Resumen ejecutivo", out)  # hay una mejora aplicada: el resumen es del cierre, todavía no toca
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| H2 | Frame largo al entrar | 48 ms en la corrida mediana · `hilo_principal_top` | — | sin veredicto "
-                      "estadístico | no se pudo confirmar ni descartar con estos datos; sin acción |", initial)
-        self.assertIn("| H3 | Jank en la lista | `jank_app_pct` 2 % | — | descartado | descartado: se investigó y no es la causa", initial)
-        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamada | 0 llamadas | alta | bajo | bajo | "
-                      "aplicada |", initial)
+        # 0.15.0 · H1/H2: panel por mejora; lo sin confirmar y lo descartado, en el anexo y sin nombres internos
+        self.assertIn("- H2 · sin confirmar · Frame largo al entrar: 48 ms en la corrida mediana", initial)
+        self.assertIn("- H3 · descartado · Jank en la lista: Cuadros que se ven trabados 2 %.", initial)
+        self.assertIn("<summary>M1 · Una sola carga del detalle · aplicada", initial)
         self.assertIn("- **H2** · causa sin verificar · falta una captura con muestreo de CPU", initial)
         self.assertNotIn("<3 a 5 líneas", initial)
         self.assertNotIn("backend real o mocks", initial)
@@ -3420,7 +3398,7 @@ class Compat060Test(PerfBase):
         self.assertNotIn("Cómo se recorre", state)  # el estado de 0.6.0 no tiene esa sección: no se agrega ni falla
         self.ok("reporte", "--carpeta", self.folder, "--html")
         final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("3 hallazgos → 1 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
+        self.assertIn("<summary>M1 · Una sola carga del detalle · [Mejora]", final)  # 0.15.0 · H2: el panel, sin embudo
         for filler in ("test que la fija", "qué dice cada métrica principal", "3 a 5 líneas", "backend real o mocks"):
             self.assertNotIn(filler, final)  # el relleno de la plantilla de 0.6.0 tampoco llega al reporte final
         self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0], "investigación cerrada")
@@ -4811,8 +4789,8 @@ class SegmentNetworkTest(DeviceBase):
         self.ok("reporte", "--carpeta", folder)
         final = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("| pago | consulta | antes | 3 llamadas | 500 ms | 150 ms | 1 llamada | 1 llamada |", final)
-        self.assertIn("| pago | consulta | despues | 2 llamadas | 500 ms | 150 ms | 0 llamadas | 0 llamadas |", final)
-        self.assertIn("**Red por tramo (`<tramo> red_…`):**", final)
+        self.assertIn("| pago | consulta | después | 2 llamadas | 500 ms | 150 ms | 0 llamadas | 0 llamadas |", final)
+        self.assertIn("**Tramos:**", final)  # 0.15.0: el glosario sin nombres internos
         self.assertEqual(perf.segment_network_md(perf.read_rows(folder / "metricas.csv"), {"flujos": {"pago": {}}}), "")
 
 
@@ -4959,10 +4937,10 @@ class Compat070Test(PerfBase):
         self.assertNotIn("Paso humano", state)
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         initial = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| H2 | Frame largo al entrar al detalle, estable en las 5 corridas |", initial)
-        self.assertIn("Una captura con muestreo de CPU o probar el cambio", initial)
-        self.assertIn("| M1 | Una sola carga del detalle | H1 | red_solapadas | 1 llamada | 0 llamadas | alta | bajo | bajo | "
-                      "aplicada |", initial)
+        # 0.15.0 · H1/H2: panel por mejora; lo sin confirmar, en el anexo
+        self.assertIn("- H2 · sin confirmar · Frame largo al entrar al detalle, estable en las 5 corridas", initial)
+        self.assertIn("Falta para decidir: una captura con muestreo de CPU o probar el cambio", initial)
+        self.assertIn("<summary>M1 · Una sola carga del detalle · aplicada", initial)
         self.assertIn("Decodificar la imagen de cabecera fuera del hilo principal", initial)
         self.assertNotIn("Red por tramo", initial.split("## Cómo leer este reporte")[0])  # el CSV de 0.7.0 no la trae
         out = self.ok("comparar", self.folder / "metricas.csv")
@@ -4974,7 +4952,8 @@ class Compat070Test(PerfBase):
         self.assertNotIn("⚠", out)
         self.ok("reporte", "--carpeta", self.folder, "--html")
         final = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("3 hallazgos → 2 mejoras propuestas → 1 aplicadas → 1 funcionaron", final)
+        self.assertIn("<summary>M1 · Una sola carga del detalle · [Mejora]", final)  # 0.15.0 · H2: el panel, sin embudo
+        self.assertIn("## Lo pendiente\n\n- M2 ·", final)  # la propuesta que quedó para más adelante
         self.assertNotIn("## Red por tramo", final)
         self.assertEqual(perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))[0],
                          "investigación cerrada · faltan quitar los cambios temporales y el DoD")  # 0.12.0
@@ -7869,30 +7848,22 @@ class ServicesReportTest(PerfBase):
     def test_todos_los_servicios_con_el_servidor_frente_a_la_app_en_un_desplegable_abierto(self):
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         md = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        section = md[md.index("## Servicios del flujo"):md.index("## Red por tramo") if "## Red por tramo" in md
-                     else md.index("## Hallazgos")]
+        # 0.15.0 · H1: la lista completa va en el anexo; la parte principal tiene solo los que se repiten o cambian
+        section = md[md.index("### Servicios del flujo, completos"):]
+        section = section[:section.index("\n### ", 5)]
         self.assertIn("**Informativa.**", section)
         self.assertIn("no para decidir una mejora de la app", section)
-        self.assertIn("si se mueve entre fases, es variación del backend, no efecto de la mejora", section)
         table = [line for line in section.splitlines() if line.startswith("| `")]
         self.assertEqual(len(table), 7)  # la lista completa: los 7 que se llaman en esta fase
         self.assertIn("<details open>\n<summary>Los 7 servicios del flujo</summary>", section)
         self.assertIn("**Tramo `carga`**", section)
-        self.assertIn("**Fuera de los tramos**", section)
         self.assertIn("| `GET api/v1/clientes` | 2 | sin dato | 410 ms / 900 ms | 300 ms | cola 5 ms · conexión 20 ms · "
                       "lectura 15 ms | 1 | 0 |", section)
-        # sin TTFB ni desglose en el CSV, lo dice: no es cero
-        self.assertIn("| `GET api/v1/clientes/{id}` | 1 | sin dato | 150 ms / 150 ms | 100 ms | sin dato | sin dato | "
-                      "sin dato |", section)
-        # sin el momento de cada llamada (una versión anterior), el orden es por lo que suman y lo dice
         self.assertIn("Orden: por el tiempo que suman (estas corridas no traen el momento de cada llamada", section)
-        self.assertIn("**Espera de servicios: 1.32 s de 2 s del flujo (66 %)**, sumando las llamadas", section)
         self.assertNotIn("nunca", section)  # el que no se llama en esta fase no aparece
-        page = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
-        self.assertIn("Servicios que más tiempo suman", page)
-        self.assertIn("<details open>", page)
-        self.assertIn("servidor (TTFB)", page)  # la leyenda del gráfico separa servidor y app
-
+        main = md[md.index("## Servicios"):md.index("## Anexo")]
+        self.assertIn("| GET api/v1/clientes | 2 | 0.41 s | se repite |", main)
+        self.assertIn("Ruta real no disponible para GET api/v1/clientes", main)
     def test_en_el_final_cada_servicio_sale_antes_contra_despues(self):
         after = service_rows("despues", "GET api/v1/clientes", 1, [400] * 5, 300, FULL) \
             + service_rows("despues", "GET api/v1/clientes/{id}", 1, [150] * 5, 100) \
@@ -7901,14 +7872,13 @@ class ServicesReportTest(PerfBase):
         write(self.folder / "metricas.csv", self.before + after)
         self.ok("reporte", "--carpeta", self.folder)
         md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        section = md[md.index("## Servicios del flujo"):]
+        section = md[md.index("### Servicios del flujo, completos"):]
         self.assertIn("| `GET api/v1/clientes` | antes | 2 | sin dato | 410 ms / 900 ms |", section)
         self.assertIn("| `GET api/v1/clientes` | después | 1 | sin dato | 400 ms / 400 ms |", section)
-        self.assertIn("| `GET api/v1/catalogo/0` | después | no se llama |", section)
-        self.assertIn("| `GET api/v1/nuevo` | antes | no se llama |", section)  # uno que solo aparece después no se pierde
         self.assertIn("| `GET api/v1/nuevo` | después | 1 | sin dato | 500 ms / 500 ms |", section)
-        self.assertIn("- En antes, 7 servicios", section)
-        self.assertIn("- En después, 3 servicios", section)
+        main = md[md.index("## Servicios"):md.index("## Anexo")]
+        self.assertIn("| GET api/v1/clientes | 2 → 1 |", main)  # 0.15.0 · H1: solo los que cambian o se repiten
+        self.assertIn("| GET api/v1/nuevo | 0 → 1 |", main)
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
         # no todos traen el tiempo del servidor: suma la duración de las llamadas y lo dice así
         self.assertIn("El recorrido llama a 3 servicios (3 llamadas en total). De los 1.3 s del recorrido (con las esperas "
@@ -8821,15 +8791,16 @@ class CodeChangesTest(PerfBase):
         self.ok("reporte", "--carpeta", "reports/perf/lista", "--html")
         md = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
         self.assertIn("_Reporte final · interno: contiene código · ", md)
-        section = md[md.index("## Cambios de código (interno: contiene código)"):]
-        self.assertIn("### M1 · Pedir la lista una sola vez", section)
-        self.assertIn("- **Por qué:** H1: La lista tarda; Pide los clientes dos veces. Evidencia: `lista_ms` 1800 ms", section)
-        self.assertIn("- **Qué mejoró:** `lista_ms` pasó de 1.8 s a 1.1 s (−39 %): Mejora clara · funcionó", section)
-        self.assertIn("- **Archivos:** `app/Lista.kt` · +0 −1 líneas · diff completo: `cambios/M1.diff`", section)
-        self.assertIn("```diff\n# app/Lista.kt\n@@", section)
+        # 0.15.0 · H2: un panel plegable por mejora, con el diff completo de cada archivo
+        section = md[md.index("## Mejoras"):md.index("## Servicios")]
+        self.assertIn("<summary>M1 · Pedir la lista una sola vez · [Mejora]", section)
+        self.assertIn("- **Por qué:** La lista tarda (H1). Causa: Pide los clientes dos veces.", section)
+        self.assertIn("- **Qué ganó:** Tiempo de \"lista\": 1.8 s → 1.1 s (−39 %) [Mejora].", section)
+        self.assertIn("<summary>app/Lista.kt · riesgo sin evaluar</summary>", section)
+        self.assertIn("- Sin explicación por archivo", section)
+        self.assertIn("```diff\n", section)
         self.assertIn("-        pedir()", section)
-        self.assertIn("### M2 · Otra", section)
-        self.assertIn("- **Código:** sin diff guardado", section)
+        self.assertIn("<summary>M2 · Otra", section)
         page = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
         self.assertIn('<pre class="diff">', page)
         self.assertIn('<span class="del">-        pedir()</span>', page)
@@ -9685,7 +9656,7 @@ class CaptureOutputTest(DeviceBase):
         self.assertIn("Rutas reales de los servicios (log hb-perf, fuera de la traza): 1", out.stdout)
         md = perf.services_md(perf.read_rows(self.plan.parent / "metricas.csv"), json.loads(
             self.plan.read_text(encoding="utf-8")), urls=perf.service_urls(self.plan.parent))
-        self.assertIn("`GET items/{id}` · ruta: `https://api.example.com/base/v3/items/42`", md)
+        self.assertIn("`GET https://api.example.com/base/v3/items/42`", md)  # 0.15.0 · H3: el método y la ruta real
         self.env["FAKE_LOGCAT_PERF"] = ""  # una instrumentación anterior: sin log
         out = self.capture("--prueba")
         self.assertIn("Sin el log de rutas (hb-perf): la instrumentación de red es anterior a 0.11.0", out.stdout)
@@ -9991,7 +9962,6 @@ class BusinessWordsTest(PerfBase):
         self.assertIn("- La búsqueda se siente trabada: Filtra todo en cada letra", text)
         self.assertNotIn(".:", text)
         self.assertNotIn("`", text)
-        self.assertIn("(5 o 6 llamadas en total)", text)
         self.assertIn("Mayor congelamiento de la pantalla, en la búsqueda de un nombre corto", text)
         self.assertIn("- Un tirón al volver (sin cerrar; el detalle está en el reporte técnico).", text)
         self.assertIn("- Un punto técnico de la investigación (sin cerrar", text)
