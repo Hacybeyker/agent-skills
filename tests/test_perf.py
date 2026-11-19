@@ -2758,8 +2758,9 @@ class RedoFlowTest(DeviceBase):
         self.assertEqual(timelines, ["detalle_1.linea.json", "detalle_2.linea.json", "detalle_3.linea.json",
                                      "home_1.linea.json"])  # la del flujo rehecho es la de la tanda nueva
         discarded = next(p for p in self.folder.iterdir() if p.name.startswith("antes-descartada-"))
-        self.assertEqual(sorted(p.name for p in discarded.iterdir()), ["home_1.linea.json", "home_1.perfetto-trace.gz",
-                                                                       "home_2.linea.json", "home_2.perfetto-trace.gz"])
+        self.assertEqual(sorted(p.name for p in discarded.iterdir()), [  # 0.15.0 · F3: el resumen se va con su traza
+            "home_1.linea.json", "home_1.perfetto-trace.gz", "home_1.resumen.json",
+            "home_2.linea.json", "home_2.perfetto-trace.gz", "home_2.resumen.json"])
 
     def test_rehacer_despues_con_dos_flujos_renueva_la_fecha_y_siguiente_no_vuelve_a_pedirlo(self):
         self.tp_outputs(GOOD)

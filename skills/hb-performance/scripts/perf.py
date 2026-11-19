@@ -1336,6 +1336,63 @@ def save_timeline(out_dir, flow, run, timeline):
         pass
 
 
+SUMMARY_SUFFIX = ".resumen.json"  # F3: todo lo que los reportes necesitan de una corrida, sin abrir su traza
+
+
+def save_run_summary(out_dir, flow, run, metrics, info, cycles=None):
+    """F3: el resumen de una corrida junto a su traza (<flujo>_<n>.resumen.json): la red por tramo con los tiempos de cada
+    llamada, los slices más largos del hilo principal, los frames y la memoria. Si falla, no frena la captura."""
+    data = {"version": 1, "metricas": {name: value for name, value, _, _ in metrics},
+            "red_por_tramo": info.get("red_por_tramo") or [], "linea": info.get("linea") or {},
+            "frames": info.get("frames"), "hilo_top": info.get("hilo_top") or [], "memoria": cycles or []}
+    try:
+        (pathlib.Path(out_dir) / ("%s_%s%s" % (flow, run, SUMMARY_SUFFIX))).write_text(
+            json.dumps(data, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def ensure_run_summaries(folder, plan, rows, tp_option=None):
+    """F3: las corridas que el reporte necesita (la representativa de cada fase y flujo) sin resumen ni línea de tiempo
+    (de una versión anterior) se procesan UNA vez y quedan en caché junto a su traza. Imprime el progreso. Nunca abre una
+    traza que ya tiene su resumen."""
+    folder = pathlib.Path(folder)
+    todo = []
+    for phase in FASES:
+        for flow in sorted({row["flujo"] for row in rows if row["fase"] == phase}):
+            runs = sorted({row["corrida"] for row in rows if row["fase"] == phase and row["flujo"] == flow}, key=to_int)
+            if not runs or any(load_timeline(folder, phase, flow, run) for run in runs):
+                continue
+            run = runs[len(runs) // 2]
+            try:
+                trace = trace_of(folder, phase, flow, run)
+            except PerfError:
+                continue
+            todo.append((phase, flow, run, trace))
+    if not todo:
+        return
+    try:
+        tp = find_tp(tp_option)
+    except PerfError:
+        print("· %d corrida%s de una versión anterior sin resumen: sin trace_processor no la%s proceso (el reporte sale sin "
+              "su línea de tiempo)" % (len(todo), "" if len(todo) == 1 else "s", "" if len(todo) == 1 else "s"))
+        return
+    for index, (phase, flow, run, trace) in enumerate(todo, start=1):
+        print("… procesando la traza %d de %d (%s, %s, corrida %s): es de una versión anterior y no tiene resumen; queda "
+              "en caché y no se vuelve a abrir" % (index, len(todo), phase, flow, run), flush=True)
+        spec = (plan.get("flujos") or {}).get(flow) or {}
+        sql = fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), plan.get("paquete", ""),
+                       {"INPUT_GLOB": plan.get("input_slices") or INPUT_SLICES})
+        try:
+            sets = run_tp_batch(tp, trace, [("metricas", sql)])["metricas"]
+            metrics, _, info = trace_metrics(trace_rows(*sets[-1]), plan.get("hz"), spec, set(), 34)
+        except (PerfError, OSError, subprocess.SubprocessError, ValueError, IndexError):
+            print("  · no se pudo procesar: el reporte sale sin su línea de tiempo")
+            continue
+        save_timeline(trace.parent, flow, run, info.get("linea"))
+        save_run_summary(trace.parent, flow, run, metrics, info)
+
+
 def load_timeline(folder, phase, flow, run):
     try:
         data = json.loads((pathlib.Path(folder) / phase / ("%s_%s%s" % (flow, run, TIMELINE_SUFFIX))).read_text(
@@ -1700,6 +1757,8 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
                     ("frame_p90_ms", percentile(durations, 0.9), "ms", "app"),
                     ("frame_p99_ms", percentile(durations, 0.99), "ms", "app")]
     top = [r for r in main if r[3] == 0 and r[2] >= MAIN_SLICE_MIN_NS]
+    info["hilo_top"] = [[r[4], round((r[1] - origin) / 1e6, 1), round(r[2] / 1e6, 1)]
+                        for r in sorted(top, key=lambda r: -r[2])[:5]]  # F3: para el resumen de la corrida
     out += [("hilo_slices_sobre_presupuesto", sum(1 for r in top if r[2] > budget), "slices", "app"),
             ("hilo_slices_100ms", sum(1 for r in top if r[2] > LONG_SLICE_NS), "slices", "app"),
             ("hilo_max_ms", max((r[2] for r in top), default=0) / 1e6, "ms", "app")]
@@ -6566,6 +6625,82 @@ def cost_total(folder, plan, plain=False):
     return " · ".join(parts)
 
 
+# F1: el costo esperado de cada tipo de sesión, en USD, según el tamaño del proyecto. Es la tabla "Costo esperado por
+# sesión" de modelos.md (un test comprueba que digan lo mismo). Nunca detiene nada: si una sesión se pasó, se avisa.
+COST_REFERENCE = {
+    "0p": {"pequeño": (0.1, 0.3), "mediano": (0.1, 0.3), "grande": (0.1, 0.3)},
+    "0": {"pequeño": (0.8, 1.5), "mediano": (1.0, 2.0), "grande": (1.5, 3.0)},
+    "1": {"pequeño": (0.5, 1.5), "mediano": (1.1, 2.3), "grande": (1.5, 2.5)},
+    "2": {"pequeño": (0.3, 1.0), "mediano": (0.5, 1.5), "grande": (1.0, 2.0)},
+    "3": {"pequeño": (0.5, 1.0), "mediano": (0.8, 1.5), "grande": (1.0, 2.0)},
+    "4": {"pequeño": (0.02, 0.3), "mediano": (0.02, 0.5), "grande": (0.05, 1.0)},
+}
+COST_SESSION_NAMES = {"0p": "0 · pedido", "0": "0 · setup", "1": "1 · ficha", "2": "2 · diagnóstico", "3": "3 · mejora",
+                      "4": "4 · cierre"}
+SIZE_KEY = re.compile(r"tama[ñn]o(?:\s+del\s+proyecto)?", re.I)
+SIZE_LIMITS = (5, 25)  # módulos de settings.gradle: hasta 5, pequeño; hasta 25, mediano; más, grande
+
+
+def project_size(root):
+    """(tamaño, por qué): "pequeño", "mediano" o "grande". La línea `Tamaño del proyecto:` de la sección de rendimiento
+    de AGENTS.md manda; si no, la cantidad de módulos que incluye settings.gradle(.kts)."""
+    for key, value in performance_lines(root):
+        if SIZE_KEY.fullmatch(key.strip()):
+            for size in ("pequeño", "mediano", "grande"):
+                if size in value.lower() or size.replace("ñ", "n") in value.lower():
+                    return size, "AGENTS.md"
+    count = 0
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        path = pathlib.Path(root) / name
+        if path.is_file():
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            text = re.sub(r"(?m)//.*$", "", re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+            text = re.sub(r",[ \t]*\n\s*", ", ", text)  # Groovy: `include ':a',` y los módulos en las líneas siguientes
+            blocks = re.findall(r"\binclude\s*\(([^)]*)\)", text) + re.findall(r"(?m)\binclude\s+([\"'][^\n]*)$", text)
+            count = len({name.lstrip(":") for block in blocks for name in re.findall(r"""["']([\w.:-]+)["']""", block)})
+            break
+    size = "pequeño" if count <= SIZE_LIMITS[0] else "mediano" if count <= SIZE_LIMITS[1] else "grande"
+    return size, "%d módulo%s en settings.gradle" % (count, "" if count == 1 else "s")
+
+
+def cost_type(label):
+    """El tipo de sesión de una fila de "Consumo": 0p (pedido), 0, 1, 2, 3 o 4; None si no se reconoce."""
+    text = " ".join(str(label or "").lower().split())
+    if re.match(r"0\s*·\s*pedido", text):
+        return "0p"
+    found = re.match(r"([0-4])\b", text)
+    return found.group(1) if found else None
+
+
+def usd(value):
+    return ("%.2f" % value).rstrip("0").rstrip(".").replace(".", ",")
+
+
+def cost_warnings(folder, plan):
+    """F1: una línea por sesión anotada que costó más de lo esperado para su tipo y el tamaño del proyecto. Nunca
+    detiene nada."""
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    size, why = project_size(project_root(pathlib.Path(folder)).resolve())
+    out = []
+    for row in rows:
+        kind = cost_type(row["sesion"])
+        spent = cost_of(row["costo"])["usd"]
+        if kind is None or spent is None:
+            continue
+        low, high = COST_REFERENCE[kind][size]
+        if spent > high:
+            out.append("la sesión %s costó %s USD; lo esperado es %s–%s (proyecto %s: %s): consumió más de lo que debía. "
+                       "No se detuvo nada; suele ser exploración que la skill hace sola (modelos.md · Por qué se encarece)"
+                       % (row["sesion"], usd(spent), usd(low), usd(high), size, why))
+    return out
+
+
 def update_cost_total(folder, plan):
     """Deja al día la línea del total debajo de la tabla "Consumo" de estado.md."""
     state = pathlib.Path(folder) / "estado.md"
@@ -6573,12 +6708,13 @@ def update_cost_total(folder, plan):
         return
     text = state.read_text(encoding="utf-8")
     line = "%s %s" % (COST_TOTAL, cost_total(folder, plan))
+    warned = ["- ⚠ Costo: %s." % warning for warning in cost_warnings(folder, plan)]  # F1
 
     def rewrite(match):
-        body = [row for row in match.group(2).rstrip("\n").split("\n") if not row.startswith(COST_TOTAL)]
+        body = [row for row in match.group(2).rstrip("\n").split("\n") if not row.startswith((COST_TOTAL, "- ⚠ Costo:"))]
         while body and not body[-1].strip():
             body.pop()
-        return match.group(1) + "\n".join(body + ["", line]) + "\n"
+        return match.group(1) + "\n".join(body + ["", line] + ([""] + warned if warned else [])) + "\n"
 
     new, count = re.subn(r"(## Consumo\n\n)(.*?)(?=\n## |\Z)", rewrite, text, count=1, flags=re.S)
     if count and new != text:
@@ -6594,7 +6730,8 @@ def cost_md(folder, plan):
     intro = ("> Lo que costó cada sesión de IA, según lo anotó quien la corrió (`perf.py consumo`). Las mediciones "
              "corren en la terminal, sin chat, y no cuestan tokens.\n\n")
     table = consumo_table(rows) + "\n\n" if rows else ""
-    return "%s%s**Total:** %s" % (intro, table, cost_total(folder, plan))
+    warned = "".join("\n\n⚠ %s." % (warning[0].upper() + warning[1:]) for warning in cost_warnings(folder, plan))
+    return "%s%s**Total:** %s%s" % (intro, table, cost_total(folder, plan), warned)
 
 
 def cost_lines(folder, plan):
@@ -7662,6 +7799,9 @@ def cmd_consumo(args):
         plan = {}
     update_cost_total(folder, plan)
     print("  Total de la investigación: %s" % cost_total(folder, plan))
+    for warning in cost_warnings(folder, plan):  # F1: siempre se avisa, nunca se detiene
+        if warning.startswith("la sesión %s " % entry["sesion"]):
+            print("⚠ " + warning[0].upper() + warning[1:] + " (queda en estado.md y en el reporte técnico).")
     print(next_hint(folder))
 
 
@@ -12333,6 +12473,7 @@ def cmd_capturar(args, plan=None):
             return
         append_rows(csv_path, [metric_row(phase, flow_name, n, m[0], m[1], m[2], m[3]) for m in metrics])
         save_timeline(out_dir, flow_name, n, info.get("linea"))
+        save_run_summary(out_dir, flow_name, n, metrics, info, read_cycles(cycles_path))  # F3
         known |= {m[0] for m in metrics}
         print(run_line(run_label()[len("corrida "):], size_mb, metrics))
         if is_repetition(flow) and read_cycles(cycles_path):  # C5: el veredicto de memoria de esta corrida
@@ -16070,7 +16211,8 @@ def cmd_reporte(args):
     title, sections = state_sections(state_path.read_text(encoding="utf-8"))
     plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
     rows = read_rows(csv_path) if csv_path.is_file() else []
-    date = datetime.date.today().isoformat()
+    print("… armando los reportes (lee metricas.csv y el resumen de cada corrida; no vuelve a abrir las trazas)", flush=True)
+    ensure_run_summaries(folder, plan, rows)  # F3: solo las corridas de una versión anterior, una vez
 
     def pick(*names):
         return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
@@ -16084,10 +16226,10 @@ def cmd_reporte(args):
         print("· %s no tiene la sección \"## Resumen para gerencia\" (es de una versión anterior): el reporte para "
               "gerencia sale igual, con esa parte \"%s\". Para completarla, agrega la sección con 3 a 5 líneas sin "
               "términos técnicos y vuelve a generar." % (state_path, UNFILLED))
-    pending_intro = ("> No son mejoras ni tareas obligatorias: es lo que esta investigación no pudo cerrar. De cada uno "
-                     "importa el síntoma y qué tan estable es, qué falta para cerrarlo, cuánto cuesta y la acción "
-                     "sugerida.\n\n")
+    urls = service_urls(folder)
+    problems = []
     if args.inicial:
+        date = datetime.date.today().isoformat()
         plan_md = plan_table_md(plan, rows) if plan.get("mejoras") else ""
         if plan_md and update_block(folder, "mejoras", plan_md):
             print("✔ estado.md actualizado (Plan de mejoras)")

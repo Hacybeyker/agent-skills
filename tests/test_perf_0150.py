@@ -852,5 +852,76 @@ class MeasurementHelpersTest(unittest.TestCase):
 
 
 # ── E, F, H: costo, velocidad del reporte y textos ───────────────────────────
+class CostWarningTest(PerfBase):
+    """F1: `consumo` compara cada sesión con la referencia de modelos.md según el tipo de sesión y el tamaño del
+    proyecto; si se pasó, lo dice (también en estado.md y en el anexo de costo) y nunca detiene nada."""
+
+    def test_aviso_y_tabla(self):
+        folder = self.dir / "inv"
+        write(self.dir / "AGENTS.md", "# P\n\n## Rendimiento\n\n- Tamaño del proyecto: mediano\n")
+        write(folder / "plan.json", json.dumps({"paquete": PKG, "flujos": {"f": {}}}))
+        write(folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        out = self.ok("consumo", "--carpeta", folder, "--sesion", "2 · diagnóstico", "--costo", "2.4 USD")
+        self.assertIn("⚠ La sesión 2 · diagnóstico costó 2,4 USD; lo esperado es 0,5–1,5 (proyecto mediano: AGENTS.md): "
+                      "consumió más de lo que debía", out)
+        state = (folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("- ⚠ Costo: la sesión 2 · diagnóstico costó 2,4 USD", state)
+        self.assertIn("consumió más de lo que debía", perf.cost_md(folder, {}))
+        quiet = self.ok("consumo", "--carpeta", folder, "--sesion", "1 · ficha", "--costo", "1.2 USD")
+        self.assertNotIn("1 · ficha costó", quiet)
+        self.assertEqual(perf.cost_type("0 · pedido"), "0p")
+
+    def test_el_tamano_por_los_modulos(self):
+        write(self.dir / "settings.gradle.kts", "\n".join('include(":m%d")' % i for i in range(30)) + "\n")
+        self.assertEqual(perf.project_size(self.dir), ("grande", "30 módulos en settings.gradle"))
+
+    def test_modelos_md_dice_lo_mismo_que_el_script(self):
+        text = (SKILL / "references" / "modelos.md").read_text(encoding="utf-8")
+        table = text.split("## Costo esperado por sesión")[1].split("\n## ")[0]
+        rows = {line.split("|")[1].strip(): [cell.strip() for cell in line.split("|")[2:5]]
+                for line in table.splitlines() if line.startswith("| ") and "USD" in line}
+
+        def usd(value):
+            return ("%.2f" % value).rstrip("0").rstrip(".").replace(".", ",")
+
+        for kind, name in perf.COST_SESSION_NAMES.items():
+            expected = ["%s–%s USD" % (usd(low), usd(high)) for low, high in
+                        (perf.COST_REFERENCE[kind][size] for size in ("pequeño", "mediano", "grande"))]
+            self.assertEqual(rows[name], expected, name)
+
+
+class ReportSpeedTest(DeviceBase):
+    """F3: `reporte` lee metricas.csv y el resumen de cada corrida; no vuelve a abrir las trazas. Las corridas viejas sin
+    resumen se procesan una sola vez y quedan en caché."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.plan.parent
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        self.tp_outputs(GOOD)
+        self.ok("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "3", "--calentamiento", "0",
+                "--sin-compilar")
+        self.assertTrue(list((self.folder / "antes").glob("*.resumen.json")))
+
+    def calls(self):
+        counter = self.dir / "tp.count"
+        return int(counter.read_text()) if counter.is_file() else 0
+
+    def test_no_abre_trazas_y_cachea_las_viejas(self):
+        before = self.calls()
+        started = time.time()
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertLess(time.time() - started, 60)
+        self.assertEqual(self.calls(), before)  # ninguna traza abierta
+        self.assertIn("no vuelve a abrir las trazas", out)
+        for path in (self.folder / "antes").glob("*%s" % perf.TIMELINE_SUFFIX):  # una corrida de una versión anterior
+            path.unlink()
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertIn("procesando la traza 1 de 1", out)
+        self.assertEqual(self.calls(), before + 1)
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertEqual(self.calls(), before + 1)  # quedó en caché
+
+
 if __name__ == "__main__":
     unittest.main()
