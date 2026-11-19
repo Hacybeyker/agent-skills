@@ -485,6 +485,8 @@ elif cmd.startswith("[ -d /proc/"):
         sys.exit(1)
     if os.environ.get("FAKE_TRAZA_CORTADA"):
         print("terminada")
+    if os.environ.get("FAKE_PERFETTO_VIVA"):  # 0.15.0: una traza que siguió grabando en el dispositivo
+        print("viva")
 elif cmd.startswith("dumpsys meminfo"):
     print("  Java Heap:  2048\n  TOTAL PSS:  51200   TOTAL RSS: 1\n  Views:  10\n  Activities:  1")
 elif cmd.startswith("uiautomator dump") and os.environ.get("FAKE_PULL_FALLA"):
@@ -5028,11 +5030,12 @@ class TriageToRigorousTest(PerfBase):
     def test_triage_cerrado_dice_como_seguir_y_no_pide_capturas(self):
         self.measured(3)
         title, steps = self.step()
-        self.assertEqual(title, "triage cerrado")
-        self.assertEqual([s["tipo"] for s in steps], ["archivo", "terminal"])
-        self.assertIn("decidir --carpeta", steps[1]["texto"])
-        self.assertTrue(steps[1]["texto"].endswith("--profundidad riguroso"))
-        self.assertIn("solo si quieres aplicar una mejora", steps[1]["que"])
+        # 0.15.0 · B6: tres caminos excluyentes ("Elige uno"); nunca `cerrar` como paso 1
+        self.assertEqual(title, "triage terminado · elige qué hacer con las mejoras")
+        self.assertEqual([s["tipo"] for s in steps], ["archivo", "opciones"])
+        names = [name for name, _, _ in steps[1]["opciones"]]
+        self.assertEqual(names, ["Aplicar ahora", "Pausar para después", "Cerrar del todo"])
+        self.assertTrue(steps[1]["opciones"][0][2]["texto"].endswith("--profundidad riguroso"))
 
     def test_un_triage_abierto_con_mejoras_y_sin_reporte_sigue_como_antes(self):
         self.measured(3, skill=None)

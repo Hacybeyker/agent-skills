@@ -471,5 +471,190 @@ TRIAGE_PLAN = {"paquete": "com.example.app", "profundidad": "triage", "principal
                             "metrica": "abrir_ms"}]}
 
 
+class TriageBase(PerfBase):
+    """Un proyecto con una investigación de triage terminada: reporte inicial, una mejora propuesta y una marca puesta
+    en app/Lista.kt (fila de "Cambios temporales")."""
+
+    def setUp(self):
+        super().setUp()
+        (self.dir / "proyecto").mkdir()
+        self.root = init_repo(self.dir / "proyecto")
+        write(self.root / "app" / "Lista.kt", LISTA)
+        write(self.root / "AGENTS.md", "# P\n\n## Rendimiento\n\n- applicationId: com.example.app\n\n## DoD\n\n1. `true`\n")
+        commit_all(self.root, "base")
+        write(self.root / ".git" / "info" / "exclude", "/reports/\n")
+        self.folder = self.root / "reports" / "perf" / "catalogo-lista" / "2026-03-02"
+        self.rel = os.path.relpath(str(self.folder), str(self.root))
+        write(self.folder / "plan.json", json.dumps(TRIAGE_PLAN))
+        state = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8").replace(
+            "| --- | --- | --- | --- | --- |\n\n\"Altera\"",
+            "| --- | --- | --- | --- | --- |\n| `app/Lista.kt` | . | marca | — | no |\n\n\"Altera\"", 1).replace(
+            "| --- | --- | --- | --- | --- | --- |\n",
+            "| --- | --- | --- | --- | --- | --- |\n| H1 | la lista tarda | abrir_ms + `app/Lista.kt:7` | dos llamadas | bug | — |\n",
+            1)
+        write(self.folder / "estado.md", state)
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-03-02T10:00:00", "corridas": 3,
+                                                                 "commit": git(self.root, "rev-parse", "HEAD").strip(),
+                                                                 "flujos": {"catalogo-lista": {"corridas": 3}}}}))
+        write(self.folder / "diagnostico.md", "x\n")
+        write(self.folder / "reporte-inicial-dev.md", "# reporte\n")
+        write(self.root / "app" / "Lista.kt", LISTA_MARKED)
+        self.env = dict(ENV, HOME=str(self.dir))
+
+    def run_in(self, *args):
+        return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(self.root),
+                              env=self.env, capture_output=True, text=True, encoding="utf-8")
+
+    def ok_in(self, *args):
+        result = self.run_in(*args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(ends_with_step(result.stdout), "sin paso al final:\n" + result.stdout)
+        self.assertEqual(pasteable(result.stdout)[1], [], result.stdout)
+        return result.stdout
+
+    def plan(self):
+        return perf.load_plan(self.folder / "plan.json")
+
+
+class TriageChoiceTest(TriageBase):
+    """B6: un triage con mejoras termina en tres caminos excluyentes, nunca con `cerrar` como paso 1."""
+
+    def test_elige_uno(self):
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("triage terminado · elige qué hacer con las mejoras", out)
+        self.assertIn("Elige uno (son caminos distintos", out)
+        options = re.findall(r"^\s+([ABC])\. (.+?) · cuándo conviene", out, re.M)
+        self.assertEqual([name for _, name in options], ["Aplicar ahora", "Pausar para después", "Cerrar del todo"])
+        commands = commands_in(out)
+        self.assertTrue(commands[0].endswith("decidir --carpeta %s --profundidad riguroso" % self.rel), commands)
+        self.assertTrue(commands[1].endswith("pausar --carpeta %s" % self.rel))
+        self.assertTrue(commands[2].endswith("cerrar --carpeta %s" % self.rel))
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("**Elige uno de los caminos (no van en orden):**", state)
+
+    def test_cerrar_del_todo(self):
+        self.ok_in("cerrar", "--carpeta", self.rel, "--dod")
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("triage cerrado", out)
+        self.assertIn(perf.NO_STEPS_LEFT, out)
+
+
+class PauseResumeTest(TriageBase):
+    """B7 y B8: pausar quita las marcas con su parche y anota los commits; reanudar las repone, revisa el código citado y
+    la línea base y da la decisión."""
+
+    def test_pausar_y_reanudar(self):
+        report = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        out = self.ok_in("pausar", "--carpeta", self.rel)
+        self.assertIn("En pausa: triage terminado, lista para pasar a riguroso", out)
+        self.assertEqual((self.root / "app" / "Lista.kt").read_text(encoding="utf-8"), LISTA)  # marca quitada
+        self.assertEqual(git(self.root, "status", "--short").strip(), "")
+        pause = json.loads((self.folder / "pausa.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(pause["commits"].values()), [git(self.root, "rev-parse", "HEAD").strip()])
+        self.assertIn("sí · perf.py pausar", (self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertEqual((self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"), report)
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("en pausa: triage terminado", out)
+        self.assertTrue(commands_in(out)[0].endswith("reanudar --carpeta %s" % self.rel))
+        # el código citado por un hallazgo cambia mientras está en pausa
+        write(self.root / "app" / "Lista.kt", "// cabecera\n// otra\n" + LISTA)
+        commit_all(self.root, "cambio del equipo")
+        simulated = self.ok_in("reanudar", "--carpeta", self.rel, "--simular")
+        self.assertIn("app/Lista.kt:7 se movió a ~9 (+2 líneas)", simulated)
+        self.assertNotIn("MarkTrace", (self.root / "app" / "Lista.kt").read_text(encoding="utf-8"))
+        out = self.ok_in("reanudar", "--carpeta", self.rel)
+        self.assertIn("2. Marcas: repuestas en .", out)
+        self.assertIn("MarkTrace", (self.root / "app" / "Lista.kt").read_text(encoding="utf-8"))
+        self.assertIn("4. La línea base no sirve", out)
+        self.assertIn("rehacer antes", out)
+        self.assertTrue(commands_in(out)[-1].endswith("decidir --carpeta %s --profundidad riguroso" % self.rel))
+        rows = perf.temp_changes((self.folder / "estado.md").read_text(encoding="utf-8"))
+        self.assertFalse(rows[0]["revertido"])
+        self.assertTrue(json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["antes"]["rehacer"])
+
+    def test_cerrada_con_sin_setup_en_0140_se_reanuda(self):
+        # como la dejaba `cerrar --sin-setup` de 0.14.0: marcas quitadas con su parche, setup "puesto (--sin-setup)"
+        patch = self.folder / "parches" / "catalogo-lista-2026-03-02-temporales-proyecto-20261101-1000.patch"
+        write(patch, git(self.root, "diff"))
+        write(self.root / "app" / "Lista.kt", LISTA)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8").replace(
+            "| marca | — | no |", "| marca | — | sí · perf.py cerrar 2026-11-01 · parche: %s |" % patch)
+        write(self.folder / "estado.md", state)
+        write(self.folder / "cierre-setup.json", json.dumps({"setup": "puesto (--sin-setup)", "fecha": "2026-11-01T10:00:00"}))
+        write(self.folder / "cierre.json", json.dumps({"quitados": 1, "dod": "ok"}))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("en pausa", out)
+        self.assertIn("Se cerró con `cerrar --sin-setup` en una versión anterior", out)
+        self.ok_in("reanudar", "--carpeta", self.rel)
+        self.assertEqual((self.root / "app" / "Lista.kt").read_text(encoding="utf-8"), LISTA_MARKED)
+
+
+class AllInvestigationsTest(TriageBase):
+    """B9: `estado` sin --carpeta lista todas las investigaciones; `nuevo` avisa de las marcas de otra."""
+
+    def test_estado_y_nuevo(self):
+        other = self.root / "reports" / "perf" / "detalle" / "2026-03-05"
+        write(other / "plan.json", json.dumps(dict(TRIAGE_PLAN, profundidad="riguroso", mejoras=[])))
+        write(other / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        out = self.ok_in("estado")
+        self.assertIn("- %s · abierta · triage terminado" % self.rel, out)
+        self.assertIn("Marcas puestas: .: app/Lista.kt", out)
+        self.assertIn("Mejoras aplicadas: ninguna · pendientes: M1", out)
+        self.assertIn("- reports/perf/detalle/2026-03-05 · abierta", out)
+        self.assertEqual(len([c for c in commands_in(out) if " siguiente --carpeta " in c]), 2)
+        self.ok_in("pausar", "--carpeta", self.rel)
+        self.assertIn("- %s · en pausa" % self.rel, self.ok_in("estado"))
+        # nuevo, con otra investigación con marcas puestas: avisa y ofrece pausarla
+        self.ok_in("reanudar", "--carpeta", self.rel)
+        result = self.run_in("nuevo", "--paquete", "com.example.app", "--flujo", "otro", "--carpeta",
+                             "reports/perf/otro/2026-03-09")
+        self.assertIn("La investigación %s tiene marcas puestas (app/Lista.kt)" % self.rel, result.stdout)
+        self.assertIn("pausar --carpeta %s" % self.rel, result.stdout)
+
+
+class InterruptedTest(TriageBase):
+    """B10: una captura, una traza en el dispositivo y un reporte que se cortaron sin terminar."""
+
+    def dead_pid(self):
+        done = subprocess.run(["/bin/sh", "-c", "echo $$"], capture_output=True, text=True)
+        return int(done.stdout.strip())
+
+    def test_captura_y_traza_en_el_dispositivo(self):
+        bin_dir = self.dir / "bin"
+        executable(bin_dir / "adb", "#!/bin/sh\necho \"$@\" >> %s\ncase \"$*\" in\n  *devices*) printf 'List of devices "
+                                    "attached\\nemulator-5554\\tdevice\\n' ;;\n  *'echo viva'*) echo viva ;;\nesac\n"
+                   % (self.dir / "adb.log"))
+        self.env = dict(self.env, PATH="%s:%s" % (bin_dir, os.environ["PATH"]))
+        partial = self.folder / "antes" / "catalogo-lista_2.perfetto-trace"
+        write(partial, "a medias")
+        write(self.folder / ".en-curso.json", json.dumps({
+            "comando": "capturar", "fase": "antes", "flujo": "catalogo-lista", "corrida": 2, "objetivo": 3, "validas": 1,
+            "inicio_corridas": 0, "traza": str(partial), "pid": self.dead_pid(), "inicio": "2026-03-02T10:00:00",
+            "registro": {"fecha": "2026-03-02T10:00:00", "corridas": 1, "skill": perf.VERSION},
+            "perfetto": {"pid": "4242", "remota": "/data/misc/perfetto-traces/hbperf-1.perfetto-trace",
+                         "serial": "emulator-5554"}}))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("quedó algo a medias: la captura de antes del flujo catalogo-lista se interrumpió en la corrida 2", out)
+        self.assertIn("Interrumpir es seguro", out)
+        self.assertTrue(commands_in(out)[0].endswith("recuperar --carpeta %s" % self.rel))
+        out = self.ok_in("recuperar", "--carpeta", self.rel)
+        self.assertIn("Detuve la traza que seguía grabando en el dispositivo", out)
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("kill -TERM 4242", log)
+        self.assertIn("rm -f /data/misc/perfetto-traces/hbperf-1.perfetto-trace", log)
+        self.assertFalse(partial.exists())
+        self.assertEqual(len(list(self.folder.glob("antes-descartada-*/catalogo-lista_2.perfetto-trace"))), 1)
+        self.assertFalse((self.folder / ".en-curso.json").exists())
+
+    def test_reporte_cortado(self):
+        write(self.folder / ".en-curso.json", json.dumps({"comando": "reporte", "pid": self.dead_pid(),
+                                                          "argv": ["reporte", "--carpeta", self.rel, "--inicial", "--html"]}))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("el reporte se interrumpió antes de terminar", out)
+        out = self.ok_in("recuperar", "--carpeta", self.rel)
+        self.assertTrue(commands_in(out)[-1].endswith("reporte --carpeta %s --inicial --html" % self.rel), out)
+
+
+
 if __name__ == "__main__":
     unittest.main()
