@@ -8419,17 +8419,16 @@ class ReadableReportsTest(PerfBase):
             self.assertIn("@media print", page, name)
         dev = pages["reporte-final-dev.html"]
         self.assertIn("Control", dev)
-        self.assertIn('class="noise"', dev)  # el ruido marcado
-        self.assertIn('class="whisker"', dev)  # el rango de las corridas
-        self.assertIn("La barra es la mediana y la línea fina va de la corrida más rápida a la más lenta", dev)
+        self.assertIn('class="noise"', dev)  # la variación normal marcada
+        self.assertIn(">variación normal<", dev)  # 0.15.0 · H4: rotulada así
+        self.assertIn('class="whisker"', dev)  # el rango de las mediciones
+        self.assertIn(perf.READ_CHART, dev)
         self.assertRegex(dev, r'class="axis-label" text-anchor="end">(?:mili)?segundos<')  # eje con unidad
-        self.assertIn("## Cómo leer este reporte", pages["reporte-final-dev.md"])
+        self.assertIn("### Cómo leer este reporte", pages["reporte-final-dev.md"])
         self.assertIn("**Unidades:**", pages["reporte-final-dev.md"])
-        self.assertIn("cada punto es una corrida", pages["reporte-inicial-dev.html"])
-        self.assertIn("| lista_a_detalle_ms | e2e", pages["reporte-final-dev.md"].replace("app + backend", "e2e")
-                      .replace("| detalle | ", "| "))
-        self.assertRegex(pages["reporte-final-dev.md"], r"\d+ ms \| \d+ ms \| −\d+ ms \(−\d+ %\)")
-
+        self.assertIn("Cada punto es una medición", pages["reporte-inicial-dev.html"])
+        for name in ("reporte-final-dev.md", "reporte-inicial-dev.md"):
+            self.assertNotRegex(re.sub(r"```.*?```", "", pages[name], flags=re.S), r"\b\w+_ms\b", name)  # H5
     def test_el_de_gerencia_va_sin_terminos_tecnicos(self):
         pages = self.generate()
         for name in ("reporte-final-gerencia.md", "reporte-inicial-gerencia.md"):
@@ -8438,17 +8437,14 @@ class ReadableReportsTest(PerfBase):
             for term in TECH_IN_BUSINESS:
                 self.assertNotRegex(visible, r"(?<![\w-])%s(?![\w-])" % re.escape(term), (name, term))
             self.assertEqual(perf.TECH_TERMS.findall(visible), [], name)
+            self.assertEqual(re.findall(r"^## (.+)$", text, re.M), list(perf.BUSINESS_SECTIONS), name)
         final = pages["reporte-final-gerencia.md"]
-        for section in ("Qué notaba el usuario", "Qué se hizo", "Resultado", "Lo que queda pendiente", "Riesgos", "Costo"):
-            self.assertIn("## %s" % section, final)
-        self.assertRegex(final, r"pasó de [\d.]+ s a [\d.]+ s \(\d+ % menos\) · mejoró, aunque depende también del "
-                                r"servidor: tómalo como orientativo")
-        self.assertIn("se mantuvo en 48 milisegundos · sin cambio", final)  # R7: sin porcentaje entre dos valores iguales
+        self.assertIn("depende también del servidor", final)
+        self.assertNotIn("Costo", final)
         self.assertIn("Antes", pages["reporte-final-gerencia.html"])
         self.assertIn("Después", pages["reporte-final-gerencia.html"])
         self.assertNotIn("Control", pages["reporte-final-gerencia.html"])
         self.assertIn("Hoy", pages["reporte-inicial-gerencia.html"])
-
     def test_medidas_en_la_escala_que_se_entiende(self):
         self.assertEqual(perf.nice(1810, "ms"), "1.81 s")
         self.assertEqual(perf.nice(12400, "ms"), "12.4 s")
@@ -8505,15 +8501,13 @@ class BusinessJargonTest(PerfBase):
         self.assertIn("⚠ Gerencia: la causa de H1 en Hallazgos de estado.md tiene términos técnicos (cargar())", out)
         self.assertIn("⚠ Gerencia: el título de M1 en plan.json tiene términos técnicos", out)
         self.assertEqual(out.count("el título de M1 en plan.json"), 1)  # un aviso por campo, aunque salga en varias partes
-        self.assertIn("Qué hacer: reescríbelo en palabras", out)
+        self.assertIn("Qué hacer: reescribe ese campo en palabras", out)
         self.assertRegex(out, r"\n    cd .+ reporte --carpeta \S+ --inicial --html\n")  # el mismo comando, para generar de nuevo
         text = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
         for term in ("P90", "lista_ms", "Jank", "cargar()", "cargarClientes"):
             self.assertNotIn(term, text)
-        self.assertIn("tiene términos técnicos y no se publica", text)
         # 0.12.0 (D5): en palabras, sin los guiones bajos
-        self.assertIn("## Qué notaba el usuario\n\nSin completar todavía: la investigación no lo anotó.", text)
-        self.assertIn("- La lista tarda: sin completar todavía", text)
+        self.assertIn("## Qué notaba el usuario\n\nSin completar todavía: la investigación no lo anotó en la Ficha.", text)
         self.assertNotIn("_sin completar_", text)
         self.assertIn("- Una mejora con el título sin completar\n- Cargar las imágenes después", text)
         # el reporte técnico no cambia: publica todo

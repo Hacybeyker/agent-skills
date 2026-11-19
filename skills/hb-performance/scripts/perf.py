@@ -14740,9 +14740,10 @@ def range_chart(series, unit, label, noise=None, plain=False):
     if noise:
         first = series[0][1]
         left, right = scale(first - noise), min(scale(first + noise), x0 + width)
-        parts.append('<rect x="%.1f" y="%d" width="%.1f" height="%d" class="noise"><title>ruido de medición</title></rect>'
+        parts.append('<rect x="%.1f" y="%d" width="%.1f" height="%d" class="noise"><title>variación normal</title></rect>'
                      % (left, pad + 4, max(right - left, 1.5), row * len(series)))
-        parts.append('<text x="%.1f" y="11" class="axis-label" text-anchor="middle">ruido</text>' % ((left + right) / 2))
+        parts.append('<text x="%.1f" y="11" class="axis-label" text-anchor="middle">variación normal</text>'
+                     % ((left + right) / 2))
     for index, (name, middle, low, high, style) in enumerate(series):
         y = 8 + pad + index * row
         fill = 'fill="url(#%s-h)"' % uid if style == "control" else 'class="bar-%s"' % style
@@ -14802,21 +14803,9 @@ def final_chart(r, plain=False, plan=None):
     if r.get("control") and not plain:
         series.append(("Control", r["control"]["mediana"], r["control"]["min"], r["control"]["max"], "control"))
     series.append(("Después", r["despues"]["mediana"], r["despues"]["min"], r["despues"]["max"], "after"))
-    flows = (plan or {}).get("flujos") or {}
-    # con escenarios (o varios flujos), gerencia ve de cuál es cada gráfico, por su título
-    where = " (%s)" % ((flows.get(r["flujo"]) or {}).get("titulo") or r["flujo"]) if plain and len(flows) > 1 else ""
-    name = plain_metric(r["metrica"], plan or {}) + where if plain else "`%s`" % r["metrica"]
-    svg = range_chart(series, unit, name if plain else r["metrica"],
-                      None if plain else r.get("ruido"), plain=plain)
-    words = plain_verdict(r)
-    text = "%s %s: %s." % (name, change_phrase(r, plain), words)
-    if not plain:
-        if r.get("control"):
-            text += " El control (medir de nuevo sin cambiar nada) quedó en %s: el ruido de medición es %s%s." % (
-                nice(r["control"]["mediana"], unit), nice(r.get("ruido"), unit),
-                " (%s %%)" % trim(r["ruido_pct"], 1) if r.get("ruido_pct") is not None else "")
-        text += " La barra es la mediana y la línea fina va de la corrida más rápida a la más lenta."
-    return svg, text
+    name = plain_metric(r["metrica"], plan or {})
+    svg = range_chart(series, unit, name, None if plain else r.get("ruido"), plain=plain)
+    return svg, chart_caption(r, plan or {})
 
 
 def initial_chart(flow, metric, entry, plain=False, plan=None):
@@ -14835,17 +14824,18 @@ def initial_chart(flow, metric, entry, plain=False, plan=None):
                     plain_metric(metric, plan or {}), plain_value(stats["mediana"], unit), plain_value(stats["min"], unit),
                     plain_value(stats["max"], unit)))
         return svg, text
-    svg = runs_chart([("Antes", before), ("Control", control)], unit, metric)
-    spread = "varía mucho entre corridas (más de %d %%): tómalo como orientativo" % CV_MAX \
-        if "inestable" in stats["avisos"] else "es estable entre corridas"
-    text = "`%s` (%s): cada punto es una corrida; la raya, la mediana (%s, la que se compara después). Las %d corridas " \
-           "van de %s a %s y %s." % (metric, flow, nice(stats["mediana"], unit), stats["n"], nice(stats["min"], unit),
-                                     nice(stats["max"], unit), spread)
+    svg = runs_chart([("Antes", before), ("Control", control)], unit, plain_metric(metric, plan or {}))
+    spread = "varía mucho entre mediciones (más de %d %%): tómalo como una señal" % CV_MAX \
+        if "inestable" in stats["avisos"] else "es estable entre mediciones"
+    where = scenario_words(plan or {}, flow)
+    text = "%s%s: hoy lo típico es %s; las %d mediciones van de %s a %s y %s." % (
+        plain_metric(metric, plan or {}), " · %s" % where if where else "", plain_value(stats["mediana"], unit), stats["n"],
+        plain_value(stats["min"], unit), plain_value(stats["max"], unit), spread)
     if control and stats["mediana"]:
         noise = abs(statistics.median(control) - stats["mediana"])
-        text += " El control, sin cambiar nada, quedó a %s (%s %%): una mejora tiene que mover la mediana más que eso." % (
-            nice(noise, unit), trim(noise / abs(stats["mediana"]) * 100, 1))
-    return svg, text
+        text += " Medir dos veces sin cambiar nada da una diferencia de unos %s: una mejora tiene que mover el valor " \
+                "más que eso." % plain_value(noise, unit)
+    return svg, text + " Cada punto es una medición; la raya, el valor típico."
 
 
 # Unidades en palabras para un lector no técnico.
@@ -14911,8 +14901,10 @@ def segment_network_md(rows, plan, phases=("antes",)):
                     entry = groups.get((flow_name, "%s %s" % (spec["nombre"], metric)))
                     values = entry["fases"].get(phase) if entry else None
                     cells.append(fmt(statistics.median(values), entry["unidad"]) if values else "—")
-                if cells[0] != "—":
-                    table.append([flow_name, spec["nombre"], phase] + cells)
+                if cells[0] != "—":  # H5: el flujo, el tramo y la fase en palabras
+                    table.append([scenario_words(plan, flow_name) or flow_name.replace("-", " "),
+                                  spec.get("titulo") or spec["nombre"].replace("-", " ").replace("_", " "),
+                                  PHASE_WORDS.get(phase, phase)] + cells)
     if not table:
         return ""
     # Sin filas vacías: las de un tramo sin llamadas se dicen en una línea; si todas son así, solo esa línea.
@@ -15629,8 +15621,8 @@ def verdict_label(result):
     la comparación no es igual contra igual (marcas o recorrido cambiados) o la métrica es inestable."""
     verdict = result.get("veredicto")
     warnings = result.get("avisos") or []
-    if verdict in ("mejora", "regresión") and (MARK_CHANGED in warnings or ROUTE_CHANGED in warnings
-                                               or "inestable" in warnings or BIMODAL in warnings):
+    unstable = ("inestable" in warnings or BIMODAL in warnings) and not clear_change(result)  # H4
+    if verdict in ("mejora", "regresión") and (MARK_CHANGED in warnings or ROUTE_CHANGED in warnings or unstable):
         return ORIENTATIVE_LABEL
     return VERDICT_LABELS.get(verdict, str(verdict or "—").capitalize())
 
@@ -15663,21 +15655,23 @@ def plain_verdict(result):
     text = PLAIN_VERDICT.get(result["veredicto"], result["veredicto"])
     if result["veredicto"] in ("mejora", "regresión"):
         verb = "mejoró" if result["veredicto"] == "mejora" else "empeoró"
+        clear = clear_change(result)
         reasons = []
         if MARK_CHANGED in result["avisos"]:
             reasons.append("lo que se mide cambió entre antes y después")
         elif ROUTE_CHANGED in result["avisos"]:
             reasons.append("el recorrido no fue el mismo antes y después")
-        if BIMODAL in result["avisos"]:
+        if BIMODAL in result["avisos"] and not clear:
             reasons.append("las mediciones forman dos grupos")
-        elif "inestable" in result["avisos"]:
+        elif "inestable" in result["avisos"] and not clear:
             reasons.append("varía mucho entre mediciones")
-        if "pocas corridas" in result["avisos"]:
-            reasons.append("hay pocas mediciones")
-        if result["familia"] == "e2e":
-            reasons.append("depende también del servidor")
+        # H4: el texto dice "orientativo" solo cuando la etiqueta lo dice; lo demás es una nota que no lo contradice
+        notes = (["hay pocas mediciones"] if "pocas corridas" in result["avisos"] else []) + (
+            ["depende también del servidor"] if result["familia"] == "e2e" else [])
         if reasons:
-            return "%s, aunque %s: tómalo como orientativo" % (verb, " y ".join(reasons))
+            return "%s, aunque %s: tómalo como orientativo" % (verb, " y ".join(reasons + notes))
+        if notes:
+            return "%s (%s)" % (text, " y ".join(notes))
     return text
 
 
@@ -15887,6 +15881,28 @@ def plain_unfilled(body):
 OWNER_SECTION = "pedido al equipo dueño"
 OWNER_INTRO = ("> Para enviar al equipo dueño de un módulo que la app consume compilado: esta investigación no puede editar "
                "ese módulo. Qué se midió, la evidencia de la traza y lo que se propone.\n\n")
+
+
+def humanize_metrics(text, names, plan):
+    """H5: los nombres internos de métricas que aparecen en un texto (también los que escribió la IA) se dicen en
+    palabras; los bloques de código (los diffs) no se tocan. Las claves internas no cambian en ningún archivo."""
+    if not text or not names:
+        return text
+    pattern = re.compile(r"`?(?<![\w-])(%s)(?![\w-])`?" % "|".join(re.escape(name) for name in sorted(names, key=len,
+                                                                                                    reverse=True)))
+    parts = re.split(r"(```.*?```)", text, flags=re.S)
+    return "".join(part if part.startswith("```") else pattern.sub(lambda m: plain_metric(m.group(1), plan), part)
+                   for part in parts)
+
+
+def humanize_parts(parts, names, plan):
+    out = []
+    for section, body in parts:
+        if isinstance(body, list):
+            out.append((section, [(sub, humanize_metrics(text, names, plan)) for sub, text in body]))
+        else:
+            out.append((section, humanize_metrics(body, names, plan)))
+    return out
 
 
 def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
@@ -16311,6 +16327,86 @@ NOTICEABLE_MS = 100  # G2: un empeoramiento secundario de tiempo menor que esto 
 ANNEX = "Anexo"
 
 
+def clear_change(r):
+    """H4: True si el cambio es mucho mayor que la variación normal y que la dispersión de cada fase (y los rangos de antes
+    y después no se tocan). Entonces un después que varía mucho no vuelve orientativo el resultado: 2,8 s → 30 ms es una
+    mejora aunque los 30 ms varíen entre mediciones."""
+    before, after = r.get("antes") or {}, r.get("despues") or {}
+    if r.get("delta") is None or not before or not after or None in (before.get("min"), after.get("min")):
+        return False
+    spread = max(before["max"] - before["min"], after["max"] - after["min"])
+    noise = abs(r.get("ruido") or 0)
+    separated = before["min"] > after["max"] or after["min"] > before["max"]
+    return separated and abs(r["delta"]) >= max(CLEAR_CHANGE_SPREAD * spread, CLEAR_CHANGE_NOISE * noise)
+
+
+def scenario_words(plan, flow):
+    """El escenario o el flujo, en palabras (su `titulo`), para el título de un gráfico: '' si es el único flujo."""
+    flows = plan.get("flujos") or {}
+    spec = flows.get(flow) or {}
+    if len(flows) < 2:
+        return ""
+    return str(spec.get("titulo") or flow.replace("-", " ").replace("_", " "))
+
+
+def chart_title(r, plan):
+    """H4: el título de un gráfico de una métrica principal: en palabras, con el escenario y la etiqueta del veredicto."""
+    where = scenario_words(plan, r["flujo"])
+    return "%s%s · %s" % (plain_metric(r["metrica"], plan), " · %s" % where if where else "", label_token(verdict_label(r)))
+
+
+def chart_caption(r, plan):
+    """H4: la descripción de un gráfico para cualquier rol: antes y ahora, cuánto cambió, cómo se compara con lo que varía
+    medir dos veces y cómo leerlo. Sin "mediana", "corrida" ni "control"."""
+    unit = r["unidad"]
+    before, after = r["antes"]["mediana"], r["despues"]["mediana"]
+    if unit == "ms":
+        text = "Antes tardaba %s; ahora %s" % (plain_value(before, unit), plain_value(after, unit))
+        if before and verdict_label(r) != "Sin cambio":  # sin cambio, un "5 % más rápido" contradiría al chip
+            pct = abs(after - before) / abs(before) * 100
+            text += ": igual" if pct_text(pct) in ("0", "0,0", "0.0") else ": %s %% más %s" % (
+                pct_text(pct), "rápido" if after < before else "lento")
+    else:
+        text = "Antes era %s; ahora %s" % (plain_value(before, unit), plain_value(after, unit))
+    noise = r.get("ruido")
+    label = verdict_label(r)
+    # H4: la frase dice lo mismo que el chip, etiqueta por etiqueta
+    own = {"Sin cambio": "el valor de después queda dentro del rango de antes: no cambió",
+           "Costo conocido": "sube a propósito, por una mejora elegida que tiene ese costo",
+           "No comparable": "antes y después midieron cosas distintas: no se comparan",
+           "No confiable": "el dispositivo no representa a uno real: el valor no es confiable",
+           "Variación del backend": "es del servidor: un cambio de la app no lo mueve",
+           "Ajeno · sin veredicto": "viene de servicios que no son del flujo: sin veredicto",
+           "Informativa": "es informativa: sin veredicto"}
+    if label in own:
+        text += ". %s" % own[label][:1].upper() + own[label][1:]
+    elif noise is not None:
+        compare_ = ("el cambio es mucho mayor" if clear_change(r) and label in ("Mejora", "Regresión") else
+                    "el cambio es mayor" if label in ("Mejora", "Regresión")
+                    else "el cambio es menor que eso: no se puede afirmar que cambió" if label == "Dentro del ruido"
+                    else "tómalo como una señal")
+        text += ". Medir dos veces sin cambiar nada da una diferencia de %s; %s" % (
+            "menos de 1 milisegundo" if unit == "ms" and abs(noise) < 1 else "unos %s" % plain_value(noise, unit), compare_)
+    else:
+        text += ". No se midió dos veces sin cambiar nada, así que no se sabe cuánto varía de por sí"
+    if label == ORIENTATIVE_LABEL:
+        text += " (orientativo: %s)" % plain_verdict(r).split(", aunque ", 1)[-1].split(":")[0]
+    elif r.get("familia") == "e2e":
+        text += "; depende también del servidor y de la red del momento"
+    return "%s. %s" % (text, READ_CHART if unit == "ms" else READ_CHART_VALUE)
+
+
+def metric_words(metric, plan, urls=None):
+    """H5: el nombre de una métrica para los reportes: en palabras (nunca la clave interna); un servicio, con su MÉTODO y
+    su ruta real."""
+    found = PLAIN_SERVICE.fullmatch(metric)
+    if found:
+        what = SERVICE_WORDS[found.group("que")]
+        where = ", en %s" % segment_words(found.group("tramo"), plan) if found.group("tramo") else ""
+        return "%s %s%s" % (what, route_text(found.group("servicio"), urls), where)
+    return plain_metric(metric, plan)
+
+
 def route_text(service, urls):
     """H3: un servicio como MÉTODO y su ruta real ("GET https://api.example.com/v2/pedidos"); sin la ruta real, el método
     y el nombre corto con "ruta real no disponible"."""
@@ -16331,6 +16427,32 @@ def words_count(markdown_text):
     text = re.sub(r"```.*?```", " ", markdown_text or "", flags=re.S)
     text = re.sub(r"<[^>]+>", " ", text)
     return len(re.findall(r"[^\s|`*_#>\-]+", text))
+
+
+def text_cap_problems(sections, plan):
+    """H6: los textos que escribe la IA que pasan su tope: [(campo, cuánto sobra)]."""
+    out = []
+    for key, name, kind, limit in TEXT_CAPS:
+        body = without_placeholders(next((sections[k] for k in sections if k.startswith(key)), ""))
+        if not body:
+            continue
+        size = len([line for line in body.splitlines() if line.strip()]) if kind == "lineas" else words_count(body)
+        if size > limit:
+            unit = ("línea", "líneas") if kind == "lineas" else ("palabra", "palabras")
+            out.append((name, "%d %s de más (tiene %d; el tope es %d)" % (size - limit, unit[size - limit != 1], size,
+                                                                         limit)))
+    for item in plan.get("mejoras") or []:
+        for entry in item.get("archivos") or []:
+            if not isinstance(entry, dict):
+                continue
+            for field in ("antes", "despues", "pros", "contras"):
+                size = words_count(str(entry.get(field) or ""))
+                if size > FILE_FIELD_WORDS:
+                    out.append(("%s · %s · %s" % (item.get("id", "?"), entry.get("ruta", "?"), field),
+                                "%d %s de más (tiene %d; el tope es %d)" % (
+                                    size - FILE_FIELD_WORDS, "palabra" if size - FILE_FIELD_WORDS == 1 else "palabras",
+                                    size, FILE_FIELD_WORDS)))
+    return out
 
 
 def findings_rows(findings_text):
@@ -16504,6 +16626,60 @@ def border_rule_md(folder, plan=None):
     return "Cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan.\n\n" + "\n".join(lines)
 
 
+def action_chart(title, start, end, calls, urls, side=""):
+    """G6: una acción en una línea de tiempo horizontal: una barra por servicio (en palabras, con su versión real y su
+    duración en segundos), las repetidas con ×N y el total de la acción al final."""
+    inside = [call for call in calls if start <= call[1] < end]
+    groups = {}
+    for service, begin, finish in inside:
+        groups.setdefault(service, []).append((begin, finish))
+    if not groups and end - start <= 0:
+        return "", ""
+    span = max([end] + [finish for _, _, finish in inside]) - start or 1.0
+    x0, width, row = 150, 230, 22
+    height = 28 + row * max(len(groups), 1) + 34
+    parts = []
+    for index, (service, items) in enumerate(sorted(groups.items(), key=lambda kv: min(b for b, _ in kv[1]))):
+        y = 18 + index * row
+        url = (urls or {}).get(service) or ""
+        name = service_words(service)[:22] + (" (%s)" % service_version(url) if service_version(url) else "")
+        parts.append('<text x="0" y="%d" class="bar-label">%s%s</text>' % (y + 12, e(name),
+                                                                          " ×%d" % len(items) if len(items) > 1 else ""))
+        for begin, finish in items:
+            left = x0 + (begin - start) / span * width
+            parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="bar-after"/>' % (
+                left, y + 2, max((finish - begin) / span * width, 2)))
+        longest = max(finish - begin for begin, finish in items)
+        parts.append('<text x="%.1f" y="%d" class="bar-value">%s s</text>' % (
+            x0 + width + 4, y + 13, trim(longest / 1000.0, 2)))
+    bottom = 18 + row * max(len(groups), 1) + 6
+    parts.append('<line x1="%d" y1="%d" x2="%d" y2="%d" class="whisker"/>' % (x0, bottom, x0 + width, bottom))
+    parts.append('<text x="%d" y="%d" class="axis-label">toque</text>' % (x0, bottom + 14))
+    parts.append('<text x="%d" y="%d" class="axis-label" text-anchor="end">total %s s</text>' % (
+        x0 + width, bottom + 14, trim((end - start) / 1000.0, 2)))
+    waited = busy_time([(max(begin, start), min(finish, end)) for _, begin, finish in inside])
+    sentence = "De %s s que tarda %s, %s s es esperar a los servicios." % (
+        trim((end - start) / 1000.0, 2), title[0].lower() + title[1:] if title else "la acción",
+        trim(waited / 1000.0, 2))
+    svg = '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (x0 + width + 50, height, e(sentence),
+                                                                          "".join(parts))
+    return figure(svg, sentence, "%s%s" % (e(title), " · %s" % e(side) if side else "")), sentence
+
+
+def rows_timeline(rows, flow, phase, run):
+    """La línea de tiempo de una corrida armada con las filas `red <servicio> inicio_ms` y `fin_ms` de metricas.csv (una
+    llamada por servicio), para corridas sin su archivo de línea de tiempo."""
+    starts, ends = {}, {}
+    for row in rows:
+        if row["flujo"] != flow or row["fase"] != phase or str(row["corrida"]) != str(run):
+            continue
+        found = re.fullmatch(r"red (.+) (inicio|fin)_ms", row["metrica"])
+        if found:
+            (starts if found.group(2) == "inicio" else ends)[found.group(1)] = row["valor"]
+    calls = [[name, starts[name], ends[name]] for name in starts if name in ends and ends[name] >= starts[name]]
+    return {"llamadas": sorted(calls, key=lambda call: call[1]), "marcas": []} if calls else None
+
+
 def changed_services_md(rows, plan, phases, urls):
     """H1: la tabla de servicios de la parte principal: solo los que cambiaron entre fases o se repiten."""
     table = []
@@ -16554,6 +16730,113 @@ def equal_line(folder, plan, results):
         return ("Igual contra igual: **no** del todo: las fases usan reglas distintas para el borde entre tramos; "
                 "`perf.py recalcular` aplica la de ahora a todas sobre las trazas guardadas.")
     return "Igual contra igual: sí (mismas marcas, mismo recorrido, mismas reglas de cálculo en todas las fases)."
+
+
+def secondary_changes(plan, results, problems):
+    """G2: lo que empeoró de verdad en una medida secundaria y el usuario nota (en palabras); y el costo conocido de cada
+    mejora, separado. Las medidas de servicios ajenos, las que quedan dentro de la variación normal y las técnicas o
+    despreciables no se mencionan (quedan en el técnico)."""
+    principales = plan.get("principales") or []
+    lines = []
+    for r in results or []:
+        if r["metrica"] in principales or r["veredicto"] != "regresión" or r["metrica"].startswith("red ") \
+                or " red " in r["metrica"] or r["familia"] != "app":
+            continue
+        if r["unidad"] == "ms" and abs(r.get("delta") or 0) < NOTICEABLE_MS:
+            continue  # un tiempo que empeora menos que lo que se nota
+        name = plain_metric(r["metrica"], plan)
+        if jargon(name):
+            continue  # sin una forma de decirlo en palabras queda en el técnico
+        lines.append("- %s empeoró: %s → %s; puede notarse." % (name, plain_value(r["antes"]["mediana"], r["unidad"]),
+                                                                plain_value(r["despues"]["mediana"], r["unidad"])))
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") != "aplicada" or not str(item.get("costo") or "").strip():
+            continue
+        text = plain_or_unfilled(str(item["costo"]), "el costo de %s" % item.get("id"), problems)
+        title = improvement_title(item)
+        if not text.startswith("_") and not jargon(title):
+            lines.append("- Costo conocido de %s: %s." % (title.rstrip("."), text.rstrip(".")))
+    return "\n".join(lines)
+
+
+def business_parts(folder, plan, rows, sections, results=None, problems=None):
+    """G: las siete secciones del reporte de gerencia, y nada más: qué notaba el usuario, qué se encontró, qué se hizo,
+    el resultado con su veredicto, el riesgo de hacer cada cambio, qué tan firme es la medición y lo pendiente. Sin
+    costo, sin "Más detalle", sin hallazgos descartados ni sin confirmar y sin líneas genéricas."""
+    final = results is not None
+    problems = [] if problems is None else problems
+    mejoras = plan.get("mejoras") or []
+
+    def pick(*names):
+        return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
+
+    summary = without_placeholders(pick(MANAGEMENT_SECTION))
+    summary = plain_or_unfilled(summary, "\"Resumen para gerencia\" de estado.md", problems) if summary else ""
+    symptom = ficha_value(pick("ficha"), "síntoma", "sintoma")
+    symptom = plain_or_unfilled(symptom, "el síntoma de la Ficha de estado.md", problems) if symptom else ""
+    # sin síntoma anotado no se repite la frase de entrada (sale del resumen): se dice que falta
+    noticed = symptom if symptom and not symptom.startswith("_") else "Sin completar todavía: la investigación no lo " \
+                                                                      "anotó en la Ficha."
+    found, unsaid = [], 0
+    for row in findings_rows(pick("hallazgos")):
+        if row["clase"] not in CONFIRMED_KINDS:
+            continue  # G4: lo descartado y lo sin confirmar nunca va en gerencia
+        parts = [plain_or_unfilled(text, "%s de %s en Hallazgos de estado.md" % (what, row["id"]), problems)
+                 for what, text in (("el síntoma", row["sintoma"]), ("la causa", row["causa"])) if text]
+        parts = [part for part in parts if not part.startswith("_")]
+        if parts:
+            found.append("- %s" % ": ".join([parts[0].rstrip(" .;:")] + parts[1:]))
+        else:
+            unsaid += 1  # confirmada, pero escrita con términos técnicos: no se publica ni se niega
+    if unsaid:
+        found.append("- %s confirmada%s más, todavía sin descripción en palabras." % (
+            "Una causa" if unsaid == 1 else "%d causas" % unsaid, "" if unsaid == 1 else "s"))
+    found_md = "\n".join(dict.fromkeys(found)) if found else "Ninguna causa confirmada todavía."
+    applied = [m for m in mejoras if m.get("estado") == "aplicada"]
+    titles = [plain_or_unfilled(improvement_title(m), "el título de %s en plan.json" % m.get("id"), problems) for m in applied]
+    proposed = [m for m in mejoras if m.get("estado", "propuesta") not in ("aplicada", "descartada")]
+    if final:
+        done_md = "\n".join("- %s" % (title if not title.startswith("_") else
+                                      "un cambio (%s), todavía sin descripción en palabras" % item.get("id", "?"))
+                            for title, item in zip(titles, applied)) or "No se aplicó ningún cambio."
+    else:
+        done_md = ("Se midió el recorrido y se buscaron las causas; todavía no se cambió nada. %s" % (
+            "Se proponen %d cambios: están en \"Lo pendiente\"." % len(proposed) if len(proposed) != 1 else
+            "Se propone un cambio: está en \"Lo pendiente\".") if proposed else
+            "Se midió el recorrido y se buscaron las causas; no se propone ningún cambio.")
+    principales = plan.get("principales") or []
+    lines = []
+    if final:
+        for metric in principales:
+            for r in sorted([r for r in results if r["metrica"] == metric], key=lambda r: r["flujo"]):
+                where = scenario_words(plan, r["flujo"])
+                lines.append("- **%s%s:** %s %s" % (plain_metric(metric, plan), " · %s" % where if where else "",
+                                                     chart_caption(r, plan).replace(" " + READ_CHART, "").replace(" " + READ_CHART_VALUE, ""),
+                                                     label_token(verdict_label(r))))
+        secondary = secondary_changes(plan, results, problems)
+        if secondary:
+            lines += ["", secondary]
+        if any(verdict_label(r) for r in results if r["metrica"] in principales):
+            lines += ["", "Qué significa cada etiqueta:", "", label_legend({verdict_label(r) for r in results
+                                                                           if r["metrica"] in principales})]
+    else:
+        groups = group(rows)
+        for metric in principales:
+            for (flow, name), entry in sorted(groups.items()):
+                if name != metric or "antes" not in entry["fases"]:
+                    continue
+                stats = describe(entry["fases"]["antes"])
+                where = scenario_words(plan, flow)
+                lines.append("- **%s%s:** hoy %s." % (plain_metric(metric, plan), " · %s" % where if where else "",
+                                                      plain_value(stats["mediana"], entry["unidad"])))
+    result_md = "\n".join(lines) if lines else "No se fijó ninguna medida principal para este recorrido."
+    risk = risk_md(plan, applied if final else [m for m in mejoras if m.get("estado") != "descartada"], problems)
+    lead = [("", summary)] if summary and not summary.startswith("_") else []
+    return lead + [(name, plain_unfilled(body)) for name, body in (
+        ("Qué notaba el usuario", noticed), ("Qué se encontró", found_md), ("Qué se hizo", done_md),
+        ("Resultado", result_md), ("Riesgo de hacer el cambio", risk),
+        ("Qué tan firme es la medición", firmness_md(folder, plan, results)),
+        ("Lo pendiente", pending_improvements(plan, final, plain=True, problems=problems)))]
 
 
 def report_main_and_annex(folder, plan, rows, sections, results, filled, pick):
