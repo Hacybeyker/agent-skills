@@ -2,8 +2,16 @@
 import os
 import pathlib
 import subprocess
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+PERF_RAPIDO = ROOT / "tests" / "perf_rapido.py"
+
+
+def perf_argv(script):
+    """`python3 -I <script>` con su bytecode guardado (tests/perf_rapido.py): el mismo código, sin compilarlo en cada
+    llamada."""
+    return [sys.executable, "-I", str(PERF_RAPIDO), str(script)]
 
 # Git aislado de la configuración de la máquina (firma de commits, hooks, plantillas).
 ENV = dict(

@@ -42,7 +42,7 @@ jobs:
         run: python scripts/check_version_bump.py "origin/$BASE_REF"
 
       - name: Correr los tests de los scripts
-        run: python -m unittest discover -s tests -v
+        run: python scripts/run_tests.py # en paralelo: una clase de test por proceso
 
       - name: Probar el contrato de install.sh
         run: scripts/test_install.sh
@@ -65,4 +65,4 @@ jobs:
       - name: Correr los tests de los scripts con el Python 3 de macOS
         run: |
           /usr/bin/python3 --version
-          /usr/bin/python3 -m unittest discover -s tests -v
+          /usr/bin/python3 scripts/run_tests.py

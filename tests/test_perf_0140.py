@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import ENV, ROOT, commit_all, git, init_repo, write
+from helpers import ENV, ROOT, commit_all, git, init_repo, perf_argv, write
 from test_perf import PerfBase, perf
 
 SKILL = ROOT / "skills" / "hb-performance"
@@ -164,7 +164,7 @@ class TraceProcessorTest(MachineBase):
         env = dict(self.env, HOME=str(self.home), PATH="/usr/bin:/bin")
         for name in self.removed:
             env.pop(name, None)
-        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "consulta", "traza.perfetto-trace", "--sql", "select 1"],
+        done = subprocess.run(perf_argv(SCRIPT) + ["consulta", "traza.perfetto-trace", "--sql", "select 1"],
                               cwd=str(self.dir), env=env, capture_output=True, text=True, encoding="utf-8")
         if "falta trace_processor" not in done.stderr:
             self.skipTest("hay un trace_processor en /usr/bin o /bin")
@@ -383,7 +383,7 @@ class SetupBase(PerfBase):
         self.patches = self.root / "reports" / "perf" / "setup" / "parches"
 
     def run_perf(self, *args, cwd=None):
-        return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(cwd or self.root),
+        return subprocess.run(perf_argv(SCRIPT) + [str(a) for a in args], cwd=str(cwd or self.root),
                               env=self.env, capture_output=True, text=True, encoding="utf-8")
 
     def good(self, *args):

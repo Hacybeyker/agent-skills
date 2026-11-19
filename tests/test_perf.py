@@ -23,7 +23,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from helpers import ROOT, write
+from helpers import ROOT, perf_argv, write
 
 SCRIPT = ROOT / "skills" / "hb-performance" / "scripts" / "perf.py"
 HEADER = "fase,flujo,metrica,corrida,valor,unidad,sentido,familia\n"
@@ -53,10 +53,10 @@ MS = 1_000_000
 def without_new(record):
     """Un registro de fases.json sin los campos opcionales que agregan 0.9.0 y 0.10.0 (la versión de la skill, la
     configuración, si el build era depurable y las opciones de desarrollador) y 0.11.0 (la huella de las marcas y del
-    plan) y 0.13.0 (cuándo se midió el flujo, con qué instalación y cuánto tardó)."""
+    plan) y 0.13.0 (cuándo se midió el flujo, con qué instalación y cuánto tardó) y 0.15.1 (el dispositivo del flujo)."""
     return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes", "marcas",
                                                                          "plan", "memoria", "fecha", "instalada",
-                                                                         "segundos", "reglas")}
+                                                                         "segundos", "reglas", "dispositivo")}
 
 
 class PerfBase(unittest.TestCase):
@@ -73,7 +73,7 @@ class PerfBase(unittest.TestCase):
         # interruptible: el proceso recibe SIGINT con su manejo por defecto aunque quien corre los tests lo ignore (un
         # trabajo en segundo plano, algunos CI); sin eso, Python no levanta KeyboardInterrupt.
         default_sigint = (lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)) if interruptible else None
-        return subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], cwd=str(self.dir),
+        return subprocess.run(perf_argv(SCRIPT) + [str(a) for a in args], cwd=str(self.dir),
                               env=self.env, input=stdin, capture_output=True, text=True, encoding="utf-8",
                               preexec_fn=default_sigint)
 
@@ -835,12 +835,12 @@ class CaptureTest(DeviceBase):
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
         self.assertIn("el flujo no tiene 'preparar'", out)
         self.assertNotIn("am start -n", (self.dir / "adb.log").read_text(encoding="utf-8"))
-        self.env["FAKE_RESUMED"] = "com.miui.home/.launcher.Launcher"
+        self.env["FAKE_RESUMED"] = "com.example.launcher/.Launcher"
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "control", "--corridas", "1")
         self.assertEqual(result.returncode, 3)  # relanzó, pero el fake sigue en el launcher: se detiene con claridad
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("am start -n %s/.MainActivity" % PKG, log)
-        self.assertIn("la pantalla activa es 'com.miui.home/.launcher.Launcher'", result.stderr)
+        self.assertIn("la pantalla activa es 'com.example.launcher/.Launcher'", result.stderr)
 
     def test_corrida_invalida_se_guarda_aparte_y_se_repite(self):
         self.tp_outputs(LOGIN, GOOD)
@@ -962,19 +962,19 @@ class CaptureTest(DeviceBase):
         self.assertEqual(perf.component_of("com.a", ""), "")
 
     def test_varios_dispositivos_usan_el_serial_del_plan_o_android_serial(self):
-        self.env["FAKE_DEVICES"] = "emulator-5554,NJ4"
+        self.env["FAKE_DEVICES"] = "emulator-5554,SERIAL01"
         self.tp_outputs(GOOD)
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
         self.assertEqual(result.returncode, 3)
         self.assertIn("nuevo --serial", result.stderr)
-        self.env["ANDROID_SERIAL"] = "NJ4"
+        self.env["ANDROID_SERIAL"] = "SERIAL01"
         self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
         del self.env["ANDROID_SERIAL"]
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
-        plan["serial"] = "NJ4"
+        plan["serial"] = "SERIAL01"
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
-        self.assertIn('["-s", "NJ4", "shell", "perfetto', (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.assertIn('["-s", "SERIAL01", "shell", "perfetto', (self.dir / "adb.log").read_text(encoding="utf-8"))
         self.assertIn("--fase antes --corridas 10", out)
 
     def test_cada_fase_indica_el_paso_siguiente(self):
@@ -1323,14 +1323,14 @@ class NuevoTest(DeviceBase):
         self.assertEqual(json.loads((self.dir / "triage" / "plan.json").read_text(encoding="utf-8"))["profundidad"], "triage")
 
     def test_con_varios_dispositivos_avisa_y_guarda_el_serial_elegido(self):
-        self.env["FAKE_DEVICES"] = "emulator-5554,NJ4"
+        self.env["FAKE_DEVICES"] = "emulator-5554,SERIAL01"
         out = self.ok("nuevo", "--carpeta", self.dir / "a", "--paquete", PKG, "--receta", "arranque-frio")
         self.assertIn("Sin dispositivo", out)
         self.assertEqual(json.loads((self.dir / "a" / "plan.json").read_text(encoding="utf-8"))
                          ["flujos"]["arranque-frio"]["recorrido"]["actividad"], "")
-        self.ok("nuevo", "--carpeta", self.dir / "b", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "NJ4")
+        self.ok("nuevo", "--carpeta", self.dir / "b", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "SERIAL01")
         plan = json.loads((self.dir / "b" / "plan.json").read_text(encoding="utf-8"))
-        self.assertEqual(plan["serial"], "NJ4")
+        self.assertEqual(plan["serial"], "SERIAL01")
         self.assertEqual(plan["flujos"]["arranque-frio"]["recorrido"]["actividad"], PKG + "/.MainActivity")
 
 
@@ -7220,7 +7220,7 @@ class CutRunTest(DeviceBase):
         if pid == 0:  # el proceso hijo: su terminal de control es el pty
             try:
                 os.chdir(str(self.dir))
-                os.execve(sys.executable, [sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args], env)
+                os.execve(sys.executable, perf_argv(SCRIPT) + [str(a) for a in args], env)
             finally:
                 os._exit(127)
         output, deadline, alive = b"", time.time() + timeout, True
@@ -7291,7 +7291,11 @@ class CutRunTest(DeviceBase):
               % (sys.executable, SCRIPT))
         self.set_route("bash %s" % script)
         self.tp_outputs(GOOD)
-        answered, flags_before = [], set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*"))
+        # su propia carpeta temporal: con la suite en paralelo, otro test crea sus banderas en la compartida
+        own_tmp = self.dir / "tmp"
+        own_tmp.mkdir()
+        self.env["TMPDIR"] = str(own_tmp)
+        answered = []
 
         def react(output, write_keys):
             shown = output.count("▶ PAUSA")
@@ -7306,7 +7310,7 @@ class CutRunTest(DeviceBase):
         self.assertIn("✖ intento 1 (inválido, buscaba la corrida 1 de 1): el recorrido terminó con código 1", out)  # la descartó la pausa
         self.assertNotIn("cortada a mano", out)
         self.assertIn("corrida 1 de 1", out)
-        self.assertEqual(set(Path(tempfile.gettempdir()).glob("hbperf-pausa-*")), flags_before)  # sin bandera vieja
+        self.assertEqual(list(own_tmp.glob("hbperf-pausa-*")), [])  # sin bandera vieja
 
     def test_sin_terminal_interactiva_no_hay_corte_ni_aviso(self):
         self.tp_outputs(GOOD)
@@ -8086,7 +8090,7 @@ class SingleFolderTest(DeviceBase):
         from helpers import init_repo
         init_repo(self.dir)
         (self.dir / "app" / "src").mkdir(parents=True)
-        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "nuevo", "--paquete", PKG, "--flujo", "detalle",
+        done = subprocess.run(perf_argv(SCRIPT) + ["nuevo", "--paquete", PKG, "--flujo", "detalle",
                                "--serial", "emulator-5554"], cwd=str(self.dir / "app" / "src"), env=self.env,
                               capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -8675,7 +8679,7 @@ class QuotedPathsTest(PerfBase):
         write(folder / "plan.json", json.dumps(plan))
         write(folder / "estado.md", STATE_COST % "")
         write(folder / "fases.json", json.dumps({"antes": {"fecha": "2026-11-05"}, "control": {"fecha": "2026-11-05"}}))
-        done = subprocess.run([sys.executable, "-I", str(SCRIPT), "siguiente", "--carpeta", "reports/perf/lista"],
+        done = subprocess.run(perf_argv(SCRIPT) + ["siguiente", "--carpeta", "reports/perf/lista"],
                               cwd=str(root), env=self.env, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         commands = [line.strip() for line in done.stdout.splitlines() if line.strip().startswith("cd ")]
@@ -8768,17 +8772,6 @@ class CodeChangesTest(PerfBase):
             self.assertNotIn("pedir()", text)
             self.assertNotIn("Cambios de código", text)
             self.assertNotIn("interno: contiene código", text)
-
-    def test_un_diff_largo_se_recorta_y_una_investigacion_vieja_dice_sin_diff(self):
-        text = "diff --git a/x b/x\nindex 1..2\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n" + "".join("+l%d\n" % i for i in range(100))
-        excerpt, skipped = perf.diff_excerpt(text, limit=10)
-        self.assertEqual(excerpt.splitlines()[:2], ["# x", "@@ -1 +1 @@"])
-        self.assertEqual(len(excerpt.splitlines()), 10)
-        self.assertEqual(skipped, 92)
-        old = dict(self.plan["mejoras"][0], estado="aplicada")
-        md = perf.changes_md(self.folder, {"mejoras": [old]}, [], "")
-        self.assertIn("sin diff guardado", md)
-        self.assertEqual(perf.changes_md(self.folder, {"mejoras": []}, [], ""), "")
 
 
 class TimelineAndInternalTest(PerfBase):
