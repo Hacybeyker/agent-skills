@@ -54,10 +54,10 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase.
-SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
