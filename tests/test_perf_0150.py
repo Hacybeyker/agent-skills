@@ -4,16 +4,16 @@ lo que imprime la skill (T). Los datos son inventados."""
 import json
 import os
 import re
-import shlex
+import shutil
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
 from helpers import ENV, ROOT, commit_all, git, init_repo, write
-from test_perf import GOOD, DeviceBase, PerfBase, perf
-from test_perf_0140 import (AGENTS, HOOKS, PKG, REMOTE, WIRING, SetupBase, ends_with_step, executable, make_project,
-                            pasteable)
+from test_perf import GOOD, HEADER, DeviceBase, PerfBase, perf, rows
+from test_perf_0140 import AGENTS, PKG, WIRING, SetupBase, ends_with_step, executable, pasteable
 
 SKILL = ROOT / "skills" / "hb-performance"
 SCRIPT = SKILL / "scripts" / "perf.py"
@@ -260,6 +260,215 @@ class OldPatchTest(MigrationBase):
         self.assertTrue((self.patches / "respaldos" / loose.name).is_file())
         self.assertFalse(legacy.exists())
         self.assertNotIn("Ya no hace falta", self.good("setup", "--estado"))
+
+
+
+# ── B · `siguiente` guía sola ────────────────────────────────────────────────
+TWO_FLOWS = {"paquete": "com.example.app", "hz": 60, "principales": ["abrir_ms"], "profundidad": "triage",
+             "flujos": {
+                 "catalogo-lista": {"recorrido": "true", "titulo": "Abrir la lista del catálogo",
+                                    "metricas_usuario": [{"nombre": "abrir_ms", "desde": {"marca": "MARK abrir"},
+                                                          "hasta": {"marca": "MARK lista_visible"}}]},
+                 "catalogo-repeticion": {"recorrido": "true", "tipo": "repeticion", "ciclos": 5,
+                                         "proposito": "repetición para memoria: abre y cierra el detalle ×5 a propósito"}},
+             "mejoras": []}
+
+
+def flows_record(**flows):
+    return {name: {"corridas": runs, "fecha": "2026-11-05T10:0%d:00" % index}
+            for index, (name, runs) in enumerate(sorted(flows.items()))}
+
+
+class PlanOptionsTest(PerfBase):
+    """B1 y B2: las opciones del plan en todos los comandos y todos los flujos en cada fase, en orden."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.dir / "inv"
+        self.plan = json.loads(json.dumps(TWO_FLOWS))
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+
+    def phases(self, record):
+        write(self.folder / "fases.json", json.dumps(record))
+
+    def captures(self):
+        title, steps = perf.next_steps(self.folder, self.plan)
+        return title, steps, [step["texto"] for step in steps if step["tipo"] == "terminal" and " capturar " in step["texto"]]
+
+    def test_todos_los_flujos_con_memoria_en_cada_comando(self):
+        self.plan["memoria"] = True
+        _, steps, captures = self.captures()
+        order = next(step for step in steps if step["tipo"] == "avisos" and step["titulo"] == "Flujos del plan, en este orden")
+        self.assertIn("2. catalogo-repeticion: repetición para memoria: abre y cierra el detalle ×5 a propósito",
+                      order["lineas"])
+        flows = [re.search(r"--flujo (\S+)", text).group(1) for text in captures]
+        kinds = ["prueba" if "--prueba" in text else re.search(r"--fase (\S+)", text).group(1) for text in captures]
+        self.assertEqual(list(zip(flows, kinds)), [("catalogo-lista", "prueba"), ("catalogo-repeticion", "prueba"),
+                                                   ("catalogo-lista", "antes"), ("catalogo-repeticion", "antes")])
+        self.assertTrue(all(text.endswith(" --memoria") for text in captures), captures)
+        self.assertTrue(all("--corridas 3" in text for text in captures if "--fase" in text))
+
+    def test_un_flujo_de_repeticion_lleva_memoria_aunque_el_plan_no_la_diga(self):
+        _, _, captures = self.captures()
+        self.assertTrue(all(text.endswith("--memoria") for text in captures if "catalogo-repeticion" in text))
+        self.assertFalse(any(text.endswith("--memoria") for text in captures if "catalogo-lista" in text))
+
+    def test_corridas_del_plan(self):
+        self.plan["profundidad"] = "riguroso"
+        self.plan["corridas"] = 7
+        _, _, captures = self.captures()
+        self.assertTrue(all("--corridas 7" in text for text in captures if "--fase" in text), captures)
+
+    def test_da_igual_que_flujo_se_midio_ultimo(self):
+        # riguroso: el control del segundo flujo ya está y su antes no; `siguiente` lo pide, venga de donde venga
+        self.plan["profundidad"] = "riguroso"
+        self.plan["mejoras"] = [{"id": "M1", "titulo": "x", "estado": "propuesta"}]
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        tests = {"catalogo-lista": {"fecha": "2026-11-05T09:00:00", "marcas_ok": True},
+                 "catalogo-repeticion": {"fecha": "2026-11-05T09:01:00", "marcas_ok": True}}
+        self.phases({"prueba": {"flujos": tests},
+                     "antes": {"fecha": "2026-11-05T10:00:00", "corridas": 10,
+                               "flujos": flows_record(**{"catalogo-lista": 10})},
+                     "control": {"fecha": "2026-11-05T11:00:00", "corridas": 20,
+                                 "flujos": flows_record(**{"catalogo-lista": 10, "catalogo-repeticion": 10})}})
+        for flow in ("catalogo-lista", "catalogo-repeticion", None):
+            _, steps = perf.next_steps(self.folder, self.plan, flow)
+            texts = [step.get("texto", "") for step in steps if step["tipo"] == "terminal"]
+            self.assertTrue(any("--flujo catalogo-repeticion --fase antes" in text for text in texts), (flow, texts))
+
+    def test_la_prueba_del_otro_flujo_aunque_la_del_primero_ya_corrio(self):
+        self.phases({"prueba": {"flujos": {"catalogo-lista": {"fecha": "2026-11-05T09:00:00", "marcas_ok": True}}}})
+        _, steps, captures = self.captures()
+        texts = [step.get("texto", "") for step in steps if step["tipo"] == "terminal"]
+        test = next(index for index, text in enumerate(texts) if "--flujo catalogo-repeticion --prueba" in text)
+        before = next(index for index, text in enumerate(texts) if "--flujo catalogo-repeticion --fase antes" in text)
+        self.assertLess(test, before)
+
+    def test_el_segundo_flujo_que_falta_va_antes_del_diagnostico(self):
+        write(self.folder / "prueba" / "catalogo-lista_1.perfetto-trace.gz", "x")
+        self.phases({"antes": {"fecha": "2026-11-05T10:00:00", "corridas": 3,
+                               "flujos": flows_record(**{"catalogo-lista": 3})},
+                     "prueba": {"flujos": {"catalogo-lista": {"fecha": "2026-11-05T09:00:00", "marcas_ok": True},
+                                           "catalogo-repeticion": {"fecha": "2026-11-05T09:01:00", "marcas_ok": True}}}})
+        title, steps, captures = self.captures()
+        texts = [step.get("texto", "") for step in steps]
+        at = next(index for index, text in enumerate(texts) if "--flujo catalogo-repeticion --fase antes" in text)
+        diagnosis = next(index for index, text in enumerate(texts) if " diagnostico " in text)
+        self.assertLess(at, diagnosis)
+        self.assertNotIn("--flujo catalogo-lista --fase antes", " ".join(captures))
+        self.assertIn("el flujo catalogo-lista ya midió esta fase", steps[at]["que"])
+
+    def test_capturar_usa_la_memoria_del_plan(self):
+        # sin dispositivo: la línea sale antes de tocar nada
+        self.plan["memoria"] = True
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        result = self.perf("capturar", "--plan", self.folder / "plan.json", "--flujo", "catalogo-lista", "--prueba")
+        self.assertIn("--memoria: el plan la pide para el flujo catalogo-lista", result.stdout)
+        self.plan["memoria"] = False
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        result = self.perf("capturar", "--plan", self.folder / "plan.json", "--flujo", "catalogo-lista", "--prueba",
+                           "--memoria")
+        self.assertIn("⚠ --memoria va en contra del plan", result.stdout)
+
+
+class DiagnoseAllFlowsTest(DeviceBase):
+    """B3: `diagnostico` procesa la mediana y la peor de cada flujo medido y dice cuáles cubrió."""
+
+    def test_los_dos_flujos(self):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["lista"] = {"inicio": "MainActivity", "recorrido": "true"}
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.tp_outputs(GOOD)
+        for flow in ("home", "lista"):
+            self.ok("capturar", "--plan", self.plan, "--flujo", flow, "--fase", "antes", "--corridas", "2",
+                    "--calentamiento", "0", "--sin-compilar")
+        out = self.ok("diagnostico", "--carpeta", self.plan.parent)
+        self.assertRegex(out, r"flujos cubiertos: home \(corrida \d, mediana[^)]*\); lista \(corrida \d, mediana")
+        text = (self.plan.parent / "diagnostico.md").read_text(encoding="utf-8")
+        self.assertIn("# Diagnóstico · home · antes", text)
+        self.assertIn("# Diagnóstico · lista · antes", text)
+        self.assertIn("_Flujos cubiertos: home", text)
+        only = self.ok("diagnostico", "--carpeta", self.plan.parent, "--flujo", "lista")
+        self.assertIn("Sin cubrir (pediste --flujo): home", only)
+
+
+class MarksPerInvestigationTest(PerfBase):
+    """B4 y B5: el parche de marcas vigente es de la investigación y de sus repos; las rutas se comparan resueltas."""
+
+    def setUp(self):
+        super().setUp()
+        for name in ("proyecto", "modulo-pagos"):
+            (self.dir / name).mkdir()
+        self.root = init_repo(self.dir / "proyecto")
+        write(self.root / "app" / "Lista.kt", "class Lista {\n    fun a() = 1\n}\n")
+        self.sibling = init_repo(self.dir / "modulo-pagos")
+        write(self.sibling / "pagos" / "Pago.kt", "class Pago {\n    fun b() = 2\n}\n")
+        commit_all(self.root)
+        commit_all(self.sibling)
+        parches = self.root / "reports" / "perf" / "parches"
+        write(self.root / "AGENTS.md", "# P\n\n## Rendimiento\n\n- Carpeta de parches: `reports/perf/parches`\n")
+        commit_all(self.root, "agents")
+        write(self.root / ".git" / "info" / "exclude", "/reports/\n")
+        self.parches = parches
+        self.folder = self.root / "reports" / "perf" / "catalogo-lista" / "2026-03-02"
+        write(self.folder / "plan.json", json.dumps(TWO_FLOWS))
+        state = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8").replace(
+            "| --- | --- | --- | --- | --- |\n\n\"Altera\"",
+            "| --- | --- | --- | --- | --- |\n| `pagos/Pago.kt` | ../modulo-pagos | marca | — | no |\n\n\"Altera\"", 1)
+        write(self.folder / "estado.md", state)
+
+    def marks(self, repo, rel, name):
+        path = repo / rel
+        original = path.read_text(encoding="utf-8")
+        write(path, original.replace("fun b() = 2\n", "fun b() = 2\n    // MarkTrace.mark(\"pago\")\n"))
+        data = git(repo, "diff")
+        write(path, original)
+        patch = self.parches / name
+        write(patch, data)
+        return patch
+
+    def test_no_ofrece_parches_de_otra_investigacion(self):
+        mine = self.marks(self.sibling, "pagos/Pago.kt", "catalogo-lista-2026-03-02-marcas-modulo-pagos-20261101-1000.patch")
+        other = self.marks(self.sibling, "pagos/Pago.kt", "detalle-2026-02-01-marcas-modulo-pagos-20261102-1000.patch")
+        found = perf.marks_patches(self.folder, self.root.resolve(), TWO_FLOWS)
+        self.assertEqual(list(found["vigente"].values()), [Path(os.path.realpath(str(mine)))])
+        self.assertEqual(found["elegidos"], {})
+        self.assertNotIn(str(other), json.dumps({str(k): str(v) for k, v in found["vigente"].items()}))
+
+    def test_con_varios_de_la_misma_investigacion_elige_el_ultimo(self):
+        first = self.marks(self.sibling, "pagos/Pago.kt", "catalogo-lista-2026-03-02-marcas-modulo-pagos-20261101-1000.patch")
+        last = self.marks(self.sibling, "pagos/Pago.kt", "catalogo-lista-2026-03-02-marcas-modulo-pagos-20261103-0900.patch")
+        found = perf.marks_patches(self.folder, self.root.resolve(), TWO_FLOWS)
+        top = Path(os.path.realpath(str(self.sibling)))
+        self.assertEqual(found["vigente"], {top: Path(os.path.realpath(str(last)))})
+        self.assertEqual(found["elegidos"][top][1], [Path(os.path.realpath(str(first)))])
+
+    def test_repo_hermano_y_carpeta_enlazada(self):
+        # el parche registrado como vigente en estado.md, con una ruta que pasa por un enlace simbólico
+        patch = self.marks(self.sibling, "pagos/Pago.kt", "catalogo-lista-2026-03-02-marcas-modulo-pagos-20261101-1000.patch")
+        os.symlink(str(self.root / "reports"), str(self.root / "informes"))
+        linked = self.root / "informes" / "perf" / "parches" / patch.name
+        result = subprocess.run([sys.executable, "-I", str(SCRIPT), "marcas", "--carpeta",
+                                 os.path.relpath(str(self.folder), str(self.root)), "--vigente", str(linked)],
+                                cwd=str(self.root), env=dict(ENV, HOME=str(self.dir)), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("parche de marcas vigente de %s" % os.path.realpath(str(self.sibling)), result.stdout)
+        self.assertNotIn("no existe o no es de ningún repo", result.stdout)
+        found = perf.marks_patches(self.folder, self.root.resolve(), TWO_FLOWS)
+        self.assertEqual(found["sin_repo"], [])
+        self.assertEqual(list(found["vigente"].values()), [Path(os.path.realpath(str(patch)))])
+
+
+
+LISTA = ("package com.example.app\n\nimport com.example.app.red.Red\n\nclass Lista {\n    fun a() = 1\n    fun b() = 2\n"
+         "    fun c() = 3\n    fun d() = 4\n    fun e() = 5\n    fun f() = 6\n    fun g() = 7\n}\n")
+# la marca va en medio del archivo (un hunk que no empieza en la línea 1: git lo aplica con desplazamiento)
+LISTA_MARKED = LISTA.replace("    fun e() = 5\n", "    fun e() = 5\n    // MarkTrace.mark(\"lista_visible\")\n")
+TRIAGE_PLAN = {"paquete": "com.example.app", "profundidad": "triage", "principales": ["abrir_ms"],
+               "flujos": {"catalogo-lista": {"recorrido": "true"}},
+               "mejoras": [{"id": "M1", "titulo": "Una sola llamada al abrir la lista", "estado": "propuesta",
+                            "metrica": "abrir_ms"}]}
 
 
 if __name__ == "__main__":

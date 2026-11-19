@@ -56,7 +56,7 @@ def without_new(record):
     plan) y 0.13.0 (cuándo se midió el flujo, con qué instalación y cuánto tardó)."""
     return {key: value for key, value in record.items() if key not in ("skill", "configs", "depurable", "ajustes", "marcas",
                                                                          "plan", "memoria", "fecha", "instalada",
-                                                                         "segundos")}
+                                                                         "segundos", "reglas")}
 
 
 class PerfBase(unittest.TestCase):

@@ -159,14 +159,16 @@ class CloseMixedFileTest(MixedFileBase):
         self.assertIn("se detiene: también tiene código de M1", out)
 
     def test_dos_parches_sin_vigente_preguntan_cual(self):
+        # 0.15.0 · B4: con varios parches de marcas de la misma investigación, usa el más nuevo y lo dice (antes
+        # preguntaba cuál); `marcas --vigente` sigue eligiendo otro.
         first = self.marks_patch("contactos-marcas-1.patch")
         second = self.marks_patch("contactos-marcas-2.patch")
         out = self.ok_in("cerrar", "--carpeta", self.rel(), "--simular")
-        self.assertIn("estado.md no dice cuál es el vigente", out)
-        self.assertIn("marcas --carpeta reports/perf/contactos/2026-03-02 --vigente %s" % perf.q(str(second.resolve())),
-                      out)
+        self.assertIn("hay 2 parches de marcas de esta investigación y uso el más nuevo, contactos-marcas-2.patch", out)
         title, steps = perf.next_steps(self.folder, perf.load_plan(self.folder / "plan.json"))
-        self.assertEqual(steps[0]["titulo"], "¿Cuál es el parche de marcas vigente?")
+        self.assertEqual(steps[0]["titulo"], "Parche de marcas")
+        self.assertIn("uso el parche de marcas más nuevo de esta investigación, contactos-marcas-2.patch",
+                      steps[0]["lineas"][0])
         self.ok_in("marcas", "--carpeta", self.rel(), "--vigente", second)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")
         self.assertIn("Parche de marcas vigente: `%s`" % second.resolve(), state)

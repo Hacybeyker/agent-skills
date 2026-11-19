@@ -3,6 +3,7 @@ pendientes de 0.11.0 (D). Reusa las bases y los datos de test_perf.py."""
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile

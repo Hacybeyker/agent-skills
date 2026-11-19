@@ -117,7 +117,10 @@
     }
     body { background: #fff; } header { background: #333; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .chart, svg { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .chart { break-inside: avoid; }
-    details > summary { display: none; }
+    /* Los plegables (las mejoras, cada archivo, el anexo) se imprimen abiertos, con su título. */
+    details > summary { list-style: none; font-weight: 600; }
+    details > summary::-webkit-details-marker { display: none; }
+    details::details-content { content-visibility: visible; display: block; }
     section { break-inside: avoid; border-color: #ccc; } .toc { display: none; }
     /* En papel no hay scroll: la tabla entra en el ancho de la página, con letra más chica y celdas que parten. */
     .table-wrap { overflow: visible; }
