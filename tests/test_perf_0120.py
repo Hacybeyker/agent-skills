@@ -621,10 +621,11 @@ class BusinessTextTest(PerfBase):
         text = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
         self.assertNotIn("_sin completar_", text)
         self.assertNotIn("_Sin completar", text)
-        self.assertIn("Sin completar todavía: la investigación no lo anotó.", text)
-        self.assertIn("1 quedó sin confirmar (la lista aparece tarde a veces)", text)
-        self.assertIn("la ficha y el plan", text)
+        self.assertIn("Sin completar todavía: la investigación no lo anotó en la Ficha.", text)
+        # 0.15.0 · G4/G5: lo sin confirmar y el costo no van en gerencia
+        self.assertNotIn("la lista aparece tarde a veces", text)
         self.assertNotIn("1 · ficha", text)
+        self.assertEqual(re.findall(r"^## (.+)$", text, re.M), list(perf.BUSINESS_SECTIONS))
         self.assertEqual(perf.session_words("3 · M1"), "la mejora M1")
 
 

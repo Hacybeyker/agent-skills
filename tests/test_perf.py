@@ -7880,12 +7880,8 @@ class ServicesReportTest(PerfBase):
         self.assertIn("| GET api/v1/clientes | 2 → 1 |", main)  # 0.15.0 · H1: solo los que cambian o se repiten
         self.assertIn("| GET api/v1/nuevo | 0 → 1 |", main)
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
-        # no todos traen el tiempo del servidor: suma la duración de las llamadas y lo dice así
-        self.assertIn("El recorrido llama a 3 servicios (3 llamadas en total). De los 1.3 s del recorrido (con las esperas "
-                      "del guion de medición), las llamadas suman 1.05 s (si van en paralelo, parte se solapa); el más "
-                      "lento es el de \"nuevo\" (0.5 s por llamada). Es orientativo", business)
-        self.assertNotIn("red get", business.lower())  # los tiempos de un servicio no salen como riesgo ni con su métrica
-
+        self.assertNotIn("red get", business.lower())
+        self.assertNotIn("api/v1", business)  # G6: sin rutas completas en gerencia
     def test_el_servidor_que_cambia_entre_fases_es_variacion_del_backend(self):
         after = service_rows("despues", "GET api/v1/clientes", 2, [700] * 5, 600, FULL) \
             + rows("despues", "lista", "lista_ms", [1700] * 5)
@@ -7899,29 +7895,12 @@ class ServicesReportTest(PerfBase):
         write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
         self.ok("reporte", "--carpeta", self.folder, "--inicial")
         self.assertNotIn("Servicios del flujo", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
-        self.assertIn("No hay datos de las llamadas a servicios (no se midieron).",
-                      (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
         write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "red_llamadas", [0] * 5, "llamadas"))
         self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
                          "El recorrido no llama a ningún servicio.")
-        # con llamadas pero sin filas por servicio (una versión anterior), no dice que no llama a ninguno
         write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "red_llamadas", [2] * 5, "llamadas"))
         self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
                          "El recorrido hace 2 llamadas a servicios; no hay datos de cada servicio.")
-        self.assertIn("hace 1 llamada a servicios", perf.services_line(
-            perf.read_rows(self.folder / "metricas.csv")[:0] + [dict(row, valor=1.0) for row in
-                                                               perf.read_rows(self.folder / "metricas.csv")], self.plan))
-        # con el tiempo en curso de esta versión: cuánto del recorrido es espera y el más lento
-        write(self.folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5)
-              + service_rows("antes", "GET api/v1/clientes", 2, [400] * 5, 300)
-              + rows("antes", "lista", "red_en_curso_ms", [450] * 5, family="info"))
-        self.assertEqual(perf.services_line(perf.read_rows(self.folder / "metricas.csv"), self.plan),
-                         "El recorrido llama a 1 servicio (2 llamadas en total). De los 1.8 s del recorrido (con las "
-                         "esperas del guion de medición), durante 0.45 s (25 %) se está esperando a algún servicio; el más "
-                         "lento es el de \"clientes\" (0.4 s por llamada). Es orientativo: depende del servidor y de la red "
-                         "del momento.")
-
-
     def test_las_filas_por_servicio_salen_de_la_traza_y_van_al_final(self):
         call = lambda ts, dur, name: ("seccion", ts, dur, 0, name)
         sections = [call(0, 300 * MS, "HTTP GET api/v1/clientes"), call(10 * MS, 200 * MS, "TTFB GET api/v1/clientes"),
@@ -7982,63 +7961,56 @@ class AudienceReportsTest(PerfBase):
             for jargon in ("mediana", "P90", "lista_ms", "jank_app_pct"):
                 self.assertNotIn(jargon, self.read(name), (name, jargon))
         self.assertIn("Los números son medianas de varias corridas", self.read("reporte-final-dev.html"))
-        self.assertIn("## Comparación completa", self.read("reporte-final-dev.md"))  # el de dev es el de siempre
-
+        self.assertIn("### Comparación completa", self.read("reporte-final-dev.md"))  # 0.15.0: en el anexo
     def test_el_de_gerencia_va_en_palabras_con_segundos_y_un_veredicto_por_numero(self):
         self.ok("reporte", "--carpeta", self.folder)
         text = self.read("reporte-final-gerencia.md")
-        self.assertIn("## En resumen\n\nAl abrir la lista se pedían los datos dos veces.", text)
+        # 0.15.0 · G: siete secciones y nada más
+        self.assertEqual(re.findall(r"^## (.+)$", text, re.M), list(perf.BUSINESS_SECTIONS))
         self.assertIn("## Qué notaba el usuario\n\nLa lista tarda en aparecer", text)
-        self.assertIn("## Qué se encontró\n\n- La lista tarda: Pide los clientes dos veces\n\nOtras causas posibles: 1 se "
-                      "investigó y se descartó y 1 quedó sin confirmar (", text)  # 0.12.0: dice cuál
+        self.assertIn("## Qué se encontró\n\n- La lista tarda: Pide los clientes dos veces\n\n## Qué se hizo", text)
         self.assertIn("## Qué se hizo\n\n- Pedir los clientes una sola vez", text)
-        self.assertIn("- **Tiempo de \"lista\":** pasó de 1.8 s a 1.1 s (39 % menos) · mejora clara.", text)
-        # R5 y R6: corridas en dos grupos (4–6 y 28–30) y sin "orientativo … (mejora clara)", que se contradice
-        self.assertIn("- **Cuadros que se ven trabados:** pasó de 6 % a 1 % (83 % menos) · mejoró, aunque las mediciones "
-                      "forman dos grupos: tómalo como orientativo.", text)
-        self.assertIn("- **Mayor congelamiento de la pantalla:** pasó de 40 milisegundos a 90 milisegundos (125 % más) · empeoró.", text)
-        # R6: el punto sin cerrar, dicho cuál es (en palabras), no solo "1 punto"
-        self.assertIn("## Lo que queda pendiente\n\n- Cargar las imágenes después (para más adelante)\n- Tirón estable "
-                      "(sin cerrar; el detalle está en el reporte técnico).", text)
-        self.assertIn("- Pedir los clientes una sola vez: riesgo bajo.", text)
-        self.assertIn("- Mayor congelamiento de la pantalla: pasó de 40 milisegundos a 90 milisegundos (125 % más) · "
-                      "empeoró.", text)
-        self.assertIn("- Empeoraron 2 medidas que no son principales: el detalle está en el reporte técnico.", text)
+        self.assertIn("- **Tiempo de \"lista\":** Antes tardaba 1.8 s; ahora 1.1 s: 39 % más rápido.", text)
+        self.assertIn("[Mejora]", text)
+        # el chip y el texto no se contradicen: dos grupos → orientativo en los dos
+        self.assertIn("- **Cuadros que se ven trabados:** Antes era 6 %; ahora 1 %", text)
+        self.assertIn("(orientativo: las mediciones forman dos grupos). [Orientativo]", text)
+        self.assertIn("Antes tardaba 40 milisegundos; ahora 90 milisegundos: 125 % más lento", text)
+        self.assertIn("## Lo pendiente\n\n- Cargar las imágenes después (en pausa: para más adelante)", text)
+        self.assertNotIn("Tirón estable", text)  # un pendiente que no es una mejora no va en gerencia
+        self.assertIn("## Riesgo de hacer el cambio\n\n- Pedir los clientes una sola vez: riesgo bajo.", text)
+        self.assertNotIn("Empeoraron", text)  # G2
         self.assertNotIn("api/v1/lento", text)
+        self.assertNotIn("Costo", text)  # G5
+        self.assertNotIn("Más detalle", text)
         self.assertEqual(perf.plain_time(153, "MB"), "153 MB")
-        self.assertIn("## Costo\n\nSesiones de IA: 0.80 USD en 1 sesión anotada · faltan anotar", text)
-        # sin jerga: ni nombres de métricas, ni percentiles, ni variación, ni evidencia técnica
         for jargon in ("lista_ms", "jank_app_pct", "hilo_max_ms", "P90", "CV", "mediana", "slice", "Lista.kt",
-                       "Resumen técnico"):
+                       "Resumen técnico", "Un punto técnico"):
             self.assertNotIn(jargon, text, jargon)
-        page = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
-        self.assertLess(len(page.splitlines()), 70)  # una página corta (0.13.0: con la leyenda de las etiquetas)
-
+        self.assertLess(len(text.splitlines()), 70)
     def test_sin_el_resumen_para_gerencia_se_genera_igual_y_lo_marca_sin_completar(self):
         write(self.folder / "estado.md", STATE_REPORT % "")  # un estado.md de una versión anterior: sin la sección
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
         self.assertIn('no tiene la sección "## Resumen para gerencia"', out)
         text = self.read("reporte-inicial-gerencia.md")
-        self.assertIn("## En resumen\n\nSin completar: el resumen para este público todavía no se escribió.", text)
-        self.assertIn("## Qué se propone\n\n- Pedir los clientes una sola vez\n- Cargar las imágenes después", text)
-        self.assertIn("- **Tiempo de \"lista\":** 1.8 s · estable entre mediciones.", text)
-        self.assertIn("- **Cuadros que se ven trabados:** 6 % · orientativo: varía mucho entre corridas.", text)
+        # 0.15.0 · G: sin la sección, lo que notaba el usuario sale de la ficha
+        self.assertIn("## Qué notaba el usuario\n\nLa lista tarda en aparecer", text)
+        self.assertIn("## Lo pendiente\n\n- Cargar las imágenes después (en pausa: para más adelante)", text)
+        self.assertIn("- **Tiempo de \"lista\":** hoy 1.8 s.", text)
         template = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
         self.assertIn("## Resumen para gerencia", template)
         write(self.folder / "estado.md", STATE_REPORT % template[template.index("## Resumen para gerencia"):
                                                                   template.index("## Pendientes")])
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial")  # con el texto de la plantilla: avisa y no lo publica
         self.assertIn("Resumen para gerencia (de 3 a 5 líneas, sin términos técnicos)", out)
-        self.assertIn("Sin completar:", self.read("reporte-inicial-gerencia.md"))
         self.assertNotIn("lector no técnico", self.read("reporte-inicial-gerencia.md"))
-
     def test_las_etiquetas_del_plan_nombran_las_metricas_propias(self):
         self.plan["etiquetas"] = {"lista_ms": "Tiempo en mostrar la lista de clientes"}
         write(self.folder / "plan.json", json.dumps(self.plan))
         self.ok("reporte", "--carpeta", self.folder)
-        self.assertIn("- **Tiempo en mostrar la lista de clientes:** pasó de 1.8 s a 1.1 s", self.read("reporte-final-gerencia.md"))
+        self.assertIn("- **Tiempo en mostrar la lista de clientes:** Antes tardaba 1.8 s; ahora 1.1 s",
+                      self.read("reporte-final-gerencia.md"))
         self.assertEqual(perf.plain_metric("detalle hilo_max_ms", {}), 'Mayor congelamiento de la pantalla, en la parte "detalle"')
-        # una métrica de un servicio elegida como principal también sale en palabras
         self.assertEqual(perf.plain_metric("red GET api/v1/clientes ms", {}), 'Duración del servicio "clientes"')
         self.assertEqual(perf.plain_metric("red GET api/v1/clientes llamadas", {}), 'Llamadas al servicio "clientes"')
         self.assertEqual(perf.plain_metric("carga red GET api/v1/clientes llamadas", {}),
@@ -8049,7 +8021,6 @@ class AudienceReportsTest(PerfBase):
         result = self.perf("reporte", "--carpeta", self.folder)
         self.assertEqual(result.returncode, 2)
         self.assertIn("'etiquetas' es un objeto", result.stderr)
-
     def test_los_nombres_de_antes_se_siguen_aceptando_y_los_nuevos_cierran_la_investigacion(self):
         for names, expected in ((["reporte-final.html"], 1), (["reporte.md"], 1),
                                 (["reporte-final-dev.html", "reporte-final-gerencia.html"], 2)):
@@ -8350,28 +8321,20 @@ class FlowServicesOrderTest(PerfBase):
     def test_la_lista_completa_va_en_orden_de_invocacion_y_por_tramo(self):
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         md = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        section = md[md.index("## Servicios del flujo"):md.index("## Red por tramo") if "## Red por tramo" in md
-                     else md.index("## Hallazgos")]
+        section = md[md.index("### Servicios del flujo, completos"):]
+        section = section[:section.index("\n### ", 5)]
         names = [line.split("`")[1] for line in section.splitlines() if line.startswith("| `")]
         self.assertEqual(names, ["GET api/v1/sesion", "GET api/v1/catalogo", "GET api/v1/clientes", "GET api/v1/clientes/{id}",
                                  "GET api/v1/extra/0", "GET api/v1/extra/1", "GET api/v1/extra/2"])
         self.assertLess(section.index("**Tramo `carga`**"), section.index("**Tramo `detalle`**"))
-        self.assertIn("<details open>\n<summary>Los 7 servicios del flujo</summary>", section)
         self.assertIn("En el orden en que se invocan", section)
         self.assertIn("| `GET api/v1/clientes` | 2 | 300 ms | 400 ms / 400 ms | 300 ms |", section)
-        self.assertIn("**Espera de servicios: 900 ms de 2.05 s del flujo (44 %)**, el tiempo con al menos una llamada en "
-                      "curso", section)
         page = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
-        self.assertIn("Línea de tiempo de los servicios", page)
-        self.assertIn("Corrida 5 (la de duración mediana)", page)  # ventana 2050 ms: la mediana de las 5
-        self.assertIn('class="mark"', page)  # dónde empieza cada tramo
-        self.assertIn("podrían ir en paralelo", page)
-        self.assertIn("Servicios que más tiempo suman", page)
-        business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
-        self.assertIn("El recorrido llama a 7 servicios (8 llamadas en total). De los 2.05 s del recorrido (con las esperas "
-                      "del guion de medición), durante 0.9 s (44 %) se está esperando a algún servicio; el más lento es el "
-                      "de \"clientes\" (0.4 s por llamada).", business)
-
+        # 0.15.0 · G6: una línea de tiempo por acción, del toque al contenido, con el total y la espera de servicios
+        self.assertIn("es esperar a los servicios.", page)
+        self.assertIn(">toque<", page)
+        business = (self.folder / "reporte-inicial-gerencia.html").read_text(encoding="utf-8")
+        self.assertIn("es esperar a los servicios.", business)
     def test_en_el_final_el_backend_que_se_mueve_es_variacion_del_backend(self):
         after = rows("despues", "lista", "lista_ms", [1200] * 5) \
             + timed_service("despues", "GET api/v1/sesion", 1, 100, 80, 0, "carga") \
@@ -8509,7 +8472,8 @@ class BusinessJargonTest(PerfBase):
         # 0.12.0 (D5): en palabras, sin los guiones bajos
         self.assertIn("## Qué notaba el usuario\n\nSin completar todavía: la investigación no lo anotó en la Ficha.", text)
         self.assertNotIn("_sin completar_", text)
-        self.assertIn("- Una mejora con el título sin completar\n- Cargar las imágenes después", text)
+        self.assertIn("\n- Cargar las imágenes después (esperando la decisión)", text)  # 0.15.0 · G4
+        self.assertIn("## Lo pendiente\n\n- un cambio propuesto (M1), sin descripción en palabras todavía", text)
         # el reporte técnico no cambia: publica todo
         self.assertIn("cargarClientes", (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8"))
 
@@ -8517,8 +8481,9 @@ class BusinessJargonTest(PerfBase):
         self.state("Al abrir la lista se pedían los datos dos veces.")
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
         self.assertNotIn("⚠ Gerencia: \"Resumen", out)
-        self.assertIn("Al abrir la lista se pedían los datos dos veces.",
-                      (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+        text = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        # 0.15.0 · G: el resumen va como párrafo de entrada, antes de las siete secciones
+        self.assertLess(text.index("Al abrir la lista se pedían los datos dos veces."), text.index("## Qué notaba el usuario"))
 
 
 class ChatCommandTest(PerfBase):
@@ -8913,10 +8878,13 @@ class BusinessUnfilledTitleTest(PerfBase):
         write(folder / "metricas.csv", HEADER + rows("antes", "lista", "lista_ms", [1800] * 5))
         self.ok("reporte", "--carpeta", folder, "--inicial")
         text = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
-        self.assertIn("## Qué se propone\n\n- Una mejora con el título sin completar", text)
-        self.assertIn("- Una mejora con el título sin completar: riesgo bajo.", text)
-        self.assertNotIn("_sin completar_: riesgo", text)
+        # 0.15.0 · G4: si no se puede decir sin términos técnicos, no va (sin líneas a medias ni genéricas)
         self.assertNotIn("LazyColumn", text)
+        self.assertNotIn("_sin completar_: riesgo", text)
+        self.assertNotIn("Un punto técnico", text)
+        # el cambio existe aunque su título no se pueda publicar: no se dice "nada pendiente" (revisión de 0.15.0)
+        self.assertNotIn("No queda nada pendiente", text)
+        self.assertIn("sin descripción en palabras todavía", text)
 
 
 # ── 0.11.0 · X: el flujo no se rompe ─────────────────────────────────────────
@@ -9957,11 +9925,13 @@ class BusinessWordsTest(PerfBase):
         self.assertNotIn(".:", text)
         self.assertNotIn("`", text)
         self.assertIn("Mayor congelamiento de la pantalla, en la búsqueda de un nombre corto", text)
-        self.assertIn("- Un tirón al volver (sin cerrar; el detalle está en el reporte técnico).", text)
-        self.assertIn("- Un punto técnico de la investigación (sin cerrar", text)
-        self.assertIn("con las esperas del guion de medición", text)
+        # 0.15.0 · G4: los pendientes que no son mejoras y lo técnico no van en gerencia
+        self.assertNotIn("Un tirón al volver", text)
+        self.assertNotIn("Un punto técnico", text)
         self.assertIn('⚠ Gerencia: "busqueda_ms" no tiene un nombre en palabras', out)  # sin etiqueta: lo dice y cómo
         self.assertIn('"etiquetas": {"busqueda_ms": "<qué es, en palabras>"}', out)
+        dev = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        self.assertIn("### Pendientes que no son mejoras", dev)  # en el anexo del técnico
 
 
 # ── 0.11.0 · K: consumo con cualquier herramienta ────────────────────────────
@@ -10184,7 +10154,7 @@ class Compat0100Test(PerfBase):
         self.ok("siguiente", "--carpeta", self.folder)
         self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
         self.ok("reporte", "--carpeta", self.folder, "--html")
-        self.assertIn("## Costo", (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8"))
+        self.assertNotIn("## Costo", (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8"))  # 0.15.0 · G5
         out = self.ok("consumo", "--carpeta", self.folder, "--sesion", "2 · diagnóstico", "--costo", "0.90 USD")
         self.assertIn("actualiza la fila que tenía esa sesión", out)
         state = (self.folder / "estado.md").read_text(encoding="utf-8")

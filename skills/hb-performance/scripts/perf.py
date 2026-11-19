@@ -16575,6 +16575,31 @@ def improvement_card(folder, plan, item, findings, results, applied_text):
     return "\n".join(lines)
 
 
+def pending_improvements(plan, final, plain=False, problems=None):
+    """G4 y H1: lo pendiente son las mejoras propuestas que no se aplicaron: título en palabras, por qué quedó y qué
+    ganaría el usuario. Nunca hallazgos descartados ni sin confirmar."""
+    words = {"propuesta": "esperando la decisión", "aprobada": "aprobada, falta aplicarla", "pendiente": "en pausa: "
+             "para más adelante", "descartada": "se decidió no hacerla"}
+    out = []
+    for item in plan.get("mejoras") or []:
+        state = item.get("estado", "propuesta")
+        if state == "aplicada" or (final is False and state == "descartada"):
+            continue
+        title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id"), problems) if plain \
+            else improvement_title(item)
+        if plain and title.startswith("_"):
+            # G4: el título técnico no se publica, pero el cambio existe: decir "nada pendiente" sería falso
+            title = "un cambio propuesto (%s), sin descripción en palabras todavía" % item.get("id", "?")
+        gain = str(item.get("esperado") or "").strip()
+        if plain and gain and jargon(gain):
+            gain = ""
+        out.append("- %s%s (%s)%s" % ("" if plain else "%s · " % item.get("id"), title, words.get(state, state),
+                                      ": %s" % gain.rstrip(".") if gain else ""))
+    if not out:
+        return "No queda nada pendiente."
+    return "\n".join(dict.fromkeys(out))
+
+
 def reviewed_md(findings):
     """H1: "Se revisó y se descartó": lo descartado y lo sin confirmar, una línea cada uno con su motivo, para no
     investigarlo de nuevo."""
@@ -16624,6 +16649,56 @@ def border_rule_md(folder, plan=None):
     if len({rule for _, rule in used}) > 1:
         lines.append("- Las fases usan reglas distintas: `perf.py recalcular` aplica la de ahora a todas.")
     return "Cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan.\n\n" + "\n".join(lines)
+
+
+def action_spans(plan, flow, timeline):
+    """G6: las acciones del usuario (los tramos del flujo, o el flujo entero sin tramos): [(título, inicio, fin)] en ms
+    de la línea de tiempo de una corrida."""
+    spec = (plan.get("flujos") or {}).get(flow) or {}
+    marks = {}
+    for name, at in timeline.get("marcas") or []:
+        marks.setdefault(name, at)
+
+    def when(mark):
+        if not mark:
+            return None
+        return next((at for name, at in marks.items() if fnmatch.fnmatchcase(name, mark)), None)
+
+    out = []
+    for segment in spec.get("segmentos") or []:
+        if not isinstance(segment, dict) or segment.get("solo_red"):
+            continue
+        start = when((segment.get("desde") or {}).get("marca"))
+        end = when((segment.get("hasta") or {}).get("marca"))
+        if start is not None and end is not None and end > start:
+            out.append((segment_title(segment.get("nombre", ""), plan) or segment_words(segment.get("nombre", ""), plan),
+                        start, end))
+    if not out:
+        # sin tramos: la acción es la ventana del flujo (de su marca de inicio a la de fin), no la traza entera, que
+        # tiene las esperas del recorrido y lo que pasa después
+        window = spec.get("ventana") if isinstance(spec.get("ventana"), dict) else {}
+        start = when((window.get("desde") or {}).get("marca")) if window else None
+        end = when((window.get("hasta") or {}).get("marca")) if window else None
+        if start is not None and end is not None and end > start:
+            out.append((str(spec.get("titulo") or "el recorrido"), start, end))
+        elif not window:
+            calls = timeline.get("llamadas") or []
+            end = max([call[2] for call in calls] + [at for _, at in timeline.get("marcas") or []] + [0])
+            if end > 0:
+                out.append((str(spec.get("titulo") or "el recorrido"), 0.0, end))
+    return out
+
+
+def busy_time(intervals):
+    total, last = 0.0, None
+    for start, end in sorted(intervals):
+        if last is None or start > last:
+            total += end - start
+            last = end
+        elif end > last:
+            total += end - last
+            last = end
+    return total
 
 
 def action_chart(title, start, end, calls, urls, side=""):
@@ -16680,6 +16755,33 @@ def rows_timeline(rows, flow, phase, run):
     return {"llamadas": sorted(calls, key=lambda call: call[1]), "marcas": []} if calls else None
 
 
+def actions_html(rows, plan, phases, folder, urls):
+    """G6: las líneas de tiempo por acción de cada flujo, una por fase (o escenario), una al lado de la otra.
+    (HTML, [frases])."""
+    out, sentences = [], []
+    for flow in list(plan.get("flujos") or {}):
+        figures = []
+        for phase in phases:
+            run = representative_run(rows, flow, phase, plan, folder)
+            timeline = (load_timeline(folder, phase, flow, run) or rows_timeline(rows, flow, phase, run)) \
+                if run is not None else None
+            if not timeline:
+                continue
+            calls = [tuple(call) for call in timeline.get("llamadas") or []]
+            if not calls:
+                continue  # sin llamadas medidas no se dice "0 s es esperar a los servicios": no se midieron
+            side = " · ".join(part for part in (scenario_words(plan, flow), PHASE_WORDS.get(phase, phase).capitalize()
+                                                if len(phases) > 1 else "") if part)
+            for title, start, end in action_spans(plan, flow, timeline):
+                html, sentence = action_chart(title, start, end, calls, urls, side)
+                if html:
+                    figures.append(html)
+                    sentences.append("%s%s" % ("%s: " % side if side else "", sentence))
+        if figures:
+            out.append('<div class="charts">%s</div>' % "".join(figures))
+    return "".join(out), sentences
+
+
 def changed_services_md(rows, plan, phases, urls):
     """H1: la tabla de servicios de la parte principal: solo los que cambiaron entre fases o se repiten."""
     table = []
@@ -16730,6 +16832,55 @@ def equal_line(folder, plan, results):
         return ("Igual contra igual: **no** del todo: las fases usan reglas distintas para el borde entre tramos; "
                 "`perf.py recalcular` aplica la de ahora a todas sobre las trazas guardadas.")
     return "Igual contra igual: sí (mismas marcas, mismo recorrido, mismas reglas de cálculo en todas las fases)."
+
+
+def firmness_md(folder, plan, results):
+    """G3: qué tan firme es la medición, separado del riesgo."""
+    lines = []
+    phases = read_phases(folder)
+    if plan.get("profundidad") == "triage" or "control" not in phases:
+        lines.append("- No se midió dos veces sin cambiar nada: no se sabe cuánto varía de por sí. Los números son una "
+                     "primera señal, no una prueba.")
+    if results:
+        unstable = [r for r in results if r["metrica"] in (plan.get("principales") or []) and
+                    verdict_label(r) == ORIENTATIVE_LABEL]
+        if unstable:
+            lines.append("- %s: el resultado sirve como señal, no como prueba." % ", ".join(
+                sorted({plain_metric(r["metrica"], plan) for r in unstable})))
+        if any(MARK_CHANGED in (r.get("avisos") or []) or ROUTE_CHANGED in (r.get("avisos") or []) for r in results):
+            lines.append("- Lo que se midió cambió algo entre antes y después: algunas comparaciones no son del todo "
+                         "iguales.")
+        if any(r["familia"] == "e2e" and r["metrica"] in (plan.get("principales") or []) for r in results):
+            lines.append("- Parte de los tiempos dependen también del servidor y de la red del momento.")
+    level, _ = frames_trust(folder)
+    if level != "ok":
+        lines.append("- La fluidez se midió en un dispositivo que no representa uno real: esos valores son %s." % (
+            "no confiables" if level == "no" else "orientativos"))
+    runs = [phase_flow_record(phases, "antes", flow).get("corridas") or 0 for flow in plan.get("flujos") or {}]
+    if runs and min(runs) and min(runs) < MIN_RUNS:
+        lines.append("- Se midió pocas veces (%d): los números pueden moverse con más mediciones." % min(runs))
+    return "\n".join(lines) if lines else "La medición es firme: se repitió varias veces, con y sin cambios, en las " \
+                                          "mismas condiciones."
+
+
+def risk_md(plan, items, problems):
+    """G1: el riesgo de hacer cada cambio, con su porqué en palabras."""
+    out = []
+    for item in items:
+        title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id"), problems)
+        if title.startswith("_"):  # el cambio existe: se nombra sin su título técnico (no se dice "no hay cambios")
+            title = "Un cambio (%s), todavía sin descripción en palabras" % item.get("id", "?")
+        level, _, why = str(item.get("riesgo") or "").partition(":")
+        level = level.strip()
+        if not level or level in ("—", "-"):
+            out.append("- %s: sin evaluar todavía." % title)
+            continue
+        why = why.strip().rstrip(".")
+        if why and jargon(why):
+            why = ""
+        out.append("- %s: %s%s." % (title, "%s: riesgo %s" % (why[0].upper() + why[1:], level) if why else "riesgo %s" % level,
+                                    ""))
+    return "\n".join(out) if out else "No hay cambios que evaluar."
 
 
 def secondary_changes(plan, results, problems):
