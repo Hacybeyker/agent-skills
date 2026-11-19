@@ -4,6 +4,8 @@ Convierte el pedido en un plan de medición concreto. Termina con **una sola apr
 
 **¿Es el arranque en frío?** Entonces esta sesión no hace falta: `perf.py nuevo --receta arranque-frio` arma `plan.json` y `estado.md` (ver [medicion.md](medicion.md)). Úsala para cualquier otro flujo.
 
+**Presupuesto y tareas (sesión 1).** 15 pasos (25 en un flujo largo: login, pantallas de una sola vez, scroll con pestañas, varios flujos); el número exacto según el tamaño del flujo está en [modelos.md](modelos.md) · Presupuesto de pasos. En este orden, y nada más: (1) `perf.py estado` en la raíz del proyecto (lista las investigaciones, también las que quedaron a medias o en pausa: si la del pedido ya existe, sigue con su `siguiente --carpeta`) y `perf.py setup --estado`; si el pedido trae la línea "(pedido mejorado con la sesión 0 · pedido)", en tu entrega dale al usuario el comando para anotar ese costo, completo y con su carpeta: `cd <raíz> && python3 -I <skill>/scripts/perf.py consumo --carpeta <carpeta> --sesion '0 · pedido' --costo '<costo>'` (el costo lo pone él; no lo corras tú ni uses `--desde-transcript`, que leería el de esta sesión); (2) el mapa del alcance y los módulos; (3) las preguntas, todas en un mensaje; (4) `perf.py nuevo`, `plan.json` y `recorrido.sh` con un `# paso:` por paso; (5) la corrida de prueba y su video; (6) la aprobación y `perf.py siguiente`. **No hagas:** leer `perf.py` ni los archivos que genera, buscar coordenadas a ciegas (usa la [técnica de scroll](#scroll-y-pestañas)), probar comandos de `adb` sueltos fuera del recorrido, ni medir fases. **Cuándo detenerte:** al llegar al 80 % del presupuesto, dilo en el chat y en una línea de "Pendientes" de `estado.md` ("80 % del presupuesto de pasos: queda X"), y sigue solo con lo que falta para entregar; si un paso no converge en 3 intentos, detente y di qué falla. El presupuesto ordena el trabajo: no lo corta.
+
 ## 1. Contexto mínimo
 
 1. **`AGENTS.md`:** solo `## Stack`, `## DoD` y la sección de rendimiento. Sin `AGENTS.md`, avisa y ofrece `hb-setup`, o sigue con la detección.
@@ -232,6 +234,32 @@ Una autorización externa, un pago, un login con otra app o un navegador: el flu
 - **Campos del plan y huella:** cambian lo que se mide (y piden línea base nueva o `recalcular`): `recorrido`, `preparar`, `inicio`, `pausas`, `duracion_max_s`, `variables`, `traza_desde_preparar`, `ventana`, `metricas_usuario`, `segmentos` (sin su `titulo` ni `min_frames`), `input_slices` y `repetidas_ventana_s`; `siguiente` nombra el campo que cambió. Son de presentación y se pueden editar después de medir sin aviso: `titulo`, `etiquetas`, `min_frames`, `servicios`, `pasos`, `preparar_reinicia`, `preparar_limpia` y `escenarios`.
 - **Servicios del flujo:** si sabes qué servicios son del flujo, ponlos en `servicios` del flujo; los demás que caigan en la ventana se tratan como ajenos en el veredicto de la red ([medicion.md](medicion.md) · Red atribuida por servicio).
 
+### Scroll y pestañas
+
+Un recorrido con scroll y pestañas anidadas (pestañas dentro de una pantalla que se desplaza, listas hasta el final, el último ítem) se traba si las coordenadas cambian con cada desplazamiento. Estas técnicas dejan la pantalla siempre en la misma posición:
+
+1. **Swipes lentos:** duración de 800 ms o más y una distancia moderada (`adb shell input swipe 540 1600 540 900 900`). Con poca inercia y siempre la misma (velocidad fija), cada swipe mueve casi lo mismo; el borde (técnica 2) absorbe la diferencia.
+2. **Al tope o al final con swipes de sobra:** el scroll se frena en el borde, así que N+2 swipes dejan siempre la misma posición, sea cual sea el largo de la lista. El último ítem queda en una coordenada fija.
+3. **Las coordenadas, después de fijar la posición:** busca el elemento (`perf.py nodos --volcar`) con la pantalla ya en el borde, no antes de desplazarla.
+4. **Tres intentos como mucho:** si un paso no converge en 3 intentos, detente, di qué falla y propón simplificarlo (por ejemplo, partir el flujo en dos).
+
+**Cada desplazamiento dice tres cosas**, en el pedido, en el plan y en su `# paso:` de `recorrido.sh`: la **dirección** (vertical u horizontal), **qué se desplaza** (la pantalla entera, una lista, un carrusel, las pestañas) y **hasta dónde** (N elementos, o hasta el final). La corrida de prueba avisa del desplazamiento cuyo `# paso:` no lo dice.
+
+### Flujo de repetición para memoria
+
+Para ver si la memoria crece al repetir algo (abrir y cerrar un detalle, cambiar de pestaña), un flujo propio con `"tipo": "repeticion"` y `"ciclos": N`, aparte del flujo que mide tiempos:
+
+- **La traza es liviana** (`"traza": "liviana"`, por defecto: las secciones de la app y el ciclo de vida de las actividades, sin frames detallados) **o no hay traza** (`"traza": "sin"`: solo la memoria). La memoria se lee con `dumpsys meminfo` antes y después de la corrida y **entre ciclos**, con `perf.py ciclo` en `recorrido.sh`, siempre fuera del tramo medido (después de la marca de fin de un ciclo y antes de la de inicio del siguiente). `--memoria` va sola: el plan la pide en todas las fases.
+- **La prueba estima el tamaño:** dice cuánto pesa la traza por ciclo y cuántos ciclos caben bajo el tope de 1 GB; si el plan pide más, propone cuántos dejar o pasar a `"traza": "sin"`. Si una corrida llega al tope, la salida lo dice en una línea ("la traza llegó a 1 GB en el ciclo ~7: baja `ciclos` a 5…").
+- **Toques por coordenadas fijas,** con puntos de control `en_pantalla` e `invalidar_si` para las pantallas de pago o de autorización (si aparecen, la corrida se descarta). **`uiautomator dump` (y `perf.py nodos --volcar`) están prohibidos dentro del recorrido:** tardan segundos, ensucian los tiempos y engordan la traza; `capturar` los detecta y se detiene antes de tocar el dispositivo.
+- **Cómo se lee:** [patrones/memoria-repeticion.md](patrones/memoria-repeticion.md) (actividades, vistas, PSS y heap entre ciclos; cuántos ciclos hacen falta; cuándo pasar a Android Studio Profiler). `capturar` y el reporte dicen "sin evidencia de fuga" o "sospecha de fuga", con su motivo.
+- **Propósito en una línea:** `"proposito": "repetición para memoria: abre y cierra el detalle ×5 a propósito"`. Sale en `siguiente`, en la ficha y en los reportes, para que nadie lo confunda con un recorrido que se repite por error.
+
+### Recorrido en palabras y video de la prueba
+
+- **Un `# paso: <qué toca y qué debe abrirse>` por paso** en `recorrido.sh` (la plantilla lo trae). Un `# paso:` cubre los comandos que lo siguen hasta una línea en blanco. `perf.py` arma con ellos la lista numerada, la imprime en la corrida de prueba y la deja en `<carpeta>/ficha.md` y en "Cómo se recorre" de `estado.md`, con el propósito de cada flujo; avisa los pasos sin comentario.
+- **Video:** `capturar --prueba` graba la pantalla con `adb shell screenrecord` mientras corre la prueba (hasta 180 s, el máximo de `screenrecord`; `video_limite_s` en el flujo lo baja), lo baja a `<carpeta>/prueba-<flujo>.mp4` y lo borra del dispositivo; `--sin-video` lo omite. **Antes de las corridas, pídele al usuario que mire el video**: es el visto bueno de que el recorrido hace lo que espera.
+
 ## 4. Métricas principales (antes de medir)
 
 Elige de 1 a 3 y fíjalas en `principales` de `plan.json`. Elegirlas después invita a quedarse con la que "mejoró".
@@ -276,6 +304,11 @@ Crea la carpeta (sin `--carpeta`, `<carpeta de investigaciones>/<flujo>/<fecha>`
 | `flujos.<nombre>.segmentos` | Opcional: tramos del flujo con sus propias métricas, `[{"nombre": "detalle", "desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}}]`; `nombre` sin espacios, y `desde` y `hasta` como en `metricas_usuario` (más `margen_ms`, opcional). Agrega `<nombre> hilo_max_ms`, `<nombre> frame_p90_ms` y `<nombre> jank_app_pct` y, si la corrida tiene red, las llamadas que empiezan en el tramo (`<nombre> red_llamadas` y las demás `<nombre> red_*`). Con `"solo_red": true`, el tramo solo agrupa llamadas, sin frames ni hilo ([medicion.md](medicion.md) · Métricas por tramo) |
 | `flujos.<nombre>.pausas` | Opcional: tiempo de una persona dentro del recorrido, `[{"desde": {"marca": "MARK autorizacion_salida"}, "hasta": {"marca": "MARK autorizacion_resultado"}}]`. La ventana, las métricas de usuario y los tramos no pueden cruzarla: `perf.py` lo rechaza con el motivo ([Flujos que pasan por otra app](#flujos-que-pasan-por-otra-app)) |
 | `flujos.<nombre>.familias` | Cambia la familia de una métrica (nombre o patrón), por ejemplo `{"ttfd_ms": "e2e"}` |
+| `memoria` (del plan o del flujo) | `true` para medir la memoria (`dumpsys meminfo`) en todas las fases: `siguiente` la pone en cada comando de captura y `capturar` la usa aunque el comando no la traiga. Va en todas las fases o en ninguna |
+| `corridas` (del plan o del flujo) | Las corridas por fase cuando no son las de siempre (10 con recorrido automático, 5 manual; en triage siempre 3) |
+| `flujos.<nombre>.tipo`, `ciclos`, `traza` | `"repeticion"` para un flujo de repetición para memoria, con `ciclos` y `traza` (`liviana`, `sin` o `completa`): [Flujo de repetición para memoria](#flujo-de-repetición-para-memoria) |
+| `flujos.<nombre>.proposito` | Para qué es el flujo, en una línea: sale en `siguiente`, la ficha y los reportes |
+| `flujos.<nombre>.video_limite_s` | Opcional: hasta cuántos segundos graba el video de la prueba (180 como mucho) |
 | `flujos.<nombre>.metricas_sql` | Métricas propias por corrida: archivos `.sql` en la carpeta que devuelven `nombre`, `valor` y, opcionales, `unidad` y `familia` |
 | `mejoras` | Vacío: lo completa la sesión 2 (también las mejoras a prueba, con `a_prueba` e `hipotesis`); `estado` lo cambia `perf.py decidir` |
 | `hilos_ajenos` | Hilos del proceso que no son de la app (un servidor embebido, por ejemplo): lista de `{"nombre": "servidor", "patron": "^(ktor\|nio)-", "familia": "e2e"}`; `patron` es una expresión regular de Python sobre el nombre del hilo y `familia` es opcional (`e2e` por defecto). Con ellos `capturar` agrega las métricas de hilo y de red de [medicion.md](medicion.md) · Hilos ajenos |
@@ -305,3 +338,21 @@ Los avisos de la prueba quedan guardados y **frenan la medición**: mientras sig
 ## Entregable
 
 `estado.md` con la ficha, el mapa y las hipótesis. **Llena la tabla "Ficha" que ya trae `estado.md`**, fila por fila, reemplazando cada texto entre `<>` (Síntoma, Métricas principales, Build y ambiente, Modos, Stack; en Precondiciones, "primer uso hecho" y lo que haya que restaurar): no escribas una sección de ficha aparte, porque el reporte publica esa tabla y una fila con el texto de la plantilla sale como "sin completar". `perf.py siguiente` avisa de las filas que falten. Muestra la ficha y el plan (pasos, métricas principales, ventana y recorrido) y espera **una** aprobación. Después, `perf.py siguiente --carpeta <carpeta>`: deja en "Siguiente paso" los comandos de la medición (`antes`, `control` en modo riguroso y `diagnostico`) y el chat de la sesión 2, con lo que le toca hacer al usuario en cada uno. Pégalo tal cual y detente. Presupuesto: 15 pasos, o 25 en un flujo largo (login, pantallas de una sola vez o `preparar` con varias pantallas); el mapa va a un subagente económico, las preguntas van todas en un mensaje y las coordenadas salen de `perf.py nodos`, un paso por elemento.
+
+## Reglas para un buen pedido (sesión 0 · pedido)
+
+Antes de la sesión 1, el usuario puede pedir "Usa hb-performance: mejora este pedido: <texto>". Esa sesión **no lee código, no toca el dispositivo y no crea la investigación**: lee `SKILL.md`, esta sección y el texto, aplica estas reglas y devuelve (1) el pedido mejorado en un bloque de código, listo para pegar en la sesión 1: empieza con "Usa hb-performance: quiero analizar el rendimiento de …", conserva el dispositivo y "No hagas commit ni push" si el pedido los traía, y termina con la línea "(pedido mejorado con la sesión 0 · pedido)", (2) las preguntas que no puede resolver sola (por ejemplo, "¿la pestaña es la de arriba o la de abajo?", "¿qué lista tiene datos?") y (3) el chat recomendado para la sesión 1 (el comando que lo abre con su modelo y su esfuerzo, [modelos.md](modelos.md)). Presupuesto: 5 pasos; costo de referencia, 0,1 a 0,3 USD. Cuándo detenerte: con el pedido mejorado y las preguntas entregados; no sigas con la sesión 1 en este chat.
+
+1. **Cada tramo con su marca de inicio y de fin:** desde el toque (o una marca de inicio si la acción no navega) hasta el contenido visible.
+2. **Una marca por pestaña** cuando se repite una pestaña o un cambio de pestaña: si no, el tramo termina en la última.
+3. **Qué se mide y qué no:** lo que el usuario nota (las métricas principales) y lo que no entra (las esperas del guion, el login).
+4. **`preparar` reinicia y comprueba el punto de partida por texto:** deja la app siempre igual y comprueba que llegó (un texto que se ve en la pantalla de partida, por ejemplo el nombre de la lista).
+5. **Número fijo de scrolls y su dirección:** cada desplazamiento dice dirección, qué se desplaza y hasta dónde ([Scroll y pestañas](#scroll-y-pestañas)).
+6. **Caso con y sin datos:** si una lista puede estar vacía, cuál se mide (o los dos, como escenarios).
+7. **La espera como variable de escenario:** si el usuario puede esperar más o menos antes de la acción, dos escenarios ([medicion.md](medicion.md) · Escenarios de tiempo).
+8. **Un flujo de repetición para memoria** si el síntoma empeora con el uso, con `memoria` en el plan.
+9. **Los servicios del flujo:** los que se llaman en el recorrido; uno que viene dentro de la respuesta de otro no es un servicio propio.
+10. **Comprobar si algún módulo del alcance llega compilado (binario):** se le pregunta a Gradle en la sesión 1.
+11. **Reutilizar las marcas de investigaciones anteriores** (su parche de marcas) si el recorrido pasa por las mismas pantallas.
+12. **`perf.py teclear` para la clave o el texto,** con el ritmo de una persona, y las credenciales desde variables de entorno.
+

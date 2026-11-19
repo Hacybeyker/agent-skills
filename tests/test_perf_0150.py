@@ -851,5 +851,6 @@ class MeasurementHelpersTest(unittest.TestCase):
 
 
 
+# ── E, F, H: costo, velocidad del reporte y textos ───────────────────────────
 if __name__ == "__main__":
     unittest.main()

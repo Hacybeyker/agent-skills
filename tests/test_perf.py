@@ -1265,11 +1265,12 @@ class ReportTest(PerfBase):
         write(folder / "metricas.csv", HEADER + rows("antes", "f", "carga_ms", [131, 130, 132, 129, 131]))
         self.ok("reporte", "--carpeta", folder, "--inicial")
         initial = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("| # | Síntoma | Evidencia | Causa raíz | Tipo | Qué pasa con él |", initial)
-        self.assertIn("| H1 | Carga lenta | 131 ms | Red en el hilo | bug | M1 (propuesta) |", initial)
-        self.assertIn("| H2 | Jank | 2 % | — | descartado | descartado: se investigó y no es la causa; no hay nada que hacer |", initial)
-        self.assertIn("| H3 | Red solapada | n=3 | — | sin veredicto estadístico | no se pudo confirmar ni descartar con estos datos; sin acción |", initial)
-        self.assertIn("No todos se convierten en mejoras", initial)
+        # 0.15.0 · E5 y H1: los confirmados explican cada panel; lo descartado y lo sin confirmar, en el anexo
+        self.assertIn("- **Por qué:** Carga lenta (H1). Causa: Red en el hilo. Evidencia: 131 ms.", initial)
+        self.assertIn("### Se revisó y se descartó\n\n- H2 · descartado · Jank: 2 %.\n- H3 · sin confirmar · Red "
+                      "solapada: n=3.", initial)
+        main = initial.split("## Anexo")[0]
+        self.assertNotIn("H2", main)
         plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
         plan["mejoras"][0]["estado"] = "aplicada"
         plan["mejoras"][1]["estado"] = "descartada"

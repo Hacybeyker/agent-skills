@@ -12,6 +12,20 @@ Para el usuario, no para el agente. Cada caso trae dónde va (un chat nuevo, con
 
 ## Empezar
 
+### Mejorar el pedido antes de la sesión 1 (0 · pedido)
+
+Antes de gastar en la sesión 1, la skill te devuelve tu pedido mejorado: tramos con su marca de inicio y de fin, la dirección de cada scroll, el caso con y sin datos, un flujo de repetición si el síntoma empeora con el uso, y las preguntas que no puede resolver sola. **No lee código, no toca el dispositivo ni crea la investigación** (las reglas están en [ficha.md](ficha.md) · Reglas para un buen pedido). Cuesta de 0,1 a 0,3 USD; anótalo como `0 · pedido` con el comando `perf.py consumo` que te da la sesión 1 al terminar (ya con su carpeta: solo pones el costo).
+
+**Dónde:** chat nuevo · Intermedio · medio
+
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después pega el bloque.
+
+```text
+Usa hb-performance: mejora este pedido: <el flujo en tus palabras: de dónde a dónde, qué tocas, qué debe verse y qué se nota>. No hagas commit ni push.
+```
+
+Te devuelve el pedido mejorado en un bloque de código (para pegar en la sesión 1), las preguntas que falten y el chat de la sesión 1.
+
 ### Una pantalla o un flujo (la primera vez en el proyecto, o con el setup listo)
 
 **La primera vez en el proyecto, este pedido hace el setup (sesión 0)** y guarda tu flujo, tal cual lo escribes, para la sesión 1: por eso te pide el flujo aunque todavía no lo mida. Al terminar el setup, la prueba de humo te da el chat de la sesión 1 con tu pedido entero. "Empieza por el setup" también sirve: hace lo mismo.
@@ -111,6 +125,46 @@ claude --resume
 ```
 
 Ese es el de Claude Code; en Copilot CLI, `copilot --resume`. Evita el que continúa "la última" sin preguntar: puede tomar la de otra terminal. Si la sesión ya había terminado, no la reabras: usa el caso anterior en un chat nuevo.
+
+### Se cortó a la mitad (la terminal se cerró en plena captura o en el reporte)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py siguiente --carpeta <carpeta>
+```
+
+Interrumpir es seguro. Si algo quedó a medias, `siguiente` lo dice y su primer paso es `perf.py recuperar --carpeta <carpeta>`, que detiene la traza que siguió grabando en el dispositivo, aparta la traza a medias y deja lista la carpeta para completar desde la corrida que falta (o repetir el reporte).
+
+### Pausar una investigación para después
+
+Un triage con mejoras termina con "Elige uno": aplicar ahora, pausar o cerrar. Para pausar (quita las marcas guardándolas en su parche, deja el setup puesto y anota el commit de cada repo):
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py pausar --carpeta <carpeta>
+```
+
+### Reanudar una investigación en pausa
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py reanudar --carpeta <carpeta>
+```
+
+Repone el setup y las marcas, dice qué cambió en el código desde la pausa y si la línea base sirve, y te da el paso siguiente (con `--simular`, solo lo muestra).
+
+### Ver todas las investigaciones del proyecto
+
+**Dónde:** terminal, sin chat, en la raíz del proyecto
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py estado
+```
+
+Cada una con su estado (abierta, en pausa o cerrada), las marcas puestas por repo, las mejoras y su paso siguiente.
 
 ### No sé cuál es el paso
 

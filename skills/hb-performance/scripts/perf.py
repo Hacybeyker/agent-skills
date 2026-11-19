@@ -6369,7 +6369,10 @@ def session_key(text, ids=()):
     """(número de sesión, id de la mejora o '') de una celda "Sesión": "3 · M1" → ("3", "M1")."""
     number = re.match(r"\s*(?:sesi[oó]n\s+)?(\d+)(?!\d|-)", text or "", re.I)
     improvement = next((item for item in ids if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(item), text or "")), "")
-    return (number.group(1) if number else ""), improvement
+    number = number.group(1) if number else ""
+    if number == "0" and re.search(r"\bpedido\b", text or "", re.I):
+        number = "0p"  # E3: "0 · pedido" no es la sesión 0 de setup
+    return number, improvement
 
 
 RECIPE_MARK = "receta de arranque en frío"
@@ -11335,6 +11338,18 @@ SCROLL_WHAT = re.compile(r"\b(?:pantalla|lista|carrusel|pestañas?|tabs?|página
 SCROLL_EXTENT = re.compile(r"\b(?:hasta|final|tope|borde|\d+\s*(?:elementos?|ítems?|items?|swipes?|filas?|veces))\b", re.I)
 
 
+def scroll_gaps(text):
+    """E2: lo que le falta al `# paso:` de un desplazamiento (dirección, qué se desplaza, hasta dónde)."""
+    missing = []
+    if not SCROLL_DIRECTION.search(text):
+        missing.append("la dirección (vertical u horizontal)")
+    if not SCROLL_WHAT.search(text):
+        missing.append("qué se desplaza (la pantalla, una lista, un carrusel)")
+    if not SCROLL_EXTENT.search(text):
+        missing.append("hasta dónde (N elementos o hasta el final)")
+    return missing
+
+
 def route_words(command, folder, scrolls=None):
     """C7: (pasos en palabras, [(archivo, línea)] de los pasos sin `# paso:`) del recorrido. Un `# paso: <texto>` cubre
     los comandos que lo siguen hasta una línea en blanco o el `# paso:` siguiente. Con `scrolls` (una lista), agrega
@@ -15965,6 +15980,47 @@ def capture_table(pending, folder=None, plan=None):
         "- %s: `%s`" % (what, command) for what, command in commands)
 
 
+CONFIRMED_KINDS = ("bug", "mejorable")
+
+
+def finding_kinds(findings_text):
+    """{id del hallazgo: tipo} de la tabla Hallazgos de estado.md (bug, mejorable, consecuencia, descartado, sin
+    confirmar)."""
+    headers, rows = parse_table(findings_text or "")
+    lower = [header.strip().lower() for header in headers]
+    kind = next((i for i, header in enumerate(lower) if header.startswith("tipo")), None)
+    out = {}
+    for row in rows:
+        if row and row[0].strip() and kind is not None and kind < len(row):
+            out[row[0].strip().strip("*")] = finding_kind(row[kind].strip())
+    return out
+
+
+def unconfirmed_improvements(plan, findings_text):
+    """E5: [(mejora, motivo)] de las mejoras que no apuntan a un hallazgo confirmado (con evidencia de la traza y
+    `archivo:línea`): solo esas pasan a ser mejoras; las demás van al anexo "Se revisó y se descartó"."""
+    kinds = finding_kinds(findings_text)
+    out = []
+    for item in plan.get("mejoras") or []:
+        if item.get("estado") in ("descartada",) or item.get("a_prueba"):
+            continue  # una mejora a prueba pone a prueba una hipótesis a propósito (su hallazgo está sin confirmar)
+        ident = str(item.get("hallazgo") or "").strip()
+        if not ident:
+            out.append((item.get("id", "?"), "no dice de qué hallazgo sale (campo \"hallazgo\" en plan.json)"))
+        elif ident not in kinds:
+            out.append((item.get("id", "?"), "su hallazgo %s no está en la tabla Hallazgos de estado.md" % ident))
+        elif kinds[ident] not in CONFIRMED_KINDS and not kinds[ident].startswith("consecuencia"):
+            out.append((item.get("id", "?"), "su hallazgo %s está %s" % (ident, kinds[ident])))
+    return out
+
+
+def warn_unconfirmed(plan, findings_text):
+    for ident, why in unconfirmed_improvements(plan, findings_text):
+        print("⚠ La mejora %s: %s. Solo los hallazgos confirmados (con evidencia de la traza y archivo:línea) pasan a ser "
+              "mejoras; si no lo está, quítala del plan y deja el hallazgo en el anexo \"Se revisó y se descartó\"" % (
+                  ident, why))
+
+
 def warn_untitled(plan):
     """Las métricas principales que gerencia nombraría con un nombre interno: qué agregar al plan para que salgan en
     palabras, con el comando para generar de nuevo."""
@@ -15983,9 +16039,9 @@ def warn_jargon(problems):
             continue
         seen.append((field, terms))
     for field, terms in seen:
-        print("⚠ Gerencia: %s tiene términos técnicos (%s) y no se publicó: el reporte de gerencia dice \"%s\" en ese "
-              "punto. Qué hacer: reescríbelo en palabras, sin nombres de métricas, de código ni términos de la traza (la "
-              "lista está en cierre.md · Reporte), y genera de nuevo:" % (field, ", ".join(terms[:6]), UNFILLED))
+        print("⚠ Gerencia: %s tiene términos técnicos (%s) y no se publicó: el reporte de gerencia lo omite o lo nombra "
+              "sin descripción. Qué hacer: reescribe ese campo en palabras, sin nombres de métricas, de código ni términos "
+              "de la traza (la lista está en cierre.md · Reporte), y genera de nuevo:" % (field, ", ".join(terms[:6])))
         print("    %s" % same_command())
 
 
@@ -16296,6 +16352,21 @@ SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
 
 # paso: <qué elemento toca y qué debe abrirse>
 # adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
+
+# Scroll (ficha.md · Scroll y pestañas): swipes lentos (800 ms o más, distancia moderada) para que no haya inercia, y
+# N+2 swipes para llegar siempre al mismo borde. Las coordenadas de lo que se toca después se buscan con la pantalla ya
+# en esa posición. Di la dirección y qué se desplaza.
+# paso: <baja la lista del detalle hasta el final (vertical, 5 + 2 swipes lentos)>
+# for i in 1 2 3 4 5 6 7; do adb -s "$SERIAL" shell input swipe 540 1600 540 900 900; done && sleep 1
+
+# Flujo de repetición para memoria ("tipo": "repeticion", "ciclos": N en el plan): repite el ciclo a propósito y, entre
+# dos ciclos (fuera del tramo medido), una foto de la memoria con `perf.py ciclo`.
+# paso: <repite N veces: abre el detalle y vuelve (a propósito, para ver la memoria)>
+# for ciclo in $(seq "${PERF_CICLOS:-5}"); do
+#   adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
+#   adb -s "$SERIAL" shell input keyevent 4 && sleep 2
+#   python3 -I "{{PERF}}" ciclo
+# done
 
 # Teclado: ciérralo solo si está abierto (BACK con el teclado cerrado sale de la pantalla) y sin cortar el recorrido
 # si ya estaba cerrado. ESC (keyevent 111) no cierra todos los teclados.

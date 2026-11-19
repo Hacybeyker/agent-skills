@@ -68,12 +68,18 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 
 Tiene varias sesiones y comandos de terminal: su guía completa está en [skills/hb-performance/references/prompts.md](skills/hb-performance/references/prompts.md). Copia solo el bloque de cada caso; la explicación va fuera. El mismo texto sirve la primera vez y las siguientes: la skill elige la sesión según el estado del proyecto (sin setup, lo hace; con setup, arma la ficha y el plan) y el agente lo dice en su primera línea.
 
-Cada chat de hb-performance se abre nuevo, desde la terminal y en la raíz del proyecto, con el modelo y el esfuerzo de su sesión. Para empezar (modelo intermedio, esfuerzo medio): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después, `perf.py siguiente` imprime el comando de cada sesión y el texto para pegar.
+**Después del primer pedido, solo pegas lo que imprime `perf.py siguiente`**: cada paso dice si va en la terminal o en un chat nuevo, con el comando completo o el texto para pegar; no hace falta ningún comando que no salga de la skill. Cada chat de hb-performance se abre nuevo, desde la terminal y en la raíz del proyecto, con el modelo y el esfuerzo de su sesión. Para empezar (modelo intermedio, esfuerzo medio): `cd <raíz> && claude --model claude-sonnet-5-5 --effort medium` en Claude Code, o `cd <raíz> && copilot --model claude-sonnet-5.5 --effort medium` en GitHub Copilot CLI. Después, `perf.py siguiente` imprime el comando de cada sesión y el texto para pegar.
 
 **Analizar una pantalla o un flujo** (la primera vez en el proyecto, o con el setup listo). La primera vez, este pedido hace el setup (sesión 0) y guarda tu flujo, tal cual lo escribes, para la sesión 1: por eso te pide el flujo aunque todavía no lo mida.
 
 ```text
 Usa hb-performance: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>. No hagas commit ni push.
+```
+
+Para que la sesión 1 no se trabe, puedes pedir antes que la skill mejore tu pedido (sesión `0 · pedido`: sin código ni dispositivo, de 0,1 a 0,3 USD):
+
+```text
+Usa hb-performance: mejora este pedido: <el flujo en tus palabras: de dónde a dónde, qué tocas, qué debe verse y qué se nota>. No hagas commit ni push.
 ```
 
 **Solo el diagnóstico, sin cambiar código** (triage):
