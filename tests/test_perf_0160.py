@@ -148,7 +148,7 @@ class RecoverCountMoreTest(RecoverCountCase):
         start = source.index("        attempts += 1\n        failure = None\n")
         self.assertLess(start, source.index("mark_running(folder, comando=\"capturar\"", start))
         self.assertLess(source.index("mark_running(folder, comando=\"capturar\"", start),
-                        source.index("                prepare()\n", start))
+                        source.index("                timed_prepare()\n", start))  # 0.17.0: 'preparar' con su hora
         self.assertIn("perfetto={\"pid\": pid, \"remota\": remote, \"serial\": serial}\n"
                       "                                                   if pid else None", source)
 

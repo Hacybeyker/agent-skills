@@ -74,7 +74,9 @@ class PerfBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.csv = self.dir / "metricas.csv"
-        self.env = dict(os.environ)
+        # 0.17.0: sin el ffmpeg ni el scrcpy de la máquina (FFMPEG y SCRCPY vacíos): el video de la prueba sale en tramos
+        # con su visor; los tests de test_perf_0170.py los usan a propósito
+        self.env = dict(os.environ, FFMPEG="", SCRCPY="")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -510,6 +512,13 @@ elif cmd.startswith("[ -d /proc/"):
         print("terminada")
     if os.environ.get("FAKE_PERFETTO_VIVA"):  # 0.15.0: una traza que siguió grabando en el dispositivo
         print("viva")
+elif cmd.startswith("date +%s"):
+    # 0.17.0 · V2: la hora del dispositivo para alinear el video de la prueba (sin FAKE_DATE, no contesta una hora)
+    print(os.environ.get("FAKE_DATE", ""))
+elif cmd.startswith("screenrecord"):
+    # 0.17.0 · V2: screenrecord --verbose dice cuándo armó la pantalla virtual (y termina enseguida: un solo tramo)
+    print("Display is 1080x2400 @60.00fps (orientation=ROTATION_0), layerStack=0")
+    print("Content area is 1080x2400 at offset x=0 y=0", flush=True)
 elif cmd.startswith("dumpsys meminfo"):
     # 0.15.0: FAKE_MEMINFO cambia la salida; con FAKE_MEMINFO_CRECE, las actividades suben en cada llamada (una fuga)
     if os.environ.get("FAKE_MEMINFO_CRECE"):

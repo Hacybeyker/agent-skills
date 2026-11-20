@@ -56,11 +56,11 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.16.0"
+VERSION = "0.17.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
-SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0", "0.15.1", "0.16.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -3226,10 +3226,12 @@ def wait_perfetto(adb, pid):
 
 
 def record_run(adb, config, recorrido, label, local, startup=None, package=None, cutter=None, before=None,
-               on_start=None, tail_s=None):
+               on_start=None, tail_s=None, on_route=None):
     """Graba una corrida. Devuelve (motivo de invalidez o None, métricas del recorrido). Una corrida cortada a mano
     (CUT_REASON) no baja su traza: se detiene Perfetto y se borra en el dispositivo. `on_start(pid, remota)` anota
-    Perfetto grabando (B10: si el proceso se corta sin poder detenerlo, `recuperar` lo detiene)."""
+    Perfetto grabando (B10: si el proceso se corta sin poder detenerlo, `recuperar` lo detiene). `on_route(momento)`
+    (0.17.0 · V2, solo en la corrida de prueba con video) anota "traza", "inicio" y "fin" del recorrido con el reloj de
+    la computadora; en las fases es None y nada cambia."""
     if startup:
         adb.shell("am force-stop %s" % package)
         settle(1)
@@ -3241,18 +3243,24 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None,
     if on_start is not None:
         on_start(pid, remote)
     traced_at = time.time()
+    if on_route is not None:
+        on_route("traza")
     time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1.5")))  # Perfetto tarda en arrancar sus fuentes
     try:
         if before is not None:  # 'preparar' dentro de la traza (traza_desde_preparar)
             before()
+        if on_route is not None:
+            on_route("inicio")
         if startup:
             reason, extra = launch(adb, package, startup)
         else:
             reason, extra = drive(recorrido, label, cutter, traced_at + tail_s if tail_s else None), []
-            if reason == TAIL_CUT:  # C6: la traza termina cerca de la última marca: el resto del recorrido no se mide
-                print("  · traza cortada a los %s s (la última marca del plan salió antes; `cola_s` del flujo)"
-                      % fmt(round(tail_s, 1)))
-                reason = None
+        if on_route is not None:
+            on_route("fin")
+        if reason == TAIL_CUT:  # C6: la traza termina cerca de la última marca: el resto del recorrido no se mide
+            print("  · traza cortada a los %s s (la última marca del plan salió antes; `cola_s` del flujo)"
+                  % fmt(round(tail_s, 1)))
+            reason = None
     except (KeyboardInterrupt, PerfError):  # Ctrl+C o 'preparar' que falla: Perfetto no queda grabando en el dispositivo
         try:
             adb.shell("kill -TERM %s" % pid, timeout=20)
@@ -4888,10 +4896,11 @@ def before_capture(folder, plan, flow, steps):
                                             "devices -l` y agrega --serial <serial> al comando" % (
                                                 captures[0]["tu"].rstrip("."), shlex.quote(str(root)), adb_shown()))
     phases = read_phases(folder)
-    for video in sorted(pathlib.Path(folder).glob("prueba-*.mp4")):
+    for video in test_videos(folder):  # V5: el video unido si existe; si no, su visor
         if not any(isinstance(phases.get(phase), dict) and phases[phase].get("corridas") for phase in FASES):
             notes.append("Mira el video de la corrida de prueba (%s) antes de medir: es el visto bueno de que el recorrido "
-                         "hace lo que esperas (si no, corrige el recorrido y repite la prueba)" % video)
+                         "hace lo que esperas, con un rótulo por parte (si no, corrige el recorrido y repite la prueba)"
+                         % video)
     lead = [{"tipo": "avisos", "titulo": "Antes de medir", "lineas": notes}] if notes else []
     return lead + first + steps
 
@@ -11154,7 +11163,7 @@ def approval_steps(folder, plan, flow, root, resume):
     camino."""
     folder = pathlib.Path(folder)
     rel = relative_folder(folder, root)
-    videos = sorted(folder.glob("prueba-*.mp4"))
+    videos = test_videos(folder)
     lines = ["La sesión 1 terminó sin tu aprobación de la ficha y el plan. Revisa, antes de medir:",
              "la ficha (tabla \"Ficha\" de %s) y el plan (%s: métricas principales, tramos, `preparar` y `recorrido`)"
              % (folder / "estado.md", folder / "plan.json"),
@@ -12398,27 +12407,53 @@ def video_stop_command(remote):
 
 class VideoChain:
     """C10: el video de la corrida de prueba desde antes de 'preparar'. `screenrecord` graba como mucho 180 s por archivo
-    (`--time-limit`, doc. de adb): cuando un segmento llega a su tope, empieza el siguiente (hasta VIDEO_SEGMENTS_MAX). Un
-    segmento que terminó mucho antes de su tope no se encadena (screenrecord falló o no está). Nunca hace fallar la
-    prueba. Las corridas medidas nunca graban video: el codificador compite con la app."""
+    (`--time-limit`; `kMaxTimeLimitSec = 180` en el código de AOSP): cuando un segmento llega a su tope, empieza el
+    siguiente (hasta VIDEO_SEGMENTS_MAX). Un segmento que terminó mucho antes de su tope no se encadena (screenrecord
+    falló o no está). Nunca hace fallar la prueba. Las corridas medidas nunca graban video: el codificador compite con la
+    app.
+
+    0.17.0 · V1 y V2: cada segmento anota cuándo empezó, con el reloj de la computadora: la línea "Content area is …" que
+    `screenrecord --verbose` imprime (y vacía con fflush) al armar la pantalla virtual, justo antes del primer cuadro; sin
+    esa línea, el momento en que se lanzó. El siguiente segmento se lanza sin pasar antes por adb (los archivos viejos se
+    borran una vez, al empezar), así el hueco entre dos segmentos es solo lo que tarda en arrancar `screenrecord`.
+    `stop_later` detiene la grabación unos segundos después del recorrido sin esperar a que termine."""
+    kind = "screenrecord"
 
     def __init__(self, adb, limit):
         self.adb, self.limit = adb, int(limit)
         self.remotes, self.process, self.started, self.stopping, self.cut, self.thread = [], None, 0.0, False, False, None
+        self.launched, self.exact, self.ended, self.later = [], [], None, None
+        self.lock = threading.Lock()
 
     def remote(self, number):
         return VIDEO_REMOTE if number == 1 else VIDEO_REMOTE.replace(".mp4", "-%d.mp4" % number)
 
     def _begin(self):
         remote = self.remote(len(self.remotes) + 1)
-        self.adb.shell("rm -f %s" % remote, timeout=20)
-        self.process = subprocess.Popen(self.adb.base + ["shell", "screenrecord", "--time-limit", str(self.limit), remote],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.process = subprocess.Popen(self.adb.base + ["shell", "screenrecord", "--verbose", "--time-limit",
+                                                         str(self.limit), remote],
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.started = time.time()
         self.remotes.append(remote)
+        self.launched.append(self.started)
+        self.exact.append(None)
+        threading.Thread(target=self._read, args=(self.process, len(self.exact) - 1), daemon=True).start()
+
+    def _read(self, process, index):
+        """V2: el momento en que `screenrecord` armó la pantalla virtual (el primer cuadro sale enseguida)."""
+        try:
+            for raw in iter(process.stdout.readline, b""):
+                if self.exact[index] is None and VIDEO_CONTENT.match(raw.decode("utf-8", "replace").strip()):
+                    self.exact[index] = time.time()
+        except (OSError, ValueError):
+            pass
+        finally:
+            process.stdout.close()
 
     def start(self):
         try:
+            self.adb.shell("rm -f %s" % " ".join(self.remote(number) for number in range(1, VIDEO_SEGMENTS_MAX + 1)),
+                           timeout=20)
             self._begin()
         except (OSError, PerfError, subprocess.SubprocessError):
             return None
@@ -12428,37 +12463,68 @@ class VideoChain:
 
     def _watch(self):
         while not self.stopping:
-            if self.process.poll() is not None and not self.stopping:
-                if self.limit <= 5 or time.time() - self.started < self.limit - 5:
-                    return  # terminó antes de su tope (o el tope es muy corto): no es el tope de screenrecord
-                if len(self.remotes) >= VIDEO_SEGMENTS_MAX:
-                    self.cut = True
+            with self.lock:
+                if self.stopping:
                     return
-                try:
-                    self._begin()
-                except (OSError, PerfError, subprocess.SubprocessError):
-                    return
-            time.sleep(0.5)
+                if self.process.poll() is not None:
+                    if self.limit <= 5 or time.time() - self.started < self.limit - 5:
+                        return  # terminó antes de su tope (o el tope es muy corto): no es el tope de screenrecord
+                    if len(self.remotes) >= VIDEO_SEGMENTS_MAX:
+                        self.cut = True
+                        return
+                    try:
+                        self._begin()
+                    except (OSError, PerfError, subprocess.SubprocessError):
+                        return
+            time.sleep(0.1)
 
-    def stop(self, target):
-        """Detiene la grabación, baja los segmentos (el primero a `target`, los demás a `<target>-2.mp4`, …) y los borra
-        del dispositivo. Devuelve las rutas locales."""
-        self.stopping = True
+    def starts(self):
+        """V2: (el inicio de cada segmento con el reloj de la computadora, True si todos son el exacto)."""
+        return ([exact if exact is not None else launched for exact, launched in zip(self.exact, self.launched)],
+                bool(self.exact) and all(value is not None for value in self.exact))
+
+    def stop_recording(self):
+        """Detiene la grabación una sola vez (SIGINT solo al screenrecord de ese archivo, como Ctrl+C: así cierra bien el
+        MP4) y anota cuándo. No baja nada."""
+        with self.lock:
+            if self.ended is not None:
+                return
+            self.stopping = True
+            self.ended = time.time()
+            try:
+                if self.process is not None and self.process.poll() is None:
+                    self.adb.shell(video_stop_command(self.remotes[-1]), timeout=20)
+                    try:
+                        self.process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait()
+            except (OSError, PerfError, subprocess.SubprocessError):
+                pass
+
+    def stop_later(self, delay):
+        """V1: detiene la grabación dentro de `delay` segundos (el fin del recorrido más `video_cola_s`), sin esperar: la
+        prueba sigue cerrando la traza mientras tanto."""
+        if self.later is None and self.ended is None:
+            self.later = threading.Timer(max(0.0, float(delay)), self.stop_recording)
+            self.later.daemon = True
+            self.later.start()
+
+    def stop(self, target=None, names=None):
+        """Detiene la grabación (si sigue), baja los segmentos y los borra del dispositivo. Devuelve las rutas locales:
+        con `names(número)`, las que da esa función; si no, el primero a `target` y los demás a `<target>-2.mp4`, …"""
         out = []
         try:
+            if self.later is not None:
+                self.later.join(timeout=VIDEO_TAIL_MAX_S + 30)
+            self.stop_recording()
             if self.thread is not None:
                 self.thread.join(timeout=5)
-            if self.process is not None and self.process.poll() is None:
-                self.adb.shell(video_stop_command(self.remotes[-1]), timeout=20)
-                try:
-                    self.process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait()
             time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1")))  # screenrecord termina de escribir el archivo
-            target = pathlib.Path(target)
+            target = pathlib.Path(target) if target is not None else None
             for number, remote in enumerate(self.remotes, start=1):
-                local = target if number == 1 else target.with_name("%s-%d%s" % (target.stem, number, target.suffix))
+                local = names(number) if names is not None else target if number == 1 else target.with_name(
+                    "%s-%d%s" % (target.stem, number, target.suffix))
                 pulled = self.adb.run("pull", remote, str(local), timeout=120)
                 self.adb.shell("rm -f %s" % remote, timeout=20)
                 if pulled.returncode == 0 and local.is_file():
@@ -12466,6 +12532,930 @@ class VideoChain:
         except (OSError, PerfError, subprocess.SubprocessError):
             pass
         return out
+
+
+class ScrcpyRecorder:
+    """0.17.0 · V1: la grabación continua con scrcpy (opcional, `video_grabador` del plan): un solo archivo en la
+    computadora, sin el tope de 180 s de `screenrecord` ni huecos. Sin ventana ni reproducción (`--no-playback
+    --no-window --record=<archivo>`, el ejemplo de la documentación de scrcpy) y sin audio (`--no-audio`). El inicio es
+    la línea "Recording started to … file" que scrcpy imprime al abrir el archivo. Se detiene con SIGINT, como Ctrl+C."""
+    kind = "scrcpy"
+
+    def __init__(self, binary, serial, partial):
+        self.binary, self.serial, self.partial = binary, serial, pathlib.Path(partial)
+        self.process, self.launched, self.exact, self.ended, self.later = None, [], [], None, None
+        self.cut, self.limit, self.remotes = False, 0, []
+        self.lock = threading.Lock()
+
+    def command(self):
+        return [self.binary] + (["--serial=%s" % self.serial] if self.serial else []) + [
+            "--no-playback", "--no-window", "--no-audio", "--record=%s" % self.partial]
+
+    def start(self):
+        try:
+            self.partial.parent.mkdir(parents=True, exist_ok=True)
+            if self.partial.exists():
+                self.partial.unlink()  # lo deja esta misma clase: un intento anterior que no llegó a terminar
+            # SIGINT con su manejo por defecto: si perf.py lo ignora (corre en segundo plano), scrcpy no lo heredaría
+            # y no cerraría bien el archivo al detenerlo
+            self.process = subprocess.Popen(self.command(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT,
+                                            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        except OSError:
+            return None
+        self.launched, self.exact, self.remotes = [time.time()], [None], [str(self.partial)]
+        threading.Thread(target=self._read, daemon=True).start()
+        return self
+
+    def _read(self):
+        try:
+            for raw in iter(self.process.stdout.readline, b""):
+                if self.exact[0] is None and SCRCPY_STARTED.search(raw.decode("utf-8", "replace")):
+                    self.exact[0] = time.time()
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.process.stdout.close()
+
+    def wait_started(self, tries=50):
+        """True cuando scrcpy dijo que empezó a grabar; False si terminó antes (sin dispositivo, sin permiso)."""
+        for _ in range(tries):
+            if self.exact[0] is not None:
+                return True
+            if self.process.poll() is not None:
+                return False
+            time.sleep(0.1)
+        return self.process.poll() is None
+
+    def starts(self):
+        return [self.exact[0] if self.exact[0] is not None else self.launched[0]], self.exact[0] is not None
+
+    def stop_recording(self):
+        with self.lock:
+            if self.ended is not None:
+                return
+            self.ended = time.time()
+            if self.process is None or self.process.poll() is not None:
+                return
+            try:
+                self.process.send_signal(signal.SIGINT)
+                self.process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+            except OSError:
+                pass
+
+    def stop_later(self, delay):
+        if self.later is None and self.ended is None:
+            self.later = threading.Timer(max(0.0, float(delay)), self.stop_recording)
+            self.later.daemon = True
+            self.later.start()
+
+    def stop(self, target=None, names=None):
+        if self.later is not None:
+            self.later.join(timeout=VIDEO_TAIL_MAX_S + 30)
+        self.stop_recording()
+        local = names(1) if names is not None else pathlib.Path(target)
+        try:
+            if self.partial.is_file() and self.partial.stat().st_size > 0:
+                os.replace(str(self.partial), str(local))
+                return [local]
+        except OSError:
+            pass
+        return []
+
+
+# ── Video de evidencia de la prueba (0.17.0 · V1–V6) ─────────────────────────
+# La corrida de prueba se graba entera, desde antes de 'preparar' hasta `video_cola_s` después del recorrido, y queda
+# en <carpeta>/video/<flujo>/: los tramos tal como los grabó el dispositivo y eventos.json, con todo en un solo reloj
+# (segundos desde el inicio del primer tramo). Con ffmpeg sale un solo prueba-<flujo>.mp4 con los rótulos en dos bandas
+# agregadas arriba y abajo: la imagen del teléfono queda tal cual, sin nada encima. Siempre sale el visor
+# prueba-<flujo>.html, que reproduce los tramos seguidos con los mismos rótulos. Las fases medidas nunca graban.
+VIDEO_DIR = "video"
+VIDEO_TAIL_S = 2  # `video_cola_s`: lo que sigue grabando después del recorrido
+VIDEO_TAIL_MAX_S = 60
+VIDEO_RECORDERS = ("screenrecord", "scrcpy", "auto")
+VIDEO_MARK_S = 1.2  # una marca del plan se ve hasta la siguiente o, como mucho, 1,2 s
+VIDEO_MARKS_MAX = 150
+VIDEO_FPS = 30
+VIDEO_BASE_W = 540  # el ancho del prototipo: las bandas y las letras escalan con el ancho del video
+VIDEO_HEAD, VIDEO_FOOT = 132, 74
+VIDEO_COLORS = {"prep": "6b7380", "med": "3657d6", "rec": "4b5a8f", "fin": "3a3d45"}
+VIDEO_PREP = "Preparación · no se mide"
+VIDEO_BETWEEN = "Recorrido · entre tramos"
+VIDEO_END = "Fin de la prueba"
+VIDEO_ALIGN_TOLERANCE_S = 2.0  # el inicio de la traza, llevado al reloj de la computadora, contra cuando arrancó Perfetto
+VIDEO_CONTENT = re.compile(r"^(?:Rotated )?[Cc]ontent area is ")  # screenrecord --verbose (screenrecord.cpp de AOSP)
+SCRCPY_STARTED = re.compile(r"Recording started to \S+ file")  # LOGI de recorder.c de scrcpy
+VIDEO_CLOCK_SQL = "SELECT ts, clock_name, clock_value FROM clock_snapshot ORDER BY ts"
+# Fuentes con tildes, «·» y «●»: drawtext necesita el archivo (los ffmpeg estáticos suelen venir sin fontconfig).
+VIDEO_FONTS = (("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+               ("/Library/Fonts/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf"),
+               ("/System/Library/Fonts/Supplemental/Verdana.ttf", "/System/Library/Fonts/Supplemental/Verdana Bold.ttf"),
+               ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+               ("/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
+               ("/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"),
+               ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"))
+FFMPEG_STATIC = "https://ffmpeg.martin-riedl.de/redirect/latest/%s/%s/release/ffmpeg.zip"
+SCRCPY_URL = "https://github.com/Genymobile/scrcpy"
+TEST_VIDEO = {"actual": None}  # el video de la prueba en curso (uno por comando)
+
+
+def video_folder(folder, flow_name):
+    return pathlib.Path(folder) / VIDEO_DIR / slug(flow_name)
+
+
+def video_outputs(folder, flow_name):
+    """(video unido, visor) de la prueba de un flujo, en la carpeta de la investigación."""
+    base = pathlib.Path(folder) / ("prueba-%s" % slug(flow_name))
+    return base.with_suffix(".mp4"), base.with_suffix(".html")
+
+
+def video_tail(flow, plan):
+    """`video_cola_s` del flujo (o del plan): segundos que sigue grabando después del recorrido (2 por defecto)."""
+    for spec in (flow or {}, plan or {}):
+        value = spec.get("video_cola_s")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= VIDEO_TAIL_MAX_S:
+            return float(value)
+    return float(VIDEO_TAIL_S)
+
+
+def tool_binary(env_name, name, local=True):
+    """La ruta de una herramienta opcional: `<ENV>=<ruta>` (vacío: no usarla), el PATH y ~/.local/bin. None si no está."""
+    value = os.environ.get(env_name)
+    if value is not None:
+        return value if value and is_executable(value) else None
+    found = shutil.which(name)
+    if found:
+        return found
+    candidate = home_dir() / ".local" / "bin" / name
+    return str(candidate) if local and is_executable(candidate) else None
+
+
+FFMPEG_FULL = ("/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg", "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+               "/home/linuxbrew/.linuxbrew/opt/ffmpeg-full/bin/ffmpeg")  # keg-only: fuera del PATH a propósito
+_FFMPEG_FEATURES = {}
+
+
+def ffmpeg_binary():
+    """El ffmpeg para el video: `FFMPEG=<ruta>` (vacío: ninguno) o, entre el del PATH, el de ~/.local/bin y el
+    `ffmpeg-full` de Homebrew (keg-only: no está en el PATH), el primero que trae drawtext; si ninguno, el primero."""
+    value = os.environ.get("FFMPEG")
+    if value is not None:
+        return value if value and is_executable(value) else None
+    found = []
+    for candidate in [shutil.which("ffmpeg"), str(home_dir() / ".local" / "bin" / "ffmpeg")] + list(FFMPEG_FULL):
+        if candidate and is_executable(candidate) and candidate not in found:
+            found.append(candidate)
+    if len(found) > 1:
+        return next((candidate for candidate in found if ffmpeg_features(candidate)["drawtext"]), found[0])
+    return found[0] if found else None
+
+
+def scrcpy_binary():
+    return tool_binary("SCRCPY", "scrcpy")
+
+
+def listed(listing, name):
+    """True si la salida de `ffmpeg -filters` o `-encoders` trae ese nombre como segunda columna de una línea."""
+    return any(line.split()[1:2] == [name] for line in (listing or "").splitlines())
+
+
+def ffmpeg_features(binary):
+    """{"drawtext": bool, "codificador": libx264 | h264_videotoolbox | None} del ffmpeg dado (solo lectura)."""
+    if binary in _FFMPEG_FEATURES:
+        return dict(_FFMPEG_FEATURES[binary])
+    out = {"drawtext": False, "codificador": None}
+    try:
+        filters = subprocess.run([binary, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=30)
+        encoders = subprocess.run([binary, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return out
+    out["drawtext"] = listed(filters.stdout, "drawtext")
+    out["codificador"] = next((name for name in ("libx264", "h264_videotoolbox") if listed(encoders.stdout, name)), None)
+    _FFMPEG_FEATURES[binary] = dict(out)
+    return out
+
+
+def scrcpy_ready(binary):
+    """True si ese scrcpy acepta --no-playback, --no-window y --record (lo dice su `--help`)."""
+    try:
+        done = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    text = done.stdout + done.stderr
+    return all(flag in text for flag in ("--no-playback", "--no-window", "--record"))
+
+
+def video_recorder_choice(flow, plan, binary=None, ready=None):
+    """V1: (grabador, aviso o ''). `video_grabador` del flujo o del plan: `screenrecord` (por defecto: no necesita nada
+    en la computadora), `scrcpy` (continuo, si está instalado y acepta los flags) o `auto` (scrcpy si se puede)."""
+    wanted = str((flow or {}).get("video_grabador") or (plan or {}).get("video_grabador") or "screenrecord").strip().lower()
+    if wanted not in VIDEO_RECORDERS:
+        return "screenrecord", "video_grabador \"%s\" no es %s: grabo con screenrecord" % (
+            wanted, ", ".join(VIDEO_RECORDERS[:-1]) + " ni " + VIDEO_RECORDERS[-1])
+    if wanted == "screenrecord":
+        return "screenrecord", ""
+    binary = binary if binary is not None else scrcpy_binary()
+    if binary and (ready if ready is not None else scrcpy_ready(binary)):
+        return "scrcpy", ""
+    if wanted == "auto":
+        return "screenrecord", ""
+    return "screenrecord", ("video_grabador es scrcpy, pero %s: grabo con screenrecord, en tramos de hasta %d s. scrcpy es "
+                            "opcional (setup.md · Requisitos)" % (
+                                "no está instalado" if not binary else
+                                "esa versión no acepta --no-playback, --no-window y --record", VIDEO_LIMIT_S))
+
+
+def parse_device_time(text):
+    """La hora del dispositivo de `date +%s.%N` (toybox: %N son nanosegundos): (segundos, True si trae fracción). Sin
+    fracción, el medio del segundo. None si no es una hora."""
+    found = re.fullmatch(r"(\d{9,11})(?:\.(\d{1,9}))?", (text or "").strip())
+    if not found:
+        return None
+    if found.group(2):
+        return int(found.group(1)) + int(found.group(2).ljust(9, "0")) / 1e9, True
+    return int(found.group(1)) + 0.5, False
+
+
+def device_clock_offset(adb, samples=3):
+    """V2: (lo que hay que sumarle a la hora del dispositivo para tener la de la computadora, precisión en segundos), con
+    `adb shell date +%s.%N` antes de grabar: la muestra de ida y vuelta más corta. None si el dispositivo no da su hora."""
+    best = None
+    for _ in range(samples):
+        before = time.time()
+        try:
+            out = adb.shell("date +%s.%N", timeout=20).stdout
+        except (OSError, PerfError, subprocess.SubprocessError):
+            break
+        after = time.time()
+        parsed = parse_device_time(out)
+        if parsed is None:
+            continue
+        precision = (after - before) / 2 + (0 if parsed[1] else 0.5)
+        if best is None or precision < best[1]:
+            best = ((before + after) / 2 - parsed[0], precision)
+    return best
+
+
+def realtime_snapshot(clock_rows):
+    """(ts de la traza, hora REALTIME en ns) del primer ClockSnapshot del reloj REALTIME (tabla clock_snapshot de
+    trace_processor; Perfetto los escribe solo y el reloj de la traza en Android es BOOTTIME). None si no hay."""
+    for row in clock_rows or []:
+        name = re.sub(r"^(?:BUILTIN_)?(?:CLOCK_)?", "", str(row.get("clock_name") or "").upper())
+        if name == "REALTIME" and str(row.get("ts", "")).strip() not in ("", "None") and to_int(row.get("clock_value")):
+            return to_int(row["ts"]), to_int(row["clock_value"])  # ts 0 vale: el inicio de la traza
+    return None
+
+
+def trace_clock(rows, clock_rows, offset, traced_at):
+    """V2: (función ns de la traza → hora de la computadora, estado, detalle). La hora de la traza pasa a la del
+    dispositivo con su ClockSnapshot y a la de la computadora con la diferencia que midió `date` antes de grabar; el
+    inicio de la traza tiene que caer cerca de cuando arrancó Perfetto. Si no se puede, se aproxima por el inicio de la
+    traza (alrededor de un segundo); sin eso, None y las marcas no se ubican."""
+    bounds = next((row for row in rows or [] if row[0] == "limites"), None)
+    start_ns = bounds[1] if bounds else None
+    snapshot = realtime_snapshot(clock_rows)
+    detail = ""
+    if snapshot and offset:
+        def convert(ns, snapshot=snapshot, shift=offset[0]):
+            return (snapshot[1] + (ns - snapshot[0])) / 1e9 + shift
+        gap = abs(convert(start_ns) - traced_at) if start_ns is not None and traced_at is not None else 0.0
+        if gap <= VIDEO_ALIGN_TOLERANCE_S:
+            return convert, "ok", "reloj de la traza → reloj del dispositivo → reloj de la computadora (±%s s)" % fmt(
+                round(max(offset[1], 0.05), 2))
+        detail = "los relojes no coinciden (el inicio de la traza cae a %s s de cuando arrancó Perfetto)" % fmt(
+            round(gap, 1))
+    elif not snapshot:
+        detail = "la traza no trae la hora del reloj del dispositivo (ClockSnapshot REALTIME)"
+    else:
+        detail = "el dispositivo no dio su hora (adb shell date)"
+    if start_ns is not None and traced_at is not None:
+        return (lambda ns: traced_at + (ns - start_ns) / 1e9), "aproximada", "%s: aproximadas por el inicio de la " \
+            "traza (alrededor de 1 s)" % detail
+    return None, "falló", detail or "sin el inicio de la traza"
+
+
+def video_markers(rows, flow):
+    """Las marcas de la traza como las arma trace_metrics (secciones, hilo principal y lanzamiento, con los toques si el
+    plan los usa), sin calcular ninguna métrica."""
+    sections = [row for row in rows or [] if row[0] == "seccion"]
+    if any(mark == INPUT_MARK for mark, _ in plan_marks(flow)):
+        sections += [("seccion", row[1], row[2], 0, INPUT_MARK) for row in rows if row[0] == "input"]
+    return sorted(sections + [row for row in rows or [] if row[0] in ("hilo", "lanzamiento")], key=lambda row: row[1])
+
+
+def video_trace_events(rows, flow, flow_name, convert):
+    """V2: (tramos [(rótulo, desde, hasta)], marcas [(hora, nombre)]) de la traza, en la hora de la computadora. Los
+    tramos del plan con su título (o su nombre en palabras); sin tramos, la ventana del flujo."""
+    markers = video_markers(rows, flow)
+    spans = []
+    for spec, bounds in segment_windows(markers, flow.get("segmentos") or []):
+        if bounds:
+            spans.append((str(spec.get("titulo") or spec["nombre"].replace("_", " ").replace("-", " ")).strip(),
+                          convert(bounds[0]), convert(bounds[1])))
+    if not spans and isinstance(flow.get("ventana"), dict):
+        window = resolve_window(markers, flow["ventana"])
+        if window:
+            spans.append((flow_words(flow, flow_name), convert(window[0]), convert(window[1])))
+    patterns = [mark for mark, _ in plan_marks(flow)]
+    marks, seen = [], set()
+    for row in markers:
+        if any(fnmatch.fnmatchcase(row[4], pattern) for pattern in patterns) and (row[1], row[4]) not in seen:
+            seen.add((row[1], row[4]))
+            marks.append((convert(row[1]), row[4]))
+    return spans, marks
+
+
+def flow_words(flow, flow_name):
+    return str((flow or {}).get("titulo") or flow_name.replace("_", " ").replace("-", " ")).strip()
+
+
+def video_phases(duration, route, spans, label):
+    """V2: las fases contiguas de 0 a `duration` (segundos desde el primer tramo): preparación (no se mide) hasta que
+    empieza el recorrido; cada tramo del plan ("Medición · <tramo>") y lo que queda entre ellos; el fin. Sin tramos
+    ubicados, todo el recorrido es "Medición · <flujo>"."""
+    out = []
+
+    def add(start, end, text, kind):
+        start, end = round(max(0.0, start), 2), round(min(duration, end), 2)
+        if end - start >= 0.05:
+            out.append({"desde": start, "hasta": end, "rotulo": text, "tipo": kind})
+
+    if not route or route[0] is None:
+        add(0.0, duration, VIDEO_PREP, "prep")
+        return contiguous(out, duration)
+    start = route[0]
+    end = route[1] if route[1] is not None else duration
+    add(0.0, start, VIDEO_PREP, "prep")
+    cursor = start
+    placed = False
+    for text, first, last in sorted(spans, key=lambda span: span[1]):
+        first, last = max(first, cursor), min(last, end)
+        if last - first < 0.05:
+            continue
+        if first - cursor >= 0.05:
+            add(cursor, first, VIDEO_BETWEEN, "rec")
+        add(first, last, "Medición · %s" % text, "med")
+        cursor, placed = last, True
+    if not placed:
+        add(start, end, "Medición · %s" % label, "med")
+    elif end - cursor >= 0.05:
+        add(cursor, end, VIDEO_BETWEEN, "rec")
+    add(end, duration, VIDEO_END, "fin")
+    return contiguous(out, duration)
+
+
+def contiguous(phases, duration):
+    """Las fases sin huecos de 0 a `duration`: un trozo de menos de 0,05 s que no se agregó queda en la fase de al lado."""
+    for before, after in zip(phases, phases[1:]):
+        after["desde"] = before["hasta"]
+    if phases:
+        phases[0]["desde"], phases[-1]["hasta"] = 0.0, duration
+    return phases
+
+
+def video_events(flow_name, recorder, parts, starts, ended, clock, spans=(), marks=(), alignment=None, label=None):
+    """V2: el contenido de eventos.json. `parts` son las rutas de los tramos relativas a la carpeta de la investigación;
+    `starts`, `ended`, `clock` (preparar y recorrido), los tramos y las marcas, horas de la computadora."""
+    origin = starts[0]
+    duration = round(max(0.1, ended - origin), 2)
+
+    def rel(value):
+        return None if value is None else round(value - origin, 2)
+
+    route = (rel(clock.get("recorrido_inicio")), rel(clock.get("recorrido_fin"))) \
+        if clock.get("recorrido_inicio") is not None else None
+    shifted = [(text, rel(first), rel(last)) for text, first, last in spans]
+    placed = sorted((round(when - origin, 2), name) for when, name in marks if 0 <= when - origin <= duration)
+    events = {"version": 1, "flujo": flow_name, "grabador": recorder,
+              "tramos_video": [{"archivo": str(part).replace(os.sep, "/"), "inicio": rel(start)}
+                               for part, start in zip(parts, starts)],
+              "fases": video_phases(duration, route, shifted, label or flow_name),
+              "marcas": [{"t": when, "nombre": name} for when, name in placed[:VIDEO_MARKS_MAX]],
+              "duracion": duration, "alineacion": dict(alignment or {"marcas": "sin traza", "detalle": ""})}
+    if clock.get("preparar_inicio") is not None:
+        events["preparar"] = [rel(clock.get("preparar_inicio")), rel(clock.get("preparar_fin"))]
+    if len(placed) > VIDEO_MARKS_MAX:
+        events["alineacion"]["detalle"] = ("%s; se muestran las primeras %d marcas de %d" % (
+            events["alineacion"].get("detalle") or "", VIDEO_MARKS_MAX, len(placed))).lstrip("; ")
+    return events
+
+
+def mark_windows(events):
+    """[(desde, hasta, nombre)] en que se ve cada marca: hasta la siguiente o VIDEO_MARK_S, lo que llegue antes."""
+    marks = events.get("marcas") or []
+    out = []
+    for i, mark in enumerate(marks):
+        following = marks[i + 1]["t"] if i + 1 < len(marks) else events["duracion"]
+        out.append((mark["t"], min(mark["t"] + VIDEO_MARK_S, max(following, mark["t"] + 0.1)), mark["nombre"]))
+    return out
+
+
+def video_page_html(events, project, date):
+    """V4: el visor autocontenido (sin recursos externos, salvo los tramos de video que reproduce, al lado): los tramos
+    seguidos, con los mismos rótulos del video unido, sincronizados con eventos.json (incrustado). ?t=<segundos> salta."""
+    page = (ASSETS / "plantillas" / "video.html").read_text(encoding="utf-8")
+    data = json.dumps(events, ensure_ascii=False, sort_keys=True).replace("</", "<\\/")
+    title = "Video de la prueba · %s" % flow_words({}, events.get("flujo") or "")
+    return (page.replace("{{TITLE}}", e(title)).replace("{{PROJECT}}", e(project)).replace("{{DATE}}", e(date))
+            .replace("{{EVENTOS}}", data))
+
+
+def embedded_events(page):
+    """Los eventos que lleva incrustados un visor (para los tests y para `perf.py video`)."""
+    found = re.search(r'<script id="eventos" type="application/json">(.*?)</script>', page, re.S)
+    return json.loads(found.group(1).replace("<\\/", "</")) if found else None
+
+
+def num(value):
+    """Un número para ffmpeg: punto decimal y hasta 3 decimales (fmt redondea a 2 y los bordes se tocarían)."""
+    text = ("%.3f" % value).rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def even(value):
+    return max(2, int(round(value / 2.0)) * 2)
+
+
+def video_size(binary, path):
+    """(ancho, alto) del primer tramo, de lo que imprime `ffmpeg -i` (sin ffprobe, que no siempre viene). None si no."""
+    try:
+        done = subprocess.run([binary, "-hide_banner", "-i", str(path)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.search(r"Video: .*?,\s*(\d{2,5})x(\d{2,5})[\s,\[]", done.stderr)
+    return (int(found.group(1)), int(found.group(2))) if found else None
+
+
+def concat_list(events):
+    """La lista del demuxer concat: cada tramo con su `duration` (hasta el inicio del siguiente o el fin), así cada uno
+    empieza en su momento aunque entre dos haya un hueco. Los nombres, relativos a la carpeta de los tramos."""
+    parts = events["tramos_video"]
+    lines = []
+    for i, part in enumerate(parts):
+        end = parts[i + 1]["inicio"] if i + 1 < len(parts) else events["duracion"]
+        lines.append("file '%s'" % pathlib.PurePosixPath(part["archivo"]).name.replace("'", "'\\''"))
+        if end - part["inicio"] > 0:
+            lines.append("duration %s" % num(end - part["inicio"]))
+    return "\n".join(lines) + "\n"
+
+
+def video_filter(events, width, height, labels=True):
+    """V3: (filtro de ffmpeg, {archivo: texto}) del video rotulado: una banda arriba (la fase y la marca más reciente del
+    plan) y otra abajo (la franja de fases, el cabezal y el reloj), agregadas con `pad`. Nada se dibuja sobre la imagen
+    del teléfono: todo cae en las bandas. Los textos van en archivos (`textfile`, `expansion=none`): nada que escapar.
+    Sin `labels` (ffmpeg sin drawtext o sin fuente), solo une los tramos."""
+    if not labels:
+        return "[0:v]fps=%d,format=yuv420p[out]" % VIDEO_FPS, {}
+    k = width / float(VIDEO_BASE_W)
+    head, foot = even(VIDEO_HEAD * k), even(VIDEO_FOOT * k)
+    duration = events["duracion"]
+    texts, chain = {}, []
+
+    def px(value):
+        return int(round(value * k))
+
+    for i, phase in enumerate(events["fases"], start=1):
+        name = "rotulo-fase-%d.txt" % i
+        texts[name] = phase["rotulo"]
+        enable = "enable='between(t,%s,%s)'" % (num(phase["desde"]), num(max(phase["desde"], phase["hasta"] - 0.001)))
+        chain.append("drawbox=x=0:y=0:w=iw:h=%d:color=0x%s:t=fill:%s" % (px(70), VIDEO_COLORS[phase["tipo"]], enable))
+        chain.append("drawtext=fontfile=fuente-negrita.ttf:textfile=%s:expansion=none:fontsize=%d:fontcolor=white:x=%d:"
+                     "y=%d:%s" % (name, px(28), px(20), px(20), enable))
+    for i, (start, end, mark) in enumerate(mark_windows(events), start=1):
+        name = "rotulo-marca-%d.txt" % i
+        texts[name] = "● %s" % mark
+        chain.append("drawtext=fontfile=fuente.ttf:textfile=%s:expansion=none:fontsize=%d:fontcolor=0x9a6400:box=1:"
+                     "boxcolor=0xfff3d6:boxborderw=%d:x=%d:y=%d:enable='between(t,%s,%s)'" % (
+                         name, px(21), px(8), px(20), px(88), num(start), num(max(start, end - 0.001))))
+    bar = head + height + px(30)
+    for phase in events["fases"]:
+        x = int(phase["desde"] / duration * width)
+        span = max(int((phase["hasta"] - phase["desde"]) / duration * width) - 2, 2)
+        chain.append("drawbox=x=%d:y=%d:w=%d:h=%d:color=0x%s:t=fill" % (x, bar, span, px(16), VIDEO_COLORS[phase["tipo"]]))
+    chain.append("drawtext=fontfile=fuente.ttf:text='%%{pts\\:hms}':fontsize=%d:fontcolor=0xd5d8de:x=w-tw-%d:y=%d" % (
+        px(18), px(16), head + height + px(6)))
+    graph = ["[0:v]fps=%d,pad=iw:ih+%d:0:%d:color=0x121317,%s[p1]" % (VIDEO_FPS, head + foot, head, ",".join(chain)),
+             "color=c=0xbf3a2f:s=%dx%d:r=%d[ph]" % (max(2, px(4)), px(30), VIDEO_FPS),
+             "[p1][ph]overlay=x='t/%s*%d':y=%d:shortest=1,format=yuv420p[out]" % (num(duration), width, bar - px(7))]
+    return ";".join(graph), texts
+
+
+def encoder_args(encoder):
+    """El H.264 que tenga ese ffmpeg: libx264 con -preset veryfast o, si no, h264_videotoolbox (macOS)."""
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+    return ["-c:v", "h264_videotoolbox", "-b:v", "8M"]
+
+
+def ffmpeg_command(binary, events, graph, encoder, out):
+    """V3: el comando que une los tramos (concat) y los rotula, con `-movflags +faststart` (el MP4 empieza a verse antes
+    de bajarlo entero). Corre en la carpeta de los tramos."""
+    return [binary, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", "lista.txt",
+            "-filter_complex", graph, "-map", "[out]", "-an"] + encoder_args(encoder) + [
+        "-t", num(events["duracion"]), "-movflags", "+faststart", "-f", "mp4", str(out)]
+
+
+def video_font(plan, flow):
+    """(regular, negrita) para drawtext: `video_fuente` del flujo o del plan (un archivo .ttf/.otf/.ttc) o una del sistema
+    (las de /System/Library/Fonts en macOS, DejaVu o Liberation en Linux). None si no hay ninguna."""
+    chosen = (flow or {}).get("video_fuente") or (plan or {}).get("video_fuente")
+    if chosen:  # relativa a donde se corre el comando (la raíz del proyecto), como los demás campos del plan
+        path = pathlib.Path(os.path.expanduser(str(chosen))).resolve()
+        return (str(path), str(path)) if path.is_file() else None
+    for regular, bold in VIDEO_FONTS:
+        if pathlib.Path(regular).is_file():
+            return regular, bold if pathlib.Path(bold).is_file() else regular
+    return None
+
+
+def link_font(source, target):
+    """La fuente al lado de los tramos con un nombre simple (un enlace; si no se puede, una copia): así su ruta no tiene
+    espacios ni nada que escapar en el filtro."""
+    target = pathlib.Path(target)
+    if target.is_symlink() or target.exists():
+        target.unlink()
+    try:
+        target.symlink_to(source)
+    except OSError:
+        shutil.copyfile(str(source), str(target))
+
+
+def join_test_video(folder, events, plan, flow, binary=None):
+    """V3: con ffmpeg, un solo prueba-<flujo>.mp4 con los tramos unidos y rotulados fuera de la imagen. Devuelve
+    {"video": ruta o None, "rotulado": bool, "motivo": por qué no (o por qué sin rótulos), "registro": log}."""
+    binary = binary or ffmpeg_binary()
+    out = {"video": None, "rotulado": False, "motivo": "", "registro": None}
+    if not binary:
+        out["motivo"] = "sin ffmpeg"
+        return out
+    features = ffmpeg_features(binary)
+    if not features["codificador"]:
+        out["motivo"] = "ese ffmpeg no trae un codificador H.264 (libx264 ni h264_videotoolbox)"
+        return out
+    work = video_folder(folder, events["flujo"])
+    size = video_size(binary, work / pathlib.PurePosixPath(events["tramos_video"][0]["archivo"]).name)
+    font = video_font(plan, flow)
+    labels = bool(features["drawtext"] and font and size)
+    if not labels:
+        out["motivo"] = ("ese ffmpeg no trae drawtext (se compila con libfreetype)" if not features["drawtext"] else
+                         "no encontré una fuente: pon \"video_fuente\" en el flujo del plan (la ruta de un .ttf)"
+                         if not font else "no pude leer el tamaño del video")
+    else:
+        link_font(font[0], work / "fuente.ttf")
+        link_font(font[1], work / "fuente-negrita.ttf")
+    graph, texts = video_filter(events, size[0] if size else 0, size[1] if size else 0, labels)
+    for name, text in texts.items():
+        (work / name).write_text(text, encoding="utf-8")
+    (work / "lista.txt").write_text(concat_list(events), encoding="utf-8")
+    final = video_outputs(folder, events["flujo"])[0]
+    partial = final.with_name(".%s.parcial.mp4" % final.stem)
+    log = work / "ffmpeg.log"
+    out["registro"] = log
+    try:
+        with log.open("w", encoding="utf-8") as handle:
+            done = subprocess.run(ffmpeg_command(binary, events, graph, features["codificador"], partial.resolve()),
+                                  cwd=str(work),
+                                  stdout=handle, stderr=subprocess.STDOUT, timeout=max(600, events["duracion"] * 10))
+    except (OSError, subprocess.SubprocessError) as error:
+        done = subprocess.CompletedProcess([], 1, "", str(error))
+    if done.returncode != 0 or not partial.is_file() or partial.stat().st_size == 0:
+        if partial.exists():
+            partial.unlink()
+        out["motivo"] = "ffmpeg terminó con error (detalle en %s)" % log
+        return out
+    os.replace(str(partial), str(final))
+    out.update(video=final, rotulado=labels)
+    return out
+
+
+def ffmpeg_install_steps(system=None, machine=None, brew=None):
+    """V6: [(qué hace, comando)] para instalar ffmpeg sin root y sin haber usado dev-setup, comprobando primero y sin
+    tocar lo que ya exista ni el perfil del shell. La skill solo los muestra: nunca los corre."""
+    system = system or sys.platform
+    machine = machine or (os.uname().machine if hasattr(os, "uname") else "")
+    brew = shutil.which("brew") if brew is None else brew
+    arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
+    osname = "macos" if system == "darwin" else "linux"
+    check = "shasum -a 256 -c ffmpeg.zip.sha256" if osname == "macos" else "sha256sum -c ffmpeg.zip.sha256"
+    static = ('cd "$(mktemp -d)" && url=$(curl -fsS -o /dev/null -w \'%%{redirect_url}\' %s) && curl -fsSLo ffmpeg.zip '
+              '"$url" && curl -fsSLo ffmpeg.zip.sha256 "$url.sha256" && %s && unzip -q ffmpeg.zip && test -f ffmpeg && '
+              'test ! -e ~/.local/bin/ffmpeg && mkdir -p ~/.local/bin && cp ffmpeg ~/.local/bin/ffmpeg && '
+              '~/.local/bin/ffmpeg -hide_banner -version' % (FFMPEG_STATIC % (osname, arch), check))
+    steps = []
+    if brew:  # el `ffmpeg` de Homebrew no trae drawtext (sin libfreetype): `ffmpeg-full` sí, y es keg-only
+        steps.append(("con Homebrew (ya lo tienes): ffmpeg-full, que trae drawtext (el ffmpeg normal de Homebrew no); "
+                      "no se enlaza al PATH ni pisa otro ffmpeg, y perf.py lo busca en su carpeta",
+                      "cd ~ && brew install ffmpeg-full"))
+    steps.append(("%ssin Homebrew ni root: el build estático firmado de ffmpeg.martin-riedl.de para tu %s (%s) en "
+                  "~/.local/bin, verificando su SHA256 antes de copiarlo; no pisa uno que ya exista ni toca el PATH "
+                  "(perf.py lo busca ahí)" % ("o, " if brew else "", "Mac" if osname == "macos" else "Linux", arch), static))
+    return steps
+
+
+def ffmpeg_hint(root, folder, flow_name):
+    """V5/V6: las líneas de la prueba sin ffmpeg: qué falta y para qué, el comando para instalarlo y el que une el video
+    sin repetir la prueba. Nunca detiene nada."""
+    first = ffmpeg_install_steps()[0]
+    short = "con Homebrew" if "brew install" in first[1] else "sin Homebrew ni root, verificando su SHA256"
+    return ["· Sin ffmpeg (opcional): el video quedó en tramos y se mira con el visor. Para un solo video rotulado:",
+            "    instálalo (%s; las otras formas, con `perf.py setup --estado`): %s" % (short, first[1]),
+            "    y únelo sin repetir la prueba: %s" % perf_command(root, "video", "--carpeta",
+                                                                  relative_folder(folder, root), "--flujo", flow_name)]
+
+
+def scrcpy_install_steps(brew=None):
+    brew = shutil.which("brew") if brew is None else brew
+    return [("con Homebrew (ya lo tienes)" if brew else "con Homebrew, si lo usas", "cd ~ && brew install scrcpy"),
+            ("o la versión de tu sistema de %s/releases (revisa que acepte --no-playback y --no-window)" % SCRCPY_URL, "")]
+
+
+class TestVideo:
+    """V1–V5: el video de evidencia de una corrida de prueba. Lo graba desde antes de 'preparar', anota cada momento con
+    el reloj de la computadora, lo baja a <carpeta>/video/<flujo>/ y arma eventos.json, el visor y, con ffmpeg, el video
+    unido y rotulado. Nunca hace fallar la prueba."""
+
+    def __init__(self, folder, plan, flow, flow_name, adb, serial):
+        self.folder, self.plan, self.flow, self.flow_name = pathlib.Path(folder), plan, flow, flow_name
+        self.adb, self.serial = adb, serial
+        self.clock, self.recorder, self.offset, self.parts = {}, None, None, []
+        self.collected = self.assembled = False
+        self.rows, self.clock_rows, self.note = None, [], ""
+        self.starts, self.precise, self.ended = [], False, None
+
+    def start(self):
+        """Empieza a grabar (scrcpy si el plan lo pide y arranca; si no, screenrecord). None si no se pudo: la prueba
+        sigue sin video y lo dice."""
+        kind, self.note = video_recorder_choice(self.flow, self.plan)
+        if self.note:
+            print("· " + self.note)
+        self.offset = device_clock_offset(self.adb)  # antes de grabar: la diferencia entre los dos relojes
+        if kind == "scrcpy":
+            recorder = ScrcpyRecorder(scrcpy_binary(), self.serial,
+                                      video_folder(self.folder, self.flow_name) / "grabando-scrcpy.mp4").start()
+            if recorder is not None and not recorder.wait_started():
+                recorder.stop_recording()
+                print("· scrcpy no empezó a grabar (¿el dispositivo no lo autorizó, o ya hay otro scrcpy abierto?): grabo "
+                      "con screenrecord, en tramos de hasta %d s" % VIDEO_LIMIT_S)
+                recorder = None
+            self.recorder = recorder
+        if self.recorder is None:
+            self.recorder = VideoChain(self.adb, int(self.flow.get("video_limite_s") or VIDEO_LIMIT_S)).start()
+        if self.recorder is None:
+            print("· No pude empezar a grabar el video de la prueba (adb shell screenrecord): la prueba sigue sin video; "
+                  "míralo en el dispositivo mientras corre")
+            return None
+        return self
+
+    def mark(self, name):
+        self.clock.setdefault(name, time.time())
+
+    def route(self, moment):
+        """Lo llama record_run (y el recorrido sin traza): "traza", "inicio" y "fin" del recorrido."""
+        self.mark("traza" if moment == "traza" else "recorrido_%s" % moment)
+        if moment == "fin" and self.recorder is not None:
+            self.recorder.stop_later(video_tail(self.flow, self.plan))
+
+    def collect(self):
+        """Detiene la grabación (si sigue) y baja los tramos a video/<flujo>/parte<N>.mp4, cada uno con su inicio
+        (aunque falte uno del medio). Una sola vez."""
+        if self.collected or self.recorder is None:
+            return
+        self.collected = True
+        target = video_folder(self.folder, self.flow_name)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.recorder.stop_recording()  # sin carpeta no hay dónde bajarlo, pero no queda grabando en el dispositivo
+            return
+        pulled = self.recorder.stop(names=lambda number: target / ("parte%d.mp4" % number))
+        starts, self.precise = self.recorder.starts()
+        for part in pulled:
+            found = re.match(r"parte(\d+)\.mp4$", part.name)
+            index = int(found.group(1)) - 1 if found else -1
+            if 0 <= index < len(starts):
+                self.parts.append(part)
+                self.starts.append(starts[index])
+        self.ended = self.recorder.ended or time.time()
+        for old in target.glob("parte*.mp4"):  # los de una prueba anterior de este flujo que ya no van (los hizo perf.py)
+            if old not in self.parts:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+
+    def alignment(self):
+        """(tramos, marcas, {"marcas": estado, "detalle": …}) para eventos.json."""
+        if not self.rows:
+            return [], [], {"marcas": "sin traza", "detalle": "la corrida no llegó a procesar su traza: los rótulos son "
+                                                              "los de la computadora (preparación, recorrido y fin)"}
+        convert, state, detail = trace_clock(self.rows, self.clock_rows, self.offset, self.clock.get("traza"))
+        if convert is None:
+            return [], [], {"marcas": "falló", "detalle": detail}
+        spans, marks = video_trace_events(self.rows, self.flow, self.flow_name, convert)
+        return spans, marks, {"marcas": state, "detalle": detail}
+
+    def assemble(self, quick=False):
+        """Escribe eventos.json y el visor y, con ffmpeg (salvo `quick`, tras un Ctrl+C), el video unido. Imprime dónde
+        quedaron. Una sola vez, y nunca hace fallar la prueba: un error del video se dice en una línea."""
+        if self.assembled:
+            return
+        self.assembled = True
+        try:
+            self._assemble(quick)
+        except Exception as error:  # noqa: BLE001 · el video es evidencia, no parte de la medición
+            print("· No pude armar el video de la prueba (%s): la prueba sigue igual%s" % (
+                one_line(str(error) or type(error).__name__)[:200],
+                "; los tramos quedaron en %s" % video_folder(self.folder, self.flow_name) if self.parts else ""))
+
+    def _assemble(self, quick):
+        self.collect()
+        if not self.parts:
+            print("· No pude grabar el video de la prueba (%s): la prueba sigue igual; míralo en el dispositivo "
+                  "mientras corre" % ("scrcpy" if getattr(self.recorder, "kind", "") == "scrcpy"
+                                      else "adb shell screenrecord"))
+            return
+        spans, marks, aligned = self.alignment()
+        if not self.precise:
+            aligned["detalle"] = ("%s; el inicio de algún tramo es el momento en que se lanzó la grabación (sin la línea "
+                                  "de inicio de %s)" % (aligned.get("detalle") or "", self.recorder.kind)).lstrip("; ")
+        relative = [part.relative_to(self.folder) for part in self.parts]
+        events = video_events(self.flow_name, self.recorder.kind, relative, self.starts, self.ended, self.clock, spans,
+                              marks, aligned, flow_words(self.flow, self.flow_name))
+        lines = write_test_video(self.folder, self.flow_name, events, self.plan, self.flow, join=not quick)
+        if getattr(self.recorder, "cut", False):
+            lines.append("· El video se cortó a los %d s: el tope es de %d tramos de screenrecord (o usa video_grabador "
+                         "scrcpy, sin tope)" % (self.recorder.limit * VIDEO_SEGMENTS_MAX, VIDEO_SEGMENTS_MAX))
+        for line in lines:
+            print(line)
+
+
+def save_test_video(folder, flow_name, events):
+    """eventos.json y el visor, con lo mismo: el visor lleva eventos.json incrustado."""
+    work = video_folder(folder, flow_name)
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "eventos.json").write_text(json.dumps(events, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                                       encoding="utf-8")
+    page = video_outputs(folder, flow_name)[1]
+    page.write_text(video_page_html(events, project_name(project_root(folder).resolve()),
+                                    datetime.date.today().strftime(FOOTER_DATE)), encoding="utf-8")
+    return work, page
+
+
+def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=None):
+    """V3–V5: escribe video/<flujo>/eventos.json y el visor y, si se pide y hay ffmpeg, el video unido; eventos.json
+    anota si la prueba de ahora lo unió y con rótulos ("unido"), así `siguiente` nunca manda a mirar uno viejo. Devuelve
+    las líneas que lo cuentan (dónde quedó cada cosa, qué muestra y, si falta algo, el paso para conseguirlo)."""
+    folder = pathlib.Path(folder)
+    events = dict(events)
+    events.pop("unido", None)
+    work, page = save_test_video(folder, flow_name, events)  # el visor, antes de unir: sirve aunque ffmpeg falle
+    root = project_root(folder).resolve()
+    result = join_test_video(folder, events, plan, flow, binary) if join else {"video": None, "motivo": "cortado"}
+    if result.get("video"):
+        events["unido"] = {"archivo": pathlib.Path(result["video"]).name, "rotulado": bool(result["rotulado"])}
+        save_test_video(folder, flow_name, events)
+    count = len(events["tramos_video"])
+    tail = video_tail(flow, plan)
+    what = ("de que se abre la app ('preparar' incluido) hasta %s; rótulos de cada parte: preparación (no se mide), cada "
+            "tramo medido, las marcas del plan y el fin" % ("que termina el recorrido" if not tail else
+                                                            "%s s después del recorrido" % fmt(tail)))
+    pieces = "el tramo de %s" % work if count == 1 else "los %d tramos de %s seguidos" % (count, work)
+    again = perf_command(root, "video", "--carpeta", relative_folder(folder, root), "--flujo", flow_name)
+    lines = []
+    if result.get("video") and result["rotulado"]:
+        lines.append("Video de la prueba: %s · míralo antes de medir: es el visto bueno de que el recorrido hace lo que "
+                     "esperas (%s)" % (result["video"], what))
+        lines.append("  Visor con los mismos rótulos: %s · %s original%s y eventos.json, en %s" % (
+            page, "el tramo" if count == 1 else "los %d tramos" % count, "" if count == 1 else "es", work))
+    else:
+        lines.append("Video de la prueba: %s (visor: reproduce %s, con los rótulos) · míralo antes de medir: es el visto "
+                     "bueno de que el recorrido hace lo que esperas (%s)" % (page, pieces, what))
+        if result.get("video"):  # unido, pero sin rótulos: el paso para tenerlos
+            lines.append("· El video unido %s quedó sin rótulos: %s. Para el video rotulado:" % (result["video"],
+                                                                                              result["motivo"]))
+            if "drawtext" in result["motivo"]:
+                first = ffmpeg_install_steps()[0]
+                lines.append("    instala un ffmpeg con drawtext (%s; las otras formas, con `perf.py setup --estado`): %s"
+                             % ("ffmpeg-full de Homebrew" if "brew install" in first[1] else
+                                "el build estático, verificando su SHA256", first[1]))
+            lines.append("    y únelo de nuevo, sin repetir la prueba: %s" % again)
+        elif result.get("motivo") == "sin ffmpeg":
+            lines += ffmpeg_hint(root, folder, flow_name)
+        elif result.get("motivo") not in ("", "cortado", None):
+            lines.append("· No pude unir los tramos en un solo video: %s. El visor sirve igual; para reintentarlo: %s" % (
+                result["motivo"], again))
+    state = (events.get("alineacion") or {}).get("marcas")
+    if state in ("aproximada", "falló"):
+        lines.append("· Marcas del plan en el video: %s (%s)" % (
+            "ubicadas de forma aproximada" if state == "aproximada" else "no se pudieron ubicar; el video sale igual, "
+            "con los rótulos de preparación, recorrido y fin", events["alineacion"].get("detalle") or "sin detalle"))
+    return lines
+
+
+def video_mark(name):
+    """Anota un momento del video de la prueba en curso (no hace nada si no hay uno: en las fases medidas nunca)."""
+    current = TEST_VIDEO["actual"]
+    if current is not None:
+        current.mark(name)
+
+
+def video_route():
+    """El aviso de inicio y fin del recorrido para record_run, solo con un video de prueba en curso."""
+    current = TEST_VIDEO["actual"]
+    return current.route if current is not None else None
+
+
+def finish_test_video(quick=False):
+    """Cierra el video de la prueba en curso (si hay uno) e imprime dónde quedó. La llaman la prueba antes de su paso
+    siguiente y cmd_capturar al terminar, también con un error. Nunca levanta una excepción (TestVideo.assemble)."""
+    current, TEST_VIDEO["actual"] = TEST_VIDEO["actual"], None
+    if current is not None:
+        current.assemble(quick=quick)
+
+
+def test_videos(folder):
+    """V5: lo que hay que mirar de cada prueba. El video unido (prueba-<flujo>.mp4) solo si la prueba de ahora lo unió con
+    rótulos (lo dice "unido" en su eventos.json); si no, el visor (prueba-<flujo>.html), aunque quede un .mp4 de una
+    prueba anterior. Sin eventos.json (una prueba de 0.16.0), el .mp4 que haya. Los segmentos sueltos de 0.16.0
+    (prueba-<flujo>-2.mp4) no se listan aparte."""
+    folder = pathlib.Path(folder)
+    stems = sorted({path.stem for pattern in ("prueba-*.mp4", "prueba-*.html") for path in folder.glob(pattern)})
+    out = []
+    for stem in stems:
+        base = re.sub(r"-\d+$", "", stem)
+        if base != stem and (folder / (base + ".mp4")).is_file():
+            continue
+        video, page = folder / (stem + ".mp4"), folder / (stem + ".html")
+        events = folder / VIDEO_DIR / stem[len("prueba-"):] / "eventos.json"
+        if events.is_file():
+            try:
+                joined = json.loads(events.read_text(encoding="utf-8")).get("unido") or {}
+            except (OSError, ValueError, AttributeError):
+                joined = {}
+            labeled = bool(joined.get("rotulado")) and video.is_file()
+            out.append(video if labeled or not page.is_file() else page)
+        else:
+            out.append(video if video.is_file() else page)
+    return out
+
+
+def events_problem(events):
+    """Qué le falta a un eventos.json para armar el video ('' si nada)."""
+    if not isinstance(events, dict):
+        return "no es un objeto"
+    parts = events.get("tramos_video")
+    if not isinstance(parts, list) or not parts or not all(
+            isinstance(part, dict) and isinstance(part.get("archivo"), str)
+            and isinstance(part.get("inicio"), (int, float)) for part in parts):
+        return "no trae los tramos de video"
+    if not isinstance(events.get("fases"), list) or not isinstance(events.get("marcas"), list):
+        return "no trae las fases o las marcas"
+    duration = events.get("duracion")
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
+        return "no trae la duración"
+    return ""
+
+
+def cmd_video(args):
+    """V3–V5: arma de nuevo el video de la prueba de cada flujo (o del de --flujo) desde video/<flujo>/eventos.json: el
+    visor y, con ffmpeg, el video unido y rotulado. Sirve después de instalar ffmpeg, sin repetir la prueba."""
+    folder = pathlib.Path(args.carpeta)
+    if not (folder / "plan.json").is_file():
+        raise PerfError("no existe %s: --carpeta es la carpeta de una investigación" % (folder / "plan.json"))
+    plan = load_plan(folder / "plan.json")
+    root = project_root(folder).resolve()
+    names = [args.flujo] if args.flujo else sorted(path.parent.name for path in (folder / VIDEO_DIR).glob("*/eventos.json"))
+    if not names:
+        raise PerfError("no hay ningún video de prueba en %s: lo graba la corrida de prueba" % (folder / VIDEO_DIR)).con(
+            guardado="nada", seguir=[("pide el paso siguiente", perf_command(root, "siguiente", "--carpeta",
+                                                                             relative_folder(folder, root)))])
+    for name in names:
+        flow_name = next((flow for flow in plan.get("flujos") or {} if slug(flow) == slug(name)), name)
+        path = video_folder(folder, flow_name) / "eventos.json"
+        try:
+            events = json.loads(path.read_text(encoding="utf-8"))
+            problem = events_problem(events)
+        except (OSError, ValueError) as error:
+            problem = "no se pudo leer (%s)" % one_line(str(error))[:120]
+        if problem:
+            test_run = ("repite la corrida de prueba de %s: graba el video de nuevo" % flow_name,
+                        perf_command(root, *capture_args(folder, plan, flow_name, root) + ["--prueba"])) \
+                if flow_name in (plan.get("flujos") or {}) else \
+                ("pide el paso siguiente", perf_command(root, "siguiente", "--carpeta", relative_folder(folder, root)))
+            raise PerfError("%s %s: no puedo armar el video del flujo %s" % (path, problem, flow_name)).con(
+                guardado="nada", seguir=[test_run])
+        flow = (plan.get("flujos") or {}).get(flow_name) or {}
+        for line in write_test_video(folder, flow_name, events, plan, flow):
+            print(line)
+    print_next(folder, plan)
 
 
 def is_repetition(spec):
@@ -12821,6 +13811,7 @@ def repetition_run(args, folder, plan, flow, flow_name, phase, n, cycles_path, r
             "%s %s" % (name, fmt(value, unit)) for name, value, unit, _ in metrics[:8]))
         verdict, why = leak_verdict(snapshots)
         print("· Memoria entre ciclos (prueba): %s: %s" % (verdict, why))
+        finish_test_video()  # 0.17.0 · V5: el video de la prueba (sin traza: rótulos de preparación, recorrido y fin)
         if args.plan:
             save_test_record(folder, flow_name, [], [], prints.get("marcas"), prints.get("plan"), build.get("instalada"))
             print_next(folder, plan, flow_name)
@@ -12854,6 +13845,19 @@ def cmd_ciclo(args):
 
 
 def cmd_capturar(args, plan=None):
+    """Una tanda de corridas (o la corrida de prueba). 0.17.0 · V1: el video de evidencia de la prueba se cierra y se
+    arma también cuando la prueba termina con un error (tras un Ctrl+C, sin unirlo: solo baja los tramos y el visor)."""
+    TEST_VIDEO["actual"] = None
+    try:
+        return capture_batch(args, plan)
+    except KeyboardInterrupt:
+        finish_test_video(quick=True)
+        raise
+    finally:
+        finish_test_video()  # sin video en curso (las fases medidas), no hace nada
+
+
+def capture_batch(args, plan=None):
     if args.plan:
         plan = load_plan(args.plan)
         folder = pathlib.Path(args.plan).parent
@@ -13252,6 +14256,14 @@ def cmd_capturar(args, plan=None):
                 settle(3)
         check_start()
 
+    def timed_prepare():
+        """'preparar' con su inicio y su fin anotados en el video de la prueba (sin video, solo 'preparar')."""
+        video_mark("preparar_inicio")
+        try:
+            prepare()
+        finally:
+            video_mark("preparar_fin")
+
     inside_trace = bool(flow.get("traza_desde_preparar")) and bool(prepare_command) and not startup and not no_trace
     if not startup and recorrido != "manual" and not prepare_command and not args.prueba:
         print("⚠ el flujo no tiene 'preparar': entre corridas la app queda donde terminó el recorrido. Si la app es de "
@@ -13320,25 +14332,7 @@ def cmd_capturar(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
-    video = None
-
-    def finish_video():
-        """C10: detiene el video de la prueba (una vez) y dice dónde quedó cada segmento."""
-        nonlocal video
-        if video is None:
-            return
-        chain, video = video, None
-        shots = chain.stop(folder / ("prueba-%s.mp4" % slug(flow_name)))
-        if shots:
-            print("Video de la prueba: %s · míralo antes de medir: es el visto bueno de que el recorrido hace lo que "
-                  "esperas (desde que se abre la app, 'preparar' incluido; %s)" % (
-                      ", ".join(str(shot) for shot in shots),
-                      "se cortó a los %d s: el tope es de %d segmentos" % (chain.limit * len(chain.remotes),
-                                                                          VIDEO_SEGMENTS_MAX) if chain.cut else
-                      "segmentos de hasta %d s, encadenados" % chain.limit))
-        else:
-            print("· No pude grabar el video de la prueba (adb shell screenrecord): la prueba sigue igual; míralo en el "
-                  "dispositivo mientras corre")
+    video_started = []  # C10 y 0.17.0 · V1: el video de la prueba se lanza una sola vez
     clear_logcat = bool(args.plan) and not startup and plan.get("limpiar_logcat") is not False  # B5
     seen_urls = {}
     tail_cut = [] if args.prueba or not args.plan else trace_tail(folder, flow, flow_name, startup, recorrido, inside_trace,
@@ -13516,9 +14510,11 @@ def cmd_capturar(args, plan=None):
                          inicio=datetime.datetime.now().replace(microsecond=0).isoformat(),
                          registro=None if args.prueba or not valid else build_record(partial=True, quiet=True),
                          perfetto=None)
-        if args.prueba and args.plan and not getattr(args, "sin_video", False) and video is None:
-            # C10: el video de la prueba empieza antes de 'preparar' (en la prueba no importa la sobrecarga)
-            video = VideoChain(adb, int(flow.get("video_limite_s") or VIDEO_LIMIT_S)).start()
+        if args.prueba and args.plan and not getattr(args, "sin_video", False) and not video_started:
+            # C10 y 0.17.0 · V1: el video de evidencia empieza antes de 'preparar' (en la prueba no importa la
+            # sobrecarga). Solo en la prueba: las fases medidas nunca graban (el codificador compite con la app).
+            video_started.append(True)
+            TEST_VIDEO["actual"] = TestVideo(folder, plan, flow, flow_name, adb, serial).start()
         if clear_logcat:
             # B5: antes de limpiar, se leen y se acumulan las rutas que ya estaban (las del calentamiento, de 'preparar' o
             # de una corrida anterior: cada servicio escribe su línea una vez por proceso); después se limpia solo el
@@ -13532,7 +14528,7 @@ def cmd_capturar(args, plan=None):
                 pass  # si adb no responde, las rutas de esta corrida pueden quedar sin leer, nada más
         try:
             if not inside_trace:
-                prepare()
+                timed_prepare()
         except Precondicion as error:
             failure = error
         if failure is None:
@@ -13555,32 +14551,34 @@ def cmd_capturar(args, plan=None):
             os.environ.update({CYCLES_ENV: str(cycles_path), CYCLE_PACKAGE_ENV: package, CYCLE_SERIAL_ENV: serial or ""})
             if is_repetition(flow):
                 memory_snapshot(adb, package, cycles_path, "inicio")
+            route_moment = video_route()  # 0.17.0 · V2: solo con el video de la prueba; en las fases, None
             try:
                 if no_trace:
+                    if route_moment:
+                        route_moment("inicio")
                     reason, extra = drive(recorrido, label, cutter), []
+                    if route_moment:
+                        route_moment("fin")
                 else:
                     # C3: con "traza_desde_preparar", 'preparar' corre con la traza ya grabando (lo de antes de la
                     # pantalla medida, como una precarga, entra en la traza).
                     reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter,
                                                tail_s=tail_cut[0] if tail_cut else None,
-                                               before=prepare if inside_trace else None,
+                                               before=timed_prepare if inside_trace else None,
                                                on_start=(lambda pid, remote: mark_running(
                                                    folder, perfetto={"pid": pid, "remota": remote, "serial": serial}
                                                    if pid else None))  # A3: al terminar, sin Perfetto (nunca None)
-                                               if args.plan else None)
+                                               if args.plan else None, on_route=route_moment)
             except Precondicion as error:
                 if not inside_trace:
                     raise
                 failure = error
-            finally:
-                finish_video()
             if is_repetition(flow) and failure is None:
                 memory_snapshot(adb, package, cycles_path, "fin")
             if clear_logcat and not args.prueba:  # B5: las rutas de esta corrida, antes de que se limpie el buffer
                 save_service_urls(folder, read_service_log(adb))
         if failure is not None:
             error = failure
-            finish_video()
             if not prepare_command or args.prueba:
                 if args.prueba and args.plan and prepare_command and hasattr(error, "corto"):
                     save_test_warnings(folder, flow_name, [warning(
@@ -13655,10 +14653,22 @@ def cmd_capturar(args, plan=None):
         if not invalid:
             print("… procesando la traza %s (%.0f MB)" % (
                 "de prueba" if args.prueba else "de la %s" % run_label(), local.stat().st_size / 1e6), flush=True)
-            results = run_tp_batch(tp, local, queries)
+            evidence = TEST_VIDEO["actual"]  # 0.17.0 · V2: solo en la prueba con video; en las fases, None
+            if evidence is None:
+                results = run_tp_batch(tp, local, queries)
+            else:  # la hora del reloj del dispositivo, en la misma pasada (si falla, la prueba sigue sin ella)
+                try:
+                    results = run_tp_batch(tp, local, queries + [("reloj", VIDEO_CLOCK_SQL)])
+                except PerfError:
+                    results = run_tp_batch(tp, local, queries)
             if not results["metricas"]:
                 raise PerfError("trace_processor no devolvió las filas de metricas.sql")
-            metrics, invalid, info = trace_metrics(trace_rows(*results["metricas"][-1]), hz, flow, known, sdk)
+            rows_now = trace_rows(*results["metricas"][-1])
+            if evidence is not None:
+                evidence.rows = rows_now
+                evidence.clock_rows = [dict(zip(header, row)) for header, body in results.get("reloj") or []
+                                       for row in body]
+            metrics, invalid, info = trace_metrics(rows_now, hz, flow, known, sdk)
             if info.get("cruzan_pausa"):
                 # No es una corrida mala: es el plan el que mide tiempo de una persona. Repetir no lo arregla.
                 raise PerfError("el plan mide tiempo humano: %s. Lo que pasa entre las dos marcas de una pausa no es de la "
@@ -13895,6 +14905,7 @@ def cmd_capturar(args, plan=None):
                 for line in no_routes_lines(root, serial):  # B3: con la instrumentación al día, las causas reales
                     print(("⚠ " if not line.startswith("  ") else "") + line)
             print("Traza: %s" % saved)
+            finish_test_video()  # 0.17.0 · V5: dónde quedaron el video y el visor, antes del paso siguiente
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
             if args.plan:
@@ -18759,6 +19770,7 @@ def r_measured_dev(data):
         if len(data.flows) > 1 and steps:
             parts.append("<h3>%s</h3>" % e(scenario_words(data.plan, flow) or flow.replace("-", " ")))
         parts.append(flow_cards(steps))
+    parts.append(video_evidence_html(data.folder))  # 0.17.0 · V5: solo en el técnico
     parts.append(html_table(["Condición", "Detalle"], [[(e(name), False), (value, False)]
                                                        for name, value in conditions_rows(data)]))
     captured = captured_rows(data)
@@ -18774,6 +19786,19 @@ def r_measured_dev(data):
     if firm:
         parts.append(note_box("Qué tan firme es la medición", md_inline_block(firm)))
     return "medicion", "Qué se midió y en qué condiciones", "".join(parts)
+
+
+def video_evidence_html(folder):
+    """0.17.0 · V5: el enlace al video de evidencia de cada prueba (ruta relativa: los reportes están en la misma
+    carpeta), con una línea de qué muestra. Nunca lo incrusta: puede mostrar datos de la cuenta de prueba y se queda en
+    la carpeta de la investigación, fuera de git. '' si no hay ninguno."""
+    links = test_videos(folder)
+    if not links:
+        return ""
+    return ('<p class="evid">Video de la prueba: la corrida de prueba completa, desde que se abre la app hasta el final, '
+            'con un rótulo por parte (preparación, que no se mide; cada tramo medido; las marcas del plan y el fin). Sirve '
+            'para ver qué se midió; queda en la carpeta de la investigación: %s.</p>' % ", ".join(
+                '<a href="%s">%s</a>' % (e(path.name), e(path.name)) for path in links))
 
 
 def md_inline_block(text):
@@ -23180,7 +24205,37 @@ def tools_report():
                                            else None)
     lines.append("  %s Maestro (opcional: lleva la app al punto de partida en flujos largos): %s" % (
         "✔" if maestro else "·", maestro or "falta (%s)" % MAESTRO_URL))
+    lines += optional_video_tools()
     return lines, missing
+
+
+def optional_video_tools():
+    """0.17.0 · V6: ffmpeg y scrcpy, opcionales para el video de la prueba: si están, dónde; si no, cómo comprobarlo y
+    cómo instalarlos sin root (solo se muestran: la skill no instala nada)."""
+    lines = []
+    ffmpeg = ffmpeg_binary()
+    if ffmpeg:
+        features = ffmpeg_features(ffmpeg)
+        gaps = [text for ok, text in ((features["drawtext"], "sin drawtext: une el video sin rótulos, el visor sí los "
+                                       "tiene; para los rótulos, ffmpeg-full de Homebrew o el build estático de "
+                                       "setup.md · Requisitos"),
+                                      (features["codificador"], "sin un codificador H.264: no une el video"))
+                if not ok]
+        lines.append("  ✔ ffmpeg (opcional: une el video de la prueba en uno solo, rotulado): %s%s" % (
+            ffmpeg, " (%s)" % "; ".join(gaps) if gaps else ""))
+    else:
+        lines.append("  · ffmpeg (opcional: une el video de la prueba en uno solo, rotulado): falta; sin él, el video queda "
+                     "en tramos con su visor HTML. Se comprueba con `command -v ffmpeg` y `ffmpeg -hide_banner -filters` "
+                     "(que liste drawtext). Para instalarlo (elige uno; no hace falta root ni dev-setup):")
+        for what, command in ffmpeg_install_steps():
+            lines.append("      %s: %s" % (what[0].upper() + what[1:], command))
+    scrcpy = scrcpy_binary()
+    lines.append("  %s scrcpy (opcional: graba la prueba en un solo archivo, sin cortes; \"video_grabador\": \"scrcpy\" en el "
+                 "plan): %s" % ("✔" if scrcpy else "·", scrcpy or "falta; sin él, screenrecord graba en tramos de hasta "
+                                "%d s. Se comprueba con `command -v scrcpy`. %s" % (VIDEO_LIMIT_S, "; ".join(
+                                    "%s: %s" % (what, command) if command else what
+                                    for what, command in scrcpy_install_steps()))))
+    return lines
 
 
 def open_investigation_steps(root, limit=3):
@@ -24505,6 +25560,12 @@ def main(argv=None):
     p.add_argument("--simular", action="store_true", help="solo muestra qué haría; no toca nada")
     p.set_defaults(func=cmd_recuperar)
 
+    p = sub.add_parser("video", help="arma de nuevo el video de la prueba desde video/<flujo>/eventos.json: el visor y, "
+                                     "con ffmpeg, el video unido y rotulado (sin repetir la prueba)")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--flujo", help="solo ese flujo (por defecto, todos los que tienen video)")
+    p.set_defaults(func=cmd_video)
+
     p = sub.add_parser("estado", help="todas las investigaciones del proyecto: estado, marcas puestas, mejoras, setup y paso "
                                       "siguiente (correlo en la raíz del proyecto)")
     p.add_argument("--carpeta", help="solo esa investigación")
@@ -24688,7 +25749,7 @@ def main(argv=None):
     p.add_argument("--sin-comprimir", action="store_true", help="deja las trazas sin gzip")
     p.add_argument("--prueba", action="store_true", help="una corrida que imprime las métricas y no escribe el CSV")
     p.add_argument("--sin-video", dest="sin_video", action="store_true",
-                   help="con --prueba: no graba el video de la corrida de prueba (adb shell screenrecord)")
+                   help="con --prueba: no graba el video de evidencia de la corrida de prueba")
     p.add_argument("--forzar", action="store_true", help="sigue aunque el dispositivo esté caliente o el build no cambie")
     p.add_argument("--rehacer", action="store_true",
                    help="descarta lo medido de este flujo en esta fase y lo mide de nuevo (lo de otros flujos no se toca)")
