@@ -56,7 +56,7 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.15.1"
+VERSION = "0.16.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
@@ -978,7 +978,7 @@ def load_plan(path):
         needed = flow.get("requiere_env", [])
         if not isinstance(needed, list) or any(not isinstance(v, str) or not ENV_NAME.fullmatch(v) for v in needed):
             raise PerfError("%s: flujos.%s.requiere_env es una lista de nombres de variables de entorno, por ejemplo "
-                            "[\"PERF_USUARIO\", \"PERF_CLAVE\"] (los nombres, nunca los valores)" % (path, name))
+                            "[\"APP_USUARIO_PRUEBA\", \"APP_CLAVE_PRUEBA\"] (los nombres, nunca los valores)" % (path, name))
         cap = flow.get("duracion_max_s")
         if cap is not None and not (isinstance(cap, (int, float)) and not isinstance(cap, bool) and 1 <= cap <= 86400):
             raise PerfError("%s: flujos.%s.duracion_max_s es el tope de la traza en segundos (un número entre 1 y 86400; "
@@ -17655,7 +17655,7 @@ def finding_kinds(findings_text):
 
 def unconfirmed_improvements(plan, findings_text):
     """E5: [(mejora, motivo)] de las mejoras que no apuntan a un hallazgo confirmado (con evidencia de la traza y
-    `archivo:línea`): solo esas pasan a ser mejoras; las demás van al anexo "Se revisó y se descartó"."""
+    `archivo:línea`): solo esas pasan a ser mejoras; las demás van como hallazgos sin confirmar o descartados."""
     kinds = finding_kinds(findings_text)
     out = []
     for item in plan.get("mejoras") or []:
@@ -17704,11 +17704,9 @@ def warn_jargon(problems):
         print("    %s" % same_command())
 
 
-# ── Reportes en 5 minutos (0.15.0 · H y G) ───────────────────────────────────
-# El técnico tiene una parte principal corta (resumen, métricas principales, un panel por mejora, servicios y lo
-# pendiente) y todo lo demás en un anexo plegado. El de gerencia tiene siete secciones y nada más. Los dos salen de los
-# mismos datos; nunca muestran nombres internos de métricas, los servicios van como MÉTODO y su ruta real, y los diffs de
-# las mejoras van completos (los saca perf.py de cambios/<id>.diff, nunca la IA).
+# ── Textos y gráficos de los reportes (desde 0.15.0 · H y G) ─────────────────
+# Lo que usan las secciones de 0.16.0 (más abajo): ningún nombre interno de métrica, los servicios con su ruta real y
+# los diffs de las mejoras completos (los saca perf.py de cambios/<id>.diff, nunca la IA).
 CLEAR_CHANGE_SPREAD = 2.0  # H4: el cambio es al menos el doble de lo que varía cada fase…
 CLEAR_CHANGE_NOISE = 3.0  # …y el triple de la variación normal (antes contra control), sin que los rangos se toquen
 TEXT_CAPS = (("resumen ejecutivo", "Resumen ejecutivo", "lineas", 5), ("resumen para gerencia", "Resumen para gerencia",
@@ -18072,8 +18070,8 @@ def reviewed_md(findings):
 
 
 def unimproved_md(findings, plan):
-    """H1: los hallazgos confirmados que ninguna mejora ataca y los que son consecuencia de otro: en el anexo, para que
-    no se pierdan (la parte principal solo tiene las mejoras)."""
+    """H1: los hallazgos confirmados que ninguna mejora ataca y los que son consecuencia de otro, para que no se
+    pierdan."""
     attacked = {str(item.get("hallazgo") or "").strip() for item in plan.get("mejoras") or []}
     rows = [row for row in findings if row["clase"] not in ("descartado", "sin confirmar") and row["id"] not in attacked]
     return "\n".join("- %s · %s · %s%s." % (row["id"], row["tipo"] or row["clase"], row["sintoma"].rstrip(".") or "—",
@@ -24390,8 +24388,9 @@ def module_steps(folder, plan):
         recheck = steps.pop(1)
         steps.insert(1, {"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que corresponda)",
                          "opciones": [
-            ("Pasarlo a código", "cuando quieres la marca o el tramo que pide ese módulo (%s): cambia tú el interruptor "
-                                 "que dice arriba y sincroniza Gradle" % "; ".join(
+            ("Pasarlo a código", "cuando quieres la marca o el tramo que pide ese módulo (%s): cambia tú cómo lo incluye "
+                                 "el proyecto (el interruptor que dice arriba o, si no encontré ninguno, el que use tu "
+                                 "proyecto) y sincroniza Gradle" % "; ".join(
                                      item.get("para") or item["nombre"] for item in binaries), recheck),
             ("Dejarlo binario", "cuando no puedes o no quieres compilarlo desde código: se mide desde el módulo app (con "
                                 "menos precisión)%s" % ("; se pierde %s" % "; ".join(
