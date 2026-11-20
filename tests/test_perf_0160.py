@@ -722,6 +722,15 @@ class SessionsTest(TriageBase):
         self.assertNotIn("Chat nuevo", out)
         self.assertIn("--prueba", commands_in(out)[0])
 
+    def test_tamano_del_proyecto_cuenta_los_modulos_de_la_investigacion(self):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        write(self.folder / "logs" / "dependencias.txt", "releaseRuntimeClasspath - Runtime classpath\n" + "".join(
+            "+--- com.example:modulo%02d:1.0.0\n" % i for i in range(40)))
+        self.assertEqual(perf.project_size(self.root, self.folder, plan),
+                         ("grande", "40 módulos según :app:dependencies (proyectos y artefactos internos del grupo "
+                                    "com.example)"))
+        self.assertEqual(perf.project_size(self.root)[1], "0 módulos en settings.gradle")
+
     def test_una_lista_donde_va_un_texto_se_une(self):
         plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
         plan["mejoras"][0]["alternativas"] = ["bajar el límite de páginas", "crearlas al abrirlas"]
@@ -986,6 +995,57 @@ class ReviewSTest(TriageBase):
             out = self.ok_in(*args)
             self.assertIn("anterior a la última compilación", out, args)
             self.assertNotIn("Chat nuevo", out, args)
+
+
+class ProjectSizeTest(unittest.TestCase):
+    """F1: de dónde sale el tamaño del proyecto y qué cuenta como módulo interno."""
+
+    def setUp(self):
+        self.dir = Path(__import__("tempfile").mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, str(self.dir), True)
+        self.folder = self.dir / "reports" / "perf" / "f" / "2026-03-02"
+        self.plan = {"paquete": "com.example.app", "flujos": {"f": {}}}
+
+    def deps(self, name, lines):
+        write(self.folder / "logs" / name, "profilingRuntimeClasspath - Runtime classpath\n" + "".join(
+            "+--- %s\n" % line for line in lines))
+
+    def test_huella_de_modulos_sin_terceros_ni_doble_conteo(self):
+        self.deps("huella-modulos.log", ["project :pedidos", "project :pagos -> com.example:pagos:1.0",
+                                         "com.example:pagos:1.0", "com.example.core:red:2.0", "androidx.core:core:1.12.0",
+                                         "com.exampleotra:x:1.0"])
+        self.assertEqual(perf.investigation_module_counts(self.folder, self.plan)[0][0], 3)  # :pedidos, :pagos, red
+
+    def test_un_grupo_publico_no_cuenta_artefactos_internos(self):
+        self.deps("dependencias.txt", ["io.github.otro:lib:1.0", "io.github.alguien:app-core:1.0"])
+        self.assertEqual(perf.investigation_module_counts(self.folder, dict(self.plan, paquete="io.github.alguien.app")),
+                         [])
+
+    def test_huella_de_fases_y_mapa_del_plan(self):
+        write(self.folder / "fases.json", json.dumps({"antes": {perf.MODULE_PRINT: {
+            "fuente": "gradle", "proyectos": [":a", ":b"], "binarios": ["com.example:c"]}}}))
+        plan = dict(self.plan, modulos=[{"nombre": ":a", "tipo": "codigo"}])
+        self.assertEqual(perf.investigation_module_counts(self.folder, plan),
+                         [(3, "la huella de módulos de :app:dependencies"), (1, "el mapa de módulos del plan")])
+        write(self.folder / "fases.json", "[]")  # un fases.json raro no detiene `consumo`
+        self.assertEqual(perf.investigation_module_counts(self.folder, plan), [(1, "el mapa de módulos del plan")])
+
+    def test_agents_md_manda_aunque_haya_carpeta(self):
+        self.deps("dependencias.txt", ["com.example:m%02d:1.0" % i for i in range(40)])
+        write(self.dir / "AGENTS.md", "# P\n\n## Rendimiento\n\n- Tamaño del proyecto: pequeño\n")
+        self.assertEqual(perf.project_size(self.dir, self.folder, self.plan), ("pequeño", "AGENTS.md"))
+
+    def test_el_aviso_de_consumo_dice_el_tamano_y_de_donde_salio(self):
+        self.deps("dependencias.txt", ["com.example:m%02d:1.0" % i for i in range(40)])
+        write(self.folder / "plan.json", json.dumps(self.plan))
+        write(self.folder / "estado.md", (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8"))
+        result = subprocess.run(perf_argv(SCRIPT) + ["consumo", "--carpeta", str(self.folder), "--sesion",
+                                                     "2 · diagnóstico", "--costo", "9 USD"],
+                                cwd=str(self.dir), env=dict(ENV, HOME=str(self.dir)), capture_output=True, text=True,
+                                encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("(proyecto grande: 40 módulos según :app:dependencies", result.stdout)
+        self.assertIn("proyecto grande: 40 módulos según", (self.folder / "estado.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

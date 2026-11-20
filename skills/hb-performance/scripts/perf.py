@@ -6958,9 +6958,12 @@ SIZE_KEY = re.compile(r"tama[ñn]o(?:\s+del\s+proyecto)?", re.I)
 SIZE_LIMITS = (5, 25)  # módulos de settings.gradle: hasta 5, pequeño; hasta 25, mediano; más, grande
 
 
-def project_size(root):
+def project_size(root, folder=None, plan=None):
     """(tamaño, por qué): "pequeño", "mediano" o "grande". La línea `Tamaño del proyecto:` de la sección de rendimiento
-    de AGENTS.md manda; si no, la cantidad de módulos que incluye settings.gradle(.kts)."""
+    de AGENTS.md manda; si no, la cantidad de módulos más alta entre los `include` de settings.gradle(.kts) y, con la
+    carpeta de una investigación (F1), los que resuelve `:app:dependencies` (proyectos y artefactos internos del mismo
+    grupo que la app, de la salida que guardaron `setup --estado --comprobar-modulos` o la huella de módulos) y los del
+    mapa de módulos del plan. Dice de dónde salió."""
     for key, value in performance_lines(root):
         if SIZE_KEY.fullmatch(key.strip()):
             for size in ("pequeño", "mediano", "grande"):
@@ -6979,8 +6982,52 @@ def project_size(root):
             blocks = re.findall(r"\binclude\s*\(([^)]*)\)", text) + re.findall(r"(?m)\binclude\s+([\"'][^\n]*)$", text)
             count = len({name.lstrip(":") for block in blocks for name in re.findall(r"""["']([\w.:-]+)["']""", block)})
             break
+    why = "%d módulo%s en settings.gradle" % (count, "" if count == 1 else "s")
+    if folder is not None:
+        for found, origin in investigation_module_counts(pathlib.Path(folder), plan or {}):
+            if found > count:
+                count, why = found, "%d módulo%s según %s" % (found, "" if found == 1 else "s", origin)
     size = "pequeño" if count <= SIZE_LIMITS[0] else "mediano" if count <= SIZE_LIMITS[1] else "grande"
-    return size, "%d módulo%s en settings.gradle" % (count, "" if count == 1 else "s")
+    return size, why
+
+
+PUBLIC_GROUPS = ("io.github", "com.github", "com.google", "org.jetbrains", "org.apache", "com.android", "androidx.core")
+
+
+def investigation_module_counts(folder, plan):
+    """F1: [(módulos, de dónde)] que conoce una investigación: la salida de `:app:dependencies` que guardó (proyectos y
+    artefactos del mismo grupo que la app: los módulos internos que llegan como binarios), la huella de módulos de sus
+    fases y el mapa de módulos del plan."""
+    out = []
+    group = ".".join(str(plan.get("paquete") or "").split(".")[:2])
+    if group in PUBLIC_GROUPS:  # un grupo público (io.github, com.google…) no dice qué artefacto es interno
+        group = ""
+    for log in (folder / "logs" / "dependencias.txt", folder / "logs" / "huella-modulos.log"):
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        block = dependencies_block(text, None)[0]
+        if block is None:
+            continue
+        deps = parse_dependencies(block)
+        swapped = {":".join(str(value).split(":")[:2]) for value in deps["sustituidos"].values()}
+        internal = [key for key in deps["artefactos"] if group and (key.split(":")[0] == group or key.split(":")[0]
+                    .startswith(group + ".")) and not deps["artefactos"][key].get("proyecto") and key not in swapped]
+        total = len(deps["proyectos"]) + len(internal) + len(deps["sustituidos"])
+        if total:
+            out.append((total, ":app:dependencies (proyectos y artefactos internos del grupo %s)" % (group or "de la app")))
+    phases = read_phases(folder)
+    phases = phases if isinstance(phases, dict) else {}
+    for record in [phases.get(name) for name in FASES] + [phases.get(TEST_RECORD)]:
+        printed = record.get(MODULE_PRINT) if isinstance(record, dict) else None
+        if isinstance(printed, dict) and printed.get("fuente") == "gradle":
+            total = len(printed.get("proyectos") or []) + len(printed.get("binarios") or [])
+            if total:
+                out.append((total, "la huella de módulos de :app:dependencies"))
+    if plan_modules(plan):
+        out.append((len(plan_modules(plan)), "el mapa de módulos del plan"))
+    return out
 
 
 def cost_type(label):
@@ -7003,7 +7050,7 @@ def cost_warnings(folder, plan):
         rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
     except OSError:
         return []
-    size, why = project_size(project_root(pathlib.Path(folder)).resolve())
+    size, why = project_size(project_root(pathlib.Path(folder)).resolve(), folder, plan)
     out = []
     for row in rows:
         kind = cost_type(row["sesion"])
@@ -22951,6 +22998,13 @@ def modules_report(root, folder, plan, args):
             deps = parse_dependencies(block)
             configuration = used or configuration
             source = "la salida guardada en %s" % args.dependencias
+            kept = pathlib.Path(folder) / "logs" / "dependencias.txt" if folder is not None else None
+            if kept is not None and os.path.realpath(str(kept)) != os.path.realpath(str(args.dependencias)):
+                try:  # F1: la misma salida que deja --comprobar-modulos, para contar los módulos del proyecto
+                    kept.parent.mkdir(parents=True, exist_ok=True)
+                    kept.write_text(saved_text, encoding="utf-8")
+                except OSError:
+                    pass
     elif configuration is None:
         why = ("no sé cuál es la variante medida (el plan no tiene `instalar` con una tarea install<Variante>): pásala con "
                "--configuracion, por ejemplo --configuracion profilingRuntimeClasspath")
