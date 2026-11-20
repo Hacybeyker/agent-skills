@@ -759,11 +759,13 @@ class MeasurementCaptureTest(DeviceBase):
         self.assertIn("1. toca la pestaña Pedidos", out)
         self.assertIn("2. baja la lista (vertical, 5 swipes lentos)", out)
         self.assertIn("1 paso del recorrido sin `# paso:` (recorrido.sh:8)", out)
-        video = self.plan.parent / "prueba-home.mp4"
-        self.assertTrue(video.is_file())
-        self.assertIn("Video de la prueba: %s" % video, out)
+        # 0.17.0: el tramo queda en video/<flujo>/ y, sin ffmpeg, se mira con el visor prueba-<flujo>.html
+        self.assertTrue((self.plan.parent / "video" / "home" / "parte1.mp4").is_file())
+        page = self.plan.parent / "prueba-home.html"
+        self.assertTrue(page.is_file())
+        self.assertIn("Video de la prueba: %s" % page, out)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
-        self.assertIn('"screenrecord", "--time-limit", "180", "/sdcard/hbperf-prueba.mp4"', log)
+        self.assertIn('"screenrecord", "--verbose", "--time-limit", "180", "/sdcard/hbperf-prueba.mp4"', log)
         # (el screenrecord falso termina solo: VIDEO_STOP lo prueba Fixes0151HelpersTest y en dispositivo se valida)
         self.assertIn("rm -f /sdcard/hbperf-prueba.mp4", log)
         ficha = (self.plan.parent / "ficha.md").read_text(encoding="utf-8")
@@ -1089,7 +1091,7 @@ class AcceptanceT2Test(AcceptanceBase):
         self.assertIn("El servicio declarado 'GET pedidos/entregados' del flujo detalle no apareció", prueba)
         self.assertIn("cruza el borde entre 'pestana' y 'lista'", prueba)
         self.assertIn("no un solapamiento", prueba)
-        self.assertTrue((self.folder / "prueba-detalle.mp4").is_file())
+        self.assertTrue((self.folder / "prueba-detalle.html").is_file())  # 0.17.0: sin ffmpeg, el visor del video
         self.follow(self.next_out(), stop=lambda command: " diagnostico " in command)
         rows = perf.read_rows(self.folder / "metricas.csv")
         values = {(r["flujo"], r["metrica"]) for r in rows}

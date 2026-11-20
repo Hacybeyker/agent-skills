@@ -41,6 +41,11 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: python scripts/check_version_bump.py "origin/$BASE_REF"
 
+      # Solo en el runner: con ffmpeg corren los tests que unen y rotulan el video de la prueba de hb-performance (en
+      # macOS se saltan). La skill nunca lo instala en la máquina del usuario.
+      - name: Instalar ffmpeg para los tests del video
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: Correr los tests de los scripts
         run: python scripts/run_tests.py # en paralelo: una clase de test por proceso
 
