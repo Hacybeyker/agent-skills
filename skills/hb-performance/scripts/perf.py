@@ -8021,6 +8021,10 @@ def cmd_estado(args):
                   "opciones": choices}]
     elif choices:
         steps = [choices[0][2]]
+    reported = [folder for folder, _ in found if report_file(folder, "inicial") is not None]
+    if not args.carpeta and len(reported) > 1:  # R12: varias con reporte: el de gerencia de todas juntas, opcional
+        print("  Reporte de gerencia de las %d investigaciones con reporte, en uno solo (opcional, no cambia nada): %s"
+              % (len(reported), perf_command(root, "reporte", "--gerencia-unificado", "--todas")))
     if not steps:
         steps = [end_step("Ninguna investigación abierta ni en pausa: %s." % NO_STEPS_LEFT)]
     print_setup_next(root, "una investigación por vez", steps)
@@ -19256,6 +19260,44 @@ def r_state_biz(data):
     return ("resultado", "Resultado", body) if data.final else ("estado", "Estado inicial", body)
 
 
+def where_time_goes(data):
+    """R7: "¿En qué se van los N s?": la acción principal en tres partes: el tiempo de la app antes de la llamada clave
+    (verde, se puede mejorar en la app), la espera de esa llamada (azul, depende del servidor) y el resto (gris). La
+    llamada clave es la que termina última antes de la marca de fin; sin ella, no hay barra."""
+    for flow in data.flows:
+        run = representative_run(data.rows, flow, "antes", data.plan, data.folder)
+        timeline = (load_timeline(data.folder, "antes", flow, run) or rows_timeline(data.rows, flow, "antes", run)) \
+            if run is not None else None
+        if not timeline:
+            continue
+        calls = [tuple(call) for call in timeline.get("llamadas") or []]
+        if not timeline.get("marcas"):  # sin las marcas de la corrida no se sabe dónde termina la acción: sin barra
+            continue
+        spans = action_spans(data.plan, flow, timeline)
+        if not spans or not calls or spans[0][1] == 0.0 and not any(at == 0.0 for _, at in timeline["marcas"]):
+            continue
+        title, start, end = spans[0]
+        key = key_call(calls, start, end)
+        if key is None or end <= start:
+            continue
+        before = max(key[1] - start, 0)
+        wait = min(key[2], end) - max(key[1], start)
+        rest = max(end - start - before - wait, 0)
+        total = end - start
+        segments = [(before, "ok", "la app antes de la llamada"), (wait, "after", "espera del servicio"),
+                    (rest, "before", "")]
+        bar = "".join('<div style="width:%.0f%%;background:var(--%s)">%s</div>' % (
+            value * 100.0 / total, color, e("%s s · %s" % (trim(value / 1000.0, 2), text)) if text and value * 100.0 / total
+            > 18 else "") for value, color, text in segments if value > 0)
+        legend = ('<div class="legend"><span><i style="background:var(--ok)"></i>se puede mejorar en la app (%s s)</span>'
+                  '<span><i style="background:var(--after)"></i>depende del servidor (%s s)</span><span><i '
+                  'style="background:var(--before)"></i>lo demás (%s s)</span></div><br/>' % (
+                      trim(before / 1000.0, 2), trim(wait / 1000.0, 2), trim(rest / 1000.0, 2)))
+        return '<h3>¿En qué se van los %s segundos?</h3><div class="stack">%s</div>%s' % (
+            trim(total / 1000.0, 2), bar, legend)
+    return ""
+
+
 def r_found_biz(data):
     cards, untitled = [], 0
     for finding in data.findings:
@@ -19285,7 +19327,8 @@ def r_found_biz(data):
         cards.append('<div class="card t-mejorable"><h3>%d causa%s confirmada%s más %s</h3><p>Todavía sin descripción '
                      'en palabras.</p></div>' % (untitled, "" if untitled == 1 else "s", "" if untitled == 1 else "s",
                                                  chip("se puede mejorar", "c-ok")))
-    body = '<div class="cards">%s</div>' % "".join(cards) if cards else "<p>Ninguna causa confirmada todavía.</p>"
+    body = where_time_goes(data) + ('<div class="cards">%s</div>' % "".join(cards) if cards else
+                                    "<p>Ninguna causa confirmada todavía.</p>")
     return "encontro", "Qué se encontró", body
 
 
@@ -19440,7 +19483,13 @@ def write_report_pair(data, kind, title, html_too):
 
 def cmd_reporte(args):
     """Los dos reportes (técnico y gerencia), inicial o final, de los mismos datos, con la estructura y el diseño de
-    0.16.0 (R). Lee metricas.csv, la línea de tiempo y el resumen de cada corrida: no vuelve a abrir las trazas."""
+    0.16.0 (R). Sin --carpeta y con --gerencia-unificado, el reporte de gerencia de varias investigaciones (R12). Lee
+    metricas.csv, la línea de tiempo y el resumen de cada corrida: no vuelve a abrir las trazas."""
+    if getattr(args, "gerencia_unificado", False):
+        return unified_report(args)
+    if not args.carpeta:
+        raise PerfError("usa --carpeta (con --inicial para el reporte inicial; sin él, el final), o --gerencia-unificado "
+                        "con --carpetas o --todas")
     folder = pathlib.Path(args.carpeta)
     state_path, csv_path = folder / "estado.md", folder / "metricas.csv"
     if not state_path.is_file():
@@ -19500,6 +19549,176 @@ def cmd_reporte(args):
     done_running(folder)
     if plan:
         print_next(folder, plan)
+
+
+# ── Reporte de gerencia unificado (R12) ──────────────────────────────────────
+
+def investigation_label(folder, plan):
+    """R12: el estado de una investigación en palabras: triage, riguroso en curso, en pausa o cerrada (el mismo que
+    dice `estado`)."""
+    try:
+        status = investigation_status(folder, plan)[0]
+    except (PerfError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        status = "abierta"  # sus datos no se pueden leer: su card lo dice
+    if status == "en pausa":
+        return "en pausa", "c-warn"
+    if status == "cerrada":
+        return "cerrada", "c-ok"
+    if plan.get("profundidad") == "triage":
+        return "triage", "c-acc"
+    return "riguroso en curso", "c-acc"
+
+
+def investigation_date(folder):
+    phases = read_phases(folder)
+    phases = phases if isinstance(phases, dict) else {}  # un fases.json raro no detiene el reporte unificado
+    dates = [rec.get("fecha") for rec in (phases.get(p) for p in FASES) if isinstance(rec, dict) and rec.get("fecha")]
+    return min(dates) if dates else folder.name
+
+
+def unified_section(folder, number):
+    """R12: la sección de una investigación en el reporte unificado: su alcance, su estado y las mismas partes del
+    reporte de gerencia, sin recalcular nada; si le faltan datos, lo dice."""
+    plan = folder_plan(folder)
+    try:
+        title, sections = state_sections((folder / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return None, [], "<p>Sin estado.md: no hay datos para esta investigación.</p>", []
+    rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
+    final = report_file(folder, "final") is not None and any(row["fase"] == "despues" for row in rows)
+    results = compare(rows, trust=frames_trust(folder), plan=plan)[0] if final else None
+    data = ReportData(folder, plan, rows, sections, results)
+    data.scope = report_scope(title, plan)
+    label, css = investigation_label(folder, plan)
+    data.label = label
+    parts = []
+    if not rows:
+        parts.append("<p>Todavía sin mediciones: esta investigación no tiene datos para su sección.</p>")
+    else:
+        for builder in (r_user_biz, r_state_biz, r_found_biz, r_changes_biz, r_risks_biz):
+            try:
+                _, name, html_ = builder(data)
+            except (PerfError, OSError, ValueError, KeyError, TypeError, statistics.StatisticsError):
+                name, html_ = "Sin datos", "<p>A esta parte le faltan datos de la investigación.</p>"
+            parts.append("<h3>%s</h3>%s" % (e(name), html_))
+    scope = report_scope(title)
+    head = '<p class="sub">%s · %s %s</p>' % (e(investigation_date(folder)[:10]), chip(label, css), e(
+        "(%s)" % ", ".join(scenario_words(plan, flow) or flow for flow in plan.get("flujos") or {})))
+    return scope, data, head + "".join(parts), data.problems
+
+
+def unified_crossings(datas):
+    """R12: "A tener en cuenta": lo que la skill ya detecta entre investigaciones (el criterio de B8): una mejora que
+    pasa por el código que cita otra investigación abierta. Aplicada después del estado inicial de la otra, ese estado
+    inicial puede no servir; propuesta, puede no servir si se aplica. Solo archivos del código, en palabras."""
+    out = []
+    for first in datas:
+        for item in first.improvements():
+            state = item.get("estado", "propuesta")
+            if state == "descartada":
+                continue
+            files = {str(entry.get("ruta")) for entry in item.get("archivos") or []
+                     if isinstance(entry, dict) and entry.get("ruta")}
+            for entry in item.get("cambios") or []:
+                if isinstance(entry, dict):
+                    files |= {str(name) for name in entry.get("archivos") or []}
+            if not files:
+                continue
+            for second in datas:
+                if second is first or getattr(second, "label", "") == "cerrada":
+                    continue
+                shared = {name for name in files for other in cited_files(second.folder, second.plan)
+                          if name == other or name.endswith("/" + other) or other.endswith("/" + name)}
+                if not shared:
+                    continue
+                count = "%d archivo%s" % (len(shared), "" if len(shared) == 1 else "s")
+                if state == "aplicada":
+                    baseline, applied = phase_time(second.phases, "antes"), fecha_ts(item.get("aplicada_en"))
+                    if baseline and applied and applied <= baseline:
+                        continue  # el estado inicial de la otra ya trae el cambio
+                    out.append("El cambio %s de \"%s\" se aplicó en código que pasa por lo que mide \"%s\" (%s), "
+                               "después de su estado inicial: ese estado inicial puede no servir y conviene medirlo de "
+                               "nuevo." % (item.get("id"), first.scope, second.scope, count))
+                else:
+                    out.append("Si se aplica el cambio %s de \"%s\", el estado inicial de \"%s\" puede no servir: "
+                               "pasan por el mismo código (%s)." % (item.get("id"), first.scope, second.scope, count))
+    return list(dict.fromkeys(out))
+
+
+def unified_report(args):
+    """R12: un solo reporte de gerencia con varias investigaciones del proyecto (triage o riguroso, en cualquier
+    estado): resumen con cifras y un chip por investigación, una sección por investigación en orden de fecha, "A tener
+    en cuenta" y, si hace falta, "Lo pendiente". Sin costo ni términos técnicos y sin recalcular nada."""
+    root = project_root(pathlib.Path.cwd()).resolve()
+    if args.todas:
+        folders = [folder for folder, _ in project_investigations(root)]
+    else:
+        folders = [pathlib.Path(item) for item in args.carpetas or []]
+    unique, seen = [], set()
+    for folder in folders:
+        key = os.path.realpath(str(folder))
+        if key not in seen:
+            seen.add(key)
+            unique.append(folder)
+    missing = [str(folder) for folder in unique if not (folder / "plan.json").is_file()]
+    if missing:
+        print("· Sin plan.json, no son investigaciones y no van en el reporte: %s" % ", ".join(missing[:5]))
+    folders = [folder for folder in unique if (folder / "plan.json").is_file()]
+    if len(folders) < 2:
+        raise PerfError("el reporte unificado junta dos o más investigaciones y %s: pasa --carpetas <carpeta> "
+                        "<carpeta> … o --todas" % ("encontré %d" % len(folders) if folders else "no encontré ninguna")).con(guardado="nada", seguir=[("todas las investigaciones del proyecto",
+                                                                 perf_command(root, "estado"))])
+    folders.sort(key=investigation_date)
+    built = []
+    for index, folder in enumerate(folders, start=1):
+        try:
+            built.append((folder,) + unified_section(folder, index))
+        except (PerfError, OSError, ValueError, KeyError, TypeError, AttributeError, statistics.StatisticsError) as error:
+            built.append((folder, folder.name, None, "<p>No pude leer los datos de esta investigación (%s): su sección "
+                          "queda sin datos.</p>" % e(one_line(str(error))[:160]), []))
+    datas = [item[2] for item in built if isinstance(item[2], ReportData)]
+    flows = sum(len(data.flows) for data in datas)
+    proposed = sum(1 for data in datas for item in data.improvements() if item.get("estado") != "descartada")
+    applied = [item for data in datas for item in data.improvements(final_only=True)]
+    gains = [r for data in datas if data.final for item in data.improvements(final_only=True)
+             for r in [improvement_metric(data.plan, item, data.results)] if r is not None and r["veredicto"] == "mejora"]
+    kpis = [kpi(str(len(folders)), "investigaciones"), kpi(str(flows), "flujos medidos"),
+            kpi(str(proposed), "cambios propuestos"), kpi(str(len(applied)), "cambios aplicados")]
+    if gains:
+        kpis.append(kpi(str(len(gains)), "cambios aplicados con una mejora medida"))
+    chips = " ".join('<a href="#inv%d">%s</a>' % (index, chip("%s · %s" % (scope, investigation_label(folder, folder_plan(
+        folder))[0]), "c-acc")) for index, (folder, scope, _, _, _) in enumerate(built, start=1) if scope)
+    sections = [("resumen", "Resumen", '<div class="kpis">%s</div><p>%s</p>' % ("".join(kpis), chips))]
+    problems = []
+    for index, (folder, scope, data, html_, found) in enumerate(built, start=1):
+        sections.append(("inv%d" % index, scope or folder.name, html_))
+        problems += found
+    crossings = unified_crossings(datas)
+    if crossings:
+        sections.append(("cruces", "A tener en cuenta", "<ul>%s</ul>" % "".join("<li>%s</li>" % e(line)
+                                                                                for line in crossings)))
+    pending = [(data, item) for data in datas if data.final for item in data.improvements()
+               if item.get("estado", "propuesta") in ("propuesta", "pendiente", "aprobada")]
+    if pending:
+        sections.append(("pendiente", "Lo pendiente", "<ul>%s</ul>" % "".join(
+            "<li>%s: %s (%s)</li>" % (e(data.scope), e(plain_improvement(data, item, "titulo_gerencia", "titulo")
+                                                        or UNTITLED_CHANGE),
+                                      e(STATE_BUSINESS.get(item.get("estado", "propuesta"), "sin aplicar")))
+            for data, item in pending)))
+    base = pathlib.Path(args.salida) if getattr(args, "salida", None) else investigations_base(root)
+    base.mkdir(parents=True, exist_ok=True)
+    title = "Performance · Resumen de %d investigaciones" % len(folders)
+    date = datetime.date.today().strftime(FOOTER_DATE)
+    target = base / "reporte-gerencia-unificado.html"
+    target.write_text(report_page(project_name(root), title, "", "gerencia", sections, date), encoding="utf-8")
+    print("✔ Reporte de gerencia unificado (%d investigaciones): %s" % (len(folders), target))
+    warn_jargon(problems)
+    print_setup_next(root, "el reporte unificado está listo", [{"tipo": "archivo", "texto": str(target),
+                                                               "que": "el reporte de gerencia de las %d investigaciones"
+                                                               % len(folders)},
+                                                              end_step("No queda ningún paso por ejecutar para este "
+                                                                       "reporte: cada investigación sigue con su propio "
+                                                                       "`siguiente`.")])
 
 
 # ── nodos ────────────────────────────────────────────────────────────────────
@@ -24417,11 +24636,17 @@ def main(argv=None):
     p.set_defaults(func=cmd_har)
 
     p = sub.add_parser("reporte", help="reporte inicial (--inicial) o final, técnico y de gerencia, en markdown y, con "
-                                       "--html, en HTML")
-    p.add_argument("--carpeta", required=True)
+                                       "--html, en HTML; con --gerencia-unificado, uno de gerencia de varias investigaciones")
+    p.add_argument("--carpeta")
     p.add_argument("--inicial", action="store_true", help="después del diagnóstico: estado inicial y plan de mejoras")
     p.add_argument("--final", action="store_true", help="el reporte final (es lo que hace sin --inicial)")
     p.add_argument("--html", action="store_true")
+    p.add_argument("--gerencia-unificado", dest="gerencia_unificado", action="store_true",
+                   help="R12: un solo reporte de gerencia con varias investigaciones (con --carpetas o --todas)")
+    p.add_argument("--carpetas", nargs="+", metavar="CARPETA", help="con --gerencia-unificado: las investigaciones")
+    p.add_argument("--todas", action="store_true", help="con --gerencia-unificado: todas las que lista `estado`")
+    p.add_argument("--salida", help="con --gerencia-unificado: la carpeta del reporte (por defecto, la de las "
+                                    "investigaciones)")
     p.set_defaults(func=cmd_reporte)
 
     p = sub.add_parser("nodos", help="busca un nodo en un volcado de uiautomator y da el centro de sus bounds para tocarlo")
@@ -24503,7 +24728,8 @@ def main(argv=None):
             # B10: un comando largo que terminó (bien, con un error guiado o con Ctrl+C) no deja su registro de "en curso";
             # solo queda si el proceso murió sin poder llegar aquí (la terminal cerrada, un kill).
             running = (pathlib.Path(args.plan).parent if args.command == "capturar" and getattr(args, "plan", None)
-                       else pathlib.Path(args.carpeta) if args.command in ("reporte", "diagnostico") else None)
+                       else pathlib.Path(args.carpeta) if args.command in ("reporte", "diagnostico")
+                       and getattr(args, "carpeta", None) else None)  # R12: el reporte unificado va sin --carpeta
             if running is not None:
                 done_running(running)
     except PerfError as error:

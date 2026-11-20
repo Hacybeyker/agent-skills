@@ -1168,6 +1168,62 @@ class ReportStructureTest(PerfBase):
         self.assertEqual(perf.verdict_label({"veredicto": "dentro del ruido", "avisos": []}),
                          "Dentro de la variación normal")  # R9
 
+    def test_barra_de_en_que_se_va_el_tiempo(self):
+        calls = [("GET a", 0, 100), ("GET b", 50, 300), ("GET c", 350, 500)]
+        self.assertEqual(perf.key_call(calls, 0, 320), ("GET b", 50, 300))  # R7: la que termina última antes del fin
+        self.assertIsNone(perf.key_call([("GET c", 350, 500)], 0, 320))  # sin ninguna, no hay barra
+
+    def test_barra_solo_con_las_marcas_de_la_corrida(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        self.assertNotIn("¿En qué se van", (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+        line = {"llamadas": [["GET pedidos/{id}", 100.0, 400.0]], "marcas": [["NAV detalle", 0.0], ["MARK detalle", 500.0]]}
+        (self.folder / "antes").mkdir()  # la carpeta de la fase, donde capturar deja las trazas
+        for run in range(1, 6):
+            perf.save_timeline(self.folder / "antes", "detalle", run, line)
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("¿En qué se van los 0.5 segundos?", business)  # R7: la app 0.1 s, el servicio 0.3 s, el resto 0.1 s
+        self.assertIn("se puede mejorar en la app (0.1 s)", business)
+        self.assertIn("depende del servidor (0.3 s)", business)
+
+    def test_unificado_con_una_sola_repetida_o_sin_datos(self):
+        result = self.perf("reporte", "--gerencia-unificado", "--carpetas", self.folder, self.folder)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("encontré 1", result.stderr)  # la misma carpeta dos veces es una sola
+        result = self.perf("reporte", "--gerencia-unificado", "--todas")
+        self.assertIn("encontré 1", result.stderr)
+        empty = self.dir / "reports" / "perf" / "vacia" / "2026-03-05"
+        write(empty / "plan.json", json.dumps({"paquete": "com.example.app", "flujos": {"vacia": {"recorrido": "true"}}}))
+        write(empty / "estado.md", "# Rendimiento · Vacía · 2026-03-05\n\n## Ficha\n\n")
+        broken = self.investigation(name="rota")
+        write(broken / "fases.json", "[]")
+        self.ok("reporte", "--gerencia-unificado", "--todas")
+        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        self.assertIn("Resumen de 3 investigaciones", page)
+        self.assertIn("Todavía sin mediciones", page)
+
+    def test_gerencia_unificado(self):
+        other = self.investigation("hb-performance-0.9.0", "lista")
+        for folder in (self.folder, other):
+            self.ok("reporte", "--carpeta", folder, "--inicial")
+        out = self.ok("estado")
+        self.assertIn("reporte --gerencia-unificado --todas", out)  # R12: `estado` lo ofrece
+        out = self.ok("reporte", "--gerencia-unificado", "--todas")
+        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        self.assertIn("reporte-gerencia-unificado.html", out)
+        self.assertIn("Performance · Resumen de 2 investigaciones", page)
+        self.assertIn("App de pedidos", page)
+        self.assertEqual(len(re.findall(r'<section id="inv\d"', page)), 2)
+        self.assertIn('href="#inv1"', page)
+        self.assertNotIn("USD", page)
+        self.assertNotIn("Costo", page)
+        self.assertNotRegex(re.sub(r"<[^>]+>", " ", page), r"\b\w+_ms\b")
+        out = self.ok("reporte", "--gerencia-unificado", "--carpetas", self.folder, other, "--salida", self.dir / "salida")
+        self.assertTrue((self.dir / "salida" / "reporte-gerencia-unificado.html").is_file())
+        result = self.perf("reporte", "--gerencia-unificado", "--carpetas", self.folder)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("dos o más investigaciones", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

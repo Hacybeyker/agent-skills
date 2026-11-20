@@ -8363,6 +8363,7 @@ class FlowServicesOrderTest(PerfBase):
         self.assertIn("línea de tiempo (medición típica)", page)
         self.assertIn('class="tl-bar key"', page)
         business = (self.folder / "reporte-inicial-gerencia.html").read_text(encoding="utf-8")
+        self.assertNotIn("¿En qué se van los", business)  # R7: sin las marcas de la corrida, no hay barra
     def test_en_el_final_el_backend_que_se_mueve_es_variacion_del_backend(self):
         after = rows("despues", "lista", "lista_ms", [1200] * 5) \
             + timed_service("despues", "GET api/v1/sesion", 1, 100, 80, 0, "carga") \
