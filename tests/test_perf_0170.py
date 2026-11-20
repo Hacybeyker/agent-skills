@@ -48,12 +48,12 @@ class VideoEventsTest(unittest.TestCase):
     def test_los_eventos_del_prototipo_salen_iguales(self):
         events = prototype_events()
         self.assertEqual([(f["desde"], f["hasta"], f["rotulo"], f["tipo"]) for f in events["fases"]], [
-            (0.0, 4.0, "Preparación · no se mide", "prep"), (4.0, 6.8, "Medición · Cargar Inicio", "med"),
+            (0.0, 4.0, "Preparación · sin traza, no se mide", "prep"), (4.0, 6.8, "Medición · Cargar Inicio", "med"),
             (6.8, 8.6, "Medición · Abrir Ver detalle", "med"), (8.6, 9.4, "Medición · Volver a Inicio", "med"),
             (9.4, 10.0, "Fin de la prueba", "fin")])
         self.assertEqual(events["tramos_video"], [{"archivo": PARTS[0], "inicio": 0.0}, {"archivo": PARTS[1], "inicio": 4.2},
                                                   {"archivo": PARTS[2], "inicio": 7.5}])
-        self.assertEqual(events["marcas"][0], {"t": 4.05, "nombre": "SCREEN Inicio onCreate"})
+        self.assertEqual(events["marcas"][0], {"t": 4.05, "nombre": "SCREEN Inicio onCreate", "papel": "", "usada": True})
         self.assertEqual(events["duracion"], 10.0)
         self.assertEqual(events["preparar"], [0.3, 3.9])
 
@@ -64,18 +64,18 @@ class VideoEventsTest(unittest.TestCase):
         self.assertEqual(phases[-1]["hasta"], events["duracion"])
         for before, after in zip(phases, phases[1:]):
             self.assertEqual(before["hasta"], after["desde"])
-        self.assertIn(("Recorrido · entre tramos", "rec"), [(f["rotulo"], f["tipo"]) for f in phases])
+        self.assertIn(("Sin medir · traza grabando", "rec"), [(f["rotulo"], f["tipo"]) for f in phases])
 
     def test_sin_tramos_ubicados_todo_el_recorrido_es_medicion(self):
         events = prototype_events(spans=[], marks=[], alignment={"marcas": "falló", "detalle": "x"})
         self.assertEqual([f["rotulo"] for f in events["fases"]],
-                         ["Preparación · no se mide", "Medición · Inicio", "Fin de la prueba"])
+                         ["Preparación · sin traza, no se mide", "Medición · Inicio", "Fin de la prueba"])
         self.assertEqual(events["marcas"], [])
 
     def test_si_preparar_fallo_todo_es_preparacion(self):
         events = prototype_events(clock={"preparar_inicio": 1000.3, "preparar_fin": 1003.9}, spans=[], marks=[])
         self.assertEqual([(f["rotulo"], f["desde"], f["hasta"]) for f in events["fases"]],
-                         [("Preparación · no se mide", 0.0, 10.0)])
+                         [("Preparación · sin traza, no se mide", 0.0, 10.0)])
 
     def test_las_marcas_fuera_del_video_no_van_y_hay_tope(self):
         marks = [(990.0, "MARK antes"), (1011.0, "MARK despues")] + [(1004.0 + i * 0.01, "MARK m%d" % i) for i in range(160)]
@@ -87,7 +87,7 @@ class VideoEventsTest(unittest.TestCase):
     def test_cada_marca_se_ve_hasta_la_siguiente_o_un_rato(self):
         windows = perf.mark_windows({"duracion": 10.0, "marcas": [{"t": 1.0, "nombre": "a"}, {"t": 1.5, "nombre": "b"},
                                                                   {"t": 5.0, "nombre": "c"}]})
-        self.assertEqual([(round(a, 2), round(b, 2)) for a, b, _ in windows], [(1.0, 1.5), (1.5, 2.7), (5.0, 6.2)])
+        self.assertEqual([(round(a, 2), round(b, 2)) for a, b, _ in windows], [(1.0, 1.5), (1.5, 3.0), (5.0, 6.5)])
 
     def test_la_cola_del_video_es_del_flujo_o_del_plan(self):
         self.assertEqual(perf.video_tail({}, {}), 2.0)
@@ -160,7 +160,7 @@ class VideoClockTest(unittest.TestCase):
         spans, marks = perf.video_trace_events(rows, flow, "home", lambda ns: 100 + ns / 1e9)
         self.assertEqual([(text, round(first, 3), round(last, 3)) for text, first, last in spans],
                          [("Abrir el detalle", 101.0, 102.5)])
-        self.assertEqual([name for _, name in marks], ["NAV detalle", "MARK detalle"])
+        self.assertEqual([mark[1] for mark in marks], ["NAV detalle", "MARK detalle"])
         flow = {"ventana": {"desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}}, "titulo": "Pedidos"}
         spans, _ = perf.video_trace_events(rows, flow, "pedidos_lista", lambda ns: ns / 1e9)
         self.assertEqual([(text, round(first, 3), round(last, 3)) for text, first, last in spans], [("Pedidos", 1.0, 2.5)])
@@ -424,7 +424,7 @@ class TestRunVideoTest(CaptureBase):
         events = json.loads((work / "eventos.json").read_text(encoding="utf-8"))
         self.assertEqual(events["tramos_video"], [{"archivo": "video/home/parte1.mp4", "inicio": 0.0}])
         self.assertEqual(events["grabador"], "screenrecord")
-        self.assertEqual(events["fases"][0]["rotulo"], "Preparación · no se mide")
+        self.assertEqual(events["fases"][0]["rotulo"], "Preparación · sin traza, no se mide")
         self.assertEqual(events["fases"][-1]["hasta"], events["duracion"])
         # con la hora del dispositivo y el ClockSnapshot de la traza; "aproximada" solo si la máquina tardó más de 2 s
         # entre `date` y el inicio de Perfetto (un CI muy cargado)
@@ -815,7 +815,7 @@ class FfmpegRealTest(unittest.TestCase):
         self.events = {"version": 1, "flujo": "home", "grabador": "screenrecord", "duracion": 4.0,
                        "tramos_video": [{"archivo": "video/home/parte1.mp4", "inicio": 0.0},
                                         {"archivo": "video/home/parte2.mp4", "inicio": 2.0}],
-                       "fases": [{"desde": 0.0, "hasta": 1.5, "rotulo": "Preparación · no se mide", "tipo": "prep"},
+                       "fases": [{"desde": 0.0, "hasta": 1.5, "rotulo": "Preparación · sin traza, no se mide", "tipo": "prep"},
                                  {"desde": 1.5, "hasta": 3.5, "rotulo": "Medición · Pedidos", "tipo": "med"},
                                  {"desde": 3.5, "hasta": 4.0, "rotulo": "Fin de la prueba", "tipo": "fin"}],
                        "marcas": [{"t": 1.6, "nombre": "MARK pedidos_visible"}], "alineacion": {"marcas": "ok"}}

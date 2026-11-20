@@ -13,9 +13,10 @@ def perf_argv(script):
     llamada."""
     return [sys.executable, "-I", str(PERF_RAPIDO), str(script)]
 
-# Git aislado de la configuración de la máquina (firma de commits, hooks, plantillas).
+# Git aislado de la configuración de la máquina (firma de commits, hooks, plantillas), y sin las variables con las que
+# un agente marca los shells que abre (CLAUDECODE, AI_AGENT): los tests dan lo mismo en una terminal, en un agente y en CI.
 ENV = dict(
-    os.environ,
+    {name: value for name, value in os.environ.items() if name not in ("CLAUDECODE", "AI_AGENT")},
     GIT_CONFIG_GLOBAL=os.devnull,
     GIT_CONFIG_NOSYSTEM="1",
     GIT_AUTHOR_NAME="test",

@@ -109,7 +109,7 @@ pnpm dlx skills remove -g --skill '*' -y
 - `-g` instala para tu usuario (en todos tus proyectos). Sin `-g`, se instala solo en el proyecto actual.
 - `-a claude-code universal` elige los agentes: `claude-code` → `~/.claude/skills`; `universal` → `~/.agents/skills` (Gemini en Android Studio, Copilot, Junie, Codex).
 - **¿Usas otros agentes?** Quita `-a` y `-y`: la CLI detecta los agentes que tienes y te deja elegir. **No uses `-y` sin `-a`:** instala en todos los agentes que conoce, incluidos los que no usas.
-- La CLI guarda **una copia** en `~/.agents/skills` y un enlace en `~/.claude/skills`. Los cambios del repo llegan con `pnpm dlx skills update -g`, no al instante. `check` compara una huella de cada skill con el repo, así que detecta cualquier cambio aunque la versión de la skill no haya subido.
+- La CLI guarda **una copia** en `~/.agents/skills` y un enlace en `~/.claude/skills`. Los cambios del repo llegan con `pnpm dlx skills update -g`, no al instante. **Si instalaste con la CLI, actualiza siempre con ese comando:** no copies la carpeta de una skill a mano encima de la instalada, porque una copia a mano la saca del registro de la CLI. `check` compara una huella de cada skill con el repo, así que detecta cualquier cambio aunque la versión de la skill no haya subido.
 
 ### Qué no instala ninguna de las dos
 

@@ -156,6 +156,16 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py reanudar --carpeta <carpeta>
 
 Repone el setup y las marcas, dice qué cambió en el código desde la pausa y si la línea base sirve, y te da el paso siguiente (con `--simular`, solo lo muestra).
 
+### Archivar una investigación que no se va a retomar
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py archivar --carpeta <carpeta> --motivo "<por qué no se va a retomar>"
+```
+
+Para la que quedó en pausa (o sin marcas en el árbol) y no se va a retomar. No borra nada: la anota como archivada, con la fecha y el motivo, y deja de contar para el aviso de `setup --estado` que impide actualizar el parche del setup mientras haya investigaciones con mediciones. Si todavía tiene marcas en el árbol, se detiene y te da `pausar` primero. Si cambias de idea, `reanudar` la retoma y revisa si la línea base sigue sirviendo. La que terminó no se archiva: se cierra (`cerrar`).
+
 ### Ver todas las investigaciones del proyecto
 
 **Dónde:** terminal, sin chat, en la raíz del proyecto
@@ -164,7 +174,7 @@ Repone el setup y las marcas, dice qué cambió en el código desde la pausa y s
 cd <raíz> && python3 -I <skill>/scripts/perf.py estado
 ```
 
-Cada una con su estado (abierta, en pausa o cerrada), las marcas puestas por repo, las mejoras y su paso siguiente. Con dos o más que ya tienen reporte, también imprime el comando del caso siguiente.
+Cada una con su estado (abierta, en pausa, archivada o cerrada), las marcas puestas por repo, las mejoras y su paso siguiente. Con dos o más que ya tienen reporte, también imprime el comando del caso siguiente.
 
 ### Un solo reporte de gerencia de varias investigaciones
 
@@ -204,7 +214,17 @@ Te deja los comandos de la medición.
 cd <raíz> && python3 -I <skill>/scripts/perf.py decidir --carpeta <carpeta> --aprobar M1,M3 --descartar M2 --pendiente -
 ```
 
-Imprime el chat de la sesión 3. Las mejoras a prueba se aprueban igual.
+Imprime el chat de la sesión 3. Las mejoras a prueba se aprueban igual. La decisión queda en "Decisiones" de `estado.md` con la fecha y la hora (y, si consta, el agente que la corrió desde un chat: Claude Code marca sus shells; sin esa marca queda solo la hora), y antes del chat de la sesión 3 `siguiente` dice cuándo se aprobó cada mejora. `--pendiente` es "para más adelante", no "sin decidir".
+
+### Reabrir una decisión (no fue tuya, o cambiaste de idea)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py decidir --carpeta <carpeta> --reabrir M1
+```
+
+Vuelve a dejar como propuesta una mejora que quedó aprobada, pendiente o descartada, y lo anota con la fecha y la hora. Solo cambia el plan: no toca código. Una mejora ya aplicada no se reabre: se quita con `lineabase --quitar-mejoras`.
 
 ### Aplicar una mejora aprobada
 
@@ -288,9 +308,9 @@ Con hb-performance, mejora el resumen ejecutivo, el resumen para gerencia y la l
 cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
 
-Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial.
+Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial. Si el reporte inicial que hay es de una versión anterior (otra estructura), `siguiente` ofrece este comando con `--inicial` en un aviso opcional, antes de los caminos de la decisión (no es un paso numerado); antes de sobrescribirlo, `reporte` guarda una copia (`reporte-inicial-dev.estructura-anterior.html`), sin pisar ninguna otra.
 
-### Unir el video de la prueba (instalaste ffmpeg después de la prueba)
+### Unir el video de la prueba (instalaste ffmpeg después de la prueba, o el video es de 0.17.0)
 
 **Dónde:** terminal, sin chat
 
@@ -298,7 +318,7 @@ Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-ger
 cd <raíz> && python3 -I <skill>/scripts/perf.py video --carpeta <carpeta>
 ```
 
-Arma de nuevo el video de evidencia de cada prueba desde `video/<flujo>/eventos.json`, sin repetirla: el visor `prueba-<flujo>.html` y, con `ffmpeg`, el video unido y rotulado `prueba-<flujo>.mp4` (`--flujo <flujo>` para uno solo). Los tramos originales quedan en `video/<flujo>/`. Cómo instalar `ffmpeg` sin root: `perf.py setup --estado` o [setup.md](setup.md) · Requisitos de la máquina.
+Arma de nuevo el video de evidencia de cada prueba desde `video/<flujo>/eventos.json`, sin repetirla: el visor `prueba-<flujo>.html` y, con `ffmpeg`, el video unido y rotulado `prueba-<flujo>.mp4` (`--flujo <flujo>` para uno solo). Los tramos originales quedan en `video/<flujo>/`. Si la prueba se hizo con 0.17.0, el video sale con los rótulos de ahora (cada parte dice si la traza graba y si se mide; cada marca, su papel), sin repetirla: `siguiente` lo ofrece en una línea opcional. Cómo instalar `ffmpeg` sin root: `perf.py setup --estado` o [setup.md](setup.md) · Requisitos de la máquina.
 
 ### Agregar una métrica, un tramo o una marca
 

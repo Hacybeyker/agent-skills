@@ -69,6 +69,9 @@ def without_new(record):
                                                                          "segundos", "reglas", "dispositivo", "corte_s")}
 
 
+AGENT_ENV = ("CLAUDECODE", "AI_AGENT")
+
+
 class PerfBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -77,6 +80,8 @@ class PerfBase(unittest.TestCase):
         # 0.17.0: sin el ffmpeg ni el scrcpy de la máquina (FFMPEG y SCRCPY vacíos): el video de la prueba sale en tramos
         # con su visor; los tests de test_perf_0170.py los usan a propósito
         self.env = dict(os.environ, FFMPEG="", SCRCPY="")
+        for name in AGENT_ENV:  # 0.18.0 · D1: `decidir` anota si lo corrió un agente; los tests, sin esas variables
+            self.env.pop(name, None)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -946,7 +951,9 @@ class CaptureModesTest(CaptureCase):
         self.tp_outputs(GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba", "--memoria")
         self.assertIn("jank_app_pct", out)
-        self.assertIn("HTTP ×2 (GET items/{id} ×2)", out)
+        self.assertIn("Secciones propias: HTTP ×2 · SCREEN ×1 (el detalle, con cada ruta, en ", out)  # 0.18.0 · O1
+        self.assertIn("| GET items/{id} | 2 | 0 | 0 | 0 |",
+                      (self.plan.parent / "prueba" / "home-metricas.md").read_text(encoding="utf-8"))
         self.assertIn("pss_mb", out)
         self.assertFalse((self.plan.parent / "metricas.csv").exists())
 
