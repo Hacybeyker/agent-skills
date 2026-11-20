@@ -46,6 +46,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import textwrap
 import time
 import traceback
@@ -95,6 +96,11 @@ HZ_TOLERANCE = 0.06  # la tasa del plan y la de la traza son "la misma" si difie
 # Slices con los que la plataforma entrega un evento de input a la app (toques, swipes), como GLOB de trace_processor.
 # Es una heurística: el nombre depende de la versión de Android; el plan lo cambia con 'input_slices'.
 INPUT_SLICES = "deliverInputEvent*"
+# C9: `"desde": {"entrada": "toque"}` en un tramo o una métrica de usuario: el evento de entrada del toque que ya trae la
+# traza (las slices deliverInputEvent del hilo principal, categoría view de atrace; el patrón es `input_slices` del plan)
+# sirve de inicio cuando el toque es de un módulo binario y no se le puede poner una marca. Por defecto, el último toque
+# antes de la marca `hasta` ("cual": "ultima_antes").
+INPUT_MARK = "INPUT toque"
 INPUT_GLOB = re.compile(r"[\w .:=#()\[\]*?-]+")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 INPUT_GRACE_NS = 100_000_000  # los eventos del mismo gesto que dispara una métrica no cuentan como "pasos del recorrido"
@@ -396,6 +402,7 @@ def describe(values, cv_max=CV_MAX):
     if groups and data["cv"] is not None and data["cv"] > cv_max / 2:
         data["avisos"].append(BIMODAL)
         data["grupos"] = (statistics.median(groups[0]), statistics.median(groups[1]))
+        data["grupos_n"] = (len(groups[0]), len(groups[1]))
     return data
 
 
@@ -484,7 +491,10 @@ def segment_min_frames(plan, flow, segment):
     return SEGMENT_MIN_FRAMES
 
 
-def few_segment_frames(groups, flow, metric, plan=None):
+SUMMARY_MIN_FRAMES = 30  # C8: con menos frames en un tramo, el resumen de fase no muestra su porcentaje de jank
+
+
+def few_segment_frames(groups, flow, metric, plan=None, minimum=None):
     """El aviso si el jank de un tramo se calcula sobre muy pocos frames (menos de SEGMENT_MIN_FRAMES en antes o en
     después): con 3 o 4 frames, un solo frame lento da 25 % o 33 %. '' si no."""
     segment = segment_of(metric)
@@ -494,7 +504,8 @@ def few_segment_frames(groups, flow, metric, plan=None):
     if not entry:
         return ""
     counts = [statistics.median(values) for values in entry["fases"].values() if values]
-    if counts and min(counts) < segment_min_frames(plan, flow, segment):
+    floor = max(minimum or 0, segment_min_frames(plan, flow, segment))
+    if counts and min(counts) < floor:
         return "pocos frames en el tramo (%s): informativa" % " / ".join(trim(count, 0) for count in counts)
     return ""
 
@@ -675,18 +686,42 @@ def priority(metric, plan):
     return (3, 0, metric)
 
 
+def is_instant(metric):
+    """C8: `<tramo> inicio_ms` y `<tramo> fin_ms` (también los de un servicio) son instantes desde el inicio de la traza,
+    no duraciones: no van al resumen de fase ni a los reportes."""
+    return metric.endswith((" inicio_ms", " fin_ms"))
+
+
+def group_text(s):
+    """C8: "dos grupos (4 corridas en ~120 ms y 6 en ~180 ms)": cuántas corridas hay en cada grupo."""
+    counts, medians = s.get("grupos_n"), s.get("grupos")
+    if not counts or not medians:
+        return BIMODAL
+    return "%s (%d corrida%s en ~%s y %d en ~%s)" % (BIMODAL, counts[0], "" if counts[0] == 1 else "s", fmt(medians[0]),
+                                                   counts[1], fmt(medians[1]))
+
+
 def summary_rows(rows, plan, phases=FASES, flows=None, everything=False, trust=("ok", ""), folder=None):
     table, hidden = [], 0
     note = frames_note(trust)
     foreign = foreign_endpoints(folder, plan, rows) if folder is not None and plan else {}
-    for (flow, metric), entry in sorted(group(rows).items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
+    groups = group(rows)
+    for (flow, metric), entry in sorted(groups.items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan))):
         if flows and flow not in flows:
+            continue
+        if is_instant(metric):  # C8: el momento en que empieza o termina un tramo no es una duración: queda en el CSV
+            hidden += 1
             continue
         for phase in phases:
             values = entry["fases"].get(phase)
             if not values:
                 continue
             s = describe(values)
+            few = few_segment_frames(groups, flow, metric, plan, SUMMARY_MIN_FRAMES)
+            if few:  # C8: con menos de 30 frames en el tramo, el porcentaje de jank no significa nada
+                table.append([phase, flow, metric, entry["familia"], s["n"], "pocos frames", "—", "—", "—",
+                              "%s; lee frame_p90_ms y hilo_max_ms del tramo" % few.split(":")[0]])
+                continue
             important = priority(metric, plan)[0] < 3 or s["avisos"]
             if not everything and not important:
                 hidden += 1
@@ -694,9 +729,10 @@ def summary_rows(rows, plan, phases=FASES, flows=None, everything=False, trust=(
             unit = entry["unidad"]
             service = SERVICE_METRIC.fullmatch(metric)
             alien = [FOREIGN_LABEL] if service and service.group(1) in foreign.get(flow, ()) else []
+            shown = [group_text(s) if aviso == BIMODAL else aviso for aviso in s["avisos"]]  # C8: cuántas en cada grupo
             table.append([phase, flow, metric, entry["familia"], s["n"], fmt(s["mediana"], unit), fmt(s["p90"], unit),
                           "%s – %s" % (fmt(s["min"]), fmt(s["max"])), fmt_pct(s["cv"], signed=False),
-                          ", ".join(alien + s["avisos"] + ([note] if note and frame_metric(metric) else [])) or "—"])
+                          ", ".join(alien + shown + ([note] if note and frame_metric(metric) else [])) or "—"])
     return table, hidden
 
 
@@ -732,6 +768,7 @@ def compare_cells(r):
 
 
 def compact_compare(results, plan, everything=False):
+    results = [r for r in results if not is_instant(r["metrica"])]  # C8: un instante no es una medida que se compare
     chosen = [r for r in results if everything or priority(r["metrica"], plan)[0] < 3
               or r["veredicto"] in ("mejora", "regresión")]
     chosen.sort(key=lambda r: (r["flujo"], priority(r["metrica"], plan)))
@@ -854,6 +891,14 @@ def load_plan(path):
     for name, flow in plan["flujos"].items():
         if not isinstance(flow, dict):
             raise PerfError("el flujo '%s' de %s debe ser un objeto" % (name, path))
+        for spec in [item for key in ("metricas_usuario", "segmentos") if isinstance(flow.get(key), list)
+                     for item in flow[key]]:
+            start = spec.get("desde") if isinstance(spec, dict) else None
+            if isinstance(start, dict) and start.get("entrada") is not None and not start.get("marca"):
+                if start.get("entrada") != "toque":
+                    raise PerfError("'%s.desde.entrada' en '%s': el único valor es \"toque\" (el evento de entrada del "
+                                    "toque que abre el tramo)" % (spec.get("nombre"), name))
+                start.update(marca=INPUT_MARK, cual=start.get("cual") or LAST_BEFORE)  # C9
         route = flow.get("recorrido")
         if isinstance(route, dict) and route.get("tipo") != "arranque-frio":
             raise PerfError("'%s.recorrido': como objeto solo admite {\"tipo\": \"arranque-frio\", \"actividad\", "
@@ -1466,6 +1511,28 @@ def metrics_spanning_input(sections, specs, inputs):
     return out
 
 
+def repeated_without_which(sections, flow_spec):
+    """C7: las marcas que el plan usa como `desde` o `hasta` sin `cual` y que salieron más de una vez: [texto]. Dice qué
+    ocurrencia usa la regla por defecto (en `desde`, la primera; en `hasta`, la última después de `desde`)."""
+    out = []
+    for label, spec in measured_spans(flow_spec):
+        for side in ("desde", "hasta"):
+            marker = spec[side]
+            if marker.get("cual") or marker.get("marca") == INPUT_MARK:
+                continue
+            count = sum(1 for item in sections if fnmatch.fnmatchcase(item[4], marker["marca"]))
+            if count < 2:
+                continue
+            last_before = spec["desde"].get("cual") == LAST_BEFORE
+            text = ("la marca %s salió %d veces; se usa la %s (`cual` no está en el plan, en %s)" % (
+                marker["marca"], count, "primera" if side == "desde" else "última" if last_before else
+                "última después de %s" % spec["desde"]["marca"],
+                "%s.%s" % (label, side)))
+            if text not in out:
+                out.append(text)
+    return out
+
+
 def repeated_marks(sections):
     """{marca: veces} de las marcas MARK que salieron más de una vez en una misma carga: apariciones seguidas de la
     misma marca sin nada entre ellas que indique una carga nueva (una navegación NAV, el ciclo de vida de otra pantalla
@@ -1693,6 +1760,10 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     frames = [r for r in rows if r[0] == "frame"]
     main = sorted((r for r in rows if r[0] == "hilo"), key=lambda r: r[1])
     sections = sorted((r for r in rows if r[0] == "seccion"), key=lambda r: r[1])
+    if any(mark == INPUT_MARK for mark, _ in plan_marks(flow_spec)):
+        # C9: cada evento de entrada (un toque) como una marca más, solo si el plan lo usa como inicio de un tramo
+        sections = sorted(sections + [("seccion", r[1], r[2], 0, INPUT_MARK) for r in rows if r[0] == "input"],
+                          key=lambda r: r[1])
     launches = sorted((r for r in rows if r[0] == "lanzamiento"), key=lambda r: r[1])
     bounds = [r for r in rows if r[0] == "limites"]
     vsync = next((r[2] for r in rows if r[0] == "vsync" and r[2] > 0), 0)
@@ -1719,6 +1790,9 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     own = [s for s in sections if s[4].startswith(("SCREEN ", "NAV ", "MARK ", "reportFullyDrawn"))]
     origin = bounds[0][1] if bounds else min((r[1] for r in rows if r[0] in ("seccion", "hilo", "frame")), default=0)
     info["ultima_marca"] = (own[-1][4], (own[-1][1] - origin) / 1e9) if own else None
+    ends = [m[1] + max(m[2], 0) for m in markers for mark, _ in plan_marks(flow_spec) if fnmatch.fnmatchcase(m[4], mark)]
+    info["ultima_marca_plan_s"] = (max(ends) - origin) / 1e9 if ends else None  # C6
+    info["sin_cual"] = repeated_without_which(sorted(set(sections + launches), key=lambda r: r[1]), flow_spec)  # C7
     info["http"] = sum(1 for s in sections if s[4].startswith("HTTP "))
     info["cruzan_pausa"] = pause_conflicts(markers, flow_spec)
     if not process:
@@ -2887,6 +2961,8 @@ def cmd_pausa(args):
 
 # ── Cortar una corrida desviada ──────────────────────────────────────────────
 CUT_REASON = "cortada a mano"
+TAIL_CUT = "cola cortada"  # C6: no es un motivo de invalidez: la corrida vale (la traza ya tenía la última marca)
+TAIL_DEFAULT_S = 5  # C6: segundos de traza después de la última marca del plan (`cola_s` del flujo; 0 no corta)
 CUT_POLL_S = 0.2
 PAUSE_FLAG_ENV = "HB_PERF_PAUSA_ACTIVA"
 CUT_HINT = ("· Si una corrida se desvía (otra pantalla, un toque que no entró), x + Enter la corta: se descarta sin "
@@ -3010,24 +3086,35 @@ def settle(seconds):
         time.sleep(seconds)
 
 
-def drive(recorrido, label, cutter=None):
+def drive(recorrido, label, cutter=None, deadline=None):
     """Recorre el flujo. Devuelve un motivo de invalidez o None. Con `cutter` (hay una terminal interactiva), x + Enter
-    corta el recorrido en el momento y el motivo es CUT_REASON."""
+    corta el recorrido en el momento y el motivo es CUT_REASON. Con `deadline` (C6: el momento, en time.time(), en que la
+    última marca del plan ya salió con holgura), el recorrido que sigue después se corta y la corrida vale: devuelve
+    TAIL_CUT."""
     if recorrido == "manual":
         answer = wait_enter("▶ %s: recorre el flujo y presiona Enter (x + Enter para descartarla) " % label)
         return "descartada por el usuario" if answer == "x" else None
-    if cutter is None:
+    if cutter is None and deadline is None:
         result = subprocess.run(recorrido, shell=True, env=child_env())
         return None if result.returncode == 0 else "el recorrido terminó con código %d" % result.returncode
-    cutter.empezar()
-    process = subprocess.Popen(recorrido, shell=True, env=child_env(cutter.entorno()))
+    if cutter is not None:
+        cutter.empezar()
+    process = subprocess.Popen(recorrido, shell=True, env=child_env(cutter.entorno() if cutter is not None else None))
     try:
         while True:
             try:
                 code = process.wait(timeout=CUT_POLL_S)
                 break
             except subprocess.TimeoutExpired:
-                if cutter.pedido():
+                if deadline is not None and time.time() >= deadline:
+                    kill_tree(process.pid)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    return TAIL_CUT
+                if cutter is not None and cutter.pedido():
                     kill_tree(process.pid)
                     try:
                         process.wait(timeout=10)
@@ -3082,6 +3169,48 @@ def with_trace_cap(config, seconds):
     return config.rstrip("\n") + "\n" + line + "\n"
 
 
+def trace_tail(folder, flow_spec, flow_name, startup, recorrido, inside_trace, prepare_command=None, phase=None):
+    """C6: [segundos desde el inicio de la traza en que se corta el recorrido, segundos de la última marca en la prueba]
+    o [] si no corresponde. El corte es del flujo y queda fijo desde su primera fase medida (`corte_s` en fases.json):
+    todas las fases cortan en el mismo segundo, así lo que se cuenta sobre toda la traza (la red, la memoria del final)
+    sigue siendo igual contra igual; si una fase del flujo se midió sin corte, ninguna corta. Sin dato de la prueba, con
+    `cola_s` 0, sin 'preparar' (la corrida siguiente arrancaría donde quedó el recorrido cortado), en un arranque en frío,
+    un recorrido manual o con una pausa humana, un flujo de repetición o 'preparar' dentro de la traza: no corta."""
+    tail = flow_spec.get("cola_s", TAIL_DEFAULT_S)
+    if not isinstance(tail, (int, float)) or isinstance(tail, bool) or tail <= 0 or startup or recorrido == "manual" \
+            or inside_trace or not prepare_command or is_repetition(flow_spec) or has_human_pause(flow_spec, folder):
+        return []
+    phases = read_phases(folder)
+    measured = [phase_flow_record(phases, name, flow_name) for name in FASES if name != phase
+                and phase_flow_record(phases, name, flow_name).get("corridas")]
+    if measured:  # ya hay fases: vale su corte (o ninguno, si alguna se midió sin cortar)
+        cuts = [record.get("corte_s") for record in measured]
+        if any(not isinstance(cut, (int, float)) or cut <= 0 for cut in cuts) or len(set(cuts)) != 1:
+            return []
+        return [cuts[0], cuts[0]]
+    learned = note_bucket(read_notes(folder), "cola").get(flow_name) or {}
+    last, total = learned.get("ultima_marca_s"), learned.get("traza_s")
+    if not isinstance(last, (int, float)) or not isinstance(total, (int, float)) or last <= 0:
+        return []
+    cut = round(last * 1.25 + tail, 1)  # holgura para una corrida más lenta que la prueba
+    return [cut, last] if total > cut + 2 else []
+
+
+def invalid_screenshot(adb, trace_name):
+    """C10: una captura de pantalla de una corrida medida que no valió, tomada después de cortar la traza y guardada
+    junto a ella (`adb shell screencap -p`). Devuelve la ruta o None; nunca hace fallar la captura."""
+    remote = "/sdcard/hbperf-invalida.png"
+    target = pathlib.Path(str(trace_name).split(".perfetto-trace")[0] + ".png")
+    try:
+        if adb.shell("screencap -p %s" % remote, timeout=30).returncode != 0:
+            return None
+        pulled = adb.run("pull", remote, str(target), timeout=60)
+        adb.shell("rm -f %s" % remote, timeout=20)
+        return target if pulled.returncode == 0 and target.is_file() else None
+    except (OSError, PerfError, subprocess.SubprocessError):
+        return None
+
+
 def trace_cap_s(config):
     found = TRACE_CAP.search(config)
     return int(found.group(1)) / 1000 if found else None
@@ -3096,7 +3225,7 @@ def wait_perfetto(adb, pid):
 
 
 def record_run(adb, config, recorrido, label, local, startup=None, package=None, cutter=None, before=None,
-               on_start=None):
+               on_start=None, tail_s=None):
     """Graba una corrida. Devuelve (motivo de invalidez o None, métricas del recorrido). Una corrida cortada a mano
     (CUT_REASON) no baja su traza: se detiene Perfetto y se borra en el dispositivo. `on_start(pid, remota)` anota
     Perfetto grabando (B10: si el proceso se corta sin poder detenerlo, `recuperar` lo detiene)."""
@@ -3110,6 +3239,7 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None,
         raise CapturaFallida("no se pudo iniciar Perfetto: %s" % (started.stderr or started.stdout).strip()[-300:])
     if on_start is not None:
         on_start(pid, remote)
+    traced_at = time.time()
     time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1.5")))  # Perfetto tarda en arrancar sus fuentes
     try:
         if before is not None:  # 'preparar' dentro de la traza (traza_desde_preparar)
@@ -3117,7 +3247,11 @@ def record_run(adb, config, recorrido, label, local, startup=None, package=None,
         if startup:
             reason, extra = launch(adb, package, startup)
         else:
-            reason, extra = drive(recorrido, label, cutter), []
+            reason, extra = drive(recorrido, label, cutter, traced_at + tail_s if tail_s else None), []
+            if reason == TAIL_CUT:  # C6: la traza termina cerca de la última marca: el resto del recorrido no se mide
+                print("  · traza cortada a los %s s (la última marca del plan salió antes; `cola_s` del flujo)"
+                      % fmt(round(tail_s, 1)))
+                reason = None
     except (KeyboardInterrupt, PerfError):  # Ctrl+C o 'preparar' que falla: Perfetto no queda grabando en el dispositivo
         try:
             adb.shell("kill -TERM %s" % pid, timeout=20)
@@ -3339,7 +3473,7 @@ def write_phase(folder, phase, data, flow=None):
     flows = dict(previous.get("flujos") or {})
     # La huella de las marcas y del plan (0.11.0) es del flujo. Si el flujo ya tenía corridas, vale la de su primera
     # tanda; una tanda con otra huella lo avisa (la fase mezclaría dos versiones de la marca o del plan).
-    prints = {key: data.pop(key) for key in ("marcas", "plan", "memoria") if key in data}
+    prints = {key: data.pop(key) for key in ("marcas", "plan", "memoria", "corte_s") if key in data}
     seconds = data.pop("segundos", None)
     if flow:
         before_flow = flows.get(flow) or {}
@@ -6162,7 +6296,7 @@ def origin_lines(folder, plan, phase, flow):
 # C6: qué campos del plan cambian lo que se mide (entran en la huella) y cuáles solo cambian cómo se presenta.
 MEASURE_FIELDS = ("recorrido", "preparar", "inicio", "pausas", "duracion_max_s", "variables", "traza_desde_preparar",
                   "ventana", "metricas_usuario", "segmentos", "input_slices", "repetidas_ventana_s", "tipo", "ciclos",
-                  "traza")
+                  "traza", "cola_s")
 PRESENTATION_FIELDS = ("titulo", "etiquetas", "min_frames", "servicios", "pasos", "preparar_reinicia",
                        "preparar_limpia", "escenarios")
 
@@ -11947,6 +12081,84 @@ VIDEO_REMOTE = "/sdcard/hbperf-prueba.mp4"
 # 0.15.1: SIGINT solo al screenrecord que graba ese archivo (no a una grabación que el usuario tenga abierta). El "[s]"
 # evita que el patrón coincida con la línea de comandos del propio shell que corre pkill.
 VIDEO_STOP = "pkill -INT -f '[s]creenrecord .*%s'" % VIDEO_REMOTE.replace(".", "[.]")
+VIDEO_SEGMENTS_MAX = 10  # C10: hasta 10 segmentos de 180 s (30 minutos) por prueba; más allá, el video se corta y se dice
+
+
+def video_stop_command(remote):
+    """C10: detiene solo la grabación de ese archivo (el patrón [s] no se encuentra a sí mismo en la línea de pkill)."""
+    return "pkill -INT -f '[s]creenrecord .*%s'" % remote.replace(".", "[.]")
+
+
+class VideoChain:
+    """C10: el video de la corrida de prueba desde antes de 'preparar'. `screenrecord` graba como mucho 180 s por archivo
+    (`--time-limit`, doc. de adb): cuando un segmento llega a su tope, empieza el siguiente (hasta VIDEO_SEGMENTS_MAX). Un
+    segmento que terminó mucho antes de su tope no se encadena (screenrecord falló o no está). Nunca hace fallar la
+    prueba. Las corridas medidas nunca graban video: el codificador compite con la app."""
+
+    def __init__(self, adb, limit):
+        self.adb, self.limit = adb, int(limit)
+        self.remotes, self.process, self.started, self.stopping, self.cut, self.thread = [], None, 0.0, False, False, None
+
+    def remote(self, number):
+        return VIDEO_REMOTE if number == 1 else VIDEO_REMOTE.replace(".mp4", "-%d.mp4" % number)
+
+    def _begin(self):
+        remote = self.remote(len(self.remotes) + 1)
+        self.adb.shell("rm -f %s" % remote, timeout=20)
+        self.process = subprocess.Popen(self.adb.base + ["shell", "screenrecord", "--time-limit", str(self.limit), remote],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.started = time.time()
+        self.remotes.append(remote)
+
+    def start(self):
+        try:
+            self._begin()
+        except (OSError, PerfError, subprocess.SubprocessError):
+            return None
+        self.thread = threading.Thread(target=self._watch, daemon=True)
+        self.thread.start()
+        return self
+
+    def _watch(self):
+        while not self.stopping:
+            if self.process.poll() is not None and not self.stopping:
+                if self.limit <= 5 or time.time() - self.started < self.limit - 5:
+                    return  # terminó antes de su tope (o el tope es muy corto): no es el tope de screenrecord
+                if len(self.remotes) >= VIDEO_SEGMENTS_MAX:
+                    self.cut = True
+                    return
+                try:
+                    self._begin()
+                except (OSError, PerfError, subprocess.SubprocessError):
+                    return
+            time.sleep(0.5)
+
+    def stop(self, target):
+        """Detiene la grabación, baja los segmentos (el primero a `target`, los demás a `<target>-2.mp4`, …) y los borra
+        del dispositivo. Devuelve las rutas locales."""
+        self.stopping = True
+        out = []
+        try:
+            if self.thread is not None:
+                self.thread.join(timeout=5)
+            if self.process is not None and self.process.poll() is None:
+                self.adb.shell(video_stop_command(self.remotes[-1]), timeout=20)
+                try:
+                    self.process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+            time.sleep(float(os.environ.get("HB_PERF_ESPERA", "1")))  # screenrecord termina de escribir el archivo
+            target = pathlib.Path(target)
+            for number, remote in enumerate(self.remotes, start=1):
+                local = target if number == 1 else target.with_name("%s-%d%s" % (target.stem, number, target.suffix))
+                pulled = self.adb.run("pull", remote, str(local), timeout=120)
+                self.adb.shell("rm -f %s" % remote, timeout=20)
+                if pulled.returncode == 0 and local.is_file():
+                    out.append(local)
+        except (OSError, PerfError, subprocess.SubprocessError):
+            pass
+        return out
 
 
 def is_repetition(spec):
@@ -12801,8 +13013,33 @@ def cmd_capturar(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
+    video = None
+
+    def finish_video():
+        """C10: detiene el video de la prueba (una vez) y dice dónde quedó cada segmento."""
+        nonlocal video
+        if video is None:
+            return
+        chain, video = video, None
+        shots = chain.stop(folder / ("prueba-%s.mp4" % slug(flow_name)))
+        if shots:
+            print("Video de la prueba: %s · míralo antes de medir: es el visto bueno de que el recorrido hace lo que "
+                  "esperas (desde que se abre la app, 'preparar' incluido; %s)" % (
+                      ", ".join(str(shot) for shot in shots),
+                      "se cortó a los %d s: el tope es de %d segmentos" % (chain.limit * len(chain.remotes),
+                                                                          VIDEO_SEGMENTS_MAX) if chain.cut else
+                      "segmentos de hasta %d s, encadenados" % chain.limit))
+        else:
+            print("· No pude grabar el video de la prueba (adb shell screenrecord): la prueba sigue igual; míralo en el "
+                  "dispositivo mientras corre")
     clear_logcat = bool(args.plan) and not startup and plan.get("limpiar_logcat") is not False  # B5
     seen_urls = {}
+    tail_cut = [] if args.prueba or not args.plan else trace_tail(folder, flow, flow_name, startup, recorrido, inside_trace,
+                                                                   prepare_command, phase)
+    if tail_cut:
+        print("· La traza de cada corrida se corta a los %s s del inicio (el mismo segundo en todas las fases del flujo): lo "
+              "que el recorrido hace después no se mide. `cola_s` del flujo cambia la holgura antes de la primera fase; con "
+              "0 no corta (medicion.md · La traza termina cerca de la última marca)" % fmt(round(tail_cut[0], 1)))
     memory_notes = []  # C4: por qué la tabla de memoria no trae `views` (una vez por tanda)
     # Una sola numeración: la de la fase ("corrida 6 de 10"), la misma de metricas.csv, del diagnóstico y del reporte.
     # Un intento inválido no gasta un número de corrida: va como "intento N (inválido)".
@@ -12917,6 +13154,8 @@ def cmd_capturar(args, plan=None):
         record.update(prints)  # la huella de las marcas y del plan, por flujo (write_phase)
         if modules_now:  # A4: la de los módulos, por fase
             record[MODULE_PRINT] = modules_now
+        if not args.prueba:  # C6: el corte de la traza del flujo (0: sin corte), para que todas sus fases corten igual
+            record["corte_s"] = tail_cut[0] if tail_cut else 0
         record["memoria"] = bool(args.memoria)
         record["segundos"] = int(round(time.time() - batch_started))
         return record
@@ -12970,6 +13209,9 @@ def cmd_capturar(args, plan=None):
                          inicio=datetime.datetime.now().replace(microsecond=0).isoformat(),
                          registro=None if args.prueba or not valid else build_record(partial=True, quiet=True),
                          perfetto=None)
+        if args.prueba and args.plan and not getattr(args, "sin_video", False) and video is None:
+            # C10: el video de la prueba empieza antes de 'preparar' (en la prueba no importa la sobrecarga)
+            video = VideoChain(adb, int(flow.get("video_limite_s") or VIDEO_LIMIT_S)).start()
         if clear_logcat:
             # B5: antes de limpiar, se leen y se acumulan las rutas que ya estaban (las del calentamiento, de 'preparar' o
             # de una corrida anterior: cada servicio escribe su línea una vez por proceso); después se limpia solo el
@@ -13006,8 +13248,6 @@ def cmd_capturar(args, plan=None):
             os.environ.update({CYCLES_ENV: str(cycles_path), CYCLE_PACKAGE_ENV: package, CYCLE_SERIAL_ENV: serial or ""})
             if is_repetition(flow):
                 memory_snapshot(adb, package, cycles_path, "inicio")
-            video = start_video(adb, int(flow.get("video_limite_s") or VIDEO_LIMIT_S)) \
-                if args.prueba and args.plan and not getattr(args, "sin_video", False) else None
             try:
                 if no_trace:
                     reason, extra = drive(recorrido, label, cutter), []
@@ -13015,6 +13255,7 @@ def cmd_capturar(args, plan=None):
                     # C3: con "traza_desde_preparar", 'preparar' corre con la traza ya grabando (lo de antes de la
                     # pantalla medida, como una precarga, entra en la traza).
                     reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter,
+                                               tail_s=tail_cut[0] if tail_cut else None,
                                                before=prepare if inside_trace else None,
                                                on_start=(lambda pid, remote: mark_running(
                                                    folder, perfetto={"pid": pid, "remota": remote, "serial": serial}
@@ -13025,18 +13266,14 @@ def cmd_capturar(args, plan=None):
                     raise
                 failure = error
             finally:
-                if video is not None:
-                    shot = stop_video(adb, video, folder / ("prueba-%s.mp4" % slug(flow_name)))
-                    print("Video de la prueba: %s · míralo antes de medir: es el visto bueno de que el recorrido hace lo "
-                          "que esperas%s" % (shot, " (graba hasta %d s)" % int(flow.get("video_limite_s") or VIDEO_LIMIT_S))
-                          if shot else "· No pude grabar el video de la prueba (adb shell screenrecord): la prueba sigue "
-                          "igual; míralo en el dispositivo mientras corre")
+                finish_video()
             if is_repetition(flow) and failure is None:
                 memory_snapshot(adb, package, cycles_path, "fin")
             if clear_logcat and not args.prueba:  # B5: las rutas de esta corrida, antes de que se limpie el buffer
                 save_service_urls(folder, read_service_log(adb))
         if failure is not None:
             error = failure
+            finish_video()
             if not prepare_command or args.prueba:
                 if args.prueba and args.plan and prepare_command and hasattr(error, "corto"):
                     save_test_warnings(folder, flow_name, [warning(
@@ -13197,6 +13434,12 @@ def cmd_capturar(args, plan=None):
             print("✖ intento %d (inválido, buscaba la %s): %s (traza guardada para auditoría)" % (
                 attempts, run_label(), invalid))
             print("  Hasta dónde llegó: %s" % reached)
+            if tail_cut and str(invalid).startswith("sin marcas"):  # C6: quizá el corte llegó antes de la marca
+                print("  · la traza se cortó a los %s s: si esto se repite, pon \"cola_s\": 0 en el flujo del plan (o una "
+                      "holgura mayor antes de la primera fase) y mide la fase de nuevo con --rehacer" % fmt(tail_cut[0]))
+            screenshot = invalid_screenshot(adb, target_name)  # C10: dónde quedó la app, después de cortar la traza
+            if screenshot:
+                print("  Captura de pantalla: %s" % screenshot)
             mark_invalid(invalid)
             note_invalid(invalid, info)
             consecutive, last_invalid = consecutive + 1, invalid
@@ -13228,6 +13471,20 @@ def cmd_capturar(args, plan=None):
             for line in repeated_lines(info.get("repetidas_tramo") or {}):
                 print("⚠ " + line)
             informative = []
+            for line in info.get("sin_cual") or []:  # C7: la ocurrencia que usa la regla por defecto, dicha
+                print("⚠ " + line[0].upper() + line[1:])
+                informative.append(line)
+            last_mark, total = info.get("ultima_marca_plan_s"), info.get("duracion_s")
+            if args.plan and isinstance(last_mark, (int, float)) and isinstance(total, (int, float)):
+                # C6: lo que dura la traza después de la última marca del plan; las fases cortan cerca de ella
+                data = read_notes(folder)
+                note_bucket(data, "cola")[flow_name] = {"ultima_marca_s": round(last_mark, 2), "traza_s": round(total, 2)}
+                save_notes(folder, data)
+                cut = trace_tail(folder, flow, flow_name, startup, recorrido, inside_trace, prepare_command)
+                if cut:
+                    print("· La traza duró %s s y la última marca del plan salió a los %s s: en las fases se corta a los "
+                          "%s s (`cola_s` del flujo; 0 no corta). No cambia ninguna métrica que termine en una marca"
+                          % (fmt(round(total, 1)), fmt(round(last_mark, 1)), fmt(round(cut[0], 1))))
             if is_repetition(flow):  # C5: cuánto pesa la traza por ciclo y cuántos ciclos caben bajo el tope
                 done_cycles = sum(1 for item in read_cycles(cycles_path) if str(item.get("etiqueta", "")).startswith("ciclo"))
                 per_cycle, fit = cycles_fit(size_mb, done_cycles or flow.get("ciclos"), cap_bytes(config))

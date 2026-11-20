@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -431,9 +432,6 @@ class NetworkLogTest(CaptureBase):
         self.assertIn("Tamaño del búfer del registrador", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # ── C · Punto de partida, prueba y lectura de resultados ─────────────────────
 
@@ -518,3 +516,141 @@ class StartingPointTest(CaptureBase):
         self.assertTrue(lines[3].startswith("| cargar hilo_max_ms"), lines[:4])
         self.assertEqual(lines[-1], "… 12 filas más en %s" % path)
         self.assertIn("generica_39", path.read_text(encoding="utf-8"))
+
+
+class FakeAdb:
+    """Un adb mínimo para probar lo que corre en el dispositivo sin uno: registra los comandos y baja archivos falsos."""
+
+    def __init__(self, base=None):
+        self.base = base or ["true"]
+        self.calls = []
+
+    def shell(self, command, stdin=None, timeout=120):
+        self.calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def run(self, *args, stdin=None, timeout=120):
+        self.calls.append(" ".join(args))
+        if args[0] == "pull":
+            Path(args[2]).write_bytes(b"x" * 2048)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class TraceEndAndReadingTest(PerfBase):
+    """C6–C10: la traza termina cerca de la última marca, marcas repetidas sin `cual`, lectura del resumen, inicio en un
+    toque y video y capturas."""
+
+    def test_la_cola_se_aprende_de_la_prueba_y_queda_fija_para_todas_las_fases(self):
+        folder = self.dir / "inv"
+        write(folder / "advertencias.json", json.dumps({"cola": {"home": {"ultima_marca_s": 20.0, "traza_s": 45.0}}}))
+        flow, prepare = {"recorrido": "bash recorrido.sh"}, "bash preparar.sh"
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "bash recorrido.sh", False, prepare), [30.0, 20.0])
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "bash recorrido.sh", False), [])  # sin 'preparar'
+        self.assertEqual(perf.trace_tail(folder, dict(flow, cola_s=0), "home", None, "bash recorrido.sh", False,
+                                         prepare), [])
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "manual", False, prepare), [])
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "bash recorrido.sh", True, prepare), [])
+        # con una fase medida, vale su corte aunque la prueba nueva aprenda otro
+        write(folder / "fases.json", json.dumps({"antes": {"corridas": 3, "flujos": {"home": {"corridas": 3,
+                                                                                           "corte_s": 30.0}}}}))
+        write(folder / "advertencias.json", json.dumps({"cola": {"home": {"ultima_marca_s": 10.0, "traza_s": 45.0}}}))
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "bash recorrido.sh", False, prepare, "despues"),
+                         [30.0, 30.0])
+        # una fase medida sin corte (de una versión anterior, o con cola_s 0): ninguna corta
+        write(folder / "fases.json", json.dumps({"antes": {"corridas": 3, "flujos": {"home": {"corridas": 3}}}}))
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "bash recorrido.sh", False, prepare, "despues"), [])
+        write(folder / "fases.json", "{}")
+        write(folder / "advertencias.json", json.dumps({"cola": {"home": {"ultima_marca_s": 20.0, "traza_s": 31.0}}}))
+        self.assertEqual(perf.trace_tail(folder, flow, "home", None, "bash recorrido.sh", False, prepare), [])
+
+    def test_drive_corta_el_recorrido_al_llegar_al_limite_y_la_corrida_vale(self):
+        started = time.time()
+        self.assertEqual(perf.drive("sleep 30", "corrida", deadline=time.time() + 0.5), perf.TAIL_CUT)
+        self.assertLess(time.time() - started, 10)
+        self.assertIsNone(perf.drive("true", "corrida", deadline=time.time() + 30))
+
+    def test_marca_repetida_sin_cual_dice_cual_se_usa(self):
+        flow = {"metricas_usuario": [{"nombre": "volver_ms", "desde": {"marca": "MARK volver"},
+                                      "hasta": {"marca": "MARK lista_visible"}},
+                                     {"nombre": "abrir_ms", "desde": {"marca": "MARK abrir"},
+                                      "hasta": {"marca": "MARK lista_visible", "cual": "primera"}}]}
+        sections = [("seccion", ts, 0, 0, name) for ts, name in ((1, "MARK abrir"), (2, "MARK lista_visible"),
+                                                                 (3, "MARK volver"), (4, "MARK lista_visible"))]
+        found = perf.repeated_without_which(sections, flow)
+        self.assertEqual(found, ["la marca MARK lista_visible salió 2 veces; se usa la última después de MARK volver "
+                                 "(`cual` no está en el plan, en la métrica 'volver_ms'.hasta)"])
+
+    def test_resumen_sin_instantes_con_pocos_frames_y_grupos_contados(self):
+        plan = {"paquete": "com.example.app", "flujos": {"home": {}}}
+        rows = []
+        for metric, values in (("volver frames", [5] * 6), ("volver jank_app_pct", [100] * 6),
+                               ("volver inicio_ms", [900, 1500, 1200, 1100, 1700, 1300]),
+                               ("cargar jank_app_pct", [9, 10, 11, 90, 91, 92])):
+            for run, value in enumerate(values, start=1):
+                rows.append({"fase": "antes", "flujo": "home", "metrica": metric, "corrida": run, "valor": value,
+                             "unidad": "ms" if metric.endswith("_ms") else "%" if metric.endswith("pct") else "frames",
+                             "sentido": "menor", "familia": "app"})
+        table, _ = perf.summary_rows(rows, plan, phases=("antes",), everything=True)
+        by_metric = {row[2]: row for row in table}
+        self.assertNotIn("volver inicio_ms", by_metric)
+        self.assertEqual(by_metric["volver jank_app_pct"][5], "pocos frames")  # 5 frames: menos de 30
+        self.assertIn("frame_p90_ms y hilo_max_ms", by_metric["volver jank_app_pct"][9])
+        self.assertIn("dos grupos (3 corridas en ~10 y 3 en ~91)", by_metric["cargar jank_app_pct"][9])
+        groups = {("home", "medio frames"): {"fases": {"antes": [20] * 6}}}
+        self.assertTrue(perf.few_segment_frames(groups, "home", "medio jank_app_pct", plan, perf.SUMMARY_MIN_FRAMES))
+        results = [{"metrica": "volver inicio_ms", "flujo": "home", "veredicto": "mejora"},
+                   {"metrica": "volver hilo_max_ms", "flujo": "home", "veredicto": "mejora"}]
+        self.assertEqual([r["metrica"] for r in perf.compact_compare(results, plan, everything=True)],
+                         ["volver hilo_max_ms"])
+
+    def test_un_tramo_puede_empezar_en_el_toque(self):
+        plan_path = self.dir / "inv" / "plan.json"
+        write(plan_path, json.dumps({"paquete": "com.example.app", "flujos": {"home": {"metricas_usuario": [
+            {"nombre": "toque_a_inicio_ms", "desde": {"entrada": "toque"}, "hasta": {"marca": "SCREEN Inicio*"}}]}}}))
+        plan = perf.load_plan(plan_path)
+        spec = plan["flujos"]["home"]["metricas_usuario"][0]["desde"]
+        self.assertEqual((spec["marca"], spec["cual"]), (perf.INPUT_MARK, perf.LAST_BEFORE))
+        ms = 1000000
+        rows = [("proceso", 0, 0, 0, "com.example.app"), ("limites", 0, 5000 * ms, 0, ""),
+                ("input", 50 * ms, 2 * ms, 0, "deliverInputEvent src=0x1002"),
+                ("input", 100 * ms, 2 * ms, 0, "deliverInputEvent src=0x1002"),
+                ("seccion", 300 * ms, 0, 0, "SCREEN InicioActivity onResume"),
+                ("frame", 310 * ms, 16 * ms, 0, "None")]
+        metrics, invalid, info = perf.trace_metrics(rows, 60, plan["flujos"]["home"], set(), 34)
+        self.assertIsNone(invalid)
+        self.assertEqual(dict((m[0], m[1]) for m in metrics)["toque_a_inicio_ms"], 200)
+        write(plan_path, json.dumps({"paquete": "com.example.app", "flujos": {"home": {"metricas_usuario": [
+            {"nombre": "x_ms", "desde": {"entrada": "swipe"}, "hasta": {"marca": "SCREEN Inicio*"}}]}}}))
+        with self.assertRaises(perf.PerfError):
+            perf.load_plan(plan_path)
+
+    def test_video_encadena_segmentos_y_los_baja_todos(self):
+        adb = FakeAdb(["sh", "-c", "sleep 1.2", "x"])
+        chain = perf.VideoChain(adb, 6).start()  # cada segmento "llega a su tope" (6 − 5 s) y empieza el siguiente
+        waited = 0.0
+        while len(chain.remotes) < 2 and waited < 15:  # espera a que empiece el segundo segmento, sin depender del reloj
+            time.sleep(0.2)
+            waited += 0.2
+        shots = chain.stop(self.dir / "prueba-home.mp4")
+        self.assertGreaterEqual(len(shots), 2)
+        self.assertEqual(shots[0], self.dir / "prueba-home.mp4")
+        self.assertEqual(shots[1], self.dir / "prueba-home-2.mp4")
+        self.assertIn("rm -f /sdcard/hbperf-prueba-2.mp4", adb.calls)
+        adb = FakeAdb(["sh", "-c", "exit 0", "x"])  # screenrecord que termina enseguida: no se encadena
+        chain = perf.VideoChain(adb, 180).start()
+        time.sleep(1)
+        self.assertEqual(len(chain.remotes), 1)
+        chain.stop(self.dir / "otra.mp4")
+
+    def test_captura_de_pantalla_de_una_corrida_invalida(self):
+        adb = FakeAdb()
+        trace = self.dir / "antes" / "home_3_intento4_invalida_sin-marcas.perfetto-trace"
+        trace.parent.mkdir(parents=True)
+        shot = perf.invalid_screenshot(adb, trace)
+        self.assertEqual(shot, self.dir / "antes" / "home_3_intento4_invalida_sin-marcas.png")
+        self.assertTrue(shot.is_file())
+        self.assertIn("screencap -p /sdcard/hbperf-invalida.png", adb.calls)
+
+
+if __name__ == "__main__":
+    unittest.main()
