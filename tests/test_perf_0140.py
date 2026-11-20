@@ -1647,7 +1647,7 @@ class ModulesGateTest(ModulesBase):
               "mostrar el resultado; la traza muestra 600 ms dentro del módulo de pagos. Se propone precargar el catálogo.\n")
         self.assertEqual(self.run_perf("reporte", "--carpeta", self.rel, "--inicial").returncode, 0)
         dev = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("## Pedido al equipo dueño del módulo", dev)
+        self.assertIn("Pedido al equipo dueño del módulo", dev)
         self.assertIn("Para enviar al equipo dueño de un módulo que la app consume compilado", dev)
         self.assertIn("Se propone precargar el catálogo", dev)
         self.assertNotIn("Pedido al equipo dueño", (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))

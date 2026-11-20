@@ -331,25 +331,23 @@ class TradeoffsReportTest(PerfBase):
     def test_pros_y_contras_en_dev_y_en_gerencia(self):
         self.ok("reporte", "--carpeta", self.folder.relative_to(self.dir), "--html")
         dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        # 0.15.0 · H2: el panel de la mejora trae qué ganó, su costo (confirmado) y su condición
-        card = dev[dev.index("<summary>M1 · Cargar la lista por adelantado"):dev.index("## Servicios")]
-        self.assertIn("- **Qué ganó:** abrir la pestaña: 2.4 s → 41 milisegundos (−98 %) [Mejora].", card)
-        self.assertIn("- **Costo conocido:** una consulta más al abrir la app, aunque no se abra la pestaña.", card)
-        self.assertIn("- **Condición:** se nota si se abre la pestaña 4 s o más después de entrar.", card)
+        # 0.16.0 · R3: la card de la mejora trae su resultado, su costo (confirmado) y su condición
+        card = dev[dev.index("M1 Cargar la lista por adelantado"):dev.index("## Servicios")]
+        self.assertIn("2.4 s → 41 milisegundos", card)
+        self.assertIn("una consulta más al abrir la app, aunque no se abra la pestaña", card)
+        self.assertIn("se nota si se abre la pestaña 4 s o más después de entrar", card)
         self.assertNotIn("regresión", card)
-        main = dev.split("\n## Anexo")[0]
-        self.assertIn("| abrir la pestaña · tras 4 s | 2.4 s | 41 milisegundos | −98 % | [Mejora] |", main)
-        self.assertIn("| abrir la pestaña · enseguida |", main)  # el escenario por su título
-        self.assertIn("| GET api/v1/contactos | tras 4 s | 1 → 2 |", main)
-        self.assertEqual(main.count("Ruta real no disponible para GET api/v1/contactos:"), 1)  # sin repetir el nombre
+        self.assertIn("| abrir la pestaña · tras 4 s | 2.4 s | 41 milisegundos | −98 % | [Mejora] |", dev)
+        self.assertIn("| abrir la pestaña · enseguida |", dev)  # el escenario por su título
+        self.assertIn("| GET api/v1/contactos | tras 4 s | 1 → 2 |", dev)
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
-        self.assertIn("- **abrir la pestaña · tras 4 s:** Antes tardaba 2.4 s; ahora 41 milisegundos: 98 % más rápido.",
+        self.assertIn("abrir la pestaña · tras 4 s [Mejora]\nAntes tardaba 2.4 s; ahora 41 milisegundos: 98 % más rápido.",
                       business)
-        self.assertIn("- Costo conocido de Cargar la lista por adelantado:", business)
+        self.assertIn("Costo conocido de Cargar la lista por adelantado:", business)
         self.assertNotIn("abrir_enseguida", business)
         self.assertNotIn("tab_visible_ms", business)
         html = (self.folder / "reporte-final-gerencia.html").read_text(encoding="utf-8")
-        self.assertIn("<figcaption>abrir la pestaña · enseguida · ", html)  # el gráfico dice de qué escenario es
+        self.assertIn('<figcaption>abrir la pestaña · enseguida <span class="chip', html)  # el gráfico dice su escenario
         self.assertNotIn("no dio el resultado esperado", business)
     def test_siguiente_pide_medir_cada_escenario(self):
         write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2026-03-02T10:00:00", "corridas": 10, "flujos": {
@@ -625,7 +623,7 @@ class BusinessTextTest(PerfBase):
         # 0.15.0 · G4/G5: lo sin confirmar y el costo no van en gerencia
         self.assertNotIn("la lista aparece tarde a veces", text)
         self.assertNotIn("1 · ficha", text)
-        self.assertEqual(re.findall(r"^## (.+)$", text, re.M), list(perf.BUSINESS_SECTIONS))
+        self.assertEqual(re.findall(r"^## (.+)$", text, re.M), list(perf.BUSINESS_SECTIONS_INITIAL))  # 0.16.0 · R2
         self.assertEqual(perf.session_words("3 · M1"), "la mejora M1")
 
 
@@ -656,9 +654,9 @@ class PrintAndLabelsTest(unittest.TestCase):
     la etiqueta de la línea de tiempo."""
 
     def test_encabezados_al_imprimir(self):
-        css = (perf.ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+        css = re.sub(r"\s+", " ", (perf.ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8"))  # R1
         printing = css[css.index("@media print"):]
-        rule = printing[printing.index("    th {"):].split("\n", 1)[0]
+        rule = printing[printing.index("*/ th {"):].split("}", 1)[0]
         self.assertIn("hyphens: none", rule)
         self.assertIn("overflow-wrap: normal", rule)
         self.assertNotIn("hyphens: auto", printing)

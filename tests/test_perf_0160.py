@@ -1,5 +1,6 @@
 """Tests de hb-performance 0.16.0: retomar y recuperar (A), compilar, probar y leer la red (B), punto de partida y
 prueba (C), sesiones de IA (E), `siguiente` sin callejones (S), costo (F) y reportes (R). Los datos son inventados."""
+import datetime
 import json
 import os
 import re
@@ -1046,6 +1047,126 @@ class ProjectSizeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("(proyecto grande: 40 módulos según :app:dependencies", result.stdout)
         self.assertIn("proyecto grande: 40 módulos según", (self.folder / "estado.md").read_text(encoding="utf-8"))
+
+
+# ── R · Reportes con la estructura y el diseño aprobados ─────────────────────
+
+import shutil  # noqa: E402
+
+PEDIDOS_URL = "https://api.example.com/ms-pedidos/v2.1/pedidos/42"
+
+
+class ReportStructureTest(PerfBase):
+    """Los reportes de 0.16.0 (R) sobre una investigación de fixture: encabezado y pie, orden de secciones, sin anexo y
+    servicios con su versión."""
+
+    def investigation(self, fixture="hb-performance-0.10.0", name="detalle"):
+        folder = self.dir / "reports" / "perf" / name / "2026-03-02"
+        shutil.copytree(str(ROOT / "tests" / "fixtures" / fixture), str(folder))
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        flow = next(iter(plan["flujos"]))
+        with (folder / "metricas.csv").open("a", encoding="utf-8") as handle:
+            handle.write("".join("%s,%s,%s,%d,%s,%s,menor,%s\n" % (phase, flow, metric, run, value, unit, family)
+                                 for phase in ("antes", "control") for run in range(1, 6)
+                                 for metric, value, unit, family in (
+                                     ("red GET pedidos/{id} llamadas", 2, "llamadas", "app"),
+                                     ("red GET pedidos/{id} ms", 300, "ms", "info"))))
+        write(folder / "servicios.json", json.dumps({"servicios": {"GET pedidos/{id}": PEDIDOS_URL}}))
+        return folder
+
+    def setUp(self):
+        super().setUp()
+        write(self.dir / "AGENTS.md", "# App de pedidos\n\n## Rendimiento\n\n- applicationId: com.example.app\n")
+        self.folder = self.investigation()
+
+    def test_encabezado_pie_y_tema(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        dev = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        business = (self.folder / "reporte-inicial-gerencia.html").read_text(encoding="utf-8")
+        for page in (dev, business):
+            self.assertIn("App de pedidos", page)  # R1: el nombre del proyecto, de AGENTS.md
+            self.assertIn("Performance · Detalle de un ítem</h1>", page)  # sin fecha
+            self.assertNotIn("2026-03-02</h1>", page)
+            self.assertIn("Los números son medianas de varias mediciones", page)
+            self.assertRegex(page.split("Los números son medianas")[1], r"\d{4}-\d{2}-\d{2}")  # la fecha de generación
+            self.assertIn("prefers-color-scheme", page)
+            self.assertIn("localStorage", page)
+            self.assertIn("try {", page)
+            self.assertNotIn("Generado por hb-performance", page)
+            self.assertNotIn("Anexo", page)  # R10
+            self.assertNotIn("Cómo leer", page)
+        self.assertIn("Reporte técnico dev", dev)
+        self.assertNotIn("Reporte técnico dev", business)
+
+    def test_nombre_del_proyecto_por_orden(self):
+        root = self.dir / "otro"
+        write(root / "settings.gradle.kts", 'rootProject.name = "pedidos-android"\ninclude(":app")\n')
+        self.assertEqual(perf.project_name(root), "pedidos-android")
+        write(root / "AGENTS.md", "# AGENTS.md\n\n- Proyecto: App de ejemplo\n")
+        self.assertEqual(perf.project_name(root), "App de ejemplo")
+        self.assertEqual(perf.project_name(self.dir / "sin-nada"), "sin-nada")
+        self.assertEqual(perf.report_scope("Rendimiento · Pedidos · 2026-03-02"), "Pedidos")
+
+    def test_orden_de_secciones(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        order = lambda name: re.findall(r'<section id="([\w-]+)"', (self.folder / name).read_text(encoding="utf-8"))
+        self.assertEqual(order("reporte-inicial-dev.html"), ["resumen", "usuario", "medicion", "metricas", "hallazgos",
+                                                              "mejoras", "servicios", "costo"])
+        self.assertEqual(order("reporte-inicial-gerencia.html"), ["resumen", "usuario", "medido", "estado", "encontro",
+                                                                   "cambios", "riesgos"])
+        self.assertEqual(order("reporte-final-dev.html"), ["resumen", "usuario", "medicion", "resultado", "hallazgos",
+                                                            "mejoras", "servicios", "costo"])
+        self.assertEqual(order("reporte-final-gerencia.html"), ["resumen", "usuario", "medido", "resultado", "encontro",
+                                                                 "cambios", "riesgos", "pendiente"])
+        final = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
+        self.assertIn("<summary>Comparación completa", final)  # R10: plegable, solo en el final
+        self.assertNotIn("Comparación completa", (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8"))
+
+    def test_al_imprimir_siempre_claro(self):
+        page = (perf.ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+        dark = page.index(':root[data-theme="dark"]')
+        printing = page.rindex("@media print")
+        self.assertGreater(printing, dark)  # va después del tema oscuro y pesa lo mismo: gana al imprimir
+        self.assertIn(':root, :root[data-theme], :root:not([data-theme="light"]) { --bg: #ffffff;', page[printing:])
+
+    def test_gerencia_cuenta_los_confirmados_sin_palabras(self):
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        write(self.folder / "estado.md", state.replace("| H1 | Dos cargas del detalle |", "| H1 | El ViewModel llama a cargar() dos veces |"))
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
+        business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        self.assertIn("1 causa confirmada más [se puede mejorar]", business)
+        self.assertNotIn("Ninguna causa confirmada", business)
+        self.assertIn("⚠ Gerencia:", out)
+
+    def test_markdown_con_celdas_de_una_linea_y_diffs_con_acentos(self):
+        text = perf.html_to_text('<table><tr><td>Tramos</td><td>a<br>b</td></tr></table>'
+                                 '<pre class="diff"><code><span class="add">+ ``` dentro</span></code></pre>')
+        self.assertIn("| Tramos | a · b |", text)
+        self.assertIn("````diff\n+ ``` dentro\n````", text)
+
+    def test_lo_capturado_los_servicios_y_su_version(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        dev = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        self.assertIn("<summary>Qué se capturó en cada medición</summary>", dev)  # R4
+        self.assertIn("System trace</b> (Perfetto)", dev)
+        self.assertIn("sin correr: se puede pedir para el diagnóstico", dev)
+        self.assertNotIn("Ningún servicio cambió entre fases", dev)  # R5
+        self.assertIn("llamadas por medición (1 servicio)", dev)
+        self.assertIn("Servicios que más tiempo suman", dev)
+        self.assertIn("ms-pedidos · v2.1", dev)  # R6: la versión debajo del servicio
+        self.assertIn("…/ms-pedidos/v2.1/pedidos/42", dev)
+        self.assertNotIn("{version}", dev)
+        self.assertEqual(perf.versioned_route("GET otro", {}), "GET otro (sin versión: falta la ruta real)")
+
+    def test_colores_de_hallazgos_y_etiqueta_de_variacion(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        dev = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        self.assertIn('<div class="card t-bug">', dev)  # R8: la esquina del color de su tipo
+        self.assertIn('<div class="card t-descartado">', dev)
+        self.assertIn('<span class="chip c-ko">bug</span>', dev)
+        self.assertEqual(perf.verdict_label({"veredicto": "dentro del ruido", "avisos": []}),
+                         "Dentro de la variación normal")  # R9
 
 
 if __name__ == "__main__":

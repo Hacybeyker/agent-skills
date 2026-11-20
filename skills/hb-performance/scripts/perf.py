@@ -104,9 +104,6 @@ INPUT_MARK = "INPUT toque"
 INPUT_GLOB = re.compile(r"[\w .:=#()\[\]*?-]+")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 INPUT_GRACE_NS = 100_000_000  # los eventos del mismo gesto que dispara una métrica no cuentan como "pasos del recorrido"
-VERDICT_CLASS = {"mejora": "v-better", "regresión": "v-worse", "sin cambio": "v-same", "dentro del ruido": "v-same",
-                 "informativa": "v-same", "no comparable": "v-same", "no confiable": "v-same",
-                 "variación del backend": "v-same", "costo conocido": "v-same", "servicios ajenos al flujo": "v-same"}
 FICHA_REPORTE = ("alcance", "síntoma", "sintoma", "métricas principales", "metricas principales", "build",
                  "dispositivo", "modos")
 FAMILY_LABEL = {"app": "solo la app", "e2e": "app + backend", "info": "informativa"}
@@ -126,19 +123,6 @@ VERDICT_TEXT = {"mejora": "funcionó: mejoró más que el ruido de medición",
 STATE_TEXT = {"propuesta": "propuesta · esperando tu decisión", "aprobada": "aprobada · se aplica en la sesión 3",
               "aplicada": "aplicada · implementada; se mide en la fase después", "descartada": "descartada · no se aplica",
               "pendiente": "pendiente · queda para más adelante"}
-GLOSSARY = """- **Valor típico (mediana):** el del medio de las mediciones de una fase; una medición rara no lo mueve. Es el que se compara.
-- **Peores casos habituales (P90):** 9 de cada 10 mediciones quedaron por debajo.
-- **Mediciones por fase:** cuántas veces se repitió el recorrido. Menos de 5 es poca evidencia.
-- **Variación normal:** cuánto cambia una medida entre dos mediciones **sin ningún cambio** en la app (antes contra la repetición sin cambios). Una diferencia menor que eso no prueba nada.
-- **Varía mucho:** las mediciones difieren entre sí más de un 10 %; suele ser el servidor, la red o el dispositivo. Si el cambio es mucho mayor que esa variación (al menos el doble de lo que varía cada fase y el triple de la variación normal, sin que los rangos se toquen), el resultado no se vuelve orientativo.
-- **Depende de:** "solo la app" se puede mejorar desde el código; "app y servidor" incluye la red y el backend; "informativa" no tiene veredicto.
-- **Etiquetas:** Mejora o Regresión solo cuando el valor de después sale del rango de antes y supera la variación normal; Sin cambio y Dentro del ruido, que no se puede afirmar nada; Orientativo, que cambió pero la comparación no es del todo igual contra igual o varía demasiado; Costo conocido, que sube a propósito por una mejora elegida; No comparable, que antes y después midieron cosas distintas; No confiable, que el dispositivo no representa uno real.
-- **Hallazgos:** solo los confirmados (con evidencia de la traza y el archivo y la línea del código) pasan a ser mejoras. Lo descartado y lo sin confirmar está en "Se revisó y se descartó", para no investigarlo de nuevo.
-- **Mejoras (M1, M2…):** cada una es un panel plegable con por qué se hizo, qué ganó, su costo y su condición, y cada archivo con su riesgo, antes, después, pros, contras y el diff completo.
-- **Tramos:** partes del recorrido entre dos marcas (una pantalla, un salto). Cada pausa del hilo principal y cada cuadro cuentan en un solo tramo: aquel donde empiezan (regla del borde).
-- **Servicios:** se muestran como su método y su ruta real (GET https://…). La línea de tiempo de cada acción va del toque a que se ve el contenido, con una barra por llamada; ×2 marca una llamada repetida.
-- **Gráficos:** la barra es el valor típico y la línea fina va del caso más rápido al más lento; la franja punteada marca la variación normal alrededor de antes.
-- **Unidades:** los tiempos de un segundo o más van en segundos (1.81 s) y los más cortos en milisegundos (450 ms); el cambio, en porcentaje respecto de antes."""
 ID_SEGMENT = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                         r"|[0-9a-fA-F]{16,})$")
 ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
@@ -7187,8 +7171,6 @@ def next_hint(folder, what="sigue con el paso que tenías"):
 # commits) lo hace perf.py: la sesión pega lo que imprime.
 PAUSE_FILE = "pausa.json"
 CALC_RULES = "borde-inicio"  # C1: cada slice y cada frame cuentan en el tramo donde empiezan (0.15.0)
-CALC_RULES_TEXT = {CALC_RULES: "cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan",
-                   "": "regla anterior a 0.15.0: un slice o un frame que cruzaba el borde contaba en los dos tramos"}
 INTERRUPTED_FILE = ".en-curso.json"  # B10: lo que un comando largo deja mientras trabaja (se borra al terminar)
 CITED = re.compile(r"([\w][\w./-]*\.(?:kt|kts|java|xml|gradle|swift|dart|ts|tsx|js|py|m|mm|cpp|c|h)):(\d+)")
 
@@ -16997,17 +16979,17 @@ def untitled_for_business(plan):
 # La misma etiqueta, con el mismo nombre y la misma regla, en el reporte técnico ("Métricas principales", columna
 # Etiqueta) y en el de gerencia ("Resultado" y el rango por escenario). Siempre con texto: el color solo acompaña.
 VERDICT_LABELS = {"mejora": "Mejora", "regresión": "Regresión", "sin cambio": "Sin cambio",
-                  "dentro del ruido": "Dentro del ruido", "costo conocido": "Costo conocido",
+                  "dentro del ruido": "Dentro de la variación normal", "costo conocido": "Costo conocido",
                   "servicios ajenos al flujo": "Ajeno · sin veredicto", "no comparable": "No comparable",
                   "no confiable": "No confiable", "informativa": "Informativa",
                   "variación del backend": "Variación del backend"}
 ORIENTATIVE_LABEL = "Orientativo"
-LABEL_CLASS = {"Mejora": "v-better", "Regresión": "v-worse", ORIENTATIVE_LABEL: "v-warn"}
 LABEL_LEGEND = {
     "Mejora": "el cambio es mayor que la variación normal entre mediciones, en la dirección buena",
     "Regresión": "el cambio es mayor que la variación normal entre mediciones, en la dirección mala",
     "Sin cambio": "el valor de después queda dentro del rango de antes",
-    "Dentro del ruido": "la diferencia es menor que la variación normal entre mediciones; no se puede afirmar que cambió",
+    "Dentro de la variación normal": "la diferencia es menor que la variación normal entre mediciones; no se puede "
+                                     "afirmar que cambió",
     "Costo conocido": "sube a propósito: es lo que cuesta una mejora que se eligió",
     ORIENTATIVE_LABEL: "cambió, pero la comparación no es del todo igual contra igual (o el valor varía mucho entre "
                        "mediciones): sirve como señal, no como prueba",
@@ -17040,17 +17022,6 @@ def label_legend(labels):
     """Una línea por etiqueta usada, para un lector no técnico."""
     used = [label for label in LABEL_LEGEND if label in labels]
     return "\n".join("- %s %s." % (label_token(label), LABEL_LEGEND[label]) for label in used)
-
-
-LABEL_TOKEN = re.compile(r"\[(%s)\]" % "|".join(re.escape(label) for label in
-                                                 sorted(set(VERDICT_LABELS.values()) | {ORIENTATIVE_LABEL}, key=len,
-                                                        reverse=True)))
-
-
-def label_html(body):
-    """Cambia cada "[Etiqueta]" del HTML por la etiqueta con su texto y su color (una clase), legible en PDF claro."""
-    return LABEL_TOKEN.sub(lambda m: '<span class="verdict label %s">%s</span>' % (
-        LABEL_CLASS.get(m.group(1), "v-same"), e(m.group(1))), body)
 
 
 def plain_verdict(result):
@@ -17298,38 +17269,6 @@ def humanize_metrics(text, names, plan):
                    for code, part in split_code(text))
 
 
-def humanize_parts(parts, names, plan):
-    out = []
-    for section, body in parts:
-        if isinstance(body, list):
-            out.append((section, [(sub, humanize_metrics(text, names, plan)) for sub, text in body]))
-        else:
-            out.append((section, humanize_metrics(body, names, plan)))
-    return out
-
-
-def write_reports(folder, kind, title, date, parts, business, html_too, charts="", extras=None, business_extras=None,
-                  dev_note=""):
-    """Escribe las dos versiones de un reporte (`reporte-<tipo>-dev` y `reporte-<tipo>-gerencia`), en markdown y, con
-    `html_too`, en HTML. Las dos salen de los mismos datos; cada una con sus gráficos (`extras`, `business_extras`)."""
-    label = "inicial" if kind == "inicial" else "final"
-    for audience, sections, text in (("dev", parts, "Reporte %s%s" % (label, dev_note)),
-                                     ("gerencia", business, "Reporte %s para gerencia" % label)):
-        name = "reporte-%s-%s" % (kind, audience)
-        shown = date if audience == "dev" else re.sub(r"(cierre (?:hecho|pendiente)):[^·]*", r"\1", date).strip()
-        page = render_report(folder, name, title, "%s · %s · hb-performance %s" % (text, shown, VERSION), sections,
-                             charts if audience == "dev" else "", extras if audience == "dev" else business_extras,
-                             plain=audience != "dev")
-        print("✔ Reporte %s (%s): %s" % (label, audience, folder / ("%s.md" % name)))
-        if html_too:
-            (folder / ("%s.html" % name)).write_text(page, encoding="utf-8")
-            print("✔ Reporte HTML (%s): %s" % (audience, folder / ("%s.html" % name)))
-    old = [name for name in ("reporte-%s.html" % kind, "reporte-%s.md" % kind) if (folder / name).is_file()]
-    if old:
-        print("· %s %s de una versión anterior y no se actualiza: los reportes de ahora son reporte-%s-dev y "
-              "reporte-%s-gerencia." % (", ".join(old), "es" if len(old) == 1 else "son", kind, kind))
-
-
 def plan_rows(plan, rows):
     medians = {(k[0], k[1]): (statistics.median(v["fases"]["antes"]), v["unidad"])
                for k, v in group(rows).items() if "antes" in v["fases"]}
@@ -17550,58 +17489,6 @@ def flow_html(counts):
         '<div class="step%s"><b>%d</b><span>%s</span></div>' % (css, n, e(label)) for label, n, css in steps)
 
 
-TECH_FOOTER = "Los números son medianas de varias corridas; el detalle está en"
-PLAIN_FOOTER = "Cada valor resume varias mediciones del mismo recorrido; el detalle técnico está en"
-
-
-def render_report(folder, name, title, subtitle, parts, charts="", extras=None, plain=False):
-    """Escribe <name>.md y devuelve el HTML. `extras`: HTML propio por sección (gráficos, franjas) que va antes del texto.
-    Una sección cuyo contenido es una lista de (título, texto) es el anexo (H1): en el HTML va plegado y cerrado."""
-    md = "# %s\n\n_%s_\n" % (title, subtitle)
-    for section, body in parts:
-        if isinstance(body, list):
-            inner = "".join("\n### %s\n\n%s\n" % (sub, text) for sub, text in body if text)
-            md += "\n## %s\n%s" % (section, inner) if inner else ""
-        elif body and not section:  # un párrafo de entrada, sin título (el resumen para gerencia)
-            md += "\n%s\n" % body
-        elif body:
-            md += "\n## %s\n\n%s\n" % (section, body)
-    (folder / ("%s.md" % name)).write_text(md, encoding="utf-8")
-    extras = dict(extras or {})
-    if charts:
-        extras["Métricas principales"] = '<div class="charts">%s</div>' % charts
-    lead = "".join('<section class="lead">%s</section>' % md_to_html(content) for section, content in parts
-                   if not section and content and not isinstance(content, list))
-    shown = [(section, content) for section, content in parts if section and content and not (
-        isinstance(content, list) and not any(text for _, text in content))]
-    nav = "".join('<a href="#s%d">%s</a>' % (i, e(section)) for i, (section, _) in enumerate(shown))
-    body = '<nav class="toc">%s</nav>' % nav + lead
-    for i, (section, content) in enumerate(shown):
-        if isinstance(content, list):
-            inner = "".join('<h3>%s</h3>%s%s' % (e(sub), extras.get(sub, ""), md_to_html(text)) for sub, text in content
-                            if text)
-            body += ('<section id="s%d" class="anexo"><details><summary>%s: %s</summary>%s</details></section>' % (
-                i, e(section), e(", ".join(sub for sub, text in content if text)), inner))
-            continue
-        body += '<section id="s%d"%s><h2>%s</h2>%s%s</section>' % (
-            i, ' class="resultado"' if section == "Resultado" else "", e(section), extras.get(section, ""),
-            md_to_html(content))
-    body = re.sub(r"<td>(mejora|regresión|sin cambio|dentro del ruido|informativa|no comparable|no confiable|costo conocido|"
-                  r"servicios ajenos al flujo)( \(backend\))?</td>",
-                  lambda m: '<td><span class="verdict %s">%s</span>%s</td>' % (
-                      VERDICT_CLASS[m.group(1)], m.group(1), m.group(2) or ""), body)
-    body = label_html(body)  # E1: "[Mejora]" con texto y color
-    body = re.sub(r"<td>(propuesta|aprobada|aplicada|descartada|pendiente)</td>",
-                  lambda m: '<td><span class="state s-%s" title="%s">%s</span></td>'
-                  % (m.group(1), e(STATE_TEXT[m.group(1)]), m.group(1)), body)
-    body = re.sub(r"<td>(✔[^<]*)</td>", r'<td class="ok">\1</td>', body)
-    body = re.sub(r"<td>(✖[^<]*)</td>", r'<td class="ko">\1</td>', body)
-    page = (ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
-    if plain:  # el reporte para gerencia no habla de medianas
-        page = page.replace(TECH_FOOTER, PLAIN_FOOTER)
-    return page.replace("{{TITLE}}", e(title)).replace("{{SUBTITLE}}", e(subtitle)).replace("{{BODY}}", body)
-
-
 def verdict_words(r):
     """El veredicto en palabras para la tabla técnica: cuánto vale ("mejora clara", "orientativo: varía mucho entre
     corridas") y qué significa."""
@@ -17683,7 +17570,7 @@ def unconfirmed_improvements(plan, findings_text):
 def warn_unconfirmed(plan, findings_text):
     for ident, why in unconfirmed_improvements(plan, findings_text):
         print("⚠ La mejora %s: %s. Solo los hallazgos confirmados (con evidencia de la traza y archivo:línea) pasan a ser "
-              "mejoras; si no lo está, quítala del plan y deja el hallazgo en el anexo \"Se revisó y se descartó\"" % (
+              "mejoras; si no lo está, quítala del plan y deja el hallazgo como sin confirmar (va en \"Hallazgos\" del técnico)" % (
                   ident, why))
 
 
@@ -17718,18 +17605,19 @@ def warn_jargon(problems):
 # las mejoras van completos (los saca perf.py de cambios/<id>.diff, nunca la IA).
 CLEAR_CHANGE_SPREAD = 2.0  # H4: el cambio es al menos el doble de lo que varía cada fase…
 CLEAR_CHANGE_NOISE = 3.0  # …y el triple de la variación normal (antes contra control), sin que los rangos se toquen
-MAIN_WORDS_MAX = 1500  # H1: la parte principal del técnico, legible en unos 5 minutos
 TEXT_CAPS = (("resumen ejecutivo", "Resumen ejecutivo", "lineas", 5), ("resumen para gerencia", "Resumen para gerencia",
                                                                         "lineas", 5),
              ("lectura de la comparación", "Lectura de la comparación", "palabras", 400))
 FILE_FIELD_WORDS = 40  # H6: cada campo de la explicación por archivo de una mejora (antes, después, pros, contras)
 RISK_LEVELS = ("critico", "alto", "medio", "bajo")
-BUSINESS_SECTIONS = ("Qué notaba el usuario", "Qué se encontró", "Qué se hizo", "Resultado", "Riesgo de hacer el cambio",
-                     "Qué tan firme es la medición", "Lo pendiente")
+RISK_WORDS = {"critico": "crítico"}  # el nivel como se lee en un reporte
+BUSINESS_SECTIONS = ("Resumen", "Qué notaba el usuario", "Qué se midió", "Resultado", "Qué se encontró",
+                     "Cambios aplicados", "Riesgo de cada cambio", "Lo pendiente")  # R3: el final de gerencia
+BUSINESS_SECTIONS_INITIAL = ("Resumen", "Qué notaba el usuario", "Qué se midió", "Estado inicial", "Qué se encontró",
+                             "Cambios propuestos", "Riesgo de cada cambio")  # R2: el inicial, sin "Lo pendiente"
 READ_CHART = "Cada barra es el tiempo típico; la línea fina va del caso más rápido al más lento."
 READ_CHART_VALUE = "Cada barra es el valor típico; la línea fina va del menor al mayor."
 NOTICEABLE_MS = 100  # G2: un empeoramiento secundario de tiempo menor que esto no lo nota el usuario (queda en el técnico)
-ANNEX = "Anexo"
 
 
 def clear_change(r):
@@ -17799,7 +17687,7 @@ def chart_caption(r, plan):
     elif noise is not None:
         compare_ = ("el cambio es mucho mayor" if clear_change(r) and label in ("Mejora", "Regresión") else
                     "el cambio es mayor" if label in ("Mejora", "Regresión")
-                    else "el cambio es menor que eso: no se puede afirmar que cambió" if label == "Dentro del ruido"
+                    else "el cambio es menor que eso: no se puede afirmar que cambió" if label == VERDICT_LABELS["dentro del ruido"]
                     else "tómalo como una señal")
         text += ". %s; %s" % (noise_sentence(noise, unit), compare_)
     else:
@@ -17830,11 +17718,6 @@ def route_text(service, urls):
     if url:
         return "%s %s" % (method, url) if method and not url.startswith(method) else url
     return QUERY_TAG.sub("", service)  # sin la ruta real: el nombre corto; quien arma la tabla lo dice una vez
-
-
-def service_version(url):
-    found = re.search(r"/(v\d+(?:\.\d+)?)(?:/|$)", url or "")
-    return found.group(1) if found else ""
 
 
 def words_count(markdown_text):
@@ -18092,23 +17975,6 @@ def unimproved_md(findings, plan):
                                                "—", "-") else "") for row in rows)
 
 
-def border_rule_md(folder, plan=None):
-    """C1: qué regla del borde se usó en cada fase ('' en un plan sin tramos: ahí no cambia nada)."""
-    if plan is not None and not any((spec or {}).get("segmentos") for spec in (plan.get("flujos") or {}).values()
-                                    if isinstance(spec, dict)):
-        return ""
-    phases = read_phases(folder)
-    used = [(phase, phases[phase].get("reglas", "")) for phase in FASES if isinstance(phases.get(phase), dict)
-            and phases[phase].get("corridas")]
-    if not used:
-        return ""
-    lines = ["- %s: %s." % (PHASE_WORDS.get(phase, phase).capitalize(), CALC_RULES_TEXT.get(rule, rule))
-             for phase, rule in used]
-    if len({rule for _, rule in used}) > 1:
-        lines.append("- Las fases usan reglas distintas: `perf.py recalcular` aplica la de ahora a todas.")
-    return "Cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan.\n\n" + "\n".join(lines)
-
-
 def action_spans(plan, flow, timeline):
     """G6: las acciones del usuario (los tramos del flujo, o el flujo entero sin tramos): [(título, inicio, fin)] en ms
     de la línea de tiempo de una corrida."""
@@ -18147,58 +18013,6 @@ def action_spans(plan, flow, timeline):
     return out
 
 
-def busy_time(intervals):
-    total, last = 0.0, None
-    for start, end in sorted(intervals):
-        if last is None or start > last:
-            total += end - start
-            last = end
-        elif end > last:
-            total += end - last
-            last = end
-    return total
-
-
-def action_chart(title, start, end, calls, urls, side=""):
-    """G6: una acción en una línea de tiempo horizontal: una barra por servicio (en palabras, con su versión real y su
-    duración en segundos), las repetidas con ×N y el total de la acción al final."""
-    inside = [call for call in calls if start <= call[1] < end]
-    groups = {}
-    for service, begin, finish in inside:
-        groups.setdefault(service, []).append((begin, finish))
-    if not groups and end - start <= 0:
-        return "", ""
-    span = max([end] + [finish for _, _, finish in inside]) - start or 1.0
-    x0, width, row = 150, 230, 22
-    height = 28 + row * max(len(groups), 1) + 34
-    parts = []
-    for index, (service, items) in enumerate(sorted(groups.items(), key=lambda kv: min(b for b, _ in kv[1]))):
-        y = 18 + index * row
-        url = (urls or {}).get(service) or ""
-        name = service_words(service)[:22] + (" (%s)" % service_version(url) if service_version(url) else "")
-        parts.append('<text x="0" y="%d" class="bar-label">%s%s</text>' % (y + 12, e(name),
-                                                                          " ×%d" % len(items) if len(items) > 1 else ""))
-        for begin, finish in items:
-            left = x0 + (begin - start) / span * width
-            parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="bar-after"/>' % (
-                left, y + 2, max((finish - begin) / span * width, 2)))
-        longest = max(finish - begin for begin, finish in items)
-        parts.append('<text x="%.1f" y="%d" class="bar-value">%s s</text>' % (
-            x0 + width + 4, y + 13, trim(longest / 1000.0, 2)))
-    bottom = 18 + row * max(len(groups), 1) + 6
-    parts.append('<line x1="%d" y1="%d" x2="%d" y2="%d" class="whisker"/>' % (x0, bottom, x0 + width, bottom))
-    parts.append('<text x="%d" y="%d" class="axis-label">toque</text>' % (x0, bottom + 14))
-    parts.append('<text x="%d" y="%d" class="axis-label" text-anchor="end">total %s s</text>' % (
-        x0 + width, bottom + 14, trim((end - start) / 1000.0, 2)))
-    waited = busy_time([(max(begin, start), min(finish, end)) for _, begin, finish in inside])
-    sentence = "De %s s que tarda %s, %s s es esperar a los servicios." % (
-        trim((end - start) / 1000.0, 2), title[0].lower() + title[1:] if title else "la acción",
-        trim(waited / 1000.0, 2))
-    svg = '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (x0 + width + 50, height, e(sentence),
-                                                                          "".join(parts))
-    return figure(svg, sentence, "%s%s" % (e(title), " · %s" % e(side) if side else "")), sentence
-
-
 def rows_timeline(rows, flow, phase, run):
     """La línea de tiempo de una corrida armada con las filas `red <servicio> inicio_ms` y `fin_ms` de metricas.csv (una
     llamada por servicio), para corridas sin su archivo de línea de tiempo."""
@@ -18211,33 +18025,6 @@ def rows_timeline(rows, flow, phase, run):
             (starts if found.group(2) == "inicio" else ends)[found.group(1)] = row["valor"]
     calls = [[name, starts[name], ends[name]] for name in starts if name in ends and ends[name] >= starts[name]]
     return {"llamadas": sorted(calls, key=lambda call: call[1]), "marcas": []} if calls else None
-
-
-def actions_html(rows, plan, phases, folder, urls):
-    """G6: las líneas de tiempo por acción de cada flujo, una por fase (o escenario), una al lado de la otra.
-    (HTML, [frases])."""
-    out, sentences = [], []
-    for flow in list(plan.get("flujos") or {}):
-        figures = []
-        for phase in phases:
-            run = representative_run(rows, flow, phase, plan, folder)
-            timeline = (load_timeline(folder, phase, flow, run) or rows_timeline(rows, flow, phase, run)) \
-                if run is not None else None
-            if not timeline:
-                continue
-            calls = [tuple(call) for call in timeline.get("llamadas") or []]
-            if not calls:
-                continue  # sin llamadas medidas no se dice "0 s es esperar a los servicios": no se midieron
-            side = " · ".join(part for part in (scenario_words(plan, flow), PHASE_WORDS.get(phase, phase).capitalize()
-                                                if len(phases) > 1 else "") if part)
-            for title, start, end in action_spans(plan, flow, timeline):
-                html, sentence = action_chart(title, start, end, calls, urls, side)
-                if html:
-                    figures.append(html)
-                    sentences.append("%s%s" % ("%s: " % side if side else "", sentence))
-        if figures:
-            out.append('<div class="charts">%s</div>' % "".join(figures))
-    return "".join(out), sentences
 
 
 def changed_services_md(rows, plan, phases, urls):
@@ -18268,7 +18055,7 @@ def changed_services_md(rows, plan, phases, urls):
             # sin filas por servicio (red sin instrumentar o una investigación de una versión anterior) no se afirma nada
             measured = any(row["metrica"] in ("red_llamadas", "red_solapadas") for row in rows)
             return ("Las mediciones no traen datos por servicio%s: no se puede decir qué servicio cambió (la "
-                    "comparación completa, en el anexo, trae el total de llamadas)." % (
+                    "comparación completa, en \"Resultado\", trae el total de llamadas)." % (
                         " (solo el total de llamadas)" if measured else ""))
         return "Ningún servicio cambió entre fases ni se repite."
     missing = list(dict.fromkeys(row[0] for row in table if "https://" not in row[0] and "http://" not in row[0]))
@@ -18368,166 +18155,1292 @@ def secondary_changes(plan, results, problems):
     return "\n".join(lines)
 
 
-def business_parts(folder, plan, rows, sections, results=None, problems=None):
-    """G: las siete secciones del reporte de gerencia, y nada más: qué notaba el usuario, qué se encontró, qué se hizo,
-    el resultado con su veredicto, el riesgo de hacer cada cambio, qué tan firme es la medición y lo pendiente. Sin
-    costo, sin "Más detalle", sin hallazgos descartados ni sin confirmar y sin líneas genéricas."""
-    final = results is not None
-    problems = [] if problems is None else problems
-    mejoras = plan.get("mejoras") or []
+# ── Reportes de 0.16.0 (R): estructura y diseño de la simulación aprobada ─────
+# Los dos reportes (técnico y gerencia), inicial y final, salen de los mismos datos con la misma página: encabezado con
+# el nombre del proyecto, título "Performance · <alcance>" (sin fecha), botón de tema y pie con la fecha de generación.
+# Cada sección es (id, título, HTML); el markdown de cada reporte es el texto de esas mismas secciones. Sin anexo.
+FINDING_CLASS = {"mejorable": "t-mejorable", "bug": "t-bug", "sin confirmar": "t-sin", "descartado": "t-descartado",
+                 "consecuencia": "t-mejorable"}
+FINDING_CHIP = {"mejorable": "c-ok", "bug": "c-ko", "sin confirmar": "c-same", "descartado": "c-warn",
+                "consecuencia": "c-ok"}
+LABEL_CHIP = {"Mejora": "c-ok", "Regresión": "c-ko", ORIENTATIVE_LABEL: "c-warn"}
+STATE_CHIP = {"propuesta": "c-warn", "pendiente": "c-warn", "aprobada": "c-acc", "aplicada": "c-acc",
+              "descartada": "c-ko"}
+STATE_BUSINESS = {"propuesta": "esperando decisión", "pendiente": "para más adelante", "aprobada": "aprobado",
+                  "aplicada": "aplicado", "descartada": "descartado"}
+FOOTER_DATE = "%Y-%m-%d"
+SERVER_WORDS = re.compile(r"servidor|backend|TTFB|equipo dueño|del servicio", re.I)
+NO_CONNECTION = re.compile(r"(?:sin|no abre(?: una)?|ninguna) conexi[oó]n(?:es)? nuevas?", re.I)
 
-    def pick(*names):
-        return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
 
-    summary = without_placeholders(pick(MANAGEMENT_SECTION))
-    summary = plain_or_unfilled(summary, "\"Resumen para gerencia\" de estado.md", problems) if summary else ""
-    symptom = ficha_value(pick("ficha"), "síntoma", "sintoma")
-    symptom = plain_or_unfilled(symptom, "el síntoma de la Ficha de estado.md", problems) if symptom else ""
-    # sin síntoma anotado no se repite la frase de entrada (sale del resumen): se dice que falta
-    noticed = symptom if symptom and not symptom.startswith("_") else "Sin completar todavía: la investigación no lo " \
-                                                                      "anotó en la Ficha."
-    found, unsaid = [], 0
-    for row in findings_rows(pick("hallazgos")):
-        if row["clase"] not in CONFIRMED_KINDS:
-            continue  # G4: lo descartado y lo sin confirmar nunca va en gerencia
-        parts = [plain_or_unfilled(text, "%s de %s en Hallazgos de estado.md" % (what, row["id"]), problems)
-                 for what, text in (("el síntoma", row["sintoma"]), ("la causa", row["causa"])) if text]
-        parts = [part for part in parts if not part.startswith("_")]
-        if parts:
-            found.append("- %s" % ": ".join([parts[0].rstrip(" .;:")] + parts[1:]))
-        else:
-            unsaid += 1  # confirmada, pero escrita con términos técnicos: no se publica ni se niega
-    if unsaid:
-        found.append("- %s confirmada%s más, todavía sin descripción en palabras." % (
-            "Una causa" if unsaid == 1 else "%d causas" % unsaid, "" if unsaid == 1 else "s"))
-    found_md = "\n".join(dict.fromkeys(found)) if found else "Ninguna causa confirmada todavía."
-    applied = [m for m in mejoras if m.get("estado") == "aplicada"]
-    titles = [plain_or_unfilled(improvement_title(m), "el título de %s en plan.json" % m.get("id"), problems) for m in applied]
-    proposed = [m for m in mejoras if m.get("estado", "propuesta") not in ("aplicada", "descartada")]
-    if final:
-        done_md = "\n".join("- %s" % (title if not title.startswith("_") else
-                                      "un cambio (%s), todavía sin descripción en palabras" % item.get("id", "?"))
-                            for title, item in zip(titles, applied)) or "No se aplicó ningún cambio."
-    else:
-        done_md = ("Se midió el recorrido y se buscaron las causas; todavía no se cambió nada. %s" % (
-            "Se proponen %d cambios: están en \"Lo pendiente\"." % len(proposed) if len(proposed) != 1 else
-            "Se propone un cambio: está en \"Lo pendiente\".") if proposed else
-            "Se midió el recorrido y se buscaron las causas; no se propone ningún cambio.")
-    principales = plan.get("principales") or []
+def project_name(root):
+    """R1: el nombre del proyecto para el encabezado: el campo `Proyecto:` de AGENTS.md o su título (# …); si no, el
+    `rootProject.name` de settings.gradle(.kts); si tampoco, el nombre de la carpeta."""
+    root = pathlib.Path(root)
+    text = read_agents(root)
+    if text:
+        found = re.search(r"(?mi)^[-*\s]*\**proyecto\**\s*:\s*\**([^\n*]+?)\**\s*$", text)
+        if found and not has_placeholder(found.group(1)):
+            return found.group(1).strip().strip("`")
+        title = re.search(r"(?m)^#\s+(.+?)\s*$", text)
+        if title and not has_placeholder(title.group(1)) and title.group(1).strip().lower() not in ("agents.md", "agents"):
+            return title.group(1).strip()
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        try:
+            settings = (root / name).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        found = re.search(r"rootProject\.name\s*=\s*[\"']([^\"']+)[\"']", settings)
+        if found:
+            return found.group(1)
+    return root.name
+
+
+def report_scope(title, plan=None):
+    """R1: el alcance de la investigación para "Performance · <alcance>": el título de estado.md sin el prefijo ni la
+    fecha; si sigue con el relleno de la plantilla, los flujos del plan."""
+    if has_placeholder(title or "") or "{{" in (title or ""):
+        flows = list((plan or {}).get("flujos") or {})
+        return ", ".join(scenario_words(plan or {}, flow) or flow.replace("-", " ") for flow in flows) or \
+            "investigación de rendimiento"
+    text = re.sub(r"^\s*(?:investigaci[oó]n(?: de rendimiento)?|performance|rendimiento)\s*[:·-]\s*", "", title or "",
+                  flags=re.I).strip()
+    text = re.sub(r"\s*[·-]\s*\d{4}-\d{2}-\d{2}\s*$", "", text).strip()  # sin fecha en el título
+    return text or "investigación de rendimiento"
+
+
+def chip(text, css):
+    return '<span class="chip %s">%s</span>' % (css, e(text))
+
+
+def kpi(value, label, extra="", hot=False):
+    return '<div class="kpi%s"><div class="v">%s</div><div class="l">%s</div>%s</div>' % (
+        " hot" if hot else "", e(value), e(label), '<div class="r">%s</div>' % e(extra) if extra else "")
+
+
+def field(key, value_html):
+    return '<div class="field"><div class="k">%s</div><div class="x">%s</div></div>' % (e(key), value_html)
+
+
+def kv_table(headers, row):
+    """R8: una tabla de campos con encabezado de acento y bordes (una fila)."""
+    return ('<div class="table-wrap"><table class="kv"><thead><tr>%s</tr></thead><tbody><tr>%s</tr></tbody></table></div>'
+            % ("".join("<th>%s</th>" % e(h) for h in headers), "".join("<td>%s</td>" % cell for cell in row)))
+
+
+def note_box(title, body_html, warn=False):
+    return '<div class="note%s"><b>%s</b>%s</div>' % (" warn" if warn else "", e(title), body_html)
+
+
+def html_table(headers, rows, css="compact"):
+    head = "".join("<th>%s</th>" % e(h) for h in headers)
+    body = "".join("<tr>%s</tr>" % "".join("<td%s>%s</td>" % (' class="num"' if num else "", cell)
+                                            for cell, num in row) for row in rows)
+    return '<div class="table-wrap"><table class="%s"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>' % (
+        css, head, body)
+
+
+def text_html(text):
+    """Un texto escrito por la IA o por el usuario, con su markdown en línea (código y negrita)."""
+    return inline_md(text or "")
+
+
+def html_to_text(html_text):
+    """El texto de una sección para el markdown del reporte: sin SVG, las tablas como tablas de markdown, las etiquetas
+    ("chips") como [texto] y un salto por bloque."""
+    text = re.sub(r"<svg.*?</svg>", "", html_text or "", flags=re.S)
+    blocks = []
+
+    def keep(found):  # el código (los diffs) va como bloque de markdown, con sus saltos de línea
+        kind = "diff" if "diff" in (found.group(1) or "") else ""
+        body = re.sub(r"</span>", "\n", found.group(2)) if kind else found.group(2)
+        code = html.unescape(re.sub(r"<[^>]+>", "", body)).rstrip("\n")
+        fence = "`" * max([3] + [len(run) + 1 for run in re.findall(r"`{3,}", code)])
+        blocks.append("%s%s\n%s\n%s" % (fence, kind, code, fence))
+        return "\n@@PRE%d@@\n" % (len(blocks) - 1)
+    text = re.sub(r'<pre(?: class="([^"]*)")?>(.*?)</pre>', keep, text, flags=re.S)
+    text = re.sub(r"<td([^>]*)>(.*?)</td>", lambda found: "<td%s>%s</td>" % (
+        found.group(1), re.sub(r"<br\s*/?>", " · ", found.group(2))), text, flags=re.S)  # una celda, una línea
+    text = re.sub(r'(<div class="note[^"]*"><b>[^<]*</b>)', r"\1<br>", text)  # el título de una nota va en su línea
+    text = re.sub(r'<span class="chip[^"]*">(.*?)</span>', r"[\1]", text)
+    text = re.sub(r"<tr>", "\n| ", text)
+    text = re.sub(r"<li>", "\n- ", text)
+    text = re.sub(r"</t[dh]>", " | ", text)
+    text = text.replace("</thead>", "\n@@SEP@@\n")
+    text = re.sub(r"<(?:/p|/div|/li|/h3|/h4|/summary|br\s*/?|/figcaption|/pre|/table)>", "\n", text)
+    text = text.replace("</b>", "</b> ")
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
     lines = []
-    if final:
-        for metric in principales:
-            for r in sorted([r for r in results if r["metrica"] == metric], key=lambda r: r["flujo"]):
-                where = scenario_words(plan, r["flujo"])
-                lines.append("- **%s%s:** %s %s" % (plain_metric(metric, plan), " · %s" % where if where else "",
-                                                     chart_caption(r, plan).replace(" " + READ_CHART, "").replace(" " + READ_CHART_VALUE, ""),
-                                                     label_token(verdict_label(r))))
-        secondary = secondary_changes(plan, results, problems)
-        if secondary:
-            lines += ["", secondary]
-        if any(verdict_label(r) for r in results if r["metrica"] in principales):
-            lines += ["", "Qué significa cada etiqueta:", "", label_legend({verdict_label(r) for r in results
-                                                                           if r["metrica"] in principales})]
-    else:
-        groups = group(rows)
-        for metric in principales:
-            for (flow, name), entry in sorted(groups.items()):
-                if name != metric or "antes" not in entry["fases"]:
-                    continue
-                stats = describe(entry["fases"]["antes"])
-                where = scenario_words(plan, flow)
-                lines.append("- **%s%s:** hoy %s." % (plain_metric(metric, plan), " · %s" % where if where else "",
-                                                      plain_value(stats["mediana"], entry["unidad"])))
-    result_md = "\n".join(lines) if lines else "No se fijó ninguna medida principal para este recorrido."
-    risk = risk_md(plan, applied if final else [m for m in mejoras if m.get("estado") != "descartada"], problems)
-    lead = [("", summary)] if summary and not summary.startswith("_") else []
-    return lead + [(name, plain_unfilled(body)) for name, body in (
-        ("Qué notaba el usuario", noticed), ("Qué se encontró", found_md), ("Qué se hizo", done_md),
-        ("Resultado", result_md), ("Riesgo de hacer el cambio", risk),
-        ("Qué tan firme es la medición", firmness_md(folder, plan, results)),
-        ("Lo pendiente", pending_improvements(plan, final, plain=True, problems=problems)))]
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line.startswith("|") and not line.endswith("|"):
+            line = line.rstrip() + " |"
+        line = line.replace("| |", "|") if line.endswith("| |") else line
+        lines.append(line)
+    out = []
+    for line in lines:
+        if line == "@@SEP@@":  # la fila de encabezado de una tabla: su separador de markdown
+            header = next((item for item in reversed(out) if item), "")
+            line = "|%s" % (" --- |" * max(header.count("|") - 1, 1))
+            while out and not out[-1]:
+                out.pop()
+        if line or (out and out[-1]):
+            out.append(line)
+    text = "\n".join(out).strip()
+    text = re.sub(r"@@PRE(\d+)@@", lambda found: blocks[int(found.group(1))], text)
+    return re.sub(r"(\| --- \|)\n\n(\|)", r"\1\n\2", text)
 
 
-def report_main_and_annex(folder, plan, rows, sections, results, filled, pick):
-    """H1: (secciones de la parte principal, secciones del anexo) del reporte técnico."""
-    final = results is not None
-    urls = service_urls(folder)
-    findings = findings_rows(pick("hallazgos"))
-    principales = plan.get("principales") or []
-    phases = ("antes", "despues") if final and any(row["fase"] == "despues" for row in rows) else ("antes",)
-    if final:
-        primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
-        table = markdown_table(["Medida", "Antes", "Después", "Cambio", "Veredicto"], [
-            [metric_words(r["metrica"], plan, urls) + (" · %s" % scenario_words(plan, r["flujo"])
-                                                       if scenario_words(plan, r["flujo"]) else ""),
-             plain_value(r["antes"]["mediana"], r["unidad"]), plain_value(r["despues"]["mediana"], r["unidad"]),
-             change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—", label_token(verdict_label(r))]
-            for r in primary]) if primary else "No hay medidas principales con antes y después."
-        metrics_md = table + "\n\n" + equal_line(folder, plan, results)
+def versioned_service(service, urls):
+    """R6: (MÉTODO y endpoint corto, "microservicio · vN.N" o None) de un servicio, desde su ruta real."""
+    url = (urls or {}).get(service) or (urls or {}).get(QUERY_TAG.sub("", service)) or ""
+    found = re.search(r"/([^/]+)/(v\d+(?:\.\d+)*)(?:/|$)", url)
+    return short_service(service, 34), ("%s · %s" % (found.group(1), found.group(2)) if found else None)
+
+
+def versioned_route(service, urls):
+    """R6: el servicio en un texto, con su versión: "POST …/ms-pedidos/v2.1/pedidos"; sin ruta real, el nombre y que falta
+    la versión."""
+    url = (urls or {}).get(service) or (urls or {}).get(QUERY_TAG.sub("", service)) or ""
+    method = service.split(" ", 1)[0] if " " in service else ""
+    found = re.search(r"/([^/]+)/(v\d+(?:\.\d+)*)(/.*)?$", re.sub(r"\?.*$", "", url))
+    if found:
+        return "%s …/%s/%s%s" % (method, found.group(1), found.group(2), found.group(3) or "")
+    if url:
+        return "%s %s" % (method, url) if method and not url.startswith(method) else url
+    return "%s (sin versión: falta la ruta real)" % QUERY_TAG.sub("", service)
+
+
+def services_of(rows):
+    """Los servicios (nombres cortos) que tienen filas en metricas.csv."""
+    out = set()
+    for row in rows:
+        found = SERVICE_METRIC.fullmatch(row["metrica"])
+        if found:
+            out.add(found.group(1))
+    return out
+
+
+def with_versions(text, rows, urls):
+    """R6: un texto escrito por la IA con cada servicio nombrado por su nombre corto reemplazado por su ruta con versión."""
+    out = text or ""
+    for service in sorted(services_of(rows), key=len, reverse=True):
+        short = QUERY_TAG.sub("", service)
+        if short and short in out and versioned_route(service, urls) not in out:
+            out = out.replace(short, versioned_route(service, urls))
+    return out
+
+
+def label_svg(x, y, service, urls):
+    """R6: la etiqueta de un servicio en un gráfico, en dos líneas: MÉTODO endpoint y, debajo, microservicio · versión."""
+    top, below = versioned_service(service, urls)
+    return ('<text x="%d" y="%d" class="bar-label">%s<title>%s</title></text><text x="%d" y="%d" class="axis-label">%s'
+            '</text>' % (x, y, e(top), e(service), x, y + 13, e(below or "sin versión: falta la ruta real")))
+
+
+class ReportData:
+    """Lo que leen las secciones de los reportes de 0.16.0: el plan, las filas, las secciones de estado.md y, en el
+    final, la comparación."""
+
+    def __init__(self, folder, plan, rows, sections, results):
+        self.folder, self.plan, self.rows, self.sections, self.results = pathlib.Path(folder), plan, rows, sections, results
+        self.final = results is not None
+        self.root = project_root(self.folder).resolve()
+        self.urls = service_urls(self.folder)
+        self.phases = read_phases(self.folder)
+        self.groups = group(rows)
+        self.problems = []
+        self.findings = findings_rows(self.pick("hallazgos"))
+        self.principales = plan.get("principales") or []
+        self.extra = {item.get("id"): item for item in plan.get("hallazgos") or [] if isinstance(item, dict)}
+        self.flows = list(plan.get("flujos") or {})
+
+    def pick(self, *names):
+        return next((self.sections[k] for k in self.sections for n in names if k.startswith(n)), "")
+
+    def filled(self, *names):
+        return without_placeholders(self.pick(*names))
+
+    def principal_entries(self):
+        """[(flujo, métrica, entrada de group)] de las métricas principales con antes, en el orden del plan."""
+        out = []
+        for (flow, metric), entry in sorted(self.groups.items(), key=lambda kv: (
+                self.flows.index(kv[0][0]) if kv[0][0] in self.flows else 99, priority(kv[0][1], self.plan))):
+            if metric in self.principales and entry["fases"].get("antes"):
+                out.append((flow, metric, entry))
+        return out
+
+    def principal_results(self):
+        if not self.final:
+            return []
+        return sorted([r for r in self.results if r["metrica"] in self.principales],
+                      key=lambda r: (self.flows.index(r["flujo"]) if r["flujo"] in self.flows else 99,
+                                     priority(r["metrica"], self.plan)))
+
+    def noise(self, entry):
+        before, control = entry["fases"].get("antes") or [], entry["fases"].get("control") or []
+        return abs(statistics.median(control) - statistics.median(before)) if before and control else None
+
+    def plain(self, text, field_name):
+        """Un texto para gerencia: si trae términos técnicos, no se publica y el aviso nombra el campo y la palabra."""
+        found = jargon(text)
+        if found:
+            self.problems.append((field_name, found))
+            return ""
+        return text
+
+    def improvements(self, final_only=False):
+        items = [m for m in self.plan.get("mejoras") or [] if isinstance(m, dict)]
+        return [m for m in items if m.get("estado") == "aplicada"] if final_only else items
+
+
+def minimum_shown(data, item):
+    """El mínimo demostrable de una mejora: el del plan (`minimo`) o, con la métrica medida, "por debajo del menor de hoy
+    y más que la variación normal"."""
+    if str(item.get("minimo") or "").strip():
+        return text_html(item["minimo"])
+    flow = improvement_flow(data.plan, item)
+    entry = data.groups.get((flow, item.get("metrica")))
+    if not entry or not entry["fases"].get("antes"):
+        return "—"
+    before = entry["fases"]["antes"]
+    unit, noise = entry["unidad"], data.noise(entry)
+    bound = min(before) if entry.get("sentido", "menor") != "mayor" else max(before)
+    return e("%s %s (el %s de hoy)%s" % ("por debajo de" if entry.get("sentido", "menor") != "mayor" else "por encima de",
+                                         plain_value(bound, unit), "menor" if entry.get("sentido", "menor") != "mayor"
+                                         else "mayor", " y más que la variación normal (≈%s)" % plain_value(noise, unit)
+                                         if noise else ""))
+
+
+def metric_today(data, item):
+    flow = improvement_flow(data.plan, item)
+    entry = data.groups.get((flow, item.get("metrica")))
+    name = plain_metric(item.get("metrica") or "", data.plan) if item.get("metrica") else "—"
+    if entry and entry["fases"].get("antes"):
+        return "%s · hoy %s" % (name, plain_value(statistics.median(entry["fases"]["antes"]), entry["unidad"]))
+    return name
+
+
+def risk_parts(item):
+    level, _, why = str(item.get("riesgo") or "").partition(":")
+    return risk_level(level) or level.strip() or "sin evaluar", why.strip()
+
+
+# ── Secciones del reporte técnico ────────────────────────────────────────────
+
+def r_summary_dev(data):
+    kpis = []
+    if data.final:
+        for r in data.principal_results()[:4]:
+            kpis.append(kpi(plain_value(r["despues"]["mediana"], r["unidad"]), metric_words(r["metrica"], data.plan,
+                                                                                               data.urls),
+                            "antes %s · %s · %s" % (plain_value(r["antes"]["mediana"], r["unidad"]),
+                                                   change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "sin cambio",
+                                                   verdict_label(r)), hot=verdict_label(r) == "Regresión"))
     else:
-        groups = group(rows)
-        found = [(flow, metric, entry) for (flow, metric), entry in sorted(groups.items())
-                 if metric in principales and entry["fases"].get("antes")]
-        metrics_md = markdown_table(["Medida", "Hoy (lo típico)", "Entre", "Estable"], [
-            [metric_words(metric, plan, urls) + (" · %s" % scenario_words(plan, flow) if scenario_words(plan, flow) else ""),
-             plain_value(describe(entry["fases"]["antes"])["mediana"], entry["unidad"]),
-             "%s y %s" % (plain_value(min(entry["fases"]["antes"]), entry["unidad"]),
-                          plain_value(max(entry["fases"]["antes"]), entry["unidad"])),
-             "no: varía mucho" if "inestable" in describe(entry["fases"]["antes"])["avisos"] else "sí"]
-            for flow, metric, entry in found]) if found else "No hay medidas principales medidas todavía."
-    memory = memory_verdict_lines(folder, plan)  # C5
+        for flow, metric, entry in data.principal_entries()[:4]:
+            stats = describe(entry["fases"]["antes"])
+            noise = data.noise(entry)
+            where = scenario_words(data.plan, flow)
+            kpis.append(kpi(plain_value(stats["mediana"], entry["unidad"]), metric_words(metric, data.plan, data.urls)
+                            + (" · %s" % where if where else ""),
+                            "entre %s y %s%s" % (plain_value(stats["min"], entry["unidad"]),
+                                                 plain_value(stats["max"], entry["unidad"]),
+                                                 " · variación normal ≈%s" % plain_value(noise, entry["unidad"])
+                                                 if noise is not None else ""),
+                            hot="inestable" in stats["avisos"]))
+    parts = ['<p class="sub">%s</p>' % e(measured_line(data))]
+    if data.final:  # B5 de 0.13.0: cuándo se generó y si el cierre está hecho (`siguiente` lo lee)
+        internal = any(item.get("estado") == "aplicada" and item.get("cambios") for item in data.improvements())
+        parts.append('<p class="sub">%s</p>' % e("Generado el %s · %s%s" % (
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), close_status(data.folder),
+            " · interno: contiene código (los diffs de las mejoras)" if internal else "")))
+    if kpis:
+        parts.append('<div class="kpis">%s</div>' % "".join(kpis))
+    summary = data.filled("resumen ejecutivo")
+    if summary:
+        parts.append(note_box("En una frase", text_html(" ".join(summary.split()))))
+    items = [m for m in data.improvements() if data.final or m.get("estado") != "descartada"]
+    if items:
+        parts.append("<h3>%s</h3>" % ("Resumen de las mejoras" if data.final else "Resumen de las mejoras propuestas"))
+        cards = []
+        for item in items:
+            level, _ = risk_parts(item)
+            r = improvement_metric(data.plan, item, data.results) if data.final else None
+            state = item.get("estado", "propuesta")
+            fields = [field("Ataca", e(item.get("hallazgo") or "—")), field("Mide", e(metric_today(data, item)))]
+            if data.final and state == "aplicada" and r is not None:
+                fields.append(field("Resultado", "%s → %s %s" % (e(plain_value(r["antes"]["mediana"], r["unidad"])),
+                                                                 e(plain_value(r["despues"]["mediana"], r["unidad"])),
+                                                                 chip(verdict_label(r), LABEL_CHIP.get(verdict_label(r),
+                                                                                                       "c-same")))))
+            else:
+                fields += [field("Esperado", text_html(item.get("esperado") or "—")),
+                           field("Mínimo demostrable", minimum_shown(data, item))]
+            fields.append(field("Prioridad, esfuerzo y riesgo", e(" · ".join(
+                str(item.get(key) or "—") for key in ("prioridad", "esfuerzo")) + " · " + level)))
+            cards.append('<div class="card m"><h3><span class="id">%s</span> %s %s</h3>%s<div class="fields">%s</div></div>'
+                         % (e(item.get("id")), e(improvement_title(item)), chip(state, STATE_CHIP.get(state, "c-same")),
+                            "<p>%s</p>" % text_html(item["que_cambia"]) if item.get("que_cambia") else "", "".join(fields)))
+        parts.append('<div class="cards">%s</div>' % "".join(cards))
+    return "resumen", "Resumen", "".join(parts)
+
+
+def measured_line(data):
+    """La línea bajo el título del resumen: flujos, mediciones por fase y dispositivo."""
+    counts = []
+    for phase in ("antes", "control") + (("despues",) if data.final else ()):  # el inicial no habla de después
+        record = data.phases.get(phase)
+        if isinstance(record, dict) and record.get("corridas"):
+            counts.append("%d %sde %s" % (record["corridas"], "" if counts else "mediciones ",
+                                          PHASE_WORDS.get(phase, phase)))
+    device = next((rec.get("dispositivo") for rec in (data.phases.get(p) or {} for p in FASES)
+                   if isinstance(rec, dict) and isinstance(rec.get("dispositivo"), dict)), None) or {}
+    flows = ", ".join(scenario_words(data.plan, flow) or flow.replace("-", " ") for flow in data.flows)
+    joined = ", ".join(counts[:-1]) + " y " + counts[-1] if len(counts) > 1 else "".join(counts)
+    return " · ".join(part for part in (flows, joined, device.get("modelo") or "") if part)
+
+
+def r_user(data):
+    symptom = ficha_value(data.pick("ficha"), "síntoma", "sintoma")
+    text = ('<p>"%s"</p>' % text_html(symptom.strip().strip('"'))) if symptom else \
+        "<p>Sin completar todavía: la investigación no lo anotó en la Ficha.</p>"
+    return "usuario", "Qué notaba el usuario", text
+
+
+def route_steps(data, flow):
+    """Los pasos del recorrido en palabras (los `# paso:` de recorrido.sh); si no hay, los tramos del plan."""
+    spec = (data.plan.get("flujos") or {}).get(flow) or {}
+    route = spec.get("recorrido") if isinstance(spec.get("recorrido"), str) else None
+    steps = []
+    if route and route != "manual":
+        try:
+            steps = route_words(route, data.folder, [])[0]
+        except (OSError, PerfError):
+            steps = []
+    if not steps:
+        steps = [segment_title(item.get("nombre", ""), data.plan) or segment_words(item.get("nombre", ""), data.plan)
+                 for item in spec.get("segmentos") or [] if isinstance(item, dict) and not item.get("solo_red")]
+    if not steps and startup_spec(spec):
+        steps = ["Abrir la app en frío hasta la primera pantalla"]
+    return steps
+
+
+def flow_cards(steps):
+    if not steps:
+        return ""
+    return '<div class="flow">%s</div>' % "".join('<div class="step%s"><b>%d</b><span>%s</span></div>' % (
+        " end" if index == len(steps) else "", index, e(step)) for index, step in enumerate(steps, start=1))
+
+
+def conditions_rows(data):
+    record = data.phases.get("antes") if isinstance(data.phases.get("antes"), dict) else {}
+    rows = []
+    for line in ficha_subset(data.pick("ficha")).splitlines()[2:]:  # R10: lo que la Ficha publica (sin precondiciones)
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[1]:
+            rows.append((cells[0], text_html(cells[1]) if not cells[1].startswith("_") else "sin completar"))
+    build = " · ".join(part for part in (record.get("version"), "compilación %s" % record["compilacion"]
+                                         if record.get("compilacion") else "", ", ".join(record.get("configs") or []),
+                                         "depurable" if record.get("depurable") else "") if part)
+    def add(name, value):  # lo que perf.py sabe, sin repetir una fila de la Ficha (salvo para completarla)
+        index = next((i for i, (known, _) in enumerate(rows) if known == name), None)
+        if index is None:
+            rows.append((name, value))
+        elif rows[index][1] == "sin completar":
+            rows[index] = (name, value)
+    add("Build", e(build or "sin dato"))
+    device = record.get("dispositivo") if isinstance(record.get("dispositivo"), dict) else {}
+    hz = record.get("hz") or data.plan.get("hz")
+    add("Dispositivo", e(" · ".join(part for part in (device.get("modelo"), "%s Hz" % hz if hz else "") if part)
+                         or "sin dato"))
+    counts = ["%s %d" % (PHASE_WORDS.get(phase, phase), data.phases[phase]["corridas"]) for phase in FASES
+              if isinstance(data.phases.get(phase), dict) and data.phases[phase].get("corridas")
+              and (data.final or phase != "despues")]
+    add("Mediciones", e(" · ".join(counts) or "sin mediciones todavía"))
+    spans = []
+    for flow in data.flows:
+        for label, spec in measured_spans((data.plan.get("flujos") or {}).get(flow) or {}):
+            spans.append("%s: de %s a %s" % (label.split("'")[1] if "'" in label else label, spec["desde"]["marca"],
+                                             spec["hasta"]["marca"]))
+    if spans:
+        rows.append(("Tramos", "<br>".join(e(span) for span in spans[:8])))
+    return rows
+
+
+def captured_rows(data):
+    """R4: qué se capturó en cada medición: solo lo que hb-performance mide, armado desde la config usada (fases.json),
+    la configuración de Perfetto, `memoria` del plan, las métricas del CSV y los hallazgos."""
+    names = {row["metrica"] for row in data.rows}
+    total = sum(rec.get("corridas") or 0 for rec in (data.phases.get(p) for p in FASES) if isinstance(rec, dict))
+    configs = sorted({c for rec in (data.phases.get(p) for p in FASES) if isinstance(rec, dict)
+                      for c in rec.get("configs") or []})
+    categories = []
+    try:
+        config_text = resolve_config(data.plan, data.folder, None).read_text(encoding="utf-8")
+        categories = sorted(set(re.findall(r'atrace_categories:\s*"([^"]+)"', config_text)))
+    except (OSError, PerfError):
+        pass
+    ok, no, opt = '<span class="ok-mark">✔</span> ', '<span class="no-mark">✖</span> ', '<span class="opt-mark">○</span> '
+    rows = [("<b>System trace</b> (Perfetto)", "Una traza por medición, durante el recorrido medido%s%s" % (
+        ": categorías %s" % ", ".join("<code>%s</code>" % e(c) for c in categories) if categories else "",
+        " · configuración %s" % e(", ".join(configs)) if configs else ""),
+        ok + e("en las %d mediciones" % total) if total else opt + "sin mediciones todavía")]
+    frames = any(n == "frames" or n.endswith(" frames") or n.startswith("gfx_") for n in names)
+    rows.append(("<b>Frames y jank</b>", "FrameTimeline (Android 12 o superior): frames por tramo, P50/P90/P99 y % de "
+                 "frames con tirón", (ok + "por tramo") if frames else no + "no medido"))
+    main = any(n.endswith("hilo_max_ms") for n in names)
+    rows.append(("<b>Hilo principal</b>", "Los slices más largos del hilo principal y cuántos superan el presupuesto de "
+                 "un frame", (ok + "por tramo") if main else no + "no medido"))
+    if "inflate_cantidad" in names or any(n.endswith("inflate_cantidad") for n in names):
+        rows.append(("<b>Vistas infladas</b>", "Slices de <code>inflate</code>: cantidad y tiempo", ok.strip()))
+    if "red_llamadas" in names:
+        rows.append(("<b>Red (servicios)</b>", "Instrumentación de OkHttp: duración, espera del servidor (TTFB), cola, "
+                     "conexión nueva y lectura de cada llamada, con la ruta real que escribe el log <code>hb-perf</code>",
+                     ok + e("de cada tramo y cada servicio · %d ruta%s real%s" % (
+                         len(data.urls), "" if len(data.urls) == 1 else "s", "" if len(data.urls) == 1 else "es"))))
+    if "pss_mb" in names or any(n in names for n in ("java_heap_mb", "activities", "views")):
+        rows.append(("<b>Memoria</b>", "<code>dumpsys meminfo</code> después de cada medición: PSS, heap de Java, "
+                     "actividades y vistas vivas", ok + "una lectura por medición, no por tramo"))
+    reviewed = any(re.search(r"\bGC\b|recolector", " ".join((f.get("sintoma") or "", f.get("causa") or "",
+                                                              f.get("evidencia") or ""))) for f in data.findings)
+    if "dalvik" in categories or reviewed:
+        rows.append(("<b>Recolección de basura (GC)</b>", "El GC que registra la categoría <code>dalvik</code> en la "
+                     "traza, con <code>perf.py consulta</code>", (ok + "revisado en el diagnóstico") if reviewed else
+                     opt + "en la traza; no se revisó"))
+    marks = sum(len(plan_marks(spec)) for spec in (data.plan.get("flujos") or {}).values() if isinstance(spec, dict))
+    if marks:
+        rows.append(("<b>Marcas del flujo</b>", "Las secciones de la app (<code>SCREEN</code>, <code>NAV</code>, "
+                     "<code>MARK</code>) que marcan el inicio y el fin de cada tramo", ok + e("%d marca%s del plan" % (marks, "" if marks == 1
+                                                                                                else "s"))))
+    diagnostic = {path.name for path in (data.folder / "prueba").glob("*.config.json")} if (data.folder / "prueba").is_dir() \
+        else set()
+    used = " ".join(diagnostic)
+    for name, what, how in (("cpu", "<b>CPU por función</b>", "Muestreo de CPU (<code>--config cpu</code>): qué funciones "
+                                                               "ocupan el hilo principal"),
+                            ("completa", "<b>Bloqueos y esperas</b>", "<code>--config completa</code>: binder, locks y por "
+                                                                      "qué espera el hilo principal")):
+        rows.append((what, how, (ok + "corrida de diagnóstico") if name in used or name in configs else
+                     opt + "sin correr: se puede pedir para el diagnóstico"))
+    return rows
+
+
+CALC_RULES_TEXT = {CALC_RULES: "cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan",
+                   "": "regla anterior a 0.15.0: un slice o un frame que cruzaba el borde contaba en los dos tramos"}
+
+
+def border_rule_md(folder, plan=None, final=True):
+    """C1: qué regla del borde se usó en cada fase ('' en un plan sin tramos: ahí no cambia nada)."""
+    if plan is not None and not any((spec or {}).get("segmentos") for spec in (plan.get("flujos") or {}).values()
+                                    if isinstance(spec, dict)):
+        return ""
+    phases = read_phases(folder)
+    used = [(phase, phases[phase].get("reglas", "")) for phase in FASES if isinstance(phases.get(phase), dict)
+            and phases[phase].get("corridas") and (final or phase != "despues")]
+    if not used:
+        return ""
+    lines = ["- %s: %s." % (PHASE_WORDS.get(phase, phase).capitalize(), CALC_RULES_TEXT.get(rule, rule))
+             for phase, rule in used]
+    if len({rule for _, rule in used}) > 1:
+        lines.append("- Las fases usan reglas distintas: `perf.py recalcular` aplica la de ahora a todas.")
+    return "Cada slice del hilo principal y cada frame cuentan en un solo tramo: aquel donde empiezan.\n\n" + "\n".join(lines)
+
+
+def r_measured_dev(data):
+    parts = []
+    for flow in data.flows:
+        steps = route_steps(data, flow)
+        if len(data.flows) > 1 and steps:
+            parts.append("<h3>%s</h3>" % e(scenario_words(data.plan, flow) or flow.replace("-", " ")))
+        parts.append(flow_cards(steps))
+    parts.append(html_table(["Condición", "Detalle"], [[(e(name), False), (value, False)]
+                                                       for name, value in conditions_rows(data)]))
+    captured = captured_rows(data)
+    parts.append('<details class="block"><summary>Qué se capturó en cada medición</summary>%s</details>' % (
+        '<div class="table-wrap"><table class="kv"><thead><tr><th>Qué</th><th>Cómo</th><th>En esta investigación</th>'
+        '</tr></thead><tbody>%s</tbody></table></div>' % "".join(
+            "<tr><td>%s</td><td>%s</td><td>%s</td></tr>" % row for row in captured)))
+    border = border_rule_md(data.folder, data.plan, data.final)  # C1 de 0.15.0: la regla del borde, con tramos
+    if border:
+        parts.append('<details class="block"><summary>Regla del borde de los tramos</summary>%s</details>'
+                     % md_to_html(border))
+    firm = firmness_md(data.folder, data.plan, data.results)
+    if firm:
+        parts.append(note_box("Qué tan firme es la medición", md_inline_block(firm)))
+    return "medicion", "Qué se midió y en qué condiciones", "".join(parts)
+
+
+def md_inline_block(text):
+    """Un texto markdown corto (frases o viñetas) dentro de una nota: las viñetas se unen en un párrafo."""
+    lines = [line.strip().lstrip("-*> ").strip() for line in (text or "").splitlines() if line.strip()]
+    return " ".join(text_html(line) for line in lines)
+
+
+def r_state_initial_dev(data):
+    figures, rows = [], []
+    for flow, metric, entry in data.principal_entries():
+        svg, caption = initial_chart(flow, metric, entry, plan=data.plan)
+        title = metric_words(metric, data.plan, data.urls) + (" · %s" % scenario_words(data.plan, flow)
+                                                              if scenario_words(data.plan, flow) else "")
+        figures.append(figure(svg, caption, e(title)))
+        stats = describe(entry["fases"]["antes"])
+        control = entry["fases"].get("control")
+        rows.append([(e(title), False), (e(plain_value(stats["mediana"], entry["unidad"])), True),
+                     (e(plain_value(statistics.median(control), entry["unidad"])) if control else "—", True),
+                     (e("%s–%s" % (plain_value(stats["min"], entry["unidad"]), plain_value(stats["max"], entry["unidad"]))),
+                      False),
+                     (e("%s · %s" % (fmt_pct(stats["cv"], signed=False), "varía mucho" if "inestable" in stats["avisos"]
+                                     else "estable")), False)])
+    parts = ['<div class="charts three">%s</div>' % "".join(figures)] if figures else []
+    if rows:
+        parts.append(html_table(["Medida", "Antes", "Control", "Rango (antes)", "Varía entre mediciones"], rows))
+    memory = memory_verdict_lines(data.folder, data.plan)
     if memory:
-        metrics_md += "\n\n" + "\n".join("- %s" % line for line in memory)
-    items = [m for m in plan.get("mejoras") or [] if (m.get("estado") == "aplicada") == final or not final]
-    if final:
-        items = [m for m in plan.get("mejoras") or [] if m.get("estado") == "aplicada"]
-    cards = "\n\n".join(improvement_card(folder, plan, item, findings, results, filled("mejoras aplicadas"))
-                        for item in items) if items else ("No se aplicó ninguna mejora." if final else
-                                                          "No se propone ninguna mejora.")
-    absent = []
-    for flow in plan.get("flujos") or {}:
-        missing = absent_from_rows(plan, rows, flow)
-        if missing:
-            absent.append("⚠ " + absent_services_text(flow, missing)[0].upper() + absent_services_text(flow, missing)[1:]
-                          + ".")
-    services = changed_services_md(rows, plan, phases, urls) + ("\n\n" + "\n\n".join(absent) if absent else "")
-    main = [("Resumen", filled("resumen ejecutivo")), ("Métricas principales", metrics_md),
-            ("Mejoras" if final else "Mejoras propuestas", cards), ("Servicios", services)]
-    if final:
-        main.append(("Lo pendiente", pending_improvements(plan, True)))
-    comparison = ""
-    if final:
-        chosen = compact_compare(results, plan, everything=True)
-        comparison = markdown_table(["Flujo", "Medida", "Antes", "Después", "Cambio", "Veredicto"], [
-            [scenario_words(plan, r["flujo"]) or r["flujo"].replace("-", " "), metric_words(r["metrica"], plan, urls),
-             plain_value(r["antes"]["mediana"], r["unidad"]), plain_value(r["despues"]["mediana"], r["unidad"]),
-             change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—", label_token(verdict_label(r))]
-            for r in chosen]) if chosen else ""
-    pending_intro = ("> Lo que la investigación no pudo cerrar (no son mejoras): síntoma, qué falta, cuánto cuesta y la "
-                     "acción sugerida.\n\n")
-    # 0.15.1: la línea del presupuesto de pasos (es para la IA, E4) no va al reporte
-    open_items = "\n".join(line for line in (filled("pendientes") or "").splitlines()
-                           if "presupuesto de pasos" not in line).strip()
-    annex = [("Comparación completa", comparison),
-             ("Lectura de la comparación", filled("lectura de la comparación", "lectura de la comparacion")),
-             ("Servicios del flujo, completos", services_md(rows, plan, phases, urls=urls)),
-             ("Red por tramo", segment_network_md(rows, plan, phases)),
-             ("Hallazgos confirmados sin mejora", unimproved_md(findings, plan)),
-             ("Se revisó y se descartó", reviewed_md(findings)),
-             ("Pendientes que no son mejoras", pending_intro + open_items + capture_table(open_items, folder, plan)
-              if open_items else ""),
-             ("Pedido al equipo dueño del módulo", OWNER_INTRO + filled(OWNER_SECTION) if filled(OWNER_SECTION) else ""),
-             ("Ficha y condiciones", ficha_subset(pick("ficha"))),
-             ("Costo de la investigación", cost_md(folder, plan)),
-             ("Cómo leer este reporte", GLOSSARY),
-             ("Regla del borde de los tramos", border_rule_md(folder, plan))]
-    return main, annex
+        parts.append("<ul>%s</ul>" % "".join("<li>%s</li>" % text_html(line) for line in memory))
+    return "metricas", "Estado inicial", "".join(parts) or "<p>No hay medidas principales medidas todavía.</p>"
+
+
+def result_title(r, data, plain=False):
+    where = scenario_words(data.plan, r["flujo"])
+    name = plain_metric(r["metrica"], data.plan) if plain else metric_words(r["metrica"], data.plan, data.urls)
+    return name + (" · %s" % where if where else "")
+
+
+def r_result_dev(data):
+    figures, rows = [], []
+    for r in data.principal_results():
+        svg, caption = final_chart(r, plan=data.plan)
+        label = verdict_label(r)
+        figures.append(figure(svg, caption, "%s %s" % (e(result_title(r, data)), chip(label, LABEL_CHIP.get(
+            label, "c-same")))))
+        rows.append([(e(result_title(r, data)), False),
+                     (e(plain_value(r["antes"]["mediana"], r["unidad"])), True),
+                     (e(plain_value(r["despues"]["mediana"], r["unidad"])), True),
+                     (e(change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—"), True),
+                     (chip(label, LABEL_CHIP.get(label, "c-same")), False)])
+    parts = ['<div class="charts three">%s</div>' % "".join(figures)] if figures else []
+    if rows:
+        parts.append(html_table(["Medida", "Antes", "Después", "Cambio", "Veredicto"], rows))
+    parts.append("<p>%s</p>" % text_html(equal_line(data.folder, data.plan, data.results)))
+    reading = data.filled("lectura de la comparación", "lectura de la comparacion")
+    if reading:
+        parts.append(note_box("Lectura de la comparación", md_inline_block(reading)))
+    chosen = [r for r in compact_compare(data.results, data.plan, everything=True) if not is_instant(r["metrica"])]
+    if chosen:  # R10: la comparación completa, plegable, en "Resultado"
+        parts.append('<details class="block"><summary>Comparación completa (%d medidas)</summary>%s</details>' % (
+            len(chosen), html_table(["Flujo", "Medida", "Antes", "Después", "Cambio", "Veredicto"], [
+                [(e(scenario_words(data.plan, r["flujo"]) or r["flujo"].replace("-", " ")), False),
+                 (e(metric_words(r["metrica"], data.plan, data.urls)), False),
+                 (e(plain_value(r["antes"]["mediana"], r["unidad"])), True),
+                 (e(plain_value(r["despues"]["mediana"], r["unidad"])), True),
+                 (e(change_pct(r["antes"]["mediana"], r["despues"]["mediana"]) or "—"), True),
+                 (chip(verdict_label(r), LABEL_CHIP.get(verdict_label(r), "c-same")), False)] for r in chosen])))
+    memory = memory_verdict_lines(data.folder, data.plan)
+    if memory:
+        parts.append("<ul>%s</ul>" % "".join("<li>%s</li>" % text_html(line) for line in memory))
+    return "resultado", "Resultado", "".join(parts)
+
+
+def finding_title(data, finding, plain=False):
+    extra = data.extra.get(finding["id"]) or {}
+    if plain:
+        return extra.get("titulo_gerencia") or ""
+    text = extra.get("titulo") or finding.get("sintoma") or finding["id"]
+    return text if len(text) <= 90 else text[:87].rsplit(" ", 1)[0] + "…"
+
+
+def finding_next(data, finding):
+    ids = [m["id"] for m in data.improvements() if str(m.get("hallazgo") or "").strip() == finding["id"]]
+    if ids:
+        return "Lo ataca: <b>%s</b>%s" % (e(", ".join(ids)), " · qué falta para decidir: %s" % text_html(
+            finding["falta"]) if finding.get("falta") else "")
+    if finding["clase"] == "sin confirmar" and SERVER_WORDS.search(" ".join((finding.get("causa") or "",
+                                                                             finding.get("evidencia") or ""))):
+        return "Siguiente paso: <b>pedido al equipo dueño del servicio</b> (en Servicios)"
+    if finding.get("falta"):
+        return "Siguiente paso: %s" % text_html(finding["falta"])
+    return ""
+
+
+def connection_contradictions(data):
+    """E6: los hallazgos que afirman "sin conexión nueva" para un servicio que, según los datos, abre conexión en la mayoría
+    de las corridas: [(hallazgo, servicio, corridas con conexión, corridas)]."""
+    out = []
+    stats = {}
+    for flow in data.flows:
+        stats.update(connection_stats(data.rows, flow, "antes"))
+    for finding in data.findings:
+        text = " ".join((finding.get("sintoma") or "", finding.get("evidencia") or "", finding.get("causa") or ""))
+        if not NO_CONNECTION.search(text):
+            continue
+        for service, (opened, total, _, _, _) in stats.items():
+            if QUERY_TAG.sub("", service) in text and total and opened * 2 > total:
+                out.append((finding["id"], service, opened, total))
+    return out
+
+
+def r_findings_dev(data):
+    if not data.findings:
+        return "hallazgos", "Hallazgos", "<p>El diagnóstico no dejó hallazgos en estado.md.</p>" + findings_extra(data)
+    contradictions = {item[0]: item for item in connection_contradictions(data)}
+    legend = '<div class="legend">%s</div><br/>' % "".join(
+        '<span><i style="background:var(--%s)"></i>%s</span>' % (color, name)
+        for color, name in (("ok", "mejorable"), ("ko", "bug"), ("same", "sin confirmar"), ("warn", "descartado")))
+    cards = []
+    for finding in data.findings:
+        kind = finding["clase"]
+        evidence = with_versions(finding.get("evidencia") or "", data.rows, data.urls)
+        files = list(dict.fromkeys("%s:%s" % pair for pair in CITED.findall(" ".join(
+            (finding.get("evidencia") or "", finding.get("causa") or "")))))
+        warn = ""
+        if finding["id"] in contradictions:
+            _, service, opened, total = contradictions[finding["id"]]
+            warn = note_box("Contradice la tabla de servicios", e("%s abrió conexión nueva en %d de %d corridas" % (
+                versioned_route(service, data.urls), opened, total)), warn=True)
+        nxt = finding_next(data, finding)
+        title = finding_title(data, finding)
+        symptom = (finding.get("sintoma") or "").strip()
+        cards.append('<div class="card %s"><h3><span class="id">%s</span> %s %s</h3><div class="fields">%s%s</div>%s%s%s%s'
+                     '</div>' % (FINDING_CLASS.get(kind, "t-sin"), e(finding["id"]), e(title),
+                                 chip(kind, FINDING_CHIP.get(kind, "c-same")),
+                                 field("Síntoma", text_html(symptom)) if symptom and symptom != title else "",  # sin repetir
+                                 field("Causa", text_html(finding.get("causa") or "—")),
+                                 '<p class="evid"><b>Evidencia:</b> %s</p>' % text_html(evidence) if evidence else "",
+                                 '<div class="files">%s</div>' % "".join("<code>%s</code>" % e(f) for f in files)
+                                 if files else "", '<p class="evid">%s</p>' % nxt if nxt else "", warn))
+    return "hallazgos", "Hallazgos", ('<p class="sub">Cada hallazgo con su causa y su evidencia. Los '
+                                     'confirmados se vuelven mejoras; los descartados quedan anotados para no buscarlos de '
+                                     'nuevo.</p>' + legend + '<div class="cards">%s</div>' % "".join(cards)
+                                     + findings_extra(data))
+
+
+def findings_extra(data):
+    """Lo que la investigación no pudo cerrar (los pendientes que no son mejoras, sin los que perf.py ya cerró) y el
+    pedido al equipo dueño de un módulo binario: debajo de los hallazgos."""
+    parts = []
+    open_items = "\n".join(line for line in (data.filled("pendientes") or "").splitlines()
+                           if "presupuesto de pasos" not in line and RESOLVED_TAG not in line).strip()
+    if open_items:
+        parts.append("<h3>Pendientes que no son mejoras</h3>%s%s" % (
+            md_to_html(open_items), md_to_html(capture_table(open_items, data.folder, data.plan))))
+    owner = data.filled(OWNER_SECTION)
+    if owner:
+        parts.append(note_box("Pedido al equipo dueño del módulo", md_to_html(OWNER_INTRO + owner), warn=True))
+    return "".join(parts)
+
+
+def improvement_files_html(data, item):
+    """Los archivos de una mejora aplicada, plegables, con su explicación y su diff completo."""
+    out = []
+    used = []
+    for shown, path, repo, text in diff_files(data.folder, item):
+        note = file_note(item, path, repo, shown == path) or {}
+        used.append(id(note))
+        level = risk_level(note.get("riesgo"))
+        body = "".join("<p><b>%s:</b> %s</p>" % (label_, text_html(str(note[key]).strip()))
+                       for key, label_ in (("antes", "Antes"), ("despues", "Después"), ("pros", "Pros"),
+                                           ("contras", "Contras")) if str(note.get(key) or "").strip())
+        if not body:
+            body = ('<p class="evid">Sin explicación por archivo: la sesión 3 la deja en "Mejoras aplicadas" de estado.md '
+                    '(antes, después, pros, contras y riesgo).</p>')
+        out.append('<details class="file"><summary>%s · riesgo %s</summary>%s%s</details>' % (
+            e(shown), level or "sin evaluar", body, md_to_html("\n".join(fenced(text, "diff")))))
+    if item.get("estado") == "aplicada" and not out:
+        out.append('<p class="evid">Código: sin diff guardado (la mejora se marcó aplicada sin <code>--archivos</code>, o es '
+                   'de una versión anterior).</p>')
+    return "".join(out)
+
+
+def r_improvements_dev(data):
+    items = data.improvements()
+    if not items:
+        return "mejoras", "Mejoras" if data.final else "Mejoras propuestas", (
+            "<p>No se aplicó ninguna mejora.</p>" if data.final else "<p>No se propone ninguna mejora.</p>")
+    applied_text = data.filled("mejoras aplicadas")
+    cards = []
+    for item in items:
+        state = item.get("estado", "propuesta")
+        level, why = risk_parts(item)
+        r = improvement_metric(data.plan, item, data.results) if data.final and state == "aplicada" else None
+        head = [chip("%s%s" % (state, " · esperando tu decisión" if state == "propuesta" else ""),
+                     STATE_CHIP.get(state, "c-same")), chip("riesgo %s" % RISK_WORDS.get(level, level), "c-warn")]
+        if r is not None:
+            head.insert(0, chip(verdict_label(r), LABEL_CHIP.get(verdict_label(r), "c-same")))
+        notes_ = improvement_notes(applied_text, str(item.get("id")))
+        cost = improvement_note(item, notes_, "costo")[0]
+        condition = improvement_note(item, notes_, "condicion")[0]
+        alternatives = improvement_note(item, notes_, "alternativas")[0]
+        target = str(item.get("hallazgo") or "").strip()
+        finding = next((f for f in data.findings if f["id"] == target), None)
+        first = kv_table(["Hallazgo que resuelve", "Métrica · hoy", "Resultado" if r is not None else "Esperado",
+                          "Mínimo demostrable"],
+                         [e("%s · %s" % (target, finding["sintoma"].rstrip(".")) if finding and finding.get("sintoma")
+                            else target or "—"), e(metric_today(data, item)),
+                          "%s → %s" % (e(plain_value(r["antes"]["mediana"], r["unidad"])),
+                                       e(plain_value(r["despues"]["mediana"], r["unidad"]))) if r is not None
+                          else text_html(item.get("esperado") or "—"), minimum_shown(data, item)])
+        second = kv_table(["Costo conocido", "Condición", "Riesgo de hacer el cambio", "Alternativas"],
+                          [text_html(cost or "—"), text_html(condition or "—"), text_html(why or level),
+                           text_html(alternatives or "—")])
+        outcome = improvement_result(item, r) if r is not None and item.get("a_prueba") else ""
+        hypothesis = ('<p><b>Hipótesis%s:</b> %s%s</p>' % (" (a prueba)" if item.get("a_prueba") else "",
+                                                           text_html(item["hipotesis"]), " · <b>%s</b>" % e(outcome)
+                                                           if outcome else "")) if item.get("hipotesis") else ""
+        files = improvement_files_html(data, item) if state == "aplicada" else \
+            '<p class="evid">Sus archivos y el diff de cada uno se agregan cuando la sesión 3 la aplica.</p>'
+        cards.append('<div class="card m"><h3><span class="id">%s</span> %s %s</h3>%s%s%s%s%s</div>' % (
+            e(item.get("id")), e(improvement_title(item)), " ".join(head),
+            "<p><b>Qué cambia:</b> %s</p>" % text_html(item["que_cambia"]) if item.get("que_cambia") else "",
+            hypothesis, first, second, files))
+    return "mejoras", "Mejoras" if data.final else "Mejoras propuestas", (
+        '<p class="sub">%s</p><div class="cards one">%s</div>' % (
+            "Cada mejora con su veredicto y su diff." if data.final else
+            "Cada mejora ataca un hallazgo; la medición de después dice si funcionó.",
+            "".join(cards)))
+
+
+# ── Servicios (R5, R6) ───────────────────────────────────────────────────────
+
+def services_bars(rows, flow, phase, urls, title):
+    """R5/R6: "Servicios que más tiempo suman": barras de servidor (TTFB) más app (cola, conexión y lectura), con el
+    servicio en dos líneas (MÉTODO endpoint y, debajo, microservicio · versión). '' sin datos."""
+    items = [item for item in flow_services(rows, flow, phase) if item["suma"] is not None][:SERVICES_TOP + 1]
+    if not items:
+        return ""
+    uid = chart_id()
+    x0, width, row = 300, 340, 36
+    top = max(item["suma"] for item in items)
+    axis, scale = svg_axis(x0, width, 8 + row * len(items) + 4, top, "ms")
+    parts = [hatch_defs(uid)]
+    for index, item in enumerate(items):
+        y = 8 + index * row
+        parts.append(label_svg(0, y + 10, item["servicio"], urls))
+        server = item["llamadas"] * item["ttfb"] if item["ttfb"] is not None else None
+        if server is not None:
+            cut = scale(min(server, item["suma"]))
+            parts.append('<rect x="%d" y="%d" width="%.1f" height="18" class="bar-server"/>' % (x0, y, max(cut - x0, 1)))
+            parts.append('<rect x="%.1f" y="%d" width="%.1f" height="18" fill="url(#%s-h)"/>' % (
+                cut, y, max(scale(item["suma"]) - cut, 0), uid))
+            detail = "%s (servidor %s · app %s)" % (nice(item["suma"], "ms"), nice(server, "ms"),
+                                                    nice(max(item["suma"] - server, 0), "ms"))
+        else:
+            parts.append('<rect x="%d" y="%d" width="%.1f" height="18" class="bar-before"/>' % (
+                x0, y, max(scale(item["suma"]) - x0, 1)))
+            detail = "%s (sin desglose)" % nice(item["suma"], "ms")
+        if item["llamadas"] != 1:
+            detail = "×%s · %s" % (trim(item["llamadas"], 1), detail)
+        parts.append('<text x="%.1f" y="%d" class="bar-value">%s</text>' % (scale(item["suma"]) + 6, y + 13, e(detail)))
+    parts += axis
+    height = 8 + row * len(items) + 44
+    svg = '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (
+        x0 + width + 220, height, e("%s: %s" % (title, ", ".join("%s %s" % (versioned_route(item["servicio"], urls),
+                                                                            nice(item["suma"], "ms")) for item in items))),
+        "".join(parts))
+    legend = ('<div class="legend"><span><i style="background:var(--after)"></i>servidor (TTFB)</span><span><i '
+              'style="background:var(--before)"></i>app (cola, conexión y lectura)</span></div>')
+    return '<figure class="chart"><figcaption>%s</figcaption>%s%s</figure>' % (e(title), svg, legend)
+
+
+def run_summary(folder, phase, flow, run):
+    """El resumen de una corrida (<flujo>_<n>.resumen.json, F3) o {}: el reporte lee de él el hilo principal ocupado."""
+    try:
+        return json.loads((pathlib.Path(folder) / phase / ("%s_%s%s" % (flow, run, SUMMARY_SUFFIX))).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def key_call(calls, start, end):
+    """R5/R7: la llamada clave de una acción: la que termina última antes de la marca de fin; None si no hay."""
+    inside = [call for call in calls if start <= call[2] <= end and call[1] >= start - 5000]
+    return max(inside, key=lambda call: call[2]) if inside else None
+
+
+def timeline_figure(data, flow, phase, title, start, end, calls, marks, busy=None, side=""):
+    """R5: la línea de tiempo de una acción en la medición típica: las marcas numeradas, una barra por llamada con el
+    servicio en dos líneas (con su versión), la llamada clave resaltada y la franja del hilo principal ocupado cuando
+    se conoce."""
+    inside = [call for call in calls if call[2] >= start - 1 and call[1] <= end + 1]
+    if not inside:
+        return ""
+    key = key_call(inside, start, end)
+    left_ms = min([start] + [call[1] for call in inside])
+    right_ms = max([end] + [call[2] for call in inside])
+    span = (right_ms - left_ms) or 1.0
+    x0, width, row = 300, 540, 34
+    height = 24 + row * len(inside) + 60
+
+    def x(ms):
+        return x0 + (ms - left_ms) / span * width
+
+    parts = []
+    if busy:
+        parts.append('<rect x="%.1f" y="18" width="%.1f" height="%d" class="tl-main"/>' % (
+            x(busy[0]), max(x(busy[1]) - x(busy[0]), 2), row * len(inside)))
+        parts.append('<text x="%.1f" y="%d" class="mark-label">hilo principal ocupado (%s–%s s)</text>' % (
+            x(busy[0]) + 4, 24 + row * len(inside) + 8, trim((busy[0] - start) / 1000.0, 2),
+            trim((busy[1] - start) / 1000.0, 2)))
+    numbered = [(name, at) for name, at in marks if start - 1 <= at <= end + 1][:TIMELINE_MARKS_MAX]
+    for number, (name, at) in enumerate(numbered, start=1):
+        parts.append('<line x1="%.1f" y1="12" x2="%.1f" y2="%d" class="mark"><title>%s</title></line>' % (
+            x(at), x(at), 18 + row * len(inside), e(name)))
+        parts.append('<text x="%.1f" y="10" class="mark-label" text-anchor="middle">%d</text>' % (x(at), number))
+    for index, call in enumerate(sorted(inside, key=lambda item: item[1])):
+        y = 22 + index * row
+        parts.append(label_svg(0, y + 10, call[0], data.urls))
+        parts.append('<rect x="%.1f" y="%d" width="%.1f" height="14" rx="2" class="tl-bar%s"/>' % (
+            x(call[1]), y + 1, max(x(call[2]) - x(call[1]), 2), " key" if call is key else ""))
+        parts.append('<text x="%.1f" y="%d" class="bar-value">%s s</text>' % (
+            x(call[2]) + 4, y + 12, trim((call[2] - call[1]) / 1000.0, 2)))
+    bottom = 22 + row * len(inside) + 18
+    parts.append('<line x1="%d" y1="%d" x2="%d" y2="%d" class="axis"/>' % (x0, bottom, x0 + width, bottom))
+    parts.append('<text x="%d" y="%d" class="axis-label">%s s</text>' % (x0, bottom + 14, trim((left_ms - start) / 1000.0,
+                                                                                            2)))
+    parts.append('<text x="%d" y="%d" class="axis-label" text-anchor="end">%s s · segundos desde el inicio de la acción'
+                 '</text>' % (x0 + width, bottom + 14, trim((right_ms - start) / 1000.0, 2)))
+    svg = '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">%s</svg>' % (
+        x0 + width + 70, height, e("Línea de tiempo de %s" % title), "".join(parts))
+    legend = " · ".join("%d = %s" % (number, name) for number, (name, _) in enumerate(numbered, start=1))
+    note = "%s%s" % (legend + ". " if legend else "", "En rojo, la llamada clave (la última que termina antes del fin de "
+                     "la acción): %s." % versioned_route(key[0], data.urls) if key else "")
+    return '<figure class="chart"><figcaption>%s</figcaption>%s<p class="chart-note">%s</p></figure>' % (
+        e("Acción \"%s\" · línea de tiempo (medición típica%s)" % (title, ", %s" % side if side else "")), svg, e(note))
+
+
+def action_timelines(data, phase, side=""):
+    """R5: una línea de tiempo por acción (tramo) de cada flujo, de la medición típica de la fase."""
+    out = []
+    for flow in data.flows:
+        run = representative_run(data.rows, flow, phase, data.plan, data.folder)
+        if run is None:
+            continue
+        timeline = load_timeline(data.folder, phase, flow, run) or rows_timeline(data.rows, flow, phase, run)
+        if not timeline or not timeline.get("llamadas"):
+            continue
+        calls = [tuple(call) for call in timeline["llamadas"]]
+        marks = [tuple(mark) for mark in timeline.get("marcas") or []]
+        spec = (data.plan.get("flujos") or {}).get(flow) or {}
+        top = run_summary(data.folder, phase, flow, run).get("hilo_top") or []
+        for title, start, end in action_spans(data.plan, flow, timeline):
+            busy = None
+            if not spec.get("ventana"):  # la franja del hilo principal comparte el origen de la traza solo sin ventana
+                slices = [(item[1], item[1] + item[2]) for item in top if isinstance(item, list) and len(item) >= 3
+                          and item[1] < end and item[1] + item[2] > start]
+                busy = max(slices, key=lambda pair: pair[1] - pair[0]) if slices else None
+            out.append(timeline_figure(data, flow, phase, title, start, end, calls, marks, busy, side))
+    return "".join(out)
+
+
+def owner_request(data):
+    """E6: el pedido al equipo dueño, armado con cada hallazgo `sin confirmar` del lado del servidor: el servicio con su
+    ruta real y versión, los tiempos y la espera del servidor por corrida, y qué se pide medir. [] si no hay."""
+    out = []
+    services = sorted(services_of(data.rows), key=len, reverse=True)
+    for finding in data.findings:
+        if finding["clase"] != "sin confirmar":
+            continue
+        text = " ".join((finding.get("sintoma") or "", finding.get("evidencia") or "", finding.get("causa") or ""))
+        if not SERVER_WORDS.search(text):
+            continue
+        named = [service for service in services if QUERY_TAG.sub("", service) in text]
+        if not named:
+            continue
+        lines = []
+        for service in named[:3]:
+            for flow in data.flows:
+                durations = data.groups.get((flow, "red %s ms" % service))
+                waits = data.groups.get((flow, "red %s ttfb_ms" % service))
+                values = (durations or {}).get("fases", {}).get("antes")
+                if not values:
+                    continue
+                server = (waits or {}).get("fases", {}).get("antes")
+                lines.append("<code>%s</code> tarda %s (entre %s y %s) en %d mediciones%s" % (
+                    e(route_text(service, data.urls)), e(plain_value(statistics.median(values), "ms")),
+                    e(plain_value(min(values), "ms")), e(plain_value(max(values), "ms")), len(values),
+                    "; espera del servidor (TTFB) %s por medición: %s" % (
+                        e(plain_value(statistics.median(server), "ms")), e(", ".join(trim(v / 1000.0, 2) + " s"
+                                                                                     for v in server)))
+                    if server else ""))
+                break
+        if lines:
+            out.append(note_box("Para el equipo dueño del servicio (%s)" % finding["id"],
+                                "%s. Pedido: medir el servicio del lado del servidor con y sin carga, y ver por qué la "
+                                "espera del servidor varía entre mediciones." % "; ".join(lines), warn=True))
+    return out
+
+
+def service_kpis(data, phase):
+    kpis = []
+    for flow in data.flows[:1]:
+        calls = data.groups.get((flow, "red_llamadas"))
+        values = (calls or {}).get("fases", {}).get(phase)
+        services = [item for item in flow_services(data.rows, flow, phase)]
+        if values:
+            kpis.append(kpi(trim(statistics.median(values), 1), "llamadas por medición (%d servicio%s)" % (
+                len(services), "" if len(services) == 1 else "s")))
+        busy = (data.groups.get((flow, "red_en_curso_ms")) or {}).get("fases", {}).get(phase)
+        if busy:
+            kpis.append(kpi(plain_value(statistics.median(busy), "ms"), "con al menos una llamada en curso"))
+        repeated = sum(1 for (owner, metric), entry in data.groups.items() if owner == flow and phase in entry["fases"]
+                       and re.fullmatch(r"[A-Za-z][\w-]* red .+ repetidas", metric)
+                       and statistics.median(entry["fases"][phase]) > 0)
+        kpis.append(kpi(str(repeated), "servicios repetidos dentro de una acción"))
+        stats = connection_stats(data.rows, flow, phase)
+        heavy = [service for service, (opened, total, _, _, _) in stats.items() if total and opened * 2 > total]
+        if heavy:
+            times = [stats[service][2] for service in heavy if stats[service][2]]
+            kpis.append(kpi("≈%s" % plain_value(statistics.median(times), "ms") if times else str(len(heavy)),
+                            "conexión nueva en casi todas las llamadas de %d servicio%s (por revisar)" % (
+                                len(heavy), "" if len(heavy) == 1 else "s"), hot=True))
+    return '<div class="kpis">%s</div>' % "".join(kpis) if kpis else ""
+
+
+def routes_table(data, phases):
+    rows, shown = [], set()
+    for flow in data.flows:
+        for phase in phases:
+            for item in invocation_order(flow_services(data.rows, flow, phase)):  # en el orden en que se invocan
+                shown.add(item["servicio"])
+                rows.append([("<code>%s</code>" % e(route_text(item["servicio"], data.urls)), False),
+                             (e(", ".join(segment_title(name, data.plan) or segment_words(name, data.plan)
+                                          for name in item["tramos"]) or "—"), False),
+                             (e(PHASE_WORDS.get(phase, phase)), False),
+                             (e(nice(item["ms"], "ms") if item["ms"] is not None else "—"), True),
+                             (e(nice(item["ttfb"], "ms") if item["ttfb"] is not None else "—"), True),
+                             (e(nice(item["conexion"], "ms") if item["conexion"] is not None else "—"), True)])
+    if not rows:
+        return ""
+    missing = [service for service in shown if not data.urls.get(service) and not data.urls.get(QUERY_TAG.sub("", service))]
+    note = ('<p class="evid">Sin la ruta real (y su versión) de %d servicio%s: la instrumentación de red no escribió su '
+            'línea <code>hb-perf</code> en estas mediciones (setup.md · Log de rutas).</p>' % (
+                len(missing), "" if len(missing) == 1 else "s")) if missing else ""
+    return '<details><summary>Rutas y tiempos de cada servicio</summary>%s%s</details>' % (
+        html_table(["Servicio", "Acción", "Fase", "Duración", "Servidor", "Conexión"], rows), note)
+
+
+def r_services(data, plain=False):
+    phases = ("antes", "despues") if data.final and any(row["fase"] == "despues" for row in data.rows) else ("antes",)
+    parts = ['<p class="sub">Los servicios de cada acción, en el orden en que se llaman, y su tiempo. Informativo: los tiempos '
+             'del servidor dependen del backend y de la red.</p>']
+    parts.append(service_kpis(data, phases[-1]))
+    for flow in data.flows:
+        bars = [services_bars(data.rows, flow, phase, data.urls, "Servicios que más tiempo suman%s%s" % (
+            " · %s" % (scenario_words(data.plan, flow) or flow) if len(data.flows) > 1 else "",
+            " · %s" % PHASE_WORDS.get(phase, phase) if len(phases) > 1 else "")) for phase in phases]
+        bars = [bar for bar in bars if bar]
+        if len(bars) > 1:
+            parts.append('<div class="charts">%s</div>' % "".join(bars))
+        else:
+            parts += bars
+    for phase in phases:
+        parts.append(action_timelines(data, phase, PHASE_WORDS.get(phase, phase) if len(phases) > 1 else ""))
+    if len(phases) > 1:  # R5: en el final, antes contra después
+        changed = changed_services_md(data.rows, data.plan, phases, data.urls)
+        if changed:
+            parts.append("<h3>Antes contra después</h3>" + md_to_html(changed))
+        backend = [line.strip("- ") for line in services_md(data.rows, data.plan, phases, urls=data.urls).splitlines()
+                   if "El servidor cambió entre fases" in line]
+        parts += ['<p class="evid">%s</p>' % text_html(line) for line in backend]
+    parts.append(routes_table(data, phases))
+    by_segment = segment_network_md(data.rows, data.plan, phases)
+    if by_segment:  # la red de cada tramo, plegable (antes estaba en el anexo)
+        parts.append("<details><summary>Red por tramo</summary>%s</details>" % md_to_html(by_segment))
+    parts += owner_request(data)
+    absent = [absent_services_text(flow, missing) for flow in data.flows
+              for missing in [absent_from_rows(data.plan, data.rows, flow)] if missing]
+    parts += ['<p class="evid">⚠ %s.</p>' % e(text[0].upper() + text[1:]) for text in absent]
+    if not services_of(data.rows) and not by_segment:
+        parts = ["<p>No se midió ninguna llamada de red en este recorrido.</p>"]
+    return "servicios", "Servicios del flujo", "".join(part for part in parts if part)
+
+
+def r_cost(data):
+    body = cost_md(data.folder, data.plan)
+    return "costo", "Costo de la investigación", md_to_html(body) if body else "<p>Sin costos anotados.</p>"
+
+
+# ── Secciones del reporte de gerencia ────────────────────────────────────────
+
+UNTITLED_CHANGE = "sin descripción en palabras todavía"  # un título técnico o vacío no se publica a gerencia
+IMPROVEMENT_FIELD_WORDS = {"titulo": "el título", "titulo_gerencia": "el título para gerencia (titulo_gerencia)",
+                           "que_cambia": "qué cambia (que_cambia)",
+                           "que_cambia_gerencia": "qué cambia para gerencia (que_cambia_gerencia)",
+                           "que_gana": "qué gana (que_gana)", "riesgo_gerencia": "el riesgo para gerencia (riesgo_gerencia)",
+                           "costo": "el costo conocido (costo)", "condicion": "la condición (condicion)"}
+
+
+def plain_improvement(data, item, key, fallback):
+    """Un campo de una mejora para gerencia; el aviso nombra el campo en palabras ("el título de M1 en plan.json")."""
+    text = item.get(key) or (item.get(fallback) if fallback else "")
+    used = key if item.get(key) else fallback
+    return data.plain(str(text or ""), "%s de %s en plan.json" % (IMPROVEMENT_FIELD_WORDS.get(used, used), item.get("id")))
+
+
+def r_summary_biz(data):
+    kpis = []
+    if data.final:
+        for r in data.principal_results()[:2]:
+            kpis.append(kpi(plain_value(r["despues"]["mediana"], r["unidad"]), "%s (antes %s)" % (
+                plain_metric(r["metrica"], data.plan), plain_value(r["antes"]["mediana"], r["unidad"])),
+                            plain_verdict(r)))
+        applied = len(data.improvements(final_only=True))
+        kpis.append(kpi(str(applied), "cambio%s aplicado%s" % ("" if applied == 1 else "s", "" if applied == 1 else "s")))
+    else:
+        for flow, metric, entry in data.principal_entries()[:1]:
+            kpis.append(kpi(plain_value(describe(entry["fases"]["antes"])["mediana"], entry["unidad"]),
+                            "%s, hoy" % plain_metric(metric, data.plan), hot=True))
+        proposed = [m for m in data.improvements() if m.get("estado", "propuesta") not in ("descartada", "aplicada")]
+        kpis.append(kpi(str(len(proposed)), "cambio%s propuesto%s, aún sin aplicar" % (
+            "" if len(proposed) == 1 else "s", "" if len(proposed) == 1 else "s")))
+    summary = data.filled(MANAGEMENT_SECTION)
+    summary = data.plain(" ".join(summary.split()), "\"Resumen para gerencia\" de estado.md") if summary else ""
+    return "resumen", "Resumen", ('<div class="kpis">%s</div>' % "".join(kpis) if kpis else "") + (
+        "<p>%s</p>" % text_html(summary) if summary else "<p>Sin completar todavía: falta el resumen para gerencia.</p>")
+
+
+def r_user_biz(data):
+    symptom = ficha_value(data.pick("ficha"), "síntoma", "sintoma")
+    symptom = data.plain(symptom, "el síntoma de la Ficha de estado.md") if symptom else ""
+    return "usuario", "Qué notaba el usuario", ('<p>"%s"</p>' % text_html(symptom.strip().strip('"')) if symptom else
+                                              "<p>Sin completar todavía: la investigación no lo anotó en la Ficha.</p>")
+
+
+def r_measured_biz(data):
+    parts = ['<p class="sub">%s</p>' % ("Se midió el recorrido antes y después de los cambios, en las mismas condiciones."
+                                        if data.final else "Sin cambios todavía: se midió el recorrido tal como "
+                                        "está hoy y se buscaron las causas.")]
+    for flow in data.flows:
+        steps = [data.plain(step, "el paso del recorrido \"%s\" (recorrido.sh)" % step) or "un paso del recorrido"
+                 for step in route_steps(data, flow)]
+        parts.append(flow_cards(steps))
+    total = sum(rec.get("corridas") or 0 for rec in (data.phases.get(p) for p in FASES) if isinstance(rec, dict))
+    if total:
+        level, why = frames_trust(data.folder)
+        parts.append("<p>El recorrido se repitió %d veces, de forma automática, en %s.</p>" % (
+            total, "un emulador" if "emulador" in why else "un teléfono"))
+    firm = firmness_md(data.folder, data.plan, data.results)
+    firm = data.plain(md_inline_block(firm), "la firmeza de la medición") if firm else ""
+    if firm:
+        parts.append(note_box("Qué tan firme es la medición", firm))
+    return "medido", "Qué se midió", "".join(parts)
+
+
+def r_state_biz(data):
+    figures = []
+    if data.final:
+        for r in data.principal_results()[:6]:
+            svg, caption = final_chart(r, plain=True, plan=data.plan)
+            label = verdict_label(r)
+            figures.append(figure(svg, caption, "%s %s" % (e(result_title(r, data, plain=True)), chip(label, LABEL_CHIP.get(
+                label, "c-same")))))
+    else:
+        for flow, metric, entry in data.principal_entries()[:6]:
+            svg, _ = initial_chart(flow, metric, entry, plain=True, plan=data.plan)
+            stats = describe(entry["fases"]["antes"])
+            figures.append(figure(svg, "Lo habitual: %s (entre %s y %s)." % (
+                plain_value(stats["mediana"], entry["unidad"]), plain_value(stats["min"], entry["unidad"]),
+                plain_value(stats["max"], entry["unidad"])), e(plain_metric(metric, data.plan))))
+    body = ('<div class="charts three">%s</div>' % "".join(figures)) if figures else \
+        "<p>No se fijó ninguna medida principal para este recorrido.</p>"
+    if not data.final:  # el pie de cada gráfico final ya lo dice
+        body += ('<p class="chart-note">La barra es el tiempo habitual y la línea fina va del caso más rápido al más '
+                 'lento.</p>')
+    if data.final and figures:  # qué significa cada etiqueta, para un lector no técnico
+        body += "<p><b>Qué significa cada etiqueta:</b></p>" + md_to_html(label_legend(
+            {verdict_label(r) for r in data.principal_results()[:6]}))
+    if data.final:  # lo demás que cambió, en palabras (G1 de 0.15.0)
+        secondary = secondary_changes(data.plan, data.results, data.problems)
+        if secondary:
+            body += md_to_html(secondary)
+    return ("resultado", "Resultado", body) if data.final else ("estado", "Estado inicial", body)
+
+
+def r_found_biz(data):
+    cards, untitled = [], 0
+    for finding in data.findings:
+        kind = finding["clase"]
+        extra = data.extra.get(finding["id"]) or {}
+        if kind in CONFIRMED_KINDS:
+            title = extra.get("titulo_gerencia") or finding.get("sintoma") or ""
+            title = data.plain(title, ("hallazgos[%s].titulo_gerencia en plan.json" if extra.get("titulo_gerencia") else
+                                       "el síntoma de %s en Hallazgos de estado.md") % finding["id"])
+            cause = extra.get("causa_gerencia") or finding.get("causa") or ""
+            cause = data.plain(cause, ("hallazgos[%s].causa_gerencia en plan.json" if extra.get("causa_gerencia") else
+                                       "la causa de %s en Hallazgos de estado.md") % finding["id"])
+            if title:
+                cards.append('<div class="card %s"><h3>%s %s</h3>%s</div>' % (
+                    FINDING_CLASS[kind], e(title.rstrip(".")),  # R8: la etiqueta, del color de la esquina
+                    chip("se puede corregir" if kind == "bug" else "se puede mejorar", FINDING_CHIP.get(kind, "c-ok")),
+                    "<p>%s</p>" % text_html(cause) if cause else ""))
+            else:  # sin descripción en palabras: se cuenta, no se niega (el aviso dice qué campo reescribir)
+                untitled += 1
+        elif kind == "sin confirmar" and SERVER_WORDS.search(" ".join((finding.get("causa") or "",
+                                                                       finding.get("evidencia") or ""))):
+            title = data.plain(extra.get("titulo_gerencia") or "", "hallazgos[%s].titulo_gerencia en plan.json"
+                               % finding["id"]) or "Un servicio tarda y no depende de la app"
+            cards.append('<div class="card t-sin"><h3>%s %s</h3><p>Es del servidor, no de la app: el dato va al equipo '
+                         'dueño del servicio.</p></div>' % (e(title), chip("del servidor", "c-same")))
+    if untitled:  # confirmados cuyo síntoma tiene términos técnicos: se cuentan (el aviso dice qué campo reescribir)
+        cards.append('<div class="card t-mejorable"><h3>%d causa%s confirmada%s más %s</h3><p>Todavía sin descripción '
+                     'en palabras.</p></div>' % (untitled, "" if untitled == 1 else "s", "" if untitled == 1 else "s",
+                                                 chip("se puede mejorar", "c-ok")))
+    body = '<div class="cards">%s</div>' % "".join(cards) if cards else "<p>Ninguna causa confirmada todavía.</p>"
+    return "encontro", "Qué se encontró", body
+
+
+def r_changes_biz(data):
+    items = data.improvements(final_only=data.final) if data.final else \
+        [m for m in data.improvements() if m.get("estado") != "descartada"]
+    cards = []
+    for item in items:
+        title = plain_improvement(data, item, "titulo_gerencia", "titulo") or UNTITLED_CHANGE
+        what = plain_improvement(data, item, "que_cambia_gerencia", "que_cambia")
+        state = item.get("estado", "propuesta")
+        fields = []
+        if data.final:
+            r = improvement_metric(data.plan, item, data.results)
+            fields.append(field("Efecto medido", e(plain_verdict(r)) + " " + chip(verdict_label(r), LABEL_CHIP.get(
+                verdict_label(r), "c-same")) if r is not None else "sin medición de su medida"))
+        else:
+            gain = plain_improvement(data, item, "que_gana", "esperado")
+            fields.append(field("Qué gana el usuario", text_html(gain) if gain else "sin completar"))
+        fields.append(field("Estado", chip(STATE_BUSINESS.get(state, state), STATE_CHIP.get(state, "c-same"))))
+        cards.append('<div class="card m"><h3><span class="id">%s</span> %s</h3>%s<div class="fields">%s</div></div>' % (
+            e(item.get("id")), e(title), "<p>%s</p>" % text_html(what) if what else "", "".join(fields)))
+    if data.final:
+        skipped = [m for m in data.improvements() if m.get("estado") != "aplicada"]
+        for item in skipped:
+            title = plain_improvement(data, item, "titulo_gerencia", "titulo") or UNTITLED_CHANGE
+            cards.append('<div class="card m"><h3><span class="id">%s</span> %s %s</h3><p>No se aplicó: %s.</p></div>' % (
+                e(item.get("id")), e(title), chip(STATE_BUSINESS.get(item.get("estado", "propuesta"), "sin aplicar"),
+                                                  "c-same"), e(STATE_TEXT.get(item.get("estado", "propuesta"),
+                                                                              "sin decidir"))))
+    sub = ('<p class="sub">Ninguno está aplicado todavía: se aplican y se miden otra vez, cada uno por separado, una vez aprobados.</p>'
+           if not data.final else "")
+    body = sub + ('<div class="cards">%s</div>' % "".join(cards) if cards else "<p>No se propone ningún cambio.</p>")
+    return ("cambios", "Cambios aplicados", body) if data.final else ("cambios", "Cambios propuestos", body)
+
+
+def r_risks_biz(data):
+    items = data.improvements(final_only=True) if data.final else \
+        [m for m in data.improvements() if m.get("estado") != "descartada"]
+    rows = []
+    for item in items:
+        level, why = risk_parts(item)
+        why = plain_improvement(data, item, "riesgo_gerencia", None) if item.get("riesgo_gerencia") else \
+            data.plain(why, "el porqué del riesgo de %s en plan.json" % item.get("id"))
+        title = plain_improvement(data, item, "titulo_gerencia", "titulo") or UNTITLED_CHANGE
+        rows.append([(e("%s · %s" % (item.get("id"), title)), False),
+                     (chip(RISK_WORDS.get(level, level) or "sin evaluar", "c-ko" if level in ("critico", "alto") else
+                           "c-warn" if level == "medio" else "c-ok" if level == "bajo" else "c-same"),
+                      False), (text_html(why or "sin explicar"), False)])
+    body = html_table(["Cambio", "Riesgo", "Por qué"], rows, css="") if rows else "<p>No hay cambios que evaluar.</p>"
+    return "riesgos", "Riesgo de cada cambio", body
+
+
+def r_pending_biz(data):
+    md = pending_improvements(data.plan, True, plain=True, problems=data.problems)
+    owners = [finding for finding in data.findings if finding["clase"] == "sin confirmar" and SERVER_WORDS.search(
+        " ".join((finding.get("causa") or "", finding.get("evidencia") or "")))]
+    extra = "<p>Consultas para el equipo dueño de un servicio: %d (el detalle va en el reporte técnico).</p>" % len(owners) \
+        if owners else ""
+    return "pendiente", "Lo pendiente", (md_to_html(md) if md else "<p>No queda nada pendiente.</p>") + extra
+
+
+# ── La página (R1) y los reportes ────────────────────────────────────────────
+
+TOC_NAMES = {"usuario": "Qué notaba el usuario", "medicion": "Qué se midió", "medido": "Qué se midió",
+             "metricas": "Estado inicial", "estado": "Estado inicial", "resultado": "Resultado", "riesgos": "Riesgos"}
+
+
+def humanize_html(html_text, names, plan):
+    """H5: los nombres internos de métricas en el texto de una sección se dicen en palabras; el código (los diffs, las
+    rutas), los SVG y los atributos no se tocan."""
+    if not html_text or not names:
+        return html_text
+    pattern = re.compile(r"(?<![\w-])(%s)(?![\w-])" % "|".join(re.escape(name) for name in sorted(names, key=len,
+                                                                                               reverse=True)))
+    # un nombre de métrica solo, entre acentos graves (<code>), también se dice en palabras (como hacía H5)
+    html_text = re.sub(r"<code>(%s)</code>" % "|".join(re.escape(e(name)) for name in sorted(names, key=len, reverse=True)),
+                       lambda m: e(plain_metric(html.unescape(m.group(1)), plan)), html_text)
+    out, skip = [], 0
+    for part in re.split(r"(<[^>]+>)", html_text):
+        if part.startswith("<"):
+            tag = re.match(r"</?\s*(\w+)", part)
+            if tag and tag.group(1).lower() in ("code", "pre", "svg", "script", "style"):
+                skip += -1 if part.startswith("</") else (0 if part.endswith("/>") else 1)
+            out.append(part)
+        elif skip > 0:
+            out.append(part)
+        else:
+            out.append(pattern.sub(lambda m: e(plain_metric(html.unescape(m.group(1)), plan)), part))
+    return "".join(out)
+
+
+def report_page(project, title, subtitle, audience, sections, date):
+    """R1: la página de un reporte: nombre del proyecto arriba, "Performance · <alcance>", el subtítulo (solo el técnico),
+    el índice, las secciones y el pie con la fecha de generación; botón de tema claro y oscuro."""
+    nav = '<nav class="toc">%s</nav>' % "".join('<a href="#%s">%s</a>' % (sid, e(TOC_NAMES.get(sid, name)))
+                                                 for sid, name, _ in sections)
+    body = nav + "".join('<section id="%s"%s><h2>%s</h2>%s</section>' % (
+        sid, ' class="resultado"' if sid in ("estado", "resultado") and audience == "gerencia" else "", e(name), html_)
+                         for sid, name, html_ in sections)
+    page = (ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+    return (page.replace("{{TITLE}}", e(title)).replace("{{PROJECT}}", e(project)).replace("{{AUDIENCE}}", audience)
+            .replace("{{SUBTITLE}}", "<p>%s</p>" % e(subtitle) if subtitle else "").replace("{{DATE}}", e(date))
+            .replace("{{BODY}}", body))
+
+
+def report_markdown(project, title, subtitle, sections, date):
+    """El markdown de un reporte: el mismo contenido, en texto."""
+    out = ["# %s" % title, "", "_%s%s_" % (project, " · %s" % subtitle if subtitle else "")]
+    for _, name, html_ in sections:
+        out += ["", "## %s" % name, "", html_to_text(html_)]
+    out += ["", "_Los números son medianas de varias mediciones; el detalle está en estado.md y metricas.csv. %s._" % date]
+    return "\n".join(out) + "\n"
+
+
+def write_report_pair(data, kind, title, html_too):
+    """R2/R3: escribe reporte-<tipo>-dev y reporte-<tipo>-gerencia (markdown y, con --html, HTML)."""
+    project = project_name(data.root)
+    scope = "Performance · %s" % report_scope(title, data.plan)
+    date = datetime.date.today().strftime(FOOTER_DATE)
+    if data.final:
+        dev = [r_summary_dev(data), r_user(data), r_measured_dev(data), r_result_dev(data), r_findings_dev(data),
+               r_improvements_dev(data), r_services(data), r_cost(data)]
+        business = [r_summary_biz(data), r_user_biz(data), r_measured_biz(data), r_state_biz(data), r_found_biz(data),
+                    r_changes_biz(data), r_risks_biz(data), r_pending_biz(data)]
+    else:
+        dev = [r_summary_dev(data), r_user(data), r_measured_dev(data), r_state_initial_dev(data), r_findings_dev(data),
+               r_improvements_dev(data), r_services(data), r_cost(data)]
+        business = [r_summary_biz(data), r_user_biz(data), r_measured_biz(data), r_state_biz(data), r_found_biz(data),
+                    r_changes_biz(data), r_risks_biz(data)]
+    label = "inicial" if kind == "inicial" else "final"
+    names = {row["metrica"] for row in data.rows if "_" in row["metrica"] and " " not in row["metrica"]} | {
+        row["metrica"] for row in data.rows if re.search(r"_(?:ms|pct|mb)$", row["metrica"])}
+    names |= {spec.get("nombre") for flow in (data.plan.get("flujos") or {}).values() if isinstance(flow, dict)
+              for spec in flow.get("metricas_usuario") or [] if isinstance(spec, dict) and spec.get("nombre")}
+    dev = [(sid, name, humanize_html(html_, names, data.plan)) for sid, name, html_ in dev]  # H5
+    business = [(sid, name, humanize_html(html_, names, data.plan)) for sid, name, html_ in business]
+    for audience, sections, subtitle in (("dev", dev, "Reporte técnico dev"), ("gerencia", business, "")):
+        name = "reporte-%s-%s" % (kind, audience)
+        (data.folder / ("%s.md" % name)).write_text(report_markdown(project, scope, subtitle, sections, date),
+                                                    encoding="utf-8")
+        print("✔ Reporte %s (%s): %s" % (label, audience, data.folder / ("%s.md" % name)))
+        if html_too:
+            (data.folder / ("%s.html" % name)).write_text(report_page(project, scope, subtitle, audience, sections, date),
+                                                          encoding="utf-8")
+            print("✔ Reporte HTML (%s): %s" % (audience, data.folder / ("%s.html" % name)))
+    old = [name for name in ("reporte-%s.html" % kind, "reporte-%s.md" % kind) if (data.folder / name).is_file()]
+    if old:
+        print("· %s %s de una versión anterior y no se actualiza: los reportes de ahora son reporte-%s-dev y "
+              "reporte-%s-gerencia." % (", ".join(old), "es" if len(old) == 1 else "son", kind, kind))
 
 
 def cmd_reporte(args):
-    """Los dos reportes (técnico y gerencia), inicial o final, de los mismos datos. El técnico: una parte principal que se
-    lee en unos 5 minutos (H1) y un anexo plegado; el de gerencia: siete secciones (G). Lee metricas.csv y la línea de
-    tiempo de cada corrida: no vuelve a abrir las trazas (F3)."""
+    """Los dos reportes (técnico y gerencia), inicial o final, de los mismos datos, con la estructura y el diseño de
+    0.16.0 (R). Lee metricas.csv, la línea de tiempo y el resumen de cada corrida: no vuelve a abrir las trazas."""
     folder = pathlib.Path(args.carpeta)
     state_path, csv_path = folder / "estado.md", folder / "metricas.csv"
     if not state_path.is_file():
@@ -18537,79 +19450,42 @@ def cmd_reporte(args):
     title, sections = state_sections(state_path.read_text(encoding="utf-8"))
     plan = load_plan(folder / "plan.json") if (folder / "plan.json").is_file() else {}
     rows = read_rows(csv_path) if csv_path.is_file() else []
-    print("… armando los reportes (lee metricas.csv y la línea de tiempo de cada corrida; no vuelve a abrir las "
-          "trazas)", flush=True)
+    print("… armando los reportes (lee metricas.csv, la línea de tiempo y el resumen de cada corrida; no vuelve a abrir "
+          "las trazas)", flush=True)
     ensure_run_summaries(folder, plan, rows)  # F3: solo las corridas de una versión anterior, una vez
-
-    def pick(*names):
-        return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
-
-    def filled(*names):
-        """La sección sin las líneas que siguen siendo relleno de la plantilla ('' si no queda nada)."""
-        return without_placeholders(pick(*names))
-
     warn_unfilled(folder, sections, findings=True)
     if not any(key.startswith(MANAGEMENT_SECTION) for key in sections):
         print("· %s no tiene la sección \"## Resumen para gerencia\" (es de una versión anterior): el reporte para "
               "gerencia sale igual, con esa parte \"%s\". Para completarla, agrega la sección con 3 a 5 líneas sin "
               "términos técnicos y vuelve a generar." % (state_path, UNFILLED))
-    urls = service_urls(folder)
-    problems = []
+    marks_moved, unmatched, results = [], [], None
     if args.inicial:
-        date = datetime.date.today().isoformat()
         plan_md = plan_table_md(plan, rows) if plan.get("mejoras") else ""
         if plan_md and update_block(folder, "mejoras", plan_md):
             print("✔ estado.md actualizado (Plan de mejoras)")
-        results = None
-        phases = ("antes",)
     else:
-        # B5: a qué hora se generó y si el cierre está hecho (un reporte de la sesión 4 es anterior a `cerrar`).
-        date = "generado el %s · %s" % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), close_status(folder))
         results, unmatched = compare(rows, trust=frames_trust(folder), plan=plan)
         marks_moved = flag_mark_changes(results, folder, plan) + flag_route_changes(results, folder, plan)
         marks_moved += attribute_network(results, rows, plan, folder)
-        phases = ("antes", "despues") if any(row["fase"] == "despues" for row in rows) else ("antes",)
-    main, annex = report_main_and_annex(folder, plan, rows, sections, results, filled, pick)
-    principales = plan.get("principales") or []
-    if results is None:
-        groups = group(rows)
-        found = [(flow, metric, entry) for (flow, metric), entry in sorted(
-            groups.items(), key=lambda kv: (kv[0][0], priority(kv[0][1], plan)))
-            if metric in principales and entry["fases"].get("antes")]
-        charts = "".join(figure(*initial_chart(flow, metric, entry, plan=plan)) for flow, metric, entry in found)
-        plain_charts = "".join(figure(*initial_chart(flow, metric, entry, plain=True, plan=plan))
-                               for flow, metric, entry in found[:3])
-    else:
-        primary = sorted([r for r in results if r["metrica"] in principales], key=lambda r: priority(r["metrica"], plan))
-        charts = "".join(figure(*final_chart(r, plan=plan), title=chart_title(r, plan)) for r in primary)
-        plain_charts = "".join(figure(*final_chart(r, plain=True, plan=plan), title=chart_title(r, plan))
-                               for r in primary[:3])
-    actions, _ = actions_html(rows, plan, phases, folder, urls)  # G6: compartida por los dos reportes
-    extras = {"Métricas principales": '<div class="charts">%s</div>' % charts if charts else "",
-              "Servicios": actions}
-    business = business_parts(folder, plan, rows, sections, results, problems)
-    business_extras = {"Resultado": ('<div class="charts">%s</div>' % plain_charts if plain_charts else "") + (
-        actions if results is not None else ""), "Qué se encontró": actions if results is None else ""}
-    kind = "inicial" if args.inicial else "final"
-    internal = any(item.get("estado") == "aplicada" and item.get("cambios") for item in plan.get("mejoras") or [])
-    names = {row["metrica"] for row in rows if "_" in row["metrica"] and " " not in row["metrica"]} | {
-        row["metrica"] for row in rows if re.search(r"_(?:ms|pct|mb)$", row["metrica"])}
-    main, annex = humanize_parts(main, names, plan), humanize_parts(annex, names, plan)  # H5
-    write_reports(folder, kind, title, date, main + [(ANNEX, annex)], business, args.html, "", extras, business_extras,
-                  " · interno: contiene código" if internal and not args.inicial else "")
-    words = words_count("\n".join(body for _, body in main if body))
-    if words > MAIN_WORDS_MAX:
-        print("⚠ La parte principal del reporte técnico tiene %d palabras (el tope es %d, unos 5 minutos de lectura): "
-              "acorta el resumen y las explicaciones por archivo de las mejoras." % (words, MAIN_WORDS_MAX))
-    for field, extra in text_cap_problems(sections, plan):  # H6
-        print("⚠ %s pasa su tope: %s. Acórtalo y vuelve a generar." % (field, extra))
-    warn_unconfirmed(plan, pick("hallazgos"))  # E5
+    data = ReportData(folder, plan, rows, sections, results)
+    write_report_pair(data, "inicial" if args.inicial else "final", title, args.html)
+    for field_, extra in text_cap_problems(sections, plan):  # H6
+        print("⚠ %s pasa su tope: %s. Acórtalo y genera de nuevo:\n    %s" % (field_, extra, same_command()))
+    warn_unconfirmed(plan, data.pick("hallazgos"))  # E5
     for item in plan.get("mejoras") or []:  # H2
         if item.get("estado") == "aplicada" and missing_file_notes(folder, item):
             print("⚠ %s: falta la explicación de %s en `archivos` de la mejora (ruta, riesgo, antes, despues, pros, contras): "
-                  "el panel los muestra \"sin explicación por archivo\"." % (item["id"], ", ".join(
+                  "el reporte técnico los muestra \"sin explicación por archivo\"." % (item["id"], ", ".join(
                       missing_file_notes(folder, item))))
-    warn_jargon(problems)
+    for finding, service, opened, total in connection_contradictions(data):  # E6
+        print("⚠ %s dice \"sin conexión nueva\" para %s, pero abrió conexión nueva en %d de %d corridas (diagnostico.md · "
+              "Conexiones nuevas por servicio): el reporte técnico lo marca. Corrige el hallazgo en estado.md." % (
+                  finding, versioned_route(service, data.urls), opened, total))
+    missing = sorted(service for service in services_of(rows) if not data.urls.get(service))
+    if missing:  # R6: la versión del microservicio sale de la ruta real
+        print("· Sin la ruta real (y su versión) de %d servicio%s: el reporte lo dice junto a cada uno (setup.md · Log de "
+              "rutas)." % (len(missing), "" if len(missing) == 1 else "s"))
+    warn_jargon(data.problems)
     warn_untitled(plan)
     if args.inicial:
         if not plan.get("mejoras"):
@@ -18617,7 +19493,7 @@ def cmd_reporte(args):
     else:
         for note in marks_moved:
             print("⚠ " + note)
-        for m in [m for m in principales if m not in {r["metrica"] for r in results}]:
+        for m in [m for m in (plan.get("principales") or []) if m not in {r["metrica"] for r in results}]:
             print("⚠ La métrica principal '%s' no tiene antes y después en el CSV." % m)
         if unmatched:
             print("⚠ %d métricas sin las dos fases (ver comparacion.md)." % len(unmatched))
@@ -23540,9 +24416,11 @@ def main(argv=None):
     p.add_argument("har", nargs="+")
     p.set_defaults(func=cmd_har)
 
-    p = sub.add_parser("reporte", help="reporte inicial (--inicial) o final, en markdown y, con --html, en HTML")
+    p = sub.add_parser("reporte", help="reporte inicial (--inicial) o final, técnico y de gerencia, en markdown y, con "
+                                       "--html, en HTML")
     p.add_argument("--carpeta", required=True)
     p.add_argument("--inicial", action="store_true", help="después del diagnóstico: estado inicial y plan de mejoras")
+    p.add_argument("--final", action="store_true", help="el reporte final (es lo que hace sin --inicial)")
     p.add_argument("--html", action="store_true")
     p.set_defaults(func=cmd_reporte)
 
