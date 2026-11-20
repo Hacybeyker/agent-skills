@@ -12432,7 +12432,7 @@ class VideoChain:
         remote = self.remote(len(self.remotes) + 1)
         self.process = subprocess.Popen(self.adb.base + ["shell", "screenrecord", "--verbose", "--time-limit",
                                                          str(self.limit), remote],
-                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.started = time.time()
         self.remotes.append(remote)
         self.launched.append(self.started)
@@ -13160,6 +13160,14 @@ def ffmpeg_install_steps(system=None, machine=None, brew=None):
     return steps
 
 
+def ffmpeg_install_line(what):
+    """La línea con el comando que instala un ffmpeg que trae `what` (drawtext o libx264), sin root."""
+    first = ffmpeg_install_steps()[0]
+    return "    instala un ffmpeg con %s (%s; las otras formas, con `perf.py setup --estado`): %s" % (
+        what, "ffmpeg-full de Homebrew" if "brew install" in first[1] else "el build estático, verificando su SHA256",
+        first[1])
+
+
 def ffmpeg_hint(root, folder, flow_name):
     """V5/V6: las líneas de la prueba sin ffmpeg: qué falta y para qué, el comando para instalarlo y el que une el video
     sin repetir la prueba. Nunca detiene nada."""
@@ -13314,10 +13322,13 @@ def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=No
     anota si la prueba de ahora lo unió y con rótulos ("unido"), así `siguiente` nunca manda a mirar uno viejo. Devuelve
     las líneas que lo cuentan (dónde quedó cada cosa, qué muestra y, si falta algo, el paso para conseguirlo)."""
     folder = pathlib.Path(folder)
-    events = dict(events)
+    events = dict(events, flujo=flow_name)
     events.pop("unido", None)
     work, page = save_test_video(folder, flow_name, events)  # el visor, antes de unir: sirve aunque ffmpeg falle
     root = project_root(folder).resolve()
+    binary = binary or (ffmpeg_binary() if join else None)
+    if binary:  # unir y rotular un video de varios minutos puede tardar: se dice antes
+        print("… uniendo y rotulando el video de la prueba con ffmpeg (%s)" % binary, flush=True)
     result = join_test_video(folder, events, plan, flow, binary) if join else {"video": None, "motivo": "cortado"}
     if result.get("video"):
         events["unido"] = {"archivo": pathlib.Path(result["video"]).name, "rotulado": bool(result["rotulado"])}
@@ -13342,14 +13353,19 @@ def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=No
             lines.append("· El video unido %s quedó sin rótulos: %s. Para el video rotulado:" % (result["video"],
                                                                                               result["motivo"]))
             if "drawtext" in result["motivo"]:
-                first = ffmpeg_install_steps()[0]
-                lines.append("    instala un ffmpeg con drawtext (%s; las otras formas, con `perf.py setup --estado`): %s"
-                             % ("ffmpeg-full de Homebrew" if "brew install" in first[1] else
-                                "el build estático, verificando su SHA256", first[1]))
+                lines.append(ffmpeg_install_line("drawtext"))
             lines.append("    y únelo de nuevo, sin repetir la prueba: %s" % again)
         elif result.get("motivo") == "sin ffmpeg":
             lines += ffmpeg_hint(root, folder, flow_name)
-        elif result.get("motivo") not in ("", "cortado", None):
+        elif result.get("motivo") == "cortado":
+            lines.append("· La prueba se cortó antes de unir el video: quedó en tramos con su visor; para unirlo después, "
+                         "sin repetir la prueba: %s" % again)
+        elif "H.264" in (result.get("motivo") or ""):
+            lines.append("· No pude unir los tramos en un solo video: %s. El visor sirve igual. Para el video unido:"
+                         % result["motivo"])
+            lines.append(ffmpeg_install_line("libx264"))
+            lines.append("    y únelo, sin repetir la prueba: %s" % again)
+        elif result.get("motivo"):
             lines.append("· No pude unir los tramos en un solo video: %s. El visor sirve igual; para reintentarlo: %s" % (
                 result["motivo"], again))
     state = (events.get("alineacion") or {}).get("marcas")
@@ -13390,11 +13406,11 @@ def test_videos(folder):
     stems = sorted({path.stem for pattern in ("prueba-*.mp4", "prueba-*.html") for path in folder.glob(pattern)})
     out = []
     for stem in stems:
-        base = re.sub(r"-\d+$", "", stem)
-        if base != stem and (folder / (base + ".mp4")).is_file():
-            continue
         video, page = folder / (stem + ".mp4"), folder / (stem + ".html")
         events = folder / VIDEO_DIR / stem[len("prueba-"):] / "eventos.json"
+        base = re.sub(r"-\d+$", "", stem)
+        if base != stem and (folder / (base + ".mp4")).is_file() and not page.is_file() and not events.is_file():
+            continue  # un segmento suelto de 0.16.0, no un flujo que se llama "<algo>-2"
         if events.is_file():
             try:
                 joined = json.loads(events.read_text(encoding="utf-8")).get("unido") or {}
@@ -13416,8 +13432,16 @@ def events_problem(events):
             isinstance(part, dict) and isinstance(part.get("archivo"), str)
             and isinstance(part.get("inicio"), (int, float)) for part in parts):
         return "no trae los tramos de video"
-    if not isinstance(events.get("fases"), list) or not isinstance(events.get("marcas"), list):
+    phases, marks = events.get("fases"), events.get("marcas")
+    if not isinstance(phases, list) or not phases or not isinstance(marks, list):
         return "no trae las fases o las marcas"
+    if not all(isinstance(phase, dict) and isinstance(phase.get("desde"), (int, float))
+               and isinstance(phase.get("hasta"), (int, float)) and isinstance(phase.get("rotulo"), str)
+               and phase.get("tipo") in VIDEO_COLORS for phase in phases):
+        return "trae una fase sin desde, hasta, rótulo o tipo"
+    if not all(isinstance(mark, dict) and isinstance(mark.get("t"), (int, float)) and isinstance(mark.get("nombre"), str)
+               for mark in marks):
+        return "trae una marca sin momento o sin nombre"
     duration = events.get("duracion")
     if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
         return "no trae la duración"

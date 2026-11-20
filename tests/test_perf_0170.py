@@ -496,17 +496,22 @@ class VideoToolsTest(unittest.TestCase):
 FAKE_FFMPEG = """#!/bin/sh
 case "$2" in
   -filters) printf '%s\\n' ' T.. drawbox    V->V  Draw a box.' {drawtext}; exit 0;;
-  -encoders) printf '%s\\n' ' V....D libx264   libx264 H.264'; exit 0;;
+  -encoders) printf '%s\\n' {encoders}; exit 0;;
   -i) echo '  Stream #0:0[0x1](und): Video: h264 (High), yuv420p(tv, bt709, progressive), 1080x2400, 60 fps' >&2; exit 1;;
 esac
 for a; do last=$a; done
 printf 'video unido' > "$last"
+exit {code}
 """
 
 
-def fake_ffmpeg(folder, drawtext=True):
-    path = Path(folder) / ("ffmpeg" if drawtext else "ffmpeg-sin-drawtext")
-    write(path, FAKE_FFMPEG.replace("{drawtext}", "' T.C drawtext   V->V  Draw text.'" if drawtext else ""))
+def fake_ffmpeg(folder, drawtext=True, encoder=True, code=0):
+    """Un ffmpeg falso: lista drawtext y libx264 (o no), dice el tamaño del video y escribe la salida en su último
+    argumento, relativo a donde lo corren (como el de verdad)."""
+    path = Path(folder) / ("ffmpeg-%d%d%d" % (drawtext, encoder, code))
+    write(path, FAKE_FFMPEG.replace("{drawtext}", "' T.C drawtext   V->V  Draw text.'" if drawtext else "")
+          .replace("{encoders}", "' V....D libx264   libx264 H.264'" if encoder else "' V....D mpeg4  MPEG-4 part 2'")
+          .replace("{code}", str(code)))
     path.chmod(0o755)
     return str(path)
 
@@ -615,6 +620,78 @@ class CollectAndErrorsTest(unittest.TestCase):
             self.assertEqual(video.recorder.kind, "screenrecord")
             self.assertIn("scrcpy no empezó a grabar", out.getvalue())
             video.collect()
+
+
+class JoinFailuresTest(unittest.TestCase):
+    """Cuando no se puede unir, el visor queda igual y siempre hay un paso."""
+
+    def run_join(self, folder, **fake):
+        work = folder / "video" / "home"
+        write(work / "parte1.mp4", "x")
+        events = prototype_events(parts=["video/home/parte1.mp4"], starts=[1000.0])
+        return perf.write_test_video(folder, "home", events, {}, {"video_fuente": str(folder / "f.ttf")},
+                                     binary=fake_ffmpeg(folder, **fake) if fake is not None else None)
+
+    def test_ffmpeg_que_falla_deja_el_visor_y_su_registro(self):
+        with TempDir() as folder:
+            write(folder / "f.ttf", "x")
+            lines = self.run_join(folder, code=3)
+            text = "\n".join(lines)
+            self.assertIn("No pude unir los tramos en un solo video: ffmpeg terminó con error", text)
+            self.assertIn("para reintentarlo:", text)
+            self.assertTrue((folder / "video" / "home" / "ffmpeg.log").is_file())
+            self.assertTrue((folder / "prueba-home.html").is_file())
+            self.assertFalse(any(path.name.endswith(".parcial.mp4") for path in folder.iterdir()))
+            self.assertFalse((folder / "prueba-home.mp4").exists())
+
+    def test_ffmpeg_sin_h264_da_la_instalacion(self):
+        with TempDir() as folder:
+            write(folder / "f.ttf", "x")
+            text = "\n".join(self.run_join(folder, encoder=False))
+            self.assertIn("no trae un codificador H.264", text)
+            self.assertIn("instala un ffmpeg con libx264", text)
+
+    def test_la_prueba_cortada_dice_como_unirlo_despues(self):
+        with TempDir() as folder:
+            events = prototype_events(parts=["video/home/parte1.mp4"], starts=[1000.0])
+            text = "\n".join(perf.write_test_video(folder, "home", events, {}, {}, join=False))
+            self.assertIn("La prueba se cortó antes de unir el video", text)
+            self.assertIn("video --carpeta", text)
+
+    def test_sin_grabador_ni_tramos_lo_dice(self):
+        import contextlib
+        import io
+
+        class BrokenAdb(FakeAdb):
+            def shell(self, command, stdin=None, timeout=120):
+                raise OSError("adb no responde")
+
+        with TempDir() as folder:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(perf.TestVideo(folder, {}, {}, "home", BrokenAdb(), "").start())
+                video = perf.TestVideo(folder, {}, {}, "home", FakeAdb(), "")
+                video.recorder = StubRecorder([], [1000.0])
+                video.assemble()
+            self.assertIn("No pude empezar a grabar el video de la prueba", out.getvalue())
+            self.assertIn("No pude grabar el video de la prueba", out.getvalue())
+
+    def test_un_flujo_que_termina_en_numero_no_se_esconde(self):
+        with TempDir() as folder:
+            for name in ("paso", "paso-2"):
+                write(folder / ("prueba-%s.html" % name), "visor")
+                write(folder / "video" / name / "eventos.json", json.dumps({"unido": {"rotulado": True}}))
+                write(folder / ("prueba-%s.mp4" % name), "video")
+            self.assertEqual(perf.test_videos(folder), [folder / "prueba-paso.mp4", folder / "prueba-paso-2.mp4"])
+
+    def test_eventos_con_fases_incompletas(self):
+        events = prototype_events()
+        self.assertEqual(perf.events_problem(events), "")
+        events["fases"][1].pop("tipo")
+        self.assertIn("una fase sin", perf.events_problem(events))
+        events = prototype_events()
+        events["marcas"].append({"t": 1})
+        self.assertIn("una marca sin", perf.events_problem(events))
 
 
 class VideoCommandErrorsTest(CaptureBase):
