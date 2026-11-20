@@ -263,7 +263,7 @@ class ReportsAfterCloseTest(MixedFileBase):
         self.assertEqual(steps[-1]["tipo"], "fin")
         self.ok_in("reporte", "--carpeta", self.rel(), "--html")
         dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("Generado el %s" % datetime.date.today().isoformat(), dev)  # 0.16.0 · R1: en el Resumen
+        self.assertRegex(dev, r"Generado el \d{4}-\d{2}-\d{2} \d{2}:\d{2}")  # 0.16.0 · R1: en el Resumen, sin depender del reloj
         self.assertIn("cierre hecho: cambios temporales quitados", dev)
         self.assertEqual(perf.next_steps(self.folder, plan)[0], "investigación cerrada")
 

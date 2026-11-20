@@ -7650,11 +7650,25 @@ def cmd_reanudar(args):
     if not groups:
         print("2. Marcas: no hay cambios temporales que reponer.")
     elif simulate:
-        print("2. Marcas: repondría %s (comprobado con git apply --check%s)." % (
-            ", ".join("%s en %s" % (patch.name, shown_path(top, root)) for top, patch, _, _ in groups),
-            "; sin el setup puesto, se comprueba al reanudar" if missing is not None else ""))
+        print("2. Marcas: repondría %s (comprobado con git apply --check%s), con un respaldo antes de cada archivo en %s."
+              % (", ".join("%s en %s" % (patch.name, shown_path(top, root)) for top, patch, _, _ in groups),
+                 "; sin el setup puesto, se comprueba al reanudar" if missing is not None else "",
+                 shown_path(patches_dir(folder, root) / "respaldos", root)))
     else:
         rows = {}
+        # Q: antes de reponer, una copia con fecha de cada archivo donde van las marcas, tal como está (nunca pisa nada)
+        backup = patches_dir(folder, root) / "respaldos" / ("reanudar-%s-%s" % (
+            slug(folder.parent.name + "-" + folder.name), datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        saved = 0
+        for top, patch, include, _ in groups:
+            for touched in include or patch_files(patch):
+                source = pathlib.Path(top) / touched
+                if source.is_file():
+                    write_new(backup / slug(pathlib.Path(top).name) / touched, source.read_bytes())
+                    saved += 1
+        if saved:
+            print("2. Respaldo antes de reponer las marcas: %d archivo%s en %s (tal como estaban; no se borra)." % (
+                saved, "" if saved == 1 else "s", shown_path(backup, root)))
         for top, patch, include, names in groups:
             ok, error = git_apply(top, patch, include=include or ())
             if not ok:  # comprobado justo antes
@@ -8640,6 +8654,65 @@ DOD_COMMAND_LIKE = re.compile(r"^(?:cd\s|\./|\.\./|[A-Za-z_][\w.+-]*\s+\S)")
 DOD_NOT_A_STEP = re.compile(r"^\W*(?:no|nunca|jam[aá]s|evita\w*|prohib\w*|s[oó]lo|[uú]nicamente|si|cuando|salvo|"
                             r"excepto|not?|never|don'?t|do\s+not|only|if|when|unless|except)\b", re.I)
 DOD_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+DOD_ONE_WORD = re.compile(r"[A-Za-z_][\w.+-]*")  # `pytest`, `make`: un comando de una palabra, solo con etiqueta
+# la etiqueta que dice que lo que sigue es un comando ("Tests: `pytest`"), entera: "Framework de tests: `JUnit5`", "Build
+# variant: `release`" o "Rama base: `main`" no lo son
+DOD_ONE_WORD_LABEL = re.compile(r"^\W*(?:tests?|pruebas?(?: unitarias)?|lint|build|compilar|compilaci[oó]n|check|"
+                                r"verificaci[oó]n|formato|format|tipos|types|an[aá]lisis(?: est[aá]tico)?|comando|"
+                                r"command)\W*$", re.I)
+# fuera de una lista (tablas y párrafos), solo lo que se reconoce como un comando: una ruta o una herramienta conocida
+DOD_TOOL = re.compile(r"^(?:\./|\.\./|cd\s|~/|\$\w|[\w.-]+/[\w./-]|(?:gradle|gradlew|npm|pnpm|yarn|npx|python3?|pytest|"
+                      r"make|swift|xcodebuild|flutter|dart|cargo|go|mvn|bundle|ruby|node|bash|sh|ktlint|detekt|shellcheck|"
+                      r"tox|ruff|mypy|black|eslint|tsc|jest|vitest|adb)\b)")
+# en una fila o un párrafo, cualquier palabra que prohíbe o condiciona (fuera del código) deja el comando sin correr
+DOD_CONDITIONAL = re.compile(r"(?<![\w-])(?:no|nunca|jam[aá]s|evita\w*|prohib\w*|s[oó]lo|[uú]nicamente|si|cuando|"
+                             r"salvo|excepto|opcional\w*|requiere\w*|necesita\w*|manual\w*|not?|never|don'?t|only|if|"
+                             r"when|unless|except|optional\w*|requires?)(?![\w-])", re.I)
+DOD_MORE = re.compile(r"\s*(?:,|;|\by\b|\be\b|\bluego\b|\bdespu[eé]s\b|\band\b|\bthen\b|&&|\+)\s*(?:\*\*)?`([^`]+)`")
+
+
+def dod_loose_line(line, found, skipped, state):
+    """Q: una línea del DoD fuera de una lista. Una fila de tabla con un comando entre acentos graves es un paso (el
+    primero de la fila) y un párrafo que empieza con uno, también, salvo que la fila o el párrafo lo prohíban o lo
+    condicionen ("solo en CI", "no lo hagas") o que los presente un párrafo que lo hace ("Solo en CI:"). Un párrafo que
+    cita un comando en medio del texto se cita como no usado, con el motivo, en lugar de ignorarlo."""
+    text = line.strip()
+    codes = [code.strip() for code in re.findall(r"`([^`]+)`", text) if DOD_COMMAND_LIKE.match(code.strip())]
+    words = re.sub(r"`[^`]*`", " ", text)  # lo que dice la línea fuera del código
+    table = text.startswith("|")
+    if table and re.fullmatch(r"\|[\s:|-]+\|?", text):
+        return  # la fila separadora
+    follows = state.get("cond") and not table  # la línea anterior del mismo párrafo condicionaba
+    state["cond"] = bool(DOD_CONDITIONAL.search(words)) and not table
+    if state.get("bloque") and (table or codes):
+        state["usado"] = True
+    if not codes:
+        if table:  # un encabezado o una fila que condiciona ("Solo en CI"): el resto de la tabla tampoco se corre
+            state["bloque"] = text if DOD_CONDITIONAL.search(words) else state.get("bloque")
+        else:  # un párrafo sin comando que presenta lo que sigue ("Solo en CI:"): lo que presenta tampoco se corre
+            state["bloque"] = text if text.rstrip("*_ ").endswith(":") and DOD_CONDITIONAL.search(words) else None
+        return
+    if follows and not state.get("bloque"):
+        skipped.append((text, "el párrafo lo pone como condición, no es un paso del DoD: no lo corro"))
+        return
+    if state.get("bloque"):
+        skipped.append((text, "lo presenta \"%s\", que lo prohíbe o lo pone como condición: no lo corro" % state["bloque"]))
+        return
+    if table:
+        if DOD_CONDITIONAL.search(words):
+            skipped.append((text, "la fila lo prohíbe o lo pone como condición, no es un paso del DoD: no lo corro"))
+        elif DOD_TOOL.match(codes[0]):
+            found.append((codes[0], text))
+        return
+    lead = re.match(r"^(?:\*\*)?`([^`]+)`", text)
+    if lead and DOD_COMMAND_LIKE.match(lead.group(1).strip()) and not DOD_CONDITIONAL.search(words) \
+            and DOD_TOOL.match(lead.group(1).strip()):
+        found.append((lead.group(1).strip(), text))
+    elif lead and DOD_COMMAND_LIKE.match(lead.group(1).strip()):
+        skipped.append((text, "el párrafo lo prohíbe o lo pone como condición, no es un paso del DoD: no lo corro"))
+    elif not DOD_NOT_A_STEP.search(text):
+        skipped.append((text, "es un párrafo que cita un comando en medio del texto: si es un paso del DoD, ponlo en una "
+                              "lista (- `comando`)"))
 
 
 def dod_entries(root):
@@ -8668,7 +8741,7 @@ def dod_entries(root):
     if start is None:
         return [], []
     level = len(re.match(r"^\ufeff?[ \t]{0,3}(#+)", lines[start]).group(1))
-    found, skipped, fence, pending, skip_block = [], [], None, None, None
+    found, skipped, fence, pending, skip_block, loose, in_item = [], [], None, None, None, {}, False
     for line in lines[start + 1:]:
         mark = DOD_FENCE.match(line)  # también un bloque sangrado dentro de un ítem
         if fence is None and not mark:
@@ -8677,29 +8750,58 @@ def dod_entries(root):
                 break
             item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", line)
             if not item:
+                if not line.strip():
+                    in_item, loose["cond"] = False, False
+                    if loose.get("usado"):  # lo que presentaba "Solo en CI:" (una tabla, una lista, un bloque) terminó
+                        loose["bloque"], loose["usado"] = None, False
+                elif in_item or line[:1] in " \t":
+                    pass  # la continuación de una viñeta (o una línea sangrada): como antes, no se lee sola
+                elif not pending:
+                    dod_loose_line(line, found, skipped, loose)  # Q: los párrafos y las tablas del DoD también se leen
                 continue
+            in_item = True
             if pending:
                 skipped.append(pending)
                 pending = None
-            body = item.group(1)
+            body = re.sub(r"^\[[ xX]\]\s+", "", item.group(1))  # Q: una casilla `- [ ] \`comando\``
             lead = re.match(r"^(?:\*\*)?`([^`]+)`", body)
-            # fuera del código con que empieza la viñeta, solo la forma "Etiqueta: `comando`"
+            # fuera del código con que empieza la viñeta, solo la forma "Etiqueta: `comando`" (también de una palabra)
             labeled = re.match(r"^([^`]*?):\s*(?:\*\*)?`([^`]+)`", body) if not lead else None
-            command = lead.group(1) if lead else labeled.group(2) if labeled and DOD_COMMAND_LIKE.match(
-                labeled.group(2).strip()) else None
+            one_word = bool(labeled) and bool(DOD_ONE_WORD_LABEL.match(labeled.group(1).strip("*_ ")))
+            command = lead.group(1) if lead else labeled.group(2) if labeled and (DOD_COMMAND_LIKE.match(
+                labeled.group(2).strip()) or one_word and DOD_ONE_WORD.fullmatch(labeled.group(2).strip())) else None
             # la etiqueta que empieza prohibiendo o condicionando ("No publiques:", "Si cambia la API:", "Only on CI:")
             if labeled and command and DOD_NOT_A_STEP.search(labeled.group(1)):
                 skipped.append((line.strip(), "lo prohíbe o lo pone como condición, no es un paso del DoD: no lo corro"))
                 continue
+            if loose.get("bloque"):
+                loose["usado"] = True
+            if command and loose.get("bloque"):  # la presenta un párrafo que condiciona ("Solo en CI:")
+                skipped.append((line.strip(), "lo presenta \"%s\", que lo prohíbe o lo pone como condición: no lo corro"
+                                % loose["bloque"]))
+                continue
             if command:
                 found.append((command.strip(), line.strip()))
+                extras, rest = [], body[(lead or labeled).end():]
+                more = DOD_MORE.match(rest)
+                while more:
+                    extras.append(more.group(1).strip())
+                    rest = rest[more.end():]
+                    more = DOD_MORE.match(rest)
+                # Q: dos comandos en una viñeta ("`a` y `b`"): los dos, en orden, solo si la viñeta no condiciona nada
+                # y no sigue texto después del último ("`a`, `b` o `c` según…" son alternativas)
+                if extras and not re.search(r"\w", rest) and not DOD_CONDITIONAL.search(re.sub(r"`[^`]*`", " ", body)):
+                    for extra in extras:
+                        if DOD_COMMAND_LIKE.match(extra) or one_word and DOD_ONE_WORD.fullmatch(extra):
+                            found.append((extra, line.strip()))
             elif body.strip():
                 # sin comando: puede presentar el bloque de código que sigue ("1. Tests:")
                 pending = (line.strip(), "no tiene un comando entre acentos graves al principio ni con la forma "
                                          "\"Etiqueta: `comando`\"; si es un paso, hazlo a mano")
         elif fence is None:
             fence = mark.group(1)
-            blocked = None
+            blocked = loose.get("bloque")  # un párrafo que condiciona ("Solo en CI:") presenta este bloque
+            loose["usado"] = loose["usado"] or bool(blocked) if "usado" in loose else bool(blocked)
             if pending and pending[0].rstrip("*_ ").endswith(":"):
                 # la viñeta anterior ("1. Tests:") presenta este bloque; si prohíbe o condiciona, el bloque no se corre
                 label = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?", "", pending[0])
@@ -18355,6 +18457,7 @@ class ReportData:
         self.phases = read_phases(self.folder)
         self.groups = group(rows)
         self.problems = []
+        self.no_gain = []  # las mejoras sin `que_gana` (nuevo en 0.16.0): gerencia dice "sin completar"
         self.findings = findings_rows(self.pick("hallazgos"))
         self.principales = plan.get("principales") or []
         self.extra = {item.get("id"): item for item in plan.get("hallazgos") or [] if isinstance(item, dict)}
@@ -19081,8 +19184,8 @@ def service_kpis(data, phase):
         values = (calls or {}).get("fases", {}).get(phase)
         services = [item for item in flow_services(data.rows, flow, phase)]
         if values:
-            kpis.append(kpi(trim(statistics.median(values), 1), "llamadas por medición (%d servicio%s)" % (
-                len(services), "" if len(services) == 1 else "s")))
+            kpis.append(kpi(trim(statistics.median(values), 1), "llamadas por medición%s" % (
+                " (%d servicio%s)" % (len(services), "" if len(services) == 1 else "s") if services else "")))
         busy = (data.groups.get((flow, "red_en_curso_ms")) or {}).get("fases", {}).get(phase)
         if busy:
             kpis.append(kpi(plain_value(statistics.median(busy), "ms"), "con al menos una llamada en curso"))
@@ -19100,6 +19203,11 @@ def service_kpis(data, phase):
     return '<div class="kpis">%s</div>' % "".join(kpis) if kpis else ""
 
 
+def names_and_more(names, limit):
+    """"a, b, c" o "a, b, c y 4 más"."""
+    return ", ".join(names[:limit]) + (" y %d más" % (len(names) - limit) if len(names) > limit else "")
+
+
 def routes_table(data, phases):
     rows, shown = [], set()
     for flow in data.flows:
@@ -19115,10 +19223,11 @@ def routes_table(data, phases):
                              (e(nice(item["conexion"], "ms") if item["conexion"] is not None else "—"), True)])
     if not rows:
         return ""
-    missing = [service for service in shown if not data.urls.get(service) and not data.urls.get(QUERY_TAG.sub("", service))]
-    note = ('<p class="evid">Sin la ruta real (y su versión) de %d servicio%s: la instrumentación de red no escribió su '
-            'línea <code>hb-perf</code> en estas mediciones (setup.md · Log de rutas).</p>' % (
-                len(missing), "" if len(missing) == 1 else "s")) if missing else ""
+    missing = sorted({QUERY_TAG.sub("", service) for service in shown if not data.urls.get(service)
+                      and not data.urls.get(QUERY_TAG.sub("", service))})
+    note = ('<p class="evid">Sin la ruta real (y su versión) de %d servicio%s (%s): la instrumentación de red no '
+            'escribió su línea <code>hb-perf</code> en estas mediciones (setup.md · Log de rutas).</p>' % (
+                len(missing), "" if len(missing) == 1 else "s", e(names_and_more(missing, 5)))) if missing else ""
     return '<details><summary>Rutas y tiempos de cada servicio</summary>%s%s</details>' % (
         html_table(["Servicio", "Acción", "Fase", "Duración", "Servidor", "Conexión"], rows), note)
 
@@ -19212,8 +19321,10 @@ def r_user_biz(data):
 
 def r_measured_biz(data):
     parts = ['<p class="sub">%s</p>' % ("Se midió el recorrido antes y después de los cambios, en las mismas condiciones."
-                                        if data.final else "Sin cambios todavía: se midió el recorrido tal como "
-                                        "está hoy y se buscaron las causas.")]
+                                        if data.final else "Se midió el recorrido tal como estaba antes de los cambios "
+                                        "y se buscaron las causas." if data.improvements(final_only=True) else
+                                        "Sin cambios todavía: se midió el recorrido tal como está hoy y se buscaron "
+                                        "las causas.")]
     for flow in data.flows:
         steps = [data.plain(step, "el paso del recorrido \"%s\" (recorrido.sh)" % step) or "un paso del recorrido"
                  for step in route_steps(data, flow)]
@@ -19299,7 +19410,7 @@ def where_time_goes(data):
 
 
 def r_found_biz(data):
-    cards, untitled = [], 0
+    cards, untitled, untitled_kinds = [], 0, set()
     for finding in data.findings:
         kind = finding["clase"]
         extra = data.extra.get(finding["id"]) or {}
@@ -19317,6 +19428,7 @@ def r_found_biz(data):
                     "<p>%s</p>" % text_html(cause) if cause else ""))
             else:  # sin descripción en palabras: se cuenta, no se niega (el aviso dice qué campo reescribir)
                 untitled += 1
+                untitled_kinds.add(kind)
         elif kind == "sin confirmar" and SERVER_WORDS.search(" ".join((finding.get("causa") or "",
                                                                        finding.get("evidencia") or ""))):
             title = data.plain(extra.get("titulo_gerencia") or "", "hallazgos[%s].titulo_gerencia en plan.json"
@@ -19324,9 +19436,12 @@ def r_found_biz(data):
             cards.append('<div class="card t-sin"><h3>%s %s</h3><p>Es del servidor, no de la app: el dato va al equipo '
                          'dueño del servicio.</p></div>' % (e(title), chip("del servidor", "c-same")))
     if untitled:  # confirmados cuyo síntoma tiene términos técnicos: se cuentan (el aviso dice qué campo reescribir)
-        cards.append('<div class="card t-mejorable"><h3>%d causa%s confirmada%s más %s</h3><p>Todavía sin descripción '
-                     'en palabras.</p></div>' % (untitled, "" if untitled == 1 else "s", "" if untitled == 1 else "s",
-                                                 chip("se puede mejorar", "c-ok")))
+        kind = "bug" if untitled_kinds == {"bug"} else "mejorable"
+        cards.append('<div class="card %s"><h3>%d causa%s confirmada%s%s %s</h3><p>Todavía sin descripción en '
+                     'palabras.</p></div>' % (FINDING_CLASS[kind], untitled, "" if untitled == 1 else "s",
+                                              "" if untitled == 1 else "s", " más" if cards else "",
+                                              chip("se puede corregir" if kind == "bug" else "se puede mejorar",
+                                                   FINDING_CHIP[kind])))
     body = where_time_goes(data) + ('<div class="cards">%s</div>' % "".join(cards) if cards else
                                     "<p>Ninguna causa confirmada todavía.</p>")
     return "encontro", "Qué se encontró", body
@@ -19346,7 +19461,9 @@ def r_changes_biz(data):
             fields.append(field("Efecto medido", e(plain_verdict(r)) + " " + chip(verdict_label(r), LABEL_CHIP.get(
                 verdict_label(r), "c-same")) if r is not None else "sin medición de su medida"))
         else:
-            gain = plain_improvement(data, item, "que_gana", "esperado")
+            gain = plain_improvement(data, item, "que_gana", None) if item.get("que_gana") else ""
+            if not item.get("que_gana"):
+                data.no_gain.append(str(item.get("id")))
             fields.append(field("Qué gana el usuario", text_html(gain) if gain else "sin completar"))
         fields.append(field("Estado", chip(STATE_BUSINESS.get(state, state), STATE_CHIP.get(state, "c-same"))))
         cards.append('<div class="card m"><h3><span class="id">%s</span> %s</h3>%s<div class="fields">%s</div></div>' % (
@@ -19359,8 +19476,10 @@ def r_changes_biz(data):
                 e(item.get("id")), e(title), chip(STATE_BUSINESS.get(item.get("estado", "propuesta"), "sin aplicar"),
                                                   "c-same"), e(STATE_TEXT.get(item.get("estado", "propuesta"),
                                                                               "sin decidir"))))
-    sub = ('<p class="sub">Ninguno está aplicado todavía: se aplican y se miden otra vez, cada uno por separado, una vez aprobados.</p>'
-           if not data.final else "")
+    sub = ("" if data.final else '<p class="sub">%s</p>' % (
+        "Los que ya se aplicaron lo dicen en su estado; los demás se aplican y se miden otra vez, cada uno por separado, una vez "
+        "aprobados." if any(item.get("estado") == "aplicada" for item in items) else
+        "Ninguno está aplicado todavía: se aplican y se miden otra vez, cada uno por separado, una vez aprobados."))
     body = sub + ('<div class="cards">%s</div>' % "".join(cards) if cards else "<p>No se propone ningún cambio.</p>")
     return ("cambios", "Cambios aplicados", body) if data.final else ("cambios", "Cambios propuestos", body)
 
@@ -19535,6 +19654,11 @@ def cmd_reporte(args):
         print("· Sin la ruta real (y su versión) de %d servicio%s: el reporte lo dice junto a cada uno (setup.md · Log de "
               "rutas)." % (len(missing), "" if len(missing) == 1 else "s"))
     warn_jargon(data.problems)
+    gains = list(dict.fromkeys(data.no_gain))
+    if gains:
+        print("⚠ Gerencia: %s no tiene%s `que_gana` en plan.json (qué gana el usuario, en palabras): \"Cambios propuestos\" "
+              "dice \"sin completar\" (`esperado` es técnico y no se publica). Agrégalo y vuelve a generar:\n    %s" % (
+                  ", ".join(gains), "" if len(gains) == 1 else "n", same_command()))
     warn_untitled(plan)
     if args.inicial:
         if not plan.get("mejoras"):

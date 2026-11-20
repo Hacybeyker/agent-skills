@@ -1135,7 +1135,7 @@ class ReportStructureTest(PerfBase):
         write(self.folder / "estado.md", state.replace("| H1 | Dos cargas del detalle |", "| H1 | El ViewModel llama a cargar() dos veces |"))
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial")
         business = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
-        self.assertIn("1 causa confirmada más [se puede mejorar]", business)
+        self.assertIn("1 causa confirmada [se puede corregir]", business)  # un bug, del color de su tipo; sin "más": es la única
         self.assertNotIn("Ninguna causa confirmada", business)
         self.assertIn("⚠ Gerencia:", out)
 
@@ -1223,6 +1223,116 @@ class ReportStructureTest(PerfBase):
         result = self.perf("reporte", "--gerencia-unificado", "--carpetas", self.folder)
         self.assertEqual(result.returncode, 2)
         self.assertIn("dos o más investigaciones", result.stderr)
+
+
+# ── Q · Lo que quedaba pendiente de 0.15.x ───────────────────────────────────
+
+class PendingQTest(TriageBase):
+    """Q: respaldo con fecha antes de que `reanudar` reponga las marcas."""
+
+    def test_reanudar_respalda_los_archivos_antes_de_reponer_las_marcas(self):
+        from test_perf_0150 import LISTA
+        self.ok_in("pausar", "--carpeta", self.rel)
+        out = self.ok_in("reanudar", "--carpeta", self.rel)
+        self.assertIn("Respaldo antes de reponer las marcas: 1 archivo", out)
+        backups = list((self.folder / "parches" / "respaldos").glob("reanudar-*/*/app/Lista.kt"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), LISTA)  # tal como estaba, sin la marca
+        self.assertRegex(backups[0].parent.parent.parent.name, r"^reanudar-.+-\d{8}-\d{6}$")  # con fecha
+
+
+class DodLooseLinesTest(PerfBase):
+    """Q: del `## DoD` también se leen las casillas, un comando de una palabra con etiqueta, dos comandos en una viñeta,
+    las tablas y los párrafos que empiezan con un comando; un párrafo que cita un comando en medio del texto se cita."""
+
+    def test_parrafos_tablas_casillas_y_dos_comandos(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## DoD\n\n- [ ] `./gradlew lint`\n- Tests: `pytest`\n"
+                                      "- `./gradlew test` y `./gradlew detekt`\n\n"
+                                      "`./gradlew assembleDebug` compila la variante de pruebas.\n\n"
+                                      "Antes de abrir el PR corre `./gradlew check` en la rama.\n\n"
+                                      "| Paso | Comando |\n| --- | --- |\n| Formato | `./gradlew ktlintCheck` |\n"
+                                      "| No publiques | `./gradlew publish` |\n")
+        commands, skipped = perf.dod_entries(self.dir)
+        root = perf.q(self.dir)
+        self.assertEqual(commands, ["cd %s && %s" % (root, command) for command in (
+            "./gradlew lint", "pytest", "./gradlew test", "./gradlew detekt", "./gradlew assembleDebug",
+            "./gradlew ktlintCheck")])
+        reasons = dict(skipped)
+        self.assertIn("párrafo que cita un comando", reasons["Antes de abrir el PR corre `./gradlew check` en la rama."])
+        self.assertIn("lo prohíbe", reasons["| No publiques | `./gradlew publish` |"])
+
+    def test_lo_condicionado_en_tablas_y_parrafos_no_se_corre(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## DoD\n\n| Paso | Comando | Nota |\n| --- | --- | --- |\n"
+                                      "| Instrumentados | `./gradlew connectedCheck` | Solo con dispositivo |\n"
+                                      "| `./gradlew lintRelease` | solo en CI |\n"
+                                      "| Publicar (no lo hagas) | `./gradlew assembleRelease` |\n\n"
+                                      "`./gradlew connectedAndroidTest` solo en CI.\n\nSolo en CI:\n\n"
+                                      "| `./gradlew uploadArchives` |\n\n- Rama base: `main`\n- `./gradlew build` y `lint`\n")
+        commands, skipped = perf.dod_entries(self.dir)
+        self.assertEqual(commands, ["cd %s && ./gradlew build" % perf.q(self.dir)])  # ni `main` ni `lint` sueltos
+        reasons = dict(skipped)
+        for line in ("| Instrumentados | `./gradlew connectedCheck` | Solo con dispositivo |",
+                     "| `./gradlew lintRelease` | solo en CI |", "| Publicar (no lo hagas) | `./gradlew assembleRelease` |",
+                     "`./gradlew connectedAndroidTest` solo en CI."):
+            self.assertIn("no lo corro", reasons[line], line)
+        self.assertIn("lo presenta \"Solo en CI:\"", reasons["| `./gradlew uploadArchives` |"])
+
+    def test_nada_que_antes_no_se_corria_y_no_debe(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## DoD\n\n"
+                                      "- No lo corras en local: `./gradlew connectedCheck` ni\n  `./gradlew connectedAndroidTest`\n"
+                                      "- `./gradlew test` y `./gradlew connectedAndroidTest` si hay un dispositivo\n"
+                                      "- `./gradlew assembleDebug`, `./gradlew assembleRelease` o `./gradlew bundle` según la variante\n"
+                                      "- Framework de tests: `JUnit5`\n- Build variant: `release`\n- Lint: `ktlint`\n\n"
+                                      "Solo en CI:\n\n```bash\n./gradlew uploadArchives\n```\n\nSolo en CI:\n\n"
+                                      "- `./gradlew publishToMavenLocal`\n\n| Paso | Comando | Solo en CI |\n| --- | --- | --- |\n"
+                                      "| Firma | `./gradlew signRelease` | Sí |\n\nEsto corre solo con un dispositivo\n"
+                                      "`./gradlew connectedCheck`\n\n| Commits | `Conventional Commits` |\n")
+        commands, skipped = perf.dod_entries(self.dir)
+        root = perf.q(self.dir)
+        self.assertEqual(commands, ["cd %s && %s" % (root, command) for command in (
+            "./gradlew test", "./gradlew assembleDebug", "ktlint")])  # el primero de cada viñeta, como antes
+        reasons = dict(skipped)
+        self.assertIn("lo presenta", reasons["./gradlew uploadArchives"])
+        self.assertIn("lo presenta", reasons["- `./gradlew publishToMavenLocal`"])
+        self.assertIn("no lo corro", reasons["| Firma | `./gradlew signRelease` | Sí |"])
+        self.assertIn("no lo corro", reasons["`./gradlew connectedCheck`"])
+
+
+class ReportFollowUpTest(PerfBase):
+    """Q: lo que dejó la revisión de los reportes: `que_gana` en lugar de `esperado`, el inicial con una mejora ya
+    aplicada, sin "(0 servicios)" y los servicios sin ruta real por nombre."""
+
+    def folder_copy(self):
+        import shutil
+        folder = self.dir / "reports" / "perf" / "detalle" / "2026-03-02"
+        shutil.copytree(str(ROOT / "tests" / "fixtures" / "hb-performance-0.10.0"), str(folder))
+        return folder
+
+    def test_que_gana_y_el_inicial_con_una_mejora_aplicada(self):
+        folder = self.folder_copy()
+        out = self.ok("reporte", "--carpeta", folder, "--inicial")
+        business = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+        changes = business.split("## Cambios propuestos")[1].split("## ")[0]
+        self.assertIn("Qué gana el usuario\nsin completar", changes)  # `esperado` es técnico: no se publica
+        self.assertNotIn("0 llamadas", changes)
+        self.assertIn("M1, M2 no tienen `que_gana` en plan.json", out)  # el aviso nombra el campo
+        self.assertIn("Los que ya se aplicaron lo dicen en su estado", changes)
+        self.assertIn("Se midió el recorrido tal como estaba antes de los cambios", business)
+        plan = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"][0]["que_gana"] = "El detalle aparece antes"
+        write(folder / "plan.json", json.dumps(plan))
+        self.ok("reporte", "--carpeta", folder, "--inicial")
+        self.assertIn("Qué gana el usuario\nEl detalle aparece antes",
+                      (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))
+
+    def test_sin_filas_por_servicio_y_rutas_que_faltan(self):
+        folder = self.folder_copy()
+        self.ok("reporte", "--carpeta", folder, "--inicial")
+        dev = (folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
+        self.assertIn("llamadas por medición\n", dev)
+        self.assertNotIn("(0 servicios)", dev)
+        self.assertEqual(perf.names_and_more(list("abcdefg"), 5), "a, b, c, d, e y 2 más")
+        self.assertEqual(perf.names_and_more(["GET a"], 5), "GET a")
 
 
 if __name__ == "__main__":

@@ -1429,7 +1429,8 @@ class DodSafetyTest(PerfBase):
                                       "    ```\n")
         commands, skipped = perf.dod_entries(self.dir)
         root = perf.q(self.dir)
-        self.assertEqual(commands, ["cd %s && ./gradlew lint" % root, "cd %s && ./gradlew check" % root,
+        self.assertEqual(commands, ["cd %s && ./gradlew lint" % root, "cd %s && ./gradlew test" % root,  # 0.16.0 · Q
+                                    "cd %s && ./gradlew check" % root,
                                     "cd %s && $ANDROID_HOME/platform-tools/adb devices" % root])
         reasons = dict(skipped)
         self.assertIn("lo prohíbe o lo pone como condición",
