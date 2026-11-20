@@ -253,5 +253,183 @@ class ModulePrintTest(CaptureBase):
         self.assertFalse((self.dir / "gradle.log").exists())
 
 
+
+# ── B · Compilar, probar y leer la red ───────────────────────────────────────
+
+class BuildAndApkTest(CaptureBase):
+    """B1 y B2: un build que no compiló y un APK anterior a las marcas nunca mandan a revisar el código."""
+
+    def setUp(self):
+        super().setUp()
+        self.source = self.dir / "app" / "src" / "main" / "kotlin" / "Pedidos.kt"
+        write(self.source, "class Pedidos {\n    fun abrir() { MarkTrace.mark(\"pedidos_visibles\") }\n}\n")
+        self.plan_with(instalar="./instalar.sh", flujo={"metricas_usuario": [
+            {"nombre": "abrir_ms", "desde": {"marca": "SCREEN MainActivity"},
+             "hasta": {"marca": "MARK pedidos_visibles"}}]})
+
+    def installer(self, code, output):
+        script = self.dir / "instalar.sh"
+        write(script, "#!/bin/sh\necho 'Starting a Gradle Daemon'\nprintf '%s'\nexit %d\n" % (output, code))
+        script.chmod(0o755)
+
+    def test_build_fallido_registra_la_primera_linea_y_siguiente_pide_compilar(self):
+        self.installer(1, "FAILURE: Build failed with an exception.\\n\\n* What went wrong:\\nCould not resolve "
+                          "com.example:pagos:1.2.0 (repositorio de artefactos inaccesible)\\n")
+        result = self.perf("instalar", "--carpeta", self.folder)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compilación fallida: Could not resolve com.example:pagos:1.2.0 (repositorio de artefactos "
+                      "inaccesible)", result.stdout + result.stderr)
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("compilación fallida: Could not resolve com.example:pagos:1.2.0", out)
+        first = commands_in(out)[0]
+        self.assertIn("instalar --carpeta", first)
+        self.assertNotIn("Chat nuevo", out.split("2.")[0])
+        self.assertNotIn("revisa dónde se emite", out)
+        result = self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("la última compilación falló", result.stdout + result.stderr)
+        self.installer(0, "BUILD SUCCESSFUL\\n")
+        self.env["FAKE_UPDATED"] = "2099-01-01 10:00:00"
+        out = self.ok("instalar", "--carpeta", self.folder)
+        self.assertIn("✔ Compiló e instaló", out)
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertNotIn("compilación fallida", out)
+
+    def test_apk_anterior_a_las_marcas_no_propone_un_chat(self):
+        os.utime(str(self.source), (4102444800, 4102444800))  # 2100-01-01: la marca es posterior al APK instalado
+        self.tp_outputs(GOOD)  # GOOD no trae MARK pedidos_visibles: la marca falta
+        result = self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        out = result.stdout + result.stderr
+        self.assertIn("el APK instalado es anterior a las marcas: compila e instala antes", out)
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("el APK instalado es anterior a las marcas", out)
+        self.assertNotIn("Chat nuevo", out)
+        self.assertNotIn("revisa dónde se emite", out)
+        self.assertIn("instalar --carpeta", commands_in(out)[0])
+
+    def test_con_una_mejora_aplicada_un_apk_viejo_pide_instalar_y_no_ajustar_marcas(self):
+        plan = self.plan_with()
+        plan["mejoras"] = [{"id": "M1", "titulo": "Pedir antes", "estado": "aplicada", "aplicada_en": "2000-01-01T00:00:00",
+                           "metrica": "abrir_ms"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        os.utime(str(self.source), (946684800, 946684800))
+        self.capture(runs=3)
+        os.utime(str(self.source), (4102444800, 4102444800))  # la marca (o la mejora) cambió después de instalar
+        self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("el APK instalado es anterior", out)
+        self.assertNotIn("Chat nuevo", out)
+        self.assertIn("instalar --carpeta", commands_in(out)[0])
+
+    def test_con_todas_las_marcas_y_el_apk_viejo_no_ofrece_medir_despues(self):
+        plan = self.plan_with()
+        plan["mejoras"] = [{"id": "M1", "titulo": "Pedir antes", "estado": "aplicada", "aplicada_en": "2000-01-01T00:00:00",
+                            "metrica": "abrir_ms"}]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        os.utime(str(self.source), (946684800, 946684800))
+        self.capture(runs=3)
+        os.utime(str(self.source), (4102444800, 4102444800))
+        self.tp_outputs(GOOD + '"seccion",600000000,0,0,"MARK pedidos_visibles"\n')  # todas las marcas salen
+        self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertNotIn("--fase despues", out)
+        self.assertIn("instalar --carpeta", commands_in(out)[0])
+
+    def test_instalar_con_fallo_externo_y_sin_comando_en_el_plan(self):
+        out = self.perf("instalar", "--carpeta", self.folder, "--fallo", "Could not resolve com.example:pagos:1.2.0")
+        self.assertIn("Anotado: compilación fallida: Could not resolve", out.stdout)
+        plan = self.plan_with()
+        plan.pop("instalar")
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        self.assertIn("plan.json no tiene \"instalar\"", out)
+        self.assertFalse(any("instalar --carpeta" in command for command in commands_in(out)))
+        self.env["FAKE_UPDATED"] = "2099-01-01 10:00:00"  # instalado después del fallo, por otro camino
+        self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertEqual(perf.last_build(self.folder).get("estado"), "ok")
+
+    def test_apk_al_dia_no_avisa(self):
+        os.utime(str(self.source), (946684800, 946684800))  # 2000-01-01: anterior al APK
+        self.tp_outputs(GOOD)
+        result = self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertNotIn("anterior a las marcas", result.stdout + result.stderr)
+
+
+LISTENER_NEW = ("// Generated by hb-performance (perf.py instrumentar); `instrumentar --actualizar` overwrites this file.\n"
+                "package com.example.app.perf\n\nclass TraceEventListener {\n    companion object {\n"
+                "        const val LOG_TAG = \"hb-perf\"\n    }\n}\n")
+LISTENER_OLD = ("// Generated by hb-performance (perf.py instrumentar); `instrumentar --actualizar` overwrites this file.\n"
+                "package com.example.app.perf\n\nclass TraceEventListener\n")
+LOG_LINE = "11-05 10:00:00.000  1234  1234 I hb-perf : servicio\tGET\tGET items/{id}\thttps://api.example.com/ms-items/v1.2/items/7"
+
+
+class NetworkLogTest(CaptureBase):
+    """B3–B6: el log de rutas sin depender del buffer de logcat y avisos con la causa real."""
+
+    def listener(self, text):
+        write(self.dir / "app" / "src" / "perf" / "kotlin" / "TraceEventListener.kt", text)
+        write(self.dir / "app" / "src" / "perf" / "kotlin" / "PerfHooks.kt",
+              "// Generated by hb-performance (perf.py instrumentar)\npackage com.example.app.perf\n")
+
+    def test_instrumentacion_al_dia_sin_rutas_dice_las_causas(self):
+        self.listener(LISTENER_NEW)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertNotIn("anterior a 0.11.0", out)
+        self.assertIn("la instrumentación de red está al día", out)
+        self.assertIn("buffer de logcat", out)
+        self.assertIn("assumenosideeffects", out)
+        self.assertIn("otro listener", out)
+
+    def test_reglas_de_r8_que_quitan_log(self):
+        self.listener(LISTENER_NEW)
+        write(self.dir / "app" / "proguard-rules.pro", "-assumenosideeffects class android.util.Log {\n"
+                                                      "    public static int i(...);\n}\n")
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("app/proguard-rules.pro", out)
+
+    def test_instrumentacion_vieja_antes_de_medir_es_un_paso(self):
+        self.listener(LISTENER_OLD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("anterior a 0.11.0", out)
+        out = self.ok("siguiente", "--carpeta", self.folder)
+        commands = commands_in(out)
+        self.assertIn("instrumentar", commands[0])
+        self.assertIn("--actualizar", commands[0])
+        self.assertTrue(any("--prueba" in command for command in commands), out)
+
+    def test_limpia_el_buffer_antes_de_cada_corrida_y_acumula_las_rutas(self):
+        self.env["FAKE_LOGCAT_PERF"] = LOG_LINE
+        self.capture(runs=2)
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertEqual(log.count('"logcat", "-b", "main", "-c"]'), 2)  # solo el buffer main
+        self.assertLess(log.index('"logcat", "-d", "-s", "hb-perf"]'), log.index('"logcat", "-b", "main", "-c"]'))
+        urls = perf.service_urls(self.folder)
+        self.assertEqual(urls["GET items/{id}"], "https://api.example.com/ms-items/v1.2/items/7")
+        self.env["FAKE_LOGCAT_PERF"] = ""
+        self.capture(phase="control", runs=1)
+        self.assertIn("GET items/{id}", perf.service_urls(self.folder))  # se acumulan, no se pisan
+
+    def test_buffer_chico_se_sube_y_queda_para_revertir(self):
+        self.env["FAKE_LOGCAT_G"] = "main: ring buffer is 256 KiB (250 KiB consumed), max entry is 5120 B, max " \
+                                    "payload is 4068 B\nsystem: ring buffer is 256 KiB (10 KiB consumed)"
+        state = (perf.ASSETS / "plantillas" / "estado.md").read_text(encoding="utf-8")
+        write(self.folder / "estado.md", state)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("buffer de logcat de 256 KiB", out)
+        self.assertIn('"logcat", "-b", "main", "-G", "16M"]', (self.dir / "adb.log").read_text(encoding="utf-8"))
+        text = (self.folder / "estado.md").read_text(encoding="utf-8")
+        cambios = text.split("## Cambios temporales por revertir")[1].split("\n## ")[0]
+        self.assertIn("logcat -b main -G 256K", cambios)
+        self.assertEqual(perf.temp_changes(text), [])  # no es una fila de archivo: `cerrar` no la toca
+
+    def test_buffer_chico_sin_tocarlo_da_el_comando_y_la_opcion(self):
+        self.env["FAKE_LOGCAT_G"] = "main: ring buffer is 256 KiB (250 KiB consumed)"
+        self.plan_with(buffer_logcat=False)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertNotIn('"-G"', (self.dir / "adb.log").read_text(encoding="utf-8"))
+        self.assertIn("logcat -b main -G 16M", out)
+        self.assertIn("Tamaño del búfer del registrador", out)
+
+
 if __name__ == "__main__":
     unittest.main()

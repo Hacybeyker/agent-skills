@@ -408,6 +408,10 @@ if os.environ.get("FAKE_DESCONECTA") and os.environ["FAKE_DESCONECTA"] in " ".jo
 if args[0] == "logcat" and "-s" in args:  # el log de rutas de la instrumentación de red (hb-perf)
     print(os.environ.get("FAKE_LOGCAT_PERF", ""))
     sys.exit(0)
+if args[0] == "logcat" and "-g" in args:  # 0.16.0 · B6: el tamaño de los buffers de logcat
+    print(os.environ.get("FAKE_LOGCAT_G", "main: ring buffer is 16 MiB (1 MiB consumed), max entry is 5120 B, max "
+                                          "payload is 4068 B"))
+    sys.exit(0)
 if args[0] == "pull":
     if os.environ.get("FAKE_PULL_FALLA"):
         sys.stderr.write("adb: error: failed to stat remote object '%s': No such file or directory\n" % args[1])
@@ -6434,6 +6438,8 @@ class TestRunWarningsTest(DeviceBase):
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
         write(self.dir / "app/src/main/kotlin/com/example/app/RepartoScreen.kt",
               "package com.example.app\n\nfun cargado() {\n    PerfHooks.mark(\"reparto\")\n}\n")
+        # 0.16.0 · B2: la marca es anterior al APK instalado (si no, la prueba avisa que el APK es viejo)
+        os.utime(str(self.dir / "app/src/main/kotlin/com/example/app/RepartoScreen.kt"), (946684800, 946684800))
 
     def test_la_prueba_guarda_sus_avisos_y_siguiente_pide_corregir_antes_de_medir(self):
         self.tp_outputs(self.REPEATED)
@@ -9615,7 +9621,7 @@ class CaptureOutputTest(DeviceBase):
         self.assertIn("`GET https://api.example.com/base/v3/items/42`", md)  # 0.15.0 · H3: el método y la ruta real
         self.env["FAKE_LOGCAT_PERF"] = ""  # una instrumentación anterior: sin log
         out = self.capture("--prueba")
-        self.assertIn("Sin el log de rutas (hb-perf): la instrumentación de red es anterior a 0.11.0", out.stdout)
+        self.assertIn("Sin el log de rutas (hb-perf): no encontré en el proyecto el TraceEventListener", out.stdout)
 
 
 class ServiceLogTemplateTest(unittest.TestCase):

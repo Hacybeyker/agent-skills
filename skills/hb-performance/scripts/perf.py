@@ -5055,6 +5055,10 @@ def plan_steps(folder, plan, flow=None):
                "recorre el flujo en el dispositivo y presiona Enter en cada una de las %d corridas (más 1 de calentamiento)"
                % runs)
     capture = ["capturar", "--plan", folder / "plan.json"] + (["--flujo", flow] if len(flows) > 1 else [])
+    # 0.16.0 · B1: lo que no compiló no se prueba ni se mide: antes que nada, compilar e instalar, con el motivo
+    failed = build_failed_steps(root / folder, plan, flow, root, command(*(capture + ["--prueba"])))
+    if failed:
+        return failed
     phases = read_phases(root / folder)
     mejoras = plan.get("mejoras", [])
     estados = [m.get("estado", "propuesta") for m in mejoras]
@@ -5243,6 +5247,15 @@ def plan_steps(folder, plan, flow=None):
                          "saliendo todas las marcas del plan antes de medir después; si salen, te da el comando de la "
                          "fase después", "revisa que todas las marcas del plan salgan con ✔; si falta alguna, el paso "
                          "siguiente es ajustarla")]
+        old_apk = [item for item in test_warnings(root / folder, flow) if item.get("tipo") == "apk_viejo"]
+        if old_apk:
+            # B2: el APK de la prueba era anterior a las marcas o a la mejora: compilar e instalar, nunca ajustar marcas
+            return "el APK instalado es anterior a la mejora o a las marcas (antes de medir después)", [
+                {"tipo": "avisos", "titulo": "Compila e instala antes de probar", "lineas": [old_apk[0]["texto"]]},
+                install_via_perf(root, root / folder, "compila e instala el build de profiling con la mejora (perf.py "
+                                 "registra si compiló)", "espera"),
+                terminal(command(*(capture + ["--prueba"])), "repite la corrida de prueba con el build nuevo",
+                         "revisa que todas las marcas del plan salgan con ✔")]
         if not test.get("marcas_ok"):
             missing = [mark for mark in test.get("faltan") or [] if not str(mark).startswith("(")]
             if missing:
@@ -5315,6 +5328,9 @@ def plan_steps(folder, plan, flow=None):
         return "corrige antes de medir (avisos de la corrida de prueba)", test_warning_steps(
             root / folder, root, plan, flow, pending, resume, command(*(capture + ["--prueba"])),
             command(*(capture + ["--fase", "antes", "--corridas", runs])), you_run)
+    if "antes" not in phases and last_test(phases, flow).get("red_vieja"):
+        return "actualizar la instrumentación de red antes de medir (sin chat)", old_network_steps(
+            root / folder, plan, root, command(*(capture + ["--prueba"])))
     if "antes" not in phases:
         outdated = (phases.get(TEST_RECORD) or {}).get("mapa_viejo") if isinstance(phases.get(TEST_RECORD), dict) else None
         kinds = {item["nombre"]: item.get("tipo") for item in plan_modules(plan)}
@@ -10549,6 +10565,346 @@ def test_warnings(folder, flow):
     return [item for item in found or [] if isinstance(item, dict) and item.get("texto")]
 
 
+# ── 0.16.0 · B: compilar, probar y leer la red ──────────────────────────────
+# Lo que la sesión 1 (o una mejora) no pudo compilar no se prueba: `perf.py instalar` corre el `instalar` del plan, deja
+# en advertencias.json si compiló o la primera línea del error, y `siguiente` da primero "compila e instala" con ese
+# motivo (nunca un chat para revisar el código). Una corrida de prueba sobre un APK anterior a las marcas tampoco manda a
+# revisar el código: dice que hay que compilar e instalar.
+BUILD_NOTE = "compilacion"
+APK_TOLERANCE_S = 120  # el reloj del dispositivo y el de la máquina no están sincronizados al segundo
+
+
+def build_error_line(text):
+    """La primera línea útil del error de una compilación: la que sigue a "* What went wrong:" de Gradle, la primera de
+    error del compilador o, si no, la última no vacía."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if line.startswith("* What went wrong") and index + 1 < len(lines):
+            return lines[index + 1][:200]
+    found = next((line for line in lines if re.match(r"^(e: |error:|ERROR:|> )", line)), None)
+    return (found or (lines[-1] if lines else "sin salida"))[:200]
+
+
+def last_build(folder):
+    """El último resultado de `perf.py instalar` en la investigación ({} si no hay): estado ("ok" o "fallida"), fecha,
+    error y log."""
+    record = read_notes(folder).get(BUILD_NOTE)
+    return record if isinstance(record, dict) else {}
+
+
+def save_build(folder, **fields):
+    data = read_notes(folder)
+    data[BUILD_NOTE] = dict(fields, fecha=datetime.datetime.now().replace(microsecond=0).isoformat())
+    save_notes(folder, data)
+
+
+def build_failed(folder):
+    """El registro de la última compilación si falló y nada la superó ({} si compiló o no hay registro)."""
+    record = last_build(folder)
+    return record if record.get("estado") == "fallida" else {}
+
+
+def install_via_perf(root, folder, what, you, plan=None):
+    """B1: el paso de compilar e instalar a través de `perf.py instalar`, que registra si compiló. Sin `instalar` en el
+    plan, la acción que dice qué hacer (como install_step)."""
+    plan = plan if plan is not None else folder_plan(pathlib.Path(folder))
+    if not plan.get("instalar"):
+        return {"tipo": "accion", "que": what, "tu": NO_INSTALL + "; si compilaste e instalaste por otro camino, la corrida "
+                "de prueba lo reconoce sola (compara la fecha de instalación con la del fallo)", "instala": True}
+    return dict(terminal(perf_command(root, "instalar", "--carpeta", relative_folder(pathlib.Path(folder), root)), what,
+                         you), instala=True)
+
+
+def build_failed_steps(folder, plan, flow, root, capture_test):
+    """B1: (título, pasos) cuando la última compilación falló: primero compilar e instalar, con el motivo; después la
+    corrida de prueba. Nunca un chat para revisar el código."""
+    record = build_failed(folder)
+    if not record or report_file(folder, "final") is not None or closed_by_cerrar(folder):
+        return None  # una investigación cerrada no vuelve a pedir compilar por un fallo viejo
+    why = "compilación fallida: %s" % (record.get("error") or "sin detalle")
+    lines = [why + (" (log: %s)" % record["log"] if record.get("log") else ""),
+             "No es el código de las marcas: el build no llegó al dispositivo, así que la app instalada es la anterior. "
+             "Resuelve lo que dice el error (por ejemplo, un repositorio de artefactos inaccesible: conéctate a la red "
+             "que lo alcanza) y compila de nuevo"]
+    return why, [{"tipo": "avisos", "titulo": "Compila e instala antes de probar", "lineas": lines},
+                 install_via_perf(root, folder, "compila e instala el build de profiling (%s)" % why,
+                                  "resuelve antes la causa del error; si compila, sigue con la prueba"),
+                 terminal(capture_test, "la corrida de prueba con el build nuevo", "revisa que todas las marcas del plan "
+                          "salgan con ✔")]
+
+
+def mark_old_network(folder, flow, old):
+    """B4: anota en la última prueba del flujo si la instrumentación de red era anterior a 0.11.0 (sin rutas)."""
+    phases = read_phases(folder)
+    record = phases.get(TEST_RECORD) if isinstance(phases.get(TEST_RECORD), dict) else {}
+    entry = (record.get("flujos") or {}).get(flow)
+    if not isinstance(entry, dict) or bool(entry.get("red_vieja")) == old:
+        return
+    if old:
+        entry["red_vieja"] = True
+    else:
+        entry.pop("red_vieja", None)
+    save_phases(folder, phases)
+
+
+def old_network_steps(folder, plan, root, capture_test):
+    """B4: antes de la primera fase, actualizar la instrumentación de red es un paso: actualizar, compilar e instalar,
+    guardar el setup de nuevo si va en un parche y repetir la prueba (los reportes necesitan la ruta real de cada
+    servicio, con su versión)."""
+    update = update_instrumentation_command(root)
+    case = setup_case(root)
+    lines = ["La corrida de prueba no leyó rutas: la instrumentación de red es anterior a 0.11.0. Todavía no mediste ninguna "
+             "fase, así que es el momento de actualizarla: los reportes muestran la ruta real de cada servicio, con la "
+             "versión del microservicio, solo con la instrumentación al día (no cambia el nombre de las secciones)"]
+    steps = [{"tipo": "avisos", "titulo": "Instrumentación de red vieja", "lineas": lines}]
+    if update:
+        steps.append(terminal(update, "actualiza la instrumentación generada (no pisa lo que editaste a mano: si un "
+                              "archivo cambió, guarda una copia .orig y te lo dice)", "nada"))
+    else:
+        steps.append({"tipo": "accion", "que": "actualiza la instrumentación con `perf.py instrumentar --modulo <módulo> "
+                      "--paquete <paquete> --actualizar` (setup.md)", "tu": "no encontré PerfHooks.kt para armar el "
+                      "comando: corre `instrumentar` con el módulo y el paquete donde está"})
+    steps.append(install_via_perf(root, folder, "compila e instala el build de profiling con la instrumentación "
+                                  "actualizada", "espera"))
+    if case.get("caso") == "parche":
+        steps.append(terminal(setup_command(root, "--guardar", folder=folder),
+                              "guarda el setup actualizado como parche nuevo: el parche vigente (%s) queda viejo, sin la "
+                              "instrumentación nueva" % shown_path(case["parche"], root), "nada"))
+    steps.append(terminal(capture_test, "repite la corrida de prueba: tiene que leer la ruta real de cada servicio",
+                          "revisa que salgan las rutas reales y todas las marcas con ✔"))
+    return steps
+
+
+def installed_ts(installed):
+    """El lastUpdateTime de `dumpsys package` (hora local del dispositivo) como marca de tiempo; None si no se lee."""
+    try:
+        return time.mktime(datetime.datetime.strptime(str(installed or "").strip(), "%Y-%m-%d %H:%M:%S").timetuple())
+    except (ValueError, OverflowError):
+        return None
+
+
+def apk_older_than_marks(root, folder, plan, flow_spec, installed):
+    """B2: (archivo, fecha) del archivo de marcas más nuevo si el APK instalado es anterior a él: las marcas del plan
+    (donde el código emite cada `MARK <nombre>`) y los cambios temporales sin revertir de estado.md (el parche de marcas
+    vigente). None si el APK es posterior o no se sabe."""
+    when = installed_ts(installed)
+    if when is None:
+        return None
+    root = pathlib.Path(root)
+    files = []
+    for name in mark_names(flow_spec):
+        for place in find_mark_sources(root, "MARK %s" % name):
+            path = pathlib.Path(place.rsplit(":", 1)[0])
+            files.append(path if path.is_absolute() else root / path)
+    for change in pending_temp(folder):
+        base = root / (change.get("repo") or ".")
+        files.append(base / change["archivo"])
+    newest = None
+    for path in files:
+        try:
+            moment = path.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or moment > newest[1]:
+            newest = (path, moment)
+    try:  # B2: también el código de las mejoras aplicadas (una mejora sin reinstalar no llega al APK)
+        changed = improvement_mtime(folder, plan) if any(item.get("estado") == "aplicada"
+                                                         for item in plan.get("mejoras") or []) else 0
+    except (OSError, PerfError):
+        changed = 0
+    if changed and (newest is None or changed > newest[1]):
+        newest = (pathlib.Path("el código de las mejoras aplicadas"), changed)
+    if newest and newest[1] > when + APK_TOLERANCE_S:
+        shown = str(newest[0]) if not newest[0].is_absolute() else relative_to_root(newest[0], root)
+        return shown, datetime.datetime.fromtimestamp(newest[1]).strftime("%Y-%m-%d %H:%M")
+    return None
+
+
+def apk_warning(root, folder, plan, old, installed):
+    """El aviso de la prueba sobre un APK anterior a las marcas: se resuelve compilando e instalando (sin chat)."""
+    text = ("el APK instalado es anterior a las marcas: compila e instala antes (instalado %s; %s cambió %s)" % (
+        installed, old[0], old[1]))
+    return warning("apk_viejo", text, text, commands=[(
+        "compila e instala el build de profiling con las marcas (perf.py registra si compiló)",
+        perf_command(root, "instalar", "--carpeta", relative_folder(pathlib.Path(folder), root)))])
+
+
+def cmd_instalar(args):
+    """B1: compila e instala con el `instalar` del plan y registra el resultado (o, con --fallo, registra una compilación
+    que falló fuera de perf.py). Si falla, `siguiente` da primero compilar de nuevo, con el motivo."""
+    folder = pathlib.Path(args.carpeta)
+    plan = load_plan(folder / "plan.json")
+    root = project_root(folder).resolve()
+    if args.fallo:
+        save_build(folder, estado="fallida", error=one_line(args.fallo)[:200])
+        print("✖ Anotado: compilación fallida: %s" % one_line(args.fallo)[:200])
+        return print_next(folder, plan)
+    if not plan.get("instalar"):
+        raise PerfError("plan.json no tiene \"instalar\": %s" % NO_INSTALL).con(
+            guardado="nada", seguir=[("cuando el plan tenga \"instalar\", repite", same_command())])
+    command = install_command(plan, root)[len("cd %s && " % q(root)):]
+    log = folder / "logs" / ("instalar-%s.log" % datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    log.parent.mkdir(parents=True, exist_ok=True)
+    print("… compilando e instalando (%s); la salida completa queda en %s" % (command, log), flush=True)
+    with log.open("w", encoding="utf-8") as handle:
+        done = subprocess.run(command, shell=True, cwd=str(root), stdout=handle, stderr=subprocess.STDOUT,
+                              env=child_env(java=True))
+    text = log.read_text(encoding="utf-8", errors="replace")
+    if done.returncode != 0:
+        line = build_error_line(text)
+        save_build(folder, estado="fallida", error=line, log=str(log))
+        print("✖ compilación fallida: %s" % line)
+        print("  No corras la corrida de prueba con el APK anterior: lo que no compiló no llegó al dispositivo.")
+        print_next(folder, plan)
+        raise SystemExit(1)
+    save_build(folder, estado="ok", log=str(log))
+    print("✔ Compiló e instaló (código 0).")
+    print_next(folder, plan)
+
+
+# B3: cuando la prueba no trae rutas del log hb-perf, la causa no es siempre una instrumentación vieja.
+R8_LOG_RULE = re.compile(r"assumenosideeffects[^{]*android\.util\.Log", re.S)
+LOGCAT_MIN_BYTES = 4 * 1024 * 1024
+LOGCAT_TARGET = "16M"
+LOGCAT_SIZE = re.compile(r"^main:\s*ring buffer is\s*([\d.]+)\s*([KMG]i?B|[KMG]b|B)\b", re.I | re.M)
+DEV_BUFFER_OPTION = "Opciones de desarrollador → \"Tamaño del búfer del registrador\" (Logger buffer sizes)"
+
+
+def listener_state(root):
+    """B3: "al día" si el TraceEventListener generado del proyecto escribe el log de rutas (tag hb-perf, 0.11.0 o
+    posterior), "vieja" si es anterior, None si no está."""
+    patterns = read_no_leer(pathlib.Path(root))
+    for current, dirs, files in os.walk(str(root)):
+        dirs[:] = [d for d in dirs if d not in ("build", "node_modules", "reports", "out") and not d.startswith(".")
+                   and not is_denied(os.path.join(current, d), pathlib.Path(root), patterns)]
+        if "TraceEventListener.kt" in files:
+            path = os.path.join(current, "TraceEventListener.kt")
+            if not is_generated(path) or is_denied(path, pathlib.Path(root), patterns):
+                continue
+            try:
+                text = pathlib.Path(path).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            return "al día" if '"%s"' % SERVICE_LOG_TAG in text else "vieja"
+    return None
+
+
+def r8_log_rules(root):
+    """B3: los archivos de reglas de R8 o ProGuard del proyecto que quitan las llamadas a android.util.Log."""
+    root = pathlib.Path(root)
+    out = []
+    for path in walk_files(root, read_no_leer(root), (".pro", ".cfg", ".txt")):
+        if "proguard" not in path.name.lower() and not path.name.endswith(".pro"):
+            continue
+        try:
+            if path.stat().st_size < 512 * 1024 and R8_LOG_RULE.search(path.read_text(encoding="utf-8", errors="ignore")):
+                out.append(relative_to_root(path, root))
+        except OSError:
+            continue
+    return out[:5]
+
+
+def no_routes_lines(root, serial):
+    """B3: por qué la prueba no leyó rutas con la instrumentación al día, cada causa con su comprobación."""
+    adb = "%s%s" % (adb_shown(), " -s %s" % q(serial) if serial else "")
+    rules = r8_log_rules(root)
+    return ["la instrumentación de red está al día (TraceEventListener escribe el log %s) y la prueba no leyó ninguna "
+            "ruta. Causas posibles, con su comprobación:" % SERVICE_LOG_TAG,
+            "  1. el buffer de logcat lleno o chico: la línea de cada servicio se escribe una sola vez, al principio; "
+            "compruébalo con `cd %s && %s logcat -g` (hb-performance lo limpia antes de cada corrida y, si `main` tiene "
+            "menos de 4 MiB, lo sube a %s: setup.md · Log de rutas)" % (q(root), adb, LOGCAT_TARGET),
+            "  2. reglas de R8 que quitan las llamadas a Log (`-assumenosideeffects class android.util.Log`): %s" % (
+                "están en %s; la variante medida tiene que conservar Log.i del tag %s" % (", ".join(rules), SERVICE_LOG_TAG)
+                if rules else "no encontré ninguna en el proyecto"),
+            "  3. un cliente HTTP cableado a mano con otro listener: cada OkHttpClient.Builder lleva el gancho de "
+            "PerfHooks (setup.md · Red: conectar cada builder)"]
+
+
+def logcat_buffer(adb):
+    """B6: (bytes del buffer main, texto) según `adb logcat -g`; (None, '') si no se lee."""
+    try:
+        done = adb.run("logcat", "-g", timeout=30)
+    except (PerfError, OSError, subprocess.SubprocessError):
+        return None, ""
+    found = LOGCAT_SIZE.search(done.stdout or "")
+    if not found:
+        return None, ""
+    value, unit = float(found.group(1)), found.group(2).upper()
+    factor = {"B": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[unit[0] if unit != "B" else "B"]
+    return int(value * factor), "%s %s" % (found.group(1), "B" if unit == "B" else unit[0] + "iB")
+
+
+def logcat_size_arg(size_bytes):
+    """El tamaño para `logcat -G` (K o M), para volver al que había."""
+    if size_bytes % (1024 ** 2) == 0:
+        return "%dM" % (size_bytes // 1024 ** 2)
+    return "%dK" % max(64, size_bytes // 1024)
+
+
+def ensure_logcat_buffer(adb, folder, plan, serial, root):
+    """B6: si el buffer main de logcat tiene menos de 4 MiB, lo sube a 16M (se pierde al reiniciar el teléfono), lo dice
+    y lo deja en estado.md con el comando para volver; con `"buffer_logcat": false` en el plan, solo avisa con el comando
+    y la opción del teléfono. Devuelve las líneas que imprimió."""
+    size, text = logcat_buffer(adb)
+    if size is None or size >= LOGCAT_MIN_BYTES:
+        return []
+    command = "cd %s && %s%s logcat -b main -G %s" % (q(root), adb_shown(), " -s %s" % q(serial) if serial else "",
+                                                     LOGCAT_TARGET)
+    back = "cd %s && %s%s logcat -b main -G %s" % (q(root), adb_shown(), " -s %s" % q(serial) if serial else "",
+                                                 logcat_size_arg(size))
+    if plan.get("buffer_logcat") is False:
+        line = ("⚠ El buffer de logcat de %s es chico: la línea %s de cada servicio puede perderse y el reporte quedaría sin "
+                "rutas reales. Súbelo con `%s` (se pierde al reiniciar el teléfono; para volver: `%s`) o en %s. El plan "
+                "dice \"buffer_logcat\": false, así que no lo toco" % (text, SERVICE_LOG_TAG, command, back,
+                                                                         DEV_BUFFER_OPTION))
+        print(line)
+        return [line]
+    try:
+        done = adb.run("logcat", "-b", "main", "-G", LOGCAT_TARGET, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        done = subprocess.CompletedProcess([], 1, "", str(error))
+    if done.returncode != 0:
+        line = "⚠ No pude subir el buffer de logcat (%s): hazlo en %s" % (
+            one_line(done.stderr or done.stdout)[:120] or "sin salida", DEV_BUFFER_OPTION)
+        print(line)
+        return [line]
+    line = ("· Subí el buffer de logcat de %s a %s para no perder la línea %s de cada servicio (se pierde al reiniciar el "
+            "teléfono). Para volver al tamaño de antes: `%s` (queda en \"Cambios temporales por revertir\" de estado.md)"
+            % (text, LOGCAT_TARGET, SERVICE_LOG_TAG, back))
+    print(line)
+    data = read_notes(folder)
+    if not isinstance(data.get("logcat_original"), dict):  # el tamaño original, la primera vez: no se pisa
+        data["logcat_original"] = {"fecha": datetime.date.today().isoformat(), "tamano": text, "comando": back}
+        save_notes(folder, data)
+    original = data["logcat_original"]
+    device_change_note(folder, "Buffer de logcat del dispositivo (no es un archivo: `cerrar` no lo toca): subido de "
+                               "%s a %s con `adb logcat -b main -G %s` (%s). Para volver al tamaño de antes: `%s`. Se pierde "
+                               "solo al reiniciar el teléfono." % (original.get("tamano"), LOGCAT_TARGET, LOGCAT_TARGET,
+                                                                   original.get("fecha"), original.get("comando")))
+    return [line]
+
+
+def device_change_note(folder, text):
+    """B6: deja un ajuste del dispositivo en "Cambios temporales por revertir" de estado.md, debajo de la tabla (no es
+    una fila: las filas son archivos que `cerrar` quita)."""
+    if update_block(folder, "ajustes-dispositivo", "- " + text):
+        return True
+    state = pathlib.Path(folder) / "estado.md"
+    try:
+        lines = state.read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return False
+    start = next((i for i, line in enumerate(lines) if line.lower().startswith("## cambios temporales")), None)
+    if start is None:
+        return False
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    lines[end:end] = ["", "<!-- perf:ajustes-dispositivo -->", "- " + text, "<!-- /perf:ajustes-dispositivo -->"]
+    state.write_text("\n".join(lines), encoding="utf-8")
+    return True
+
+
 def count_invalid(folder, phase, flow, reason):
     """Suma una corrida inválida (con su motivo) a lo que la sección de advertencias cuenta de esa fase y ese flujo."""
     data = read_notes(folder)
@@ -11136,7 +11492,10 @@ def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, 
     normal. Primero los avisos, uno por línea; después lo que corre el usuario en su terminal para los avisos que se
     resuelven sin código (las opciones de desarrollador), el chat que corrige el resto (sin compilar, instalar ni
     capturar), instalar y repetir la prueba y, como opción, medir igual."""
-    in_code = [item for item in pending if not item.get("comandos")]
+    old_apk = any(item.get("tipo") == "apk_viejo" for item in pending)
+    # B2: con el APK anterior a las marcas, una marca que falta es consecuencia: no va a un chat que revise el código
+    in_code = [item for item in pending if not item.get("comandos") and not (
+        old_apk and item.get("tipo") in ("marca", "invalida", "sin_marcas"))]
     listed = []
     for index, item in enumerate(in_code, start=1):
         where = " (%s)" % ", ".join(item.get("donde") or []) if item.get("donde") else ""
@@ -11147,9 +11506,16 @@ def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, 
         commands = [pair for pair in item.get("comandos") or [] if isinstance(pair, list) and len(pair) == 2]
         lines += ["%s: %s" % (what[0].upper() + what[1:], command) for what, command in commands[1:]]
     steps = [{"tipo": "avisos", "titulo": "Corrige antes de medir", "lineas": lines}]
+    built = last_build(folder)
+    tested_at = ((read_notes(folder).get("prueba") or {}).get(flow) or {}).get("fecha")
+    rebuilt = built.get("estado") == "ok" and (fecha_ts(built.get("fecha")) or 0) > (fecha_ts(tested_at) or 0)
     for item in pending:
         commands = [pair for pair in item.get("comandos") or [] if isinstance(pair, list) and len(pair) == 2]
-        if commands:
+        if commands and item.get("tipo") == "apk_viejo":
+            if not rebuilt:  # B2: si ya compiló después de esta prueba, solo falta repetirla
+                steps.append(terminal(commands[0][1], commands[0][0], "espera; si la compilación falla, `siguiente` te da "
+                                      "el motivo"))
+        elif commands:
             steps.append(terminal(commands[0][1], commands[0][0], "córrelo en la terminal donde mides; no cambia el código "
                                   "ni la app"))
     if in_code:
@@ -11159,9 +11525,11 @@ def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, 
                        "compila, no instala y no captura", plan),
                   install_step(plan, root, "compila e instala el build de profiling con las correcciones",
                            "espera; si solo cambió plan.json, salta este paso")]
-    return steps + [
-        terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente pasa "
-                 "a ser medir antes", "lo mismo que en una corrida, una sola vez"),
+    retry = terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente "
+                     "pasa a ser medir antes", "lo mismo que en una corrida, una sola vez")
+    if old_apk:  # B2: medir con el APK anterior mediría la app sin las marcas: no se ofrece
+        return steps + [retry]
+    return steps + [retry,
         terminal(capture_before, "OPCIÓN, solo si decides medir igual con estos avisos: lo que se mida así puede salir sin "
                  "red, midiendo el recorrido o con otras condiciones, y habría que repetirlo con --rehacer", you_run)]
 
@@ -12092,6 +12460,29 @@ def cmd_capturar(args, plan=None):
     adb = Adb(serial)
     sdk, warnings, build = preflight(adb, package, args.forzar)
     batch_started = time.time()  # lo que tarda la tanda (con la compilación): `siguiente` estima el costo de un escenario
+    apk_warn = None
+    if args.plan:
+        root_b = project_root(folder).resolve()
+        failed = build_failed(folder)
+        if failed and not args.forzar:
+            # B1: lo que no compiló no se prueba ni se mide: la app instalada es la anterior
+            failed_at = fecha_ts(failed.get("fecha"))
+            installed_at = installed_ts(build.get("instalada"))
+            if installed_at is not None and failed_at is not None and installed_at > failed_at + APK_TOLERANCE_S:
+                save_build(folder, estado="ok", nota="instalado después del fallo, fuera de perf.py")
+            else:
+                raise Precondicion("la última compilación falló (%s): el APK instalado es el anterior; compila e instala "
+                                   "antes de %s" % (failed.get("error") or "sin detalle",
+                                                    "la prueba" if args.prueba else "medir")).con(
+                    guardado="nada: no toqué el dispositivo",
+                    seguir=[("compila e instala (perf.py registra si compiló)", perf_command(
+                        root_b, "instalar", "--carpeta", relative_folder(folder, root_b))),
+                            ("y repite", same_command())])
+        if args.prueba:
+            old_apk = apk_older_than_marks(root_b, folder, plan, flow, build.get("instalada"))
+            if old_apk:  # B2: la causa de una marca que falte es el APK, no el código
+                apk_warn = apk_warning(root_b, folder, plan, old_apk, build.get("instalada"))
+                print("⚠ " + apk_warn["texto"])
     if not args.prueba and phase == "despues" and not args.forzar and args.plan:
         missing_step = despues_gate(folder, plan, flow_name, build)
         if missing_step:
@@ -12165,6 +12556,8 @@ def cmd_capturar(args, plan=None):
         if not dev_setting_normal("always_finish_activities", dev_settings.get("always_finish_activities")):
             print("    Además, %s." % ALWAYS_FINISH_NOTE)
         save_dev_restore(folder, dev_settings, back)
+    if args.plan and not startup:  # B6: el buffer de logcat que guarda la línea hb-perf de cada servicio
+        ensure_logcat_buffer(adb, folder, plan, serial, project_root(folder).resolve())
     commit, dirty = git_info()
     build_warnings = []
     if not args.prueba:
@@ -12371,6 +12764,8 @@ def cmd_capturar(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
+    clear_logcat = bool(args.plan) and not startup and plan.get("limpiar_logcat") is not False  # B5
+    seen_urls = {}
     memory_notes = []  # C4: por qué la tabla de memoria no trae `views` (una vez por tanda)
     # Una sola numeración: la de la fase ("corrida 6 de 10"), la misma de metricas.csv, del diagnóstico y del reporte.
     # Un intento inválido no gasta un número de corrida: va como "intento N (inválido)".
@@ -12529,6 +12924,17 @@ def cmd_capturar(args, plan=None):
                          inicio=datetime.datetime.now().replace(microsecond=0).isoformat(),
                          registro=None if args.prueba or not valid else build_record(partial=True, quiet=True),
                          perfetto=None)
+        if clear_logcat:
+            # B5: antes de limpiar, se leen y se acumulan las rutas que ya estaban (las del calentamiento, de 'preparar' o
+            # de una corrida anterior: cada servicio escribe su línea una vez por proceso); después se limpia solo el
+            # buffer main, antes de 'preparar', para que el log de otra corrida no desplace las líneas nuevas
+            early = read_service_log(adb)
+            seen_urls.update(early)
+            save_service_urls(folder, early)
+            try:
+                adb.run("logcat", "-b", "main", "-c", timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass  # si adb no responde, las rutas de esta corrida pueden quedar sin leer, nada más
         try:
             if not inside_trace:
                 prepare()
@@ -12581,6 +12987,8 @@ def cmd_capturar(args, plan=None):
                           "igual; míralo en el dispositivo mientras corre")
             if is_repetition(flow) and failure is None:
                 memory_snapshot(adb, package, cycles_path, "fin")
+            if clear_logcat and not args.prueba:  # B5: las rutas de esta corrida, antes de que se limpie el buffer
+                save_service_urls(folder, read_service_log(adb))
         if failure is not None:
             error = failure
             if not prepare_command or args.prueba:
@@ -12722,7 +13130,7 @@ def cmd_capturar(args, plan=None):
                 save_test_record(folder, flow_name, [mark for mark, _, seen in info.get("marcas_plan") or [] if seen],
                                  unseen or ["(la corrida no llegó a procesarse: %s)" % one_line(invalid)[:120]],
                                  prints.get("marcas"), prints.get("plan"))
-                save_test_warnings(folder, flow_name, [warning(
+                save_test_warnings(folder, flow_name, ([apk_warn] if apk_warn else []) + [warning(
                     "invalida", "la corrida de prueba fue inválida: %s%s" % (
                         invalid, " (marcas del plan que no salieron: %s)" % ", ".join(unseen) if unseen else ""),
                     "la corrida de prueba fue inválida (%s): corrige el recorrido, 'preparar' o las marcas del plan"
@@ -12839,22 +13247,38 @@ def cmd_capturar(args, plan=None):
                     note = update_agents_state(root, http=state) if state else ""
                     if note:
                         print(note)
-                pending = test_run_warnings(root, hz, info, gap, unwired, settings=dev_settings, serial=serial)
+                pending = ([apk_warn] if apk_warn else []) + test_run_warnings(root, hz, info, gap, unwired,
+                                                                               settings=dev_settings, serial=serial)
                 save_test_warnings(folder, flow_name, pending)
                 if pending:
-                    print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` los lista con el texto para "
-                          "un chat; una corrida de prueba sin avisos los da por resueltos" % (len(pending), folder / NOTES_FILE))
-            urls = read_service_log(adb)
+                    print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` da cómo corregirlos (en la "
+                          "terminal o con el texto para un chat); una corrida de prueba sin avisos los da por resueltos"
+                          % (len(pending), folder / NOTES_FILE))
+            urls = dict(seen_urls, **read_service_log(adb))  # B5: también las leídas antes de limpiar el buffer
+            if args.plan:
+                mark_old_network(folder, flow_name, False)
             if urls:
                 save_service_urls(folder, urls)
                 print("Rutas reales de los servicios (log %s, fuera de la traza): %d" % (SERVICE_LOG_TAG, len(urls)))
                 for name, url in sorted(urls.items()):  # D2: cada una completa, junto a su nombre corto
                     print("  · %s → %s" % (name, url))
-            elif info.get("http"):
-                print("· Sin el log de rutas (%s): la instrumentación de red es anterior a 0.11.0, así que los reportes "
-                      "muestran el nombre corto de cada servicio. Para la ruta completa, actualiza la instrumentación "
-                      "entre investigaciones (no cambia el nombre de las secciones): %s" % (
+            elif info.get("http") and listener_state(root) is None:
+                print("· Sin el log de rutas (%s): no encontré en el proyecto el TraceEventListener que genera "
+                      "`instrumentar` (¿un listener cableado a mano?), así que los reportes muestran el nombre corto de "
+                      "cada servicio, sin su versión. Si lo generó una versión anterior a 0.11.0, actualízalo: %s" % (
                           SERVICE_LOG_TAG, update_hint(root)))
+            elif info.get("http") and listener_state(root) == "vieja":
+                measured_any = any(name in read_phases(folder) for name in FASES) if args.plan else True
+                print("· Sin el log de rutas (%s): la instrumentación de red es anterior a 0.11.0, así que los reportes "
+                      "muestran el nombre corto de cada servicio (sin su versión). %s" % (
+                          SERVICE_LOG_TAG, "Antes de medir, `siguiente` te da actualizarla, compilar y repetir la prueba"
+                          if not measured_any else "Actualízala entre investigaciones (no cambia el nombre de las "
+                          "secciones): %s" % update_hint(root)))
+                if args.plan:  # B4: antes de la primera fase, actualizarla es un paso de `siguiente`
+                    mark_old_network(folder, flow_name, True)
+            elif info.get("http"):
+                for line in no_routes_lines(root, serial):  # B3: con la instrumentación al día, las causas reales
+                    print(("⚠ " if not line.startswith("  ") else "") + line)
             print("Traza: %s" % saved)
             if gap and getattr(args, "red_obligatoria", False):
                 raise Precondicion(gap + " Si el arranque de esta app no hace ninguna llamada de red, repite con --sin-red.")
@@ -22114,6 +22538,13 @@ def main(argv=None):
     p.add_argument("--marcas-a-mano", dest="marcas_a_mano", action="store_true",
                    help="las marcas ya se repusieron a mano (su parche no aplicaba): no las repone y cierra sus filas viejas")
     p.set_defaults(func=cmd_reanudar)
+
+    p = sub.add_parser("instalar", help="compila e instala con el 'instalar' del plan y registra si compiló (si falla, "
+                                        "`siguiente` da primero compilar de nuevo, con el motivo)")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--fallo", help="no compila: registra una compilación que falló fuera de perf.py, con la primera línea "
+                                   "de su error")
+    p.set_defaults(func=cmd_instalar)
 
     p = sub.add_parser("recuperar", help="después de una interrupción: detiene la traza que siguió en el dispositivo, aparta "
                                          "la traza parcial y da el paso exacto")
