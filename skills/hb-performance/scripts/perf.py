@@ -71,6 +71,7 @@ REPETITION = "repeticion"  # tipo de flujo "repetición para memoria" (0.15.0 ·
 CV_MAX = 10.0
 MAX_ROWS = 30
 REMOTE_DIR = "/data/misc/perfetto-traces"
+CAPTURE_ENV = "HB_PERF_CAPTURA"  # C4: `capturar` lo pone para 'preparar' y el recorrido (sus procesos hijos)
 DUPLICATE_WINDOW_NS = 2_000_000_000
 MAIN_SLICE_MIN_NS = 5_000_000
 LONG_SLICE_NS = 100_000_000
@@ -152,11 +153,12 @@ MAX_CONSECUTIVE_INVALID = 3
 WARMUP_SETTLE_S = 2  # respiro después del calentamiento, antes del primer 'preparar' medido
 
 
-def max_attempts(target):
+def max_attempts(target, only_prepare=False):
     """Intentos totales de una captura: las corridas pedidas más una reserva de 3 como mínimo y de la mitad de las pedidas
     si son más (5 → 8, 10 → 15, 20 → 30). Así las inválidas sueltas de un backend inestable no cortan una captura larga;
-    las seguidas ya las corta MAX_CONSECUTIVE_INVALID."""
-    return target + max(3, target // 2)
+    las seguidas ya las corta MAX_CONSECUTIVE_INVALID. 0.16.0 · C2: si todos los intentos inválidos de la tanda son
+    fallos de 'preparar' (no hubo traza que procesar, no cuestan), el tope es 3 veces las corridas pedidas."""
+    return max(3 * target, target + max(3, target // 2)) if only_prepare else target + max(3, target // 2)
 
 
 class PerfError(Exception):
@@ -2768,7 +2770,7 @@ def mask_secrets(text, names):
     return text
 
 
-def run_prepare(command, folder, secret_names, capture=None):
+def run_prepare(command, folder, secret_names, capture=None, label=None):
     """Corre 'preparar' y devuelve (código, últimas líneas de su salida, ruta del log). Si funciona, su salida no se
     muestra ni se guarda. Si falla, queda su cola en <carpeta>/logs/preparar.log después de pasar por mask_secrets. La
     salida estándar solo se mira cuando el flujo declara 'requiere_env' (y se enmascaran sus valores); sin esa lista se
@@ -2785,6 +2787,9 @@ def run_prepare(command, folder, secret_names, capture=None):
     if result.returncode != 0:
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        if label:  # C3: cada intento fallido deja su propio log (los secretos ya enmascarados), no solo el último
+            own = log.with_name("preparar-%s.log" % slug(label))
+            own.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     elif log.is_file():
         log.unlink()  # el de un fallo anterior ya no dice nada
     return result.returncode, lines[-8:], log
@@ -10922,9 +10927,13 @@ UNSTABLE_MARK_SHARE = 0.3
 
 
 PREPARE_EXTRA_WAIT_S = 3
+# C3: la línea con la que 'preparar' dice que se saltó la pantalla que esperaba porque la app llegó a una posterior
+# (la plantilla de ficha.md · Pantallas con límite de frecuencia la escribe así). Se decide por ese texto, nunca por la
+# actividad: en una app de una sola actividad, todas las pantallas son la misma.
+SKIPPED_SCREEN = re.compile(r"se salt[óo] ['\"]([^'\"]{1,80})['\"]: la app lleg[óo] a ['\"]([^'\"]{1,80})['\"]")
 
 
-def invalid_summary(failures, attempts, screens=None, stuck_screens=None, nodes_command=None):
+def invalid_summary(failures, attempts, screens=None, stuck_screens=None, nodes_command=None, skipped=None):
     """Las líneas que resumen el patrón de los intentos inválidos de una tanda: cuántas veces faltó cada marca del plan y
     cuántas veces se repitió cada otro motivo. Si una misma marca faltó en más del 30 % de los intentos, la nombra y
     sugiere revisar esa marca o ese paso del recorrido entre investigaciones. Si 'preparar' falló varias veces dejando la
@@ -10952,6 +10961,17 @@ def invalid_summary(failures, attempts, screens=None, stuck_screens=None, nodes_
     stuck = {}
     for screen in stuck_screens or ():
         stuck[screen] = stuck.get(screen, 0) + 1
+    for (expected, reached), count in sorted((skipped or {}).items(), key=lambda kv: -kv[1]):
+        # C3: 'preparar' dijo que la app llegó a una pantalla posterior: se saltó la esperada. Nunca se proponen toques
+        # del volcado: tocar ahí cambiaría el recorrido.
+        lines.append("⚠ Se saltó '%s': la app llegó directo a '%s' (%d %s de %d). Probablemente es una pantalla que la app "
+                     "muestra con límite de frecuencia (un aviso que no vuelve si se cerró hace poco): compruébalo "
+                     "corriendo `preparar` y el recorrido dos veces seguidas fuera de la captura; si falla solo el "
+                     "segundo, agrega a `preparar` el bloque de reintento (ficha.md · Pantallas con límite de "
+                     "frecuencia). Esos reintentos no cuentan como corridas inválidas. Cambiar `preparar` cambia la "
+                     "huella del recorrido: si ya mediste una fase con el anterior, `siguiente` te pide medirla de nuevo. "
+                     "El log de cada intento queda en logs/preparar-<fase>-intento<N>.log" % (
+                         expected, reached, count, "vez" if count == 1 else "veces", attempts))
     for screen, count in sorted(stuck.items(), key=lambda kv: -kv[1]):
         if count < 2:
             continue
@@ -12200,6 +12220,12 @@ def route_words_lines(plan, flow, folder):
             "`# paso:` por paso (lo que toca y lo que tiene que abrirse)" if inline else
             "agrega uno por paso, con lo que toca y lo que tiene que abrirse, para que el recorrido se entienda sin leer el "
             "script", later))
+    for where, text in route_texts(route, folder):  # C4: la comprobación de la pantalla de partida sin completar
+        for number, line in enumerate(text.splitlines(), start=1):
+            if not line.lstrip().startswith("#") and "--partida" in line and "<texto de la pantalla de partida>" in line:
+                lines.append("⚠ %s:%d todavía tiene el texto de ejemplo de la pantalla de partida: pon un texto que solo "
+                             "se vea ahí; corrido a mano, el recorrido se detendría sin tocar nada (en la captura no "
+                             "vuelca la pantalla)" % (pathlib.Path(str(where)).name, number))
     for where, number, missing in scrolls[:4]:
         lines.append("⚠ El desplazamiento de %s:%d no dice %s en su `# paso:`: escríbelo, para que el recorrido no dependa "
                      "de adivinar (ficha.md · Scroll y pestañas).%s" % (pathlib.Path(str(where)).name, number,
@@ -12382,6 +12408,7 @@ def cmd_capturar(args, plan=None):
     phase = "antes" if args.prueba else normalize_phase(args.fase)
     csv_path = folder / "metricas.csv"
     target = 1 if args.prueba else args.corridas
+    os.environ[CAPTURE_ENV] = "1"  # C4: los hijos (preparar, recorrido) saben que corren dentro de una captura
     progress = {"validas": 0}
 
     def guide():
@@ -12644,6 +12671,8 @@ def cmd_capturar(args, plan=None):
 
     prepare_shown = []
     prepare_screens = {}  # C6: {pantalla donde quedó la app tras un 'preparar' fallido: textos tocables}
+    skipped_screens = {}  # 0.16.0 · C3: {(pantalla esperada, pantalla a la que llegó): veces}, según dice 'preparar'
+    prepare_label = ["%s-calentamiento" % ("prueba" if args.prueba else phase)]  # C3: el nombre del log de cada intento
     stuck_screens = []  # C6: la pantalla de cada intento en que 'preparar' falló
 
     def prepare():
@@ -12653,7 +12682,8 @@ def cmd_capturar(args, plan=None):
             return
         if prepare_command:
             print("… dejando la app en el punto de partida ('preparar')", flush=True)
-            code, tail, log = run_prepare(prepare_command, folder, mask_names, capture=bool(declared))
+            code, tail, log = run_prepare(prepare_command, folder, mask_names, capture=bool(declared),
+                                          label=prepare_label[0])
             if code != 0:
                 # Entre paréntesis: un `exit` o un `;` del comando no cierran ni desordenan la terminal de quien lo pega.
                 by_hand = "cd %s && ( %s )" % (shlex.quote(os.getcwd()), mask_secrets(prepare_command, mask_names))
@@ -12685,7 +12715,14 @@ def cmd_capturar(args, plan=None):
                 failure.corto = "'preparar' terminó con código %d%s" % (
                     code, " (pantalla de error: %s)" % screen if screen else "")
                 failure.pantalla = stuck  # C6: dónde quedó la app (para proponer el ajuste si se repite)
-                if stuck and stuck not in prepare_screens:  # qué se puede tocar ahí, una vez por pantalla
+                jumped = next((found for found in (SKIPPED_SCREEN.search(line) for line in reversed(tail)) if found), None)
+                if jumped:
+                    # C3: 'preparar' dijo que se saltó la pantalla esperada (la app llegó a una posterior): no es una
+                    # pantalla trabada y no se proponen toques
+                    key = (jumped.group(1), jumped.group(2))
+                    skipped_screens[key] = skipped_screens.get(key, 0) + 1
+                    failure.pantalla = ""
+                elif stuck and stuck not in prepare_screens:  # qué se puede tocar ahí, una vez por pantalla
                     prepare_screens[stuck] = screen_buttons(adb, folder)
                 raise failure
             GUIA["previos"] = []  # este 'preparar' funcionó: un corte posterior ya no pide correrlo a mano
@@ -12790,6 +12827,7 @@ def cmd_capturar(args, plan=None):
             target = plan_total - start
             guide()
     failures = []  # por intento inválido: (motivo, marcas del plan que faltaron) para resumir el patrón (invalid_summary)
+    raised_cap = []
     # La huella de las marcas del plan y del plan del flujo, fuera de toda traza: queda en fases.json por fase (y en la
     # corrida de prueba), para que `comparar` sepa si una marca cambió entre fases.
     prints = {}
@@ -12842,7 +12880,7 @@ def cmd_capturar(args, plan=None):
     def print_invalid_summary():
         lines = invalid_summary(failures, attempts, prepare_screens, stuck_screens, lambda text: perf_command(
             project_root(folder).resolve(), "nodos", pathlib.Path(folder) / "logs" / "pantalla-preparar.xml", "--texto",
-            text))
+            text), skipped_screens)
         for line in lines:
             print(line)
         if lines and not args.prueba:  # también para la sesión 2: queda en "Advertencias para el diagnóstico"
@@ -12907,13 +12945,21 @@ def cmd_capturar(args, plan=None):
             raise CorridasInsuficientes("%d corridas inválidas seguidas (última: %s): algo del entorno falla, no la "
                                         "suerte. Revisa el recorrido, 'preparar' o el backend; las %d válidas quedan "
                                         "guardadas" % (consecutive, last_invalid, valid))
-        if attempts >= max_attempts(target):
+        only_prepare = bool(failures) and all(str(reason).startswith("'preparar' terminó") for reason, _ in failures)
+        if attempts >= max_attempts(target, only_prepare):
             print_invalid_summary()
-            raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos: revisa las condiciones (el "
+            raise CorridasInsuficientes("solo %d de %d corridas válidas en %d intentos%s: revisa las condiciones (el "
                                         "recorrido, 'preparar', el backend); el patrón de los intentos inválidos está "
-                                        "justo arriba" % (valid, target, attempts))
+                                        "justo arriba" % (valid, target, attempts, (
+                                            " (todos los inválidos fueron de 'preparar', así que el tope ya era de %d "
+                                            "intentos)" % max_attempts(target, True) if only_prepare else "")))
+        if only_prepare and attempts == max_attempts(target) and not raised_cap:
+            raised_cap.append(True)  # C2: se dice una vez, cuando el tope de siempre se habría alcanzado
+            print("· Todos los intentos inválidos de esta tanda fueron fallos de 'preparar' (sin traza que procesar): el "
+                  "tope sube de %d a %d intentos" % (max_attempts(target), max_attempts(target, True)))
         attempts += 1
         failure = None
+        prepare_label[0] = "%s-intento%d" % ("prueba" if args.prueba else phase, attempts)
         if args.plan:
             # 0.16.0 · A1: el registro de lo que está en curso se actualiza al EMPEZAR cada intento (antes de 'preparar'),
             # con el número de la corrida que se busca y las válidas de esta tanda: un corte en cualquier punto deja
@@ -13159,8 +13205,8 @@ def cmd_capturar(args, plan=None):
         saved = local if args.sin_comprimir else compress(local)
         if args.prueba:
             print(run_line("de prueba", size_mb, metrics))
-            print(markdown_table(["Métrica", "Valor", "Familia"],
-                                 [[m[0], fmt(m[1], m[2]), m[3]] for m in metrics[:MAX_ROWS]]))
+            for line in test_table_lines(metrics, flow, folder / "prueba" / ("%s-metricas.md" % slug(flow_name))):
+                print(line)
             print("Secciones propias: %s" % sections_summary(info["nombres"]))
             print("\n".join(marks_report(info)))
             print("Tasa de refresco: %s Hz (%s)" % (
@@ -13326,6 +13372,36 @@ def cmd_capturar(args, plan=None):
     print("✔ Listo. No hace falta pegar esta salida en el chat: quedó en metricas.csv, resumen.md y estado.md.")
     if args.plan:
         print_next(folder, plan, flow_name)
+
+
+def test_table_lines(metrics, flow_spec, path):
+    """C5: la tabla de la corrida de prueba: primero las métricas de usuario y los tramos del plan, con su valor en esa
+    corrida; después las genéricas. Si se recorta, lo dice ("… N filas más en <archivo>") y deja la tabla completa en
+    ese archivo: nunca se corta en silencio."""
+    users = [spec.get("nombre") for spec in flow_spec.get("metricas_usuario") or [] if isinstance(spec, dict)]
+    segments = [spec.get("nombre") for spec in flow_spec.get("segmentos") or [] if isinstance(spec, dict)]
+
+    def rank(item):
+        name = item[0]
+        if name in users:
+            return (0, users.index(name))
+        segment = next((index for index, seg in enumerate(segments) if seg and name.startswith(seg + " ")), None)
+        if segment is not None:
+            return (1, segment)
+        return (2, 0)
+
+    ordered = sorted(metrics, key=rank)  # estable: dentro de cada grupo, el orden de la traza
+    rows = [[m[0], fmt(m[1], m[2]), m[3]] for m in ordered]
+    lines = markdown_table(["Métrica", "Valor", "Familia"], rows[:MAX_ROWS]).splitlines()
+    if len(rows) > MAX_ROWS:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# Métricas de la corrida de prueba\n\n" + markdown_table(["Métrica", "Valor", "Familia"], rows)
+                            + "\n", encoding="utf-8")
+            lines.append("… %d filas más en %s" % (len(rows) - MAX_ROWS, path))
+        except OSError:
+            lines.append("… %d filas más (no pude guardarlas en %s)" % (len(rows) - MAX_ROWS, path))
+    return lines
 
 
 def phase_warnings(folder):
@@ -18147,6 +18223,14 @@ def cmd_nodos(args):
     path = pathlib.Path(args.xml)
     if args.texto is None and args.id is None and args.desc is None:
         raise PerfError("indica qué nodo buscar con --texto, --id o --desc")
+    if getattr(args, "partida", False):
+        # C4: la comprobación de la pantalla de partida al comienzo de recorrido.sh
+        if os.environ.get(CAPTURE_ENV):
+            return  # dentro de una captura: lo comprobó 'preparar', fuera de la traza; no se vuelca nada en ella
+        if args.texto is not None and "<" in args.texto:
+            raise PerfError("recorrido.sh todavía tiene el texto de ejemplo en la comprobación de la pantalla de "
+                            "partida: pon un texto que solo se vea en esa pantalla")
+        args.volcar = True
     serial = None
     if args.volcar:
         serial = select_device(args.serial)
@@ -18183,8 +18267,16 @@ def cmd_nodos(args):
             label = node["attrs"].get("text") or node["attrs"].get("content-desc")
             if label and label not in seen:
                 seen.append(label)
+        if getattr(args, "partida", False):
+            raise Precondicion("no está la pantalla de partida (no se ve \"%s\"): el recorrido no toca a ciegas sobre "
+                               "otra pantalla. Deja la app donde la deja 'preparar' (córrelo antes) y repite. A la vista: %s"
+                               % (args.texto or args.id or args.desc, ", ".join('"%s"' % label[:40] for label in seen[:8])
+                                  or "ningún texto")).con(guardado="nada: no toqué la app", seguir=[])
         raise PerfError("ningún nodo coincide en %s (%d nodos). A la vista: %s" % (
             path, len(nodes), ", ".join('"%s"' % label[:40] for label in seen[:12]) or "ningún texto"))
+    if getattr(args, "partida", False):
+        print("✔ Pantalla de partida a la vista (%s)" % (args.texto or args.id or args.desc))
+        return
     if len(matches) > 1:
         print("%d nodos coinciden: afina con --exacto, --id o --desc, o elige por sus bounds." % len(matches))
     tap = "adb%s shell input tap" % (" -s %s" % (serial or args.serial) if (serial or args.serial) else "")
@@ -18211,6 +18303,11 @@ ROUTE_TEMPLATE = """#!/usr/bin/env bash
 # El plan apunta aquí: "recorrido": "bash {{CARPETA}}/recorrido.sh". Para verlo correr a mano: bash {{CARPETA}}/recorrido.sh
 set -euo pipefail
 SERIAL="${ANDROID_SERIAL:-{{SERIAL}}}"
+
+# Pantalla de partida: el recorrido empieza donde lo deja 'preparar'. Corrido a mano, comprueba antes por texto que esa
+# pantalla está al frente y sale con error si no, para nunca tocar a ciegas sobre otra. Dentro de una captura no vuelca
+# nada (ya lo comprobó 'preparar', fuera de la traza). Pon un texto que solo se vea en la pantalla de partida.
+python3 -I "{{PERF}}" nodos "{{CARPETA}}/logs/partida.xml" --partida --serial "$SERIAL" --texto "<texto de la pantalla de partida>" > /dev/null
 
 # paso: <qué elemento toca y qué debe abrirse>
 # adb -s "$SERIAL" shell input tap <x> <y> && sleep 3
@@ -22814,6 +22911,9 @@ def main(argv=None):
     p.add_argument("--exacto", action="store_true",
                    help="el texto, el id o la descripción tienen que ser iguales (también en mayúsculas y minúsculas), no contener")
     p.add_argument("--volcar", action="store_true", help="vuelca primero la pantalla del dispositivo a ese archivo")
+    p.add_argument("--partida", action="store_true",
+                   help="desde recorrido.sh: comprueba por texto la pantalla de partida y termina con error si no está "
+                        "(vuelca la pantalla); dentro de una captura no hace nada (ya lo comprobó 'preparar')")
     p.add_argument("--serial", help="dispositivo para --volcar y para el comando de toque que imprime")
     p.add_argument("--limite", type=int, default=5)
     p.set_defaults(func=cmd_nodos)

@@ -433,3 +433,88 @@ class NetworkLogTest(CaptureBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── C · Punto de partida, prueba y lectura de resultados ─────────────────────
+
+NODES_XML = ('<?xml version="1.0"?><hierarchy><node index="0" text="Pedidos" resource-id="" class="android.widget.TextView" '
+             'content-desc="" clickable="true" enabled="true" bounds="[0,0][100,100]" /></hierarchy>')
+
+
+class StartingPointTest(CaptureBase):
+    """C1–C5: pantallas que salen solo a veces, tope de intentos, pantalla saltada, pantalla de partida y tabla de la
+    prueba."""
+
+    def flaky_prepare(self, expected="Aviso de novedades"):
+        """Un 'preparar' que falla en los intentos pares, como una pantalla con límite de frecuencia."""
+        counter = self.dir / "intentos.txt"
+        script = self.dir / "preparar.sh"
+        write(script, "#!/bin/sh\nn=$(cat %s 2>/dev/null || echo 0)\necho $((n+1)) > %s\n"
+                      "if [ $((n %% 2)) -eq 1 ]; then echo \"se saltó '%s': la app llegó a 'Pedidos'\" >&2; exit 1; fi\n"
+                      % (counter, counter, expected))
+        script.chmod(0o755)
+        self.plan_with(flujo={"preparar": "sh %s" % script})
+
+    def test_preparar_que_falla_la_mitad_de_las_veces_completa_la_fase_y_dice_que_se_salto(self):
+        self.flaky_prepare()
+        out = self.capture(runs=5)
+        self.assertIn("el tope sube de 8 a 15 intentos", out)
+        self.assertEqual(self.csv_runs(), [1, 2, 3, 4, 5])
+        self.assertIn("Se saltó 'Aviso de novedades': la app llegó directo a 'Pedidos'", out)
+        self.assertNotIn("toca el botón", out)
+        logs = sorted(path.name for path in (self.folder / "logs").glob("preparar-antes-intento*.log"))
+        self.assertGreaterEqual(len(logs), 4)
+        self.assertIn("se saltó 'Aviso de novedades'", (self.folder / "logs" / logs[0]).read_text(encoding="utf-8"))
+
+    def test_una_app_de_una_sola_actividad_trabada_no_se_toma_por_saltada(self):
+        script = self.dir / "preparar.sh"
+        write(script, "#!/bin/sh\necho \"no apareció 'Aviso de novedades'\" >&2\nexit 1\n")
+        script.chmod(0o755)
+        self.plan_with(flujo={"preparar": "sh %s" % script})
+        result = self.perf("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "3", "--calentamiento", "0",
+                           "--sin-compilar")
+        self.assertNotIn("Se saltó", result.stdout + result.stderr)  # la actividad es la misma: no se decide por ella
+        self.assertIn("'preparar' falló 3 veces dejando la app en la misma pantalla", result.stdout + result.stderr)
+
+    def test_con_otro_motivo_el_tope_no_cambia(self):
+        self.assertEqual(perf.max_attempts(10), 15)
+        self.assertEqual(perf.max_attempts(10, only_prepare=True), 30)
+
+    def test_trabada_en_otra_pantalla_si_propone_el_toque(self):
+        failures = [("'preparar' terminó con código 1", ())] * 2
+        lines = perf.invalid_summary(failures, 4, {"LoginActivity": ["Ingresar"]}, ["LoginActivity"] * 2)
+        self.assertTrue(any("toca el botón con el texto que se ve en esa pantalla ('Ingresar')" in line for line in lines))
+        lines = perf.invalid_summary(failures, 4, {}, [], skipped={("Aviso de novedades", "Pedidos"): 2})
+        self.assertTrue(any(line.startswith("⚠ Se saltó 'Aviso de novedades': la app llegó directo a 'Pedidos' (2 veces")
+                            for line in lines), lines)
+        self.assertFalse(any("toca" in line for line in lines))
+
+    def test_recorrido_comprueba_la_pantalla_de_partida(self):
+        self.ok("nuevo", "--carpeta", self.dir / "otra", "--paquete", "com.example.app", "--flujo", "catalogo-lista",
+                "--serial", "emulator-5554")
+        route = (self.dir / "otra" / "recorrido.sh").read_text(encoding="utf-8")
+        first = next(line for line in route.splitlines() if line and not line.startswith(("#", "set ", "SERIAL")))
+        self.assertIn("nodos", first)
+        self.assertIn("--partida", first)
+        self.assertFalse(perf.route_dumps("bash %s" % (self.dir / "otra" / "recorrido.sh"), self.dir / "otra"))
+        xml = self.dir / "ui.xml"
+        self.env["FAKE_PULL"] = NODES_XML
+        result = self.perf("nodos", xml, "--partida", "--texto", "Inicio")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)  # no está: no toca a ciegas
+        self.assertIn("no está la pantalla de partida", result.stderr)
+        self.assertIn("Pantalla de partida a la vista", self.ok("nodos", xml, "--partida", "--texto", "Pedidos"))
+        self.env[perf.CAPTURE_ENV] = "1"  # dentro de una captura no vuelca nada
+        (self.dir / "adb.log").write_text("", encoding="utf-8")
+        self.ok("nodos", xml, "--partida", "--texto", "Inicio")
+        self.assertNotIn("uiautomator", (self.dir / "adb.log").read_text(encoding="utf-8"))
+
+    def test_tabla_de_la_prueba_con_las_del_plan_primero_y_sin_cortar_en_silencio(self):
+        flow = {"metricas_usuario": [{"nombre": "abrir_ms"}], "segmentos": [{"nombre": "cargar"}]}
+        metrics = [("generica_%02d" % i, i, "ms", "app") for i in range(40)] + [
+            ("cargar hilo_max_ms", 5, "ms", "app"), ("abrir_ms", 900, "ms", "e2e")]
+        path = self.dir / "prueba" / "home-metricas.md"
+        lines = perf.test_table_lines(metrics, flow, path)
+        self.assertTrue(lines[2].startswith("| abrir_ms | 900 ms"), lines[:4])
+        self.assertTrue(lines[3].startswith("| cargar hilo_max_ms"), lines[:4])
+        self.assertEqual(lines[-1], "… 12 filas más en %s" % path)
+        self.assertIn("generica_39", path.read_text(encoding="utf-8"))

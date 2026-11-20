@@ -192,6 +192,36 @@ Términos, permisos, huella, onboarding y coach marks aparecen la primera vez y 
 3. **Sus marcas van en `invalidar_si`** (`SCREEN *Terminos*`, `MARK onboarding`, `SCREEN *Login*`): si una de esas pantallas aparece dentro del tramo medido, la corrida no vale y se repite.
 4. **Nunca se borran datos entre fases** (`pm clear`, `clearState`, desinstalar): vuelven las pantallas de primera vez y el estado de la app deja de ser el mismo en antes y en después.
 
+### Pantallas con límite de frecuencia
+
+Otra pantalla intermedia sale **solo a veces**: un aviso, una encuesta o una pantalla de novedades o de enrolamiento que la app no vuelve a mostrar si se cerró hace poco (minutos). Si `preparar` termina en esa pantalla y el recorrido la cierra (su primer paso, dentro de la traza: lo que se mide empieza al cerrarla), en la corrida siguiente ya no aparece: `preparar` falla buscándola en una parte de los intentos, sin patrón fijo (depende de cuánto tardó en procesarse la traza anterior). Si `preparar` dice que se la saltó (la línea `se saltó '<pantalla esperada>': la app llegó a '<pantalla>'`, como en la plantilla de abajo), `capturar` lo dice así y no propone tocar textos del volcado; lo decide por ese texto, no por la actividad (en una app de una sola actividad todas las pantallas son la misma). Cada intento fallido deja su propio log en `logs/preparar-<fase>-intento<N>.log`, con los secretos enmascarados.
+
+- **Cómo confirmarlo:** corre `preparar` y el recorrido dos veces seguidas, fuera de la captura. Si la pantalla sale en la primera y falta en la segunda, es esto.
+- **Qué hacer:** que `preparar` tolere el caso con un bloque de reintento. Si en lugar de la pantalla esperada aparece una posterior, cierra la app, espera (30 s, 60 s, 90 s) y repite el login, hasta un máximo configurable. Esos reintentos son de `preparar`: **no cuentan como corridas inválidas**. Y si un intento falla igual, el tope de intentos de la fase sube solo cuando todos los inválidos son de `preparar` ([medicion.md](medicion.md) · El comando).
+
+```bash
+# preparar.sh, con el bloque opcional de reintento (usa la función hay() de arriba). Termina con el aviso a la vista:
+# el recorrido lo cierra como su primer paso.
+entrar() {  # abre la app y hace el login (credenciales: Credenciales en `preparar`, abajo)
+  adb -s "$S" shell am start -n com.example.app/.MainActivity > /dev/null && sleep 3
+  # … el login, como en el ejemplo de arriba
+}
+entrar
+intento=0
+until hay "Aviso de novedades"; do                       # la pantalla que sale con límite de frecuencia
+  if ! hay "Pedidos"; then echo "no apareció 'Aviso de novedades'" >&2; exit 1; fi   # trabada en otra: no es este caso
+  intento=$((intento + 1))
+  if [ "$intento" -gt "${PERF_REINTENTOS:-3}" ]; then
+    echo "se saltó 'Aviso de novedades': la app llegó a 'Pedidos'" >&2; exit 1      # la línea que lee `capturar`
+  fi
+  adb -s "$S" shell am force-stop com.example.app
+  sleep $((30 * intento))                                # 30 s, 60 s, 90 s
+  entrar
+done
+```
+
+Si la app queda trabada en otra pantalla, el error es "no apareció …" y `capturar` propone el ajuste de siempre; si se saltó el aviso, la línea `se saltó '…': la app llegó a '…'` le dice que no es una pantalla trabada. Si en cambio `preparar` mismo cierra el aviso (no es parte de lo que se mide), no hace falta reintentar: alcanza con `if hay "Aviso de novedades"; then <toque>; fi`, como en "Pantallas de una sola vez". El reintento hace más largo `preparar`, que corre fuera de la traza: no cambia lo que se mide, pero sí la huella del recorrido; agrégalo antes de medir la primera fase (con una fase ya medida, `siguiente` pide medirla de nuevo).
+
 ### Credenciales en `preparar`
 
 - **Nunca en el plan, en el flow ni en el chat:** van en variables de entorno que carga el usuario, y el flow las lee (`${PERF_CLAVE}` en Maestro, pasadas con `-e PERF_CLAVE="$PERF_CLAVE"`; `"$PERF_CLAVE"` en un script).
@@ -257,6 +287,7 @@ Para ver si la memoria crece al repetir algo (abrir y cerrar un detalle, cambiar
 
 ### Recorrido en palabras y video de la prueba
 
+- **`recorrido.sh` empieza comprobando la pantalla de partida** (la plantilla trae la línea `perf.py nodos … --partida --texto "<texto>"`): corrido a mano, vuelca la pantalla y sale con error si ese texto no está, así nunca toca a ciegas sobre otra; dentro de una captura no vuelca nada (ya lo comprobó `preparar`, fuera de la traza). Pon un texto que solo se vea en la pantalla de partida; la prueba avisa si quedó el de ejemplo.
 - **Un `# paso: <qué toca y qué debe abrirse>` por paso** en `recorrido.sh` (la plantilla lo trae). Un `# paso:` cubre los comandos que lo siguen hasta una línea en blanco. `perf.py` arma con ellos la lista numerada, la imprime en la corrida de prueba y la deja en `<carpeta>/ficha.md` y en "Cómo se recorre" de `estado.md`, con el propósito de cada flujo; avisa los pasos sin comentario.
 - **Video:** `capturar --prueba` graba la pantalla con `adb shell screenrecord` mientras corre la prueba (hasta 180 s, el máximo de `screenrecord`; `video_limite_s` en el flujo lo baja), lo detiene al terminar la prueba (solo esa grabación: otra que el usuario tenga abierta sigue), lo baja a `<carpeta>/prueba-<flujo>.mp4` y lo borra del dispositivo; `--sin-video` lo omite. **Antes de las corridas, pídele al usuario que mire el video**: es el visto bueno de que el recorrido hace lo que espera.
 
