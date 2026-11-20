@@ -652,5 +652,229 @@ class TraceEndAndReadingTest(PerfBase):
         self.assertIn("screencap -p /sdcard/hbperf-invalida.png", adb.calls)
 
 
+# ── E · Sesiones de IA, S · `siguiente` sin callejones, F · Costo ────────────
+
+from test_perf_0150 import TriageBase  # noqa: E402  (después de las clases de arriba, que no la usan)
+
+
+class SessionsTest(TriageBase):
+    """E2–E6, S1, S2 y F1 sobre una investigación con su proyecto y su repo."""
+
+    def rigorous(self, **extra):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        plan.pop("profundidad", None)
+        plan.update(extra)
+        write(self.folder / "plan.json", json.dumps(plan))
+        write(self.folder / "fases.json", json.dumps({
+            "antes": {"fecha": "2026-03-02T10:00:00", "corridas": 10, "flujos": {"catalogo-lista": {"corridas": 10}}},
+            "control": {"fecha": "2026-03-02T11:00:00", "corridas": 10, "flujos": {"catalogo-lista": {"corridas": 10}}}}))
+
+    def before_measuring(self):
+        """La investigación antes de medir: sin fases, diagnóstico, reporte ni mejoras."""
+        write(self.folder / "fases.json", "{}")
+        os.remove(str(self.folder / "diagnostico.md"))
+        os.remove(str(self.folder / "reporte-inicial-dev.md"))
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"] = []
+        write(self.folder / "plan.json", json.dumps(plan))
+
+    def test_costo_del_pedido_mejorado_sale_en_sin_anotar(self):
+        self.rigorous(pedido_mejorado=True)
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("--sesion '0 · pedido' --modelo", out)
+        line = next(line for line in out.splitlines() if "--sesion '0 · pedido'" in line)
+        self.assertTrue(line.strip().startswith("cd "))
+
+    def test_nuevo_registra_el_pedido_mejorado(self):
+        self.ok_in("nuevo", "--carpeta", "reports/perf/otra", "--paquete", "com.example.app", "--flujo",
+                   "catalogo-lista", "--pedido-mejorado")
+        self.assertTrue(json.loads((self.root / "reports/perf/otra/plan.json").read_text(encoding="utf-8"))
+                        ["pedido_mejorado"])
+
+    def test_aprobacion_pendiente_da_que_revisar_y_como_aprobar(self):
+        self.before_measuring()
+        out = self.ok_in("aprobar", "--carpeta", self.rel, "--pendiente")
+        self.assertIn("Falta tu aprobación", out)
+        self.assertIn("plan.json", out)
+        self.assertTrue(any(command.endswith("aprobar --carpeta %s" % self.rel) for command in commands_in(out)))
+        self.assertIn("pregúntame qué hay que cambiar", out)
+        out = self.ok_in("aprobar", "--carpeta", self.rel)
+        self.assertIn("Ficha y plan aprobados", out)
+        self.assertNotIn("Falta tu aprobación", out)
+
+    def test_una_lista_donde_va_un_texto_se_une(self):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"][0]["alternativas"] = ["bajar el límite de páginas", "crearlas al abrirlas"]
+        write(self.folder / "plan.json", json.dumps(plan))
+        self.assertEqual(perf.load_plan(self.folder / "plan.json")["mejoras"][0]["alternativas"],
+                         "bajar el límite de páginas; crearlas al abrirlas")
+
+    def test_una_prueba_sin_avisos_cierra_el_pendiente_de_la_prueba(self):
+        text = (self.folder / "estado.md").read_text(encoding="utf-8")
+        text = text.replace("## Pedido al equipo dueño", "- Bloqueo de la corrida de prueba: la marca no salió porque "
+                                                           "no compiló\n- H3 · otra cosa pendiente\n\n## Pedido al equipo dueño")
+        write(self.folder / "estado.md", text)
+        self.assertEqual(perf.close_test_pendings(self.folder), 1)
+        text = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("no compiló · ✔ resuelto por perf.py", text)
+        self.assertNotIn("otra cosa pendiente · ✔", text)
+        self.assertEqual(perf.close_test_pendings(self.folder), 0)
+
+
+class ConnectionsTest(unittest.TestCase):
+    """E6: conexiones nuevas por servicio y el candidato "conexiones ≈ llamadas"."""
+
+    def test_tabla_y_candidato(self):
+        rows = []
+        for run in range(1, 5):
+            for service in ("GET pedidos/{id}", "GET catalogo/destacados"):
+                for metric, value in (("conexion_ms", 240), ("conexiones_nuevas", 2), ("llamadas", 2)):
+                    rows.append({"fase": "antes", "flujo": "home", "corrida": run, "metrica": "red %s %s" % (service, metric),
+                                 "valor": value})
+        urls = {"GET pedidos/{id}": "https://api.example.com/ms-pedidos/v2.1/pedidos/42",
+                "GET catalogo/destacados": "https://api.example.com/ms-catalogo/v3.0/destacados"}
+        md = "\n".join(perf.connections_md(rows, "home", "antes", urls))
+        self.assertIn("| GET https://api.example.com/ms-pedidos/v2.1/pedidos/42 | 4 de 4 | 240 ms | 2 | 2 |", md)
+        self.assertIn("Candidato · conexiones nuevas ≈ llamadas** (api.example.com)", md)
+
+
+from test_perf_0140 import ModulesBase  # noqa: E402
+
+
+class BinaryModulesTest(ModulesBase):
+    """E4: el módulo binario con el toque que lo pidió, "Elige uno" y el paso cuando pasa a código."""
+
+    def test_binario_con_motivo_elige_uno_y_cuando_pasa_a_codigo_da_el_chat(self):
+        self.good("setup", "--estado", "--carpeta", self.rel, "--modulos", "com.example:modulo-pagos", "--dependencias",
+                  self.binary, "--para", "com.example:modulo-pagos=aquí está el toque de Pagar", "--pierde",
+                  "com.example:modulo-pagos=la métrica del toque a la confirmación")
+        module = self.modules()["com.example:modulo-pagos"]
+        self.assertEqual(module["para"], "aquí está el toque de Pagar")
+        out = self.good("siguiente", "--carpeta", self.rel)
+        self.assertIn("lo pidió aquí está el toque de Pagar; si sigue binario, se pierde la métrica del toque", out)
+        self.assertIn("Elige uno", out)
+        self.assertIn("A. Pasarlo a código", out)
+        self.assertIn("B. Dejarlo binario", out)
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--dependencias", self.code)
+        self.assertIn("com.example:modulo-pagos cambió de binario (llega compilado) a código desde la sesión 1: ahora se "
+                      "puede poner la marca (aquí está el toque de Pagar)", out)
+        self.assertEqual(self.modules()["com.example:modulo-pagos"]["para"], "aquí está el toque de Pagar")
+        out = self.good("siguiente", "--carpeta", self.rel)
+        self.assertIn("Un módulo pasó a código", out)
+        self.assertIn("pon la marca o el tramo que faltaba", out)
+
+
+class ReviewETest(TriageBase):
+    """E: lo que pidió la revisión: textos viejos que no detienen un plan, conexiones nuevas con la mediana en 0, los
+    bloqueos de la prueba con su prefijo y el encabezado de estado.md."""
+
+    def test_un_numero_donde_va_un_texto_no_detiene_un_plan_anterior(self):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        plan["mejoras"][0].update(esperado=500, minimo=-30, titulo_gerencia={"a": 1})
+        write(self.folder / "plan.json", json.dumps(plan))
+        item = perf.load_plan(self.folder / "plan.json")["mejoras"][0]
+        self.assertEqual((item["esperado"], item["minimo"], item["titulo_gerencia"]), ("500", "-30", None))
+        plan["mejoras"][0]["costo"] = {"x": 1}  # los que ya se validaban así siguen igual
+        write(self.folder / "plan.json", json.dumps(plan))
+        with self.assertRaises(perf.PerfError):
+            perf.load_plan(self.folder / "plan.json")
+
+    def test_solo_cierra_las_lineas_con_el_prefijo_y_del_flujo(self):
+        text = (self.folder / "estado.md").read_text(encoding="utf-8").replace(
+            "## Pedido al equipo dueño", "- H2: falta una corrida de prueba con --config cpu\n"
+            "- Bloqueo de la corrida de prueba (otro-flujo): la marca no salió\n"
+            "- Bloqueo de la corrida de prueba (catalogo-lista): avisos sin corregir\n\n## Pedido al equipo dueño")
+        write(self.folder / "estado.md", text)
+        self.assertEqual(perf.close_test_pendings(self.folder, "catalogo-lista"), 1)
+        text = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("avisos sin corregir · ✔ resuelto por perf.py", text)
+        self.assertNotIn("--config cpu · ✔", text)
+        self.assertNotIn("la marca no salió · ✔", text)
+
+    def test_encabezado_de_estado_con_opciones_y_pasos_en_orden(self):
+        option = ("Uno", "cuando", perf.terminal("true", "nada", "nada"))
+        perf.write_next(self.folder, "x", [{"tipo": "opciones", "titulo": "Elige uno", "opciones": [option, option]},
+                                           perf.terminal("true", "después", "nada")])
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertIn("**En orden, uno a la vez (en «Elige uno», corre solo uno de sus caminos):**", state)
+        perf.write_next(self.folder, "x", [{"tipo": "avisos", "titulo": "t", "lineas": ["a"]},
+                                           {"tipo": "opciones", "titulo": "Elige uno", "opciones": [option, option]}])
+        self.assertIn("**Elige uno de los caminos (no van en orden):**",
+                      (self.folder / "estado.md").read_text(encoding="utf-8"))
+
+
+class ConnectionsReviewTest(unittest.TestCase):
+    """E6: las corridas con conexión nueva salen de conexiones_nuevas (la mediana por llamada da 0 si la mayoría reusa)."""
+
+    def test_mediana_en_cero_con_una_conexion_nueva_por_corrida(self):
+        rows = [{"fase": "antes", "flujo": "home", "corrida": run, "metrica": "red GET pedidos %s" % metric, "valor": value}
+                for run in range(1, 5) for metric, value in (("conexion_ms", 0), ("conexiones_nuevas", 1),
+                                                             ("llamadas", 3))]
+        self.assertEqual(perf.connection_stats(rows, "home", "antes"), {"GET pedidos": (4, 4, None, 3, 1)})
+        self.assertIn("| GET pedidos | 4 de 4 | — | 3 | 1 |", "\n".join(perf.connections_md(rows, "home", "antes", {})))
+
+    def test_las_corridas_sin_conexion_nueva_cuentan_como_cero(self):
+        rows = [{"fase": "antes", "flujo": "home", "corrida": run, "metrica": "red GET pedidos llamadas", "valor": 3}
+                for run in range(1, 11)]
+        rows += [{"fase": "antes", "flujo": "home", "corrida": run, "metrica": "red GET pedidos %s" % metric, "valor": value}
+                 for run in (1, 2) for metric, value in (("conexion_ms", 100), ("conexiones_nuevas", 3))]
+        self.assertEqual(perf.connection_stats(rows, "home", "antes"), {"GET pedidos": (2, 10, 100, 3, 0)})
+        md = "\n".join(perf.connections_md(rows, "home", "antes", {}))
+        self.assertIn("| GET pedidos | 2 de 10 | 100 ms | 3 | 0 |", md)
+        self.assertNotIn("Candidato", md)
+
+    def test_servicios_sin_ruta_real_no_se_juntan_en_un_host(self):
+        rows = [{"fase": "antes", "flujo": "home", "corrida": 1, "metrica": "red %s %s" % (service, metric), "valor": value}
+                for service in ("GET a", "GET b") for metric, value in (("conexion_ms", 100), ("conexiones_nuevas", 2),
+                                                                         ("llamadas", 2))]
+        self.assertNotIn("Candidato", "\n".join(perf.connections_md(rows, "home", "antes", {})))
+
+    def test_service_metrics_cuenta_las_conexiones_nuevas(self):
+        ms = 1000000
+        sections = [(1, 10 * ms, 50 * ms, 1, "HTTP GET pedidos"), (1, 10 * ms, 20 * ms, 2, "CONN GET pedidos"),
+                    (1, 40 * ms, 10 * ms, 2, "TTFB GET pedidos"), (1, 100 * ms, 30 * ms, 1, "HTTP GET pedidos"),
+                    (1, 110 * ms, 10 * ms, 2, "TTFB GET pedidos")]
+        out = {name: value for name, value, _, _ in perf.service_metrics(sections, [], [])}
+        self.assertEqual(out["red GET pedidos conexiones_nuevas"], 1)
+
+
+class ModulesReviewTest(ModulesBase):
+    """E4: --para con formato y junto a un comando de módulos; un módulo de código que pasa a binario lo dice."""
+
+    def test_para_sin_igual_o_sin_comando_de_modulos(self):
+        err = self.bad("setup", "--estado", "--carpeta", self.rel, "--modulos", "com.example:modulo-pagos",
+                       "--dependencias", self.binary, "--para", "sin-igual")
+        self.assertIn("--para va como MÓDULO=TEXTO", err)
+        err = self.bad("setup", "--estado", "--carpeta", self.rel, "--para", "com.example:modulo-pagos=el toque")
+        self.assertIn("--para y --pierde se guardan junto con el mapa de módulos", err)
+
+    def test_de_codigo_a_binario(self):
+        self.good("setup", "--estado", "--carpeta", self.rel, "--modulos", "com.example:modulo-pagos", "--dependencias",
+                  self.code)
+        out = self.good("setup", "--estado", "--carpeta", self.rel, "--comprobar-modulos", "--dependencias", self.binary)
+        self.assertIn("com.example:modulo-pagos cambió de código a binario (llega compilado) desde la sesión 1: ya no se "
+                      "edita", out)
+
+
+from test_perf_0140 import AGENTS, PKG, WIRING, SetupBase  # noqa: E402
+
+
+class PatchAppIdTest(SetupBase):
+    """E5: `setup --estado` con una ficha "app sin dato" da el comando que la completa."""
+
+    def test_ficha_sin_applicationid(self):
+        write(self.root / "AGENTS.md", AGENTS.replace("- applicationId: %s\n" % PKG, ""))
+        self.instrument()
+        self.good("setup", "--guardar", *WIRING)
+        out = self.good("setup", "--estado")
+        self.assertIn("La ficha del parche no tiene el applicationId", out)
+        self.assertRegex(out, r"setup --vigente \S+perf-setup-\S+\.patch --paquete\n")
+        agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")  # con el bloque de estado que dejó --guardar
+        write(self.root / "AGENTS.md", agents.replace("## Rendimiento\n\n", "## Rendimiento\n\n- applicationId: %s\n" % PKG, 1))
+        out = self.good("setup", "--estado")
+        self.assertIn("Complétala con el que encontré (%s, de la sección de rendimiento de AGENTS.md)" % PKG, out)
+        self.assertRegex(out, r"setup --vigente \S+perf-setup-\S+\.patch --paquete %s" % re.escape(PKG))
+
+
 if __name__ == "__main__":
     unittest.main()

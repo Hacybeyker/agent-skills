@@ -794,6 +794,11 @@ def update_block(folder, name, content):
 LAST_BEFORE = "ultima_antes"  # en `desde`: la última ocurrencia de la marca antes de la marca `hasta` elegida
 
 
+# E6: los campos de texto de una mejora (diagnostico.md · Campos de una mejora): una lista de textos se une con "; "
+IMPROVEMENT_TEXT = ("costo", "condicion", "alternativas", "esperado", "que_cambia", "titulo_gerencia", "que_cambia_gerencia",
+                    "que_gana", "riesgo_gerencia", "minimo")
+
+
 def check_marker(marker, start=False):
     """True si la marca es válida. `ultima_antes` solo vale en `desde` (start) de una ventana, una métrica de usuario o
     un tramo: en `hasta` y en las pausas no tiene sentido."""
@@ -950,10 +955,19 @@ def load_plan(path):
                                                                            ", ".join(ESTADOS)))
         if not isinstance(item.get("a_prueba", False), bool):
             raise PerfError("%s: 'a_prueba' de la mejora %s es true o false" % (path, item["id"]))
-        for key in ("costo", "condicion", "alternativas"):
-            if item.get(key) is not None and not isinstance(item[key], str):
-                raise PerfError("%s: '%s' de la mejora %s es un texto (lo anticipa la sesión 2; lo confirma el cierre en "
-                                "\"Mejoras aplicadas\" de estado.md)" % (path, key, item["id"]))
+        for key in IMPROVEMENT_TEXT:  # E6: una lista de textos donde se espera un texto se une, no falla
+            if isinstance(item.get(key), list) and all(isinstance(v, str) for v in item[key]):
+                item[key] = "; ".join(v.strip() for v in item[key] if v.strip())
+        for key in IMPROVEMENT_TEXT:
+            value = item.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and \
+                    key not in ("costo", "condicion", "alternativas"):
+                item[key] = fmt(value)  # un número donde va un texto (un plan de 0.15.x con "esperado": 500) se lee igual
+            elif value is not None and not isinstance(value, str):
+                if key in ("costo", "condicion", "alternativas"):  # los que ya se validaban así antes de 0.16.0
+                    raise PerfError("%s: '%s' de la mejora %s es un texto (lo anticipa la sesión 2; lo confirma el cierre "
+                                    "en \"Mejoras aplicadas\" de estado.md)" % (path, key, item["id"]))
+                item[key] = None  # E6: los textos nuevos no detienen un plan anterior; uno que no es texto no se muestra
         for key in ("servicios", "metricas"):
             if item.get(key) is not None and (not isinstance(item[key], list)
                                               or not all(isinstance(v, str) and v.strip() for v in item[key])):
@@ -1329,6 +1343,9 @@ def service_metrics(sections, known_endpoints, by_segment, origin=None):
         served = [i for i in indexes if calls[i][2] > 0 and waits[i]]  # las mismas llamadas que miden cola y lectura
         if connections and served:  # 0 si la llamada reutilizó una conexión
             out.append(("red %s conexion_ms" % endpoint, statistics.median(owned[i] / 1e6 for i in served), "ms", "e2e"))
+        if connections and indexes:  # E6: cuántas llamadas abrieron conexión nueva (informativa)
+            out.append(("red %s conexiones_nuevas" % endpoint, sum(1 for i in indexes if owned[i] > 0), "llamadas",
+                        "info"))
     for row in by_segment:
         out += [("%s red %s llamadas" % (row["tramo"], endpoint), count, "llamadas", "info")
                 for endpoint, count in sorted(row["endpoints"].items())]
@@ -3457,6 +3474,13 @@ def save_test_record(folder, flow, seen, missing, marks=None, plan_prints=None, 
     save_phases(folder, phases)
 
 
+def newest_test(phases):
+    """E4: la fecha de la corrida de prueba más nueva de cualquier flujo ('' si no hay)."""
+    record = phases.get(TEST_RECORD) if isinstance(phases.get(TEST_RECORD), dict) else {}
+    dates = [entry.get("fecha") or "" for entry in (record.get("flujos") or {}).values() if isinstance(entry, dict)]
+    return max(dates, default="")
+
+
 def last_test(phases, flow):
     """La última corrida de prueba registrada del flujo ({} si no hay)."""
     record = phases.get(TEST_RECORD) if isinstance(phases.get(TEST_RECORD), dict) else {}
@@ -5467,6 +5491,8 @@ def plan_steps(folder, plan, flow=None):
         return "corrige antes de medir (avisos de la corrida de prueba)", test_warning_steps(
             root / folder, root, plan, flow, pending, resume, command(*(capture + ["--prueba"])),
             command(*(capture + ["--fase", "antes", "--corridas", runs])), you_run)
+    if "antes" not in phases and approval(root / folder).get("estado") == "pendiente":
+        return "falta tu aprobación de la ficha y el plan", approval_steps(root / folder, plan, flow, root, resume)
     if "antes" not in phases and last_test(phases, flow).get("red_vieja"):
         return "actualizar la instrumentación de red antes de medir (sin chat)", old_network_steps(
             root / folder, plan, root, command(*(capture + ["--prueba"])))
@@ -6546,11 +6572,19 @@ def render_steps(steps, markdown, root=None, plan=None):
             for letter, (name, when, option) in zip("ABCDEFG", step["opciones"]):
                 lines.append(("   %s. **%s** · cuándo conviene: %s." if markdown else "   %s. %s · cuándo conviene: %s.")
                              % (letter, name, when))
-                lines.append("      %s · %s" % ("Terminal (sin chat)" if option["tipo"] == "terminal" else "Chat nuevo",
-                                                option["que"]))
+                lines.append("      %s · %s" % ("Terminal (sin chat)" if option["tipo"] == "terminal" else
+                                                "Chat nuevo · Modelo: %s · Esfuerzo: %s" % (
+                                                    option.get("modelo"), option.get("esfuerzo")), option["que"]))
                 if option["tipo"] == "terminal":
                     lines.append("      %s" % code(option["texto"]))
-                lines.append("      Tú: %s." % option["tu"])
+                elif option["tipo"] == "chat":  # 0.16.0: una opción de chat trae cómo abrirlo y el texto para pegar
+                    if root is not None and option.get("nivel"):
+                        for tool, command, note in chat_openers(plan or {}, root, option["nivel"], option["esfuerzo"],
+                                                                option.get("env") or ()):
+                            lines.append("      Abrir (Terminal, %s): %s%s" % (tool, code(command),
+                                                                              " · %s" % note if note else ""))
+                    lines.append("      Texto: \"%s\"" % option["texto"])
+                lines.append("      Tú: %s." % (option.get("tu") or CHAT_YOU))
         else:
             lines.append("%d. %s: %s" % (i, step["que"][0].upper() + step["que"][1:], step["texto"]))
     return lines
@@ -6571,7 +6605,7 @@ COST_OPTION = {"copilot": ("--creditos", "'<AI Credits de /usage>'", "son AI Cre
                "otra": ("--costo", "'<monto> USD'", "el monto en USD, entre comillas simples; si tu herramienta da tokens, "
                                                     "--tokens-entrada y --tokens-salida en su lugar")}
 # Nivel de modelo y esfuerzo que `siguiente` recomienda para cada sesión: con ellos sale el comando ya completo.
-SESSIONS = {"0": ("0 · setup", "intermedio", "medio"), "1": ("1 · ficha", "intermedio", "medio"), "2": ("2 · diagnóstico", "diagnostico", "alto"),
+SESSIONS = {"0p": ("0 · pedido", "intermedio", "medio"), "0": ("0 · setup", "intermedio", "medio"), "1": ("1 · ficha", "intermedio", "medio"), "2": ("2 · diagnóstico", "diagnostico", "alto"),
             "3": ("3 · %s", "intermedio", "medio"), "4": ("4 · cierre", "economico", "bajo")}
 COST_TOTAL = "**Total de la investigación:**"
 USD_AMOUNT = re.compile(r"(?:US\$|USD|\$)[ \t]*(\d[\d.,]*)|(\d[\d.,]*)[ \t]*(?:USD|US\$|\$|dólares|dolares)", re.I)
@@ -6711,6 +6745,8 @@ def done_sessions(folder, plan):
     folder = pathlib.Path(folder)
     mejoras = plan.get("mejoras") or []
     out = []
+    if plan.get("pedido_mejorado"):  # E2: la sesión 1 lo registró (`nuevo --pedido-mejorado`)
+        out.append(SESSIONS["0p"])
     if setup_session_pending(folder):
         out.append(SESSIONS["0"])
     tested = (folder / "prueba").is_dir() and any((folder / "prueba").glob("*.perfetto-trace*"))
@@ -7004,8 +7040,11 @@ def write_next(folder, title, steps, missing=(), plan=None):
     state = pathlib.Path(folder) / "estado.md"
     if not state.is_file():
         return
-    body = "\n".join(["- **Paso:** %s" % title, "- **Elige uno de los caminos (no van en orden):**"
-                      if any(step["tipo"] == "opciones" for step in steps) else "- **En orden, uno a la vez:**"]
+    runnable = [step for step in steps if step["tipo"] not in ("avisos", "archivo", "fin")]
+    header = ("- **Elige uno de los caminos (no van en orden):**" if runnable and all(
+        step["tipo"] == "opciones" for step in runnable) else "- **En orden, uno a la vez (en «Elige uno», corre solo uno "
+        "de sus caminos):**" if any(step["tipo"] == "opciones" for step in runnable) else "- **En orden, uno a la vez:**")
+    body = "\n".join(["- **Paso:** %s" % title, header]
                      + ["  " + line for line in render_steps(steps, markdown=True, root=project_root(
                          pathlib.Path(folder)).resolve(), plan=plan)]
                      + (["- **Costo (opcional, terminal):** faltan anotar %s. `perf.py siguiente` imprime un comando "
@@ -10772,6 +10811,37 @@ def build_failed_steps(folder, plan, flow, root, capture_test):
                           "salgan con ✔")]
 
 
+TEST_PENDING = re.compile(r"^\s*-\s*(?:\*\*)?Bloqueo de la corrida de prueba(?:\s*\(([^)]*)\))?\s*:", re.I)
+RESOLVED_TAG = "✔ resuelto por perf.py"
+
+
+def close_test_pendings(folder, flow=None):
+    """E6: marca resueltos en "Pendientes" de estado.md los bloqueos de la corrida de prueba que anotó la sesión 1 (las
+    líneas que empiezan con "Bloqueo de la corrida de prueba:", o "Bloqueo de la corrida de prueba (<flujo>):" para uno
+    solo) cuando una prueba del flujo sale sin avisos. Devuelve cuántos."""
+    state = pathlib.Path(folder) / "estado.md"
+    try:
+        lines = state.read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return 0
+    start = next((i for i, line in enumerate(lines) if line.lower().startswith("## pendientes")), None)
+    if start is None:
+        return 0
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    today = datetime.date.today().isoformat()
+    count = 0
+    for index in range(start + 1, end):
+        line = lines[index]
+        found = TEST_PENDING.match(line)
+        if found and not has_placeholder(line) and RESOLVED_TAG not in line \
+                and (not found.group(1) or flow is None or found.group(1).strip() == flow):
+            lines[index] = line.rstrip() + " · %s: la corrida de prueba del %s salió sin avisos" % (RESOLVED_TAG, today)
+            count += 1
+    if count:
+        state.write_text("\n".join(lines), encoding="utf-8")
+    return count
+
+
 def mark_old_network(folder, flow, old):
     """B4: anota en la última prueba del flujo si la instrumentación de red era anterior a 0.11.0 (sin rutas)."""
     phases = read_phases(folder)
@@ -10866,6 +10936,53 @@ def apk_warning(root, folder, plan, old, installed):
     return warning("apk_viejo", text, text, commands=[(
         "compila e instala el build de profiling con las marcas (perf.py registra si compiló)",
         perf_command(root, "instalar", "--carpeta", relative_folder(pathlib.Path(folder), root)))])
+
+
+APPROVAL_NOTE = "aprobacion"
+
+
+def approval(folder):
+    """E3: {"estado": "aprobada" o "pendiente", "fecha"} de la ficha y el plan, o {} si la sesión 1 no lo registró."""
+    record = read_notes(folder).get(APPROVAL_NOTE)
+    return record if isinstance(record, dict) else {}
+
+
+def cmd_aprobar(args):
+    """E3: registra la aprobación de la ficha y el plan (la da el usuario; la sesión 1 lo corre cuando el usuario dice
+    que sí) o, con --pendiente, que la sesión 1 terminó sin ella: `siguiente` da entonces qué revisar y cómo aprobar."""
+    folder = pathlib.Path(args.carpeta)
+    plan = load_plan(folder / "plan.json")
+    data = read_notes(folder)
+    data[APPROVAL_NOTE] = {"estado": "pendiente" if args.pendiente else "aprobada",
+                           "fecha": datetime.datetime.now().replace(microsecond=0).isoformat()}
+    save_notes(folder, data)
+    print("✔ %s" % ("Anotado: la ficha y el plan esperan tu aprobación; `siguiente` te dice qué revisar y cómo aprobarlos"
+                    if args.pendiente else "Ficha y plan aprobados"))
+    print_next(folder, plan)
+
+
+def approval_steps(folder, plan, flow, root, resume):
+    """E3: cuando la sesión 1 terminó sin la aprobación: qué revisar (la ficha, el plan, el recorrido en palabras y el
+    video de la prueba) y "Elige uno": aprobar con un comando o pedir cambios en un chat. Nunca "falta que apruebes" sin
+    camino."""
+    folder = pathlib.Path(folder)
+    rel = relative_folder(folder, root)
+    videos = sorted(folder.glob("prueba-*.mp4"))
+    lines = ["La sesión 1 terminó sin tu aprobación de la ficha y el plan. Revisa, antes de medir:",
+             "la ficha (tabla \"Ficha\" de %s) y el plan (%s: métricas principales, tramos, `preparar` y `recorrido`)"
+             % (folder / "estado.md", folder / "plan.json"),
+             "el recorrido en palabras (%s)%s" % (folder / "ficha.md", " y el video de la prueba (%s)" % ", ".join(
+                 str(video) for video in videos) if videos else "")]
+    return [{"tipo": "avisos", "titulo": "Falta tu aprobación", "lineas": lines},
+            {"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que corresponda)", "opciones": [
+                ("Apruebo", "cuando la ficha, el plan, el recorrido y el video son lo que quieres medir",
+                 terminal(perf_command(root, "aprobar", "--carpeta", rel), "registra tu aprobación y te da el paso "
+                          "siguiente (medir antes)", "nada")),
+                ("Hay que cambiar algo", "cuando algo no es lo que quieres medir (un tramo, una marca, un paso del "
+                                         "recorrido)",
+                 chat("%s: sesión 1, ajusta la ficha y el plan: pregúntame qué hay que cambiar, repite la corrida de prueba y "
+                      "pídeme la aprobación" % resume, "intermedio", "medio", "ajusta la ficha y el plan con lo que le "
+                      "digas, repite la prueba y te pide la aprobación", plan))]}]
 
 
 def cmd_instalar(args):
@@ -13553,6 +13670,11 @@ def cmd_capturar(args, plan=None):
                 pending = ([apk_warn] if apk_warn else []) + test_run_warnings(root, hz, info, gap, unwired,
                                                                                settings=dev_settings, serial=serial)
                 save_test_warnings(folder, flow_name, pending)
+                if not pending:  # E6: lo que perf.py puede verificar lo cierra perf.py, no la sesión
+                    closed = close_test_pendings(folder, flow_name)
+                    if closed:
+                        print("· Cerré en \"Pendientes\" de estado.md %d pendiente%s de la corrida de prueba: esta salió "
+                              "sin avisos" % (closed, "" if closed == 1 else "s"))
                 if pending:
                     print("⚠ %d avisos por corregir antes de medir: quedan en %s y `siguiente` da cómo corregirlos (en la "
                           "terminal o con el texto para un chat); una corrida de prueba sin avisos los da por resueltos"
@@ -14576,6 +14698,9 @@ def diagnose_flow(args, folder, plan, flow_name, phase, rows, tp):
         if not bucket:
             notes["diagnostico"].pop(phase)
         save_notes(folder, notes)
+    connection_md = connections_md(rows, flow_name, phase, service_urls(folder))
+    if connection_md:  # E6: en cuántas corridas abre conexión nueva cada servicio
+        md += [""] + connection_md
     if blocked:
         print("· %s: el hilo principal espera dentro de sus frames más largos (%s %% del tiempo): el diagnóstico deja una "
               "captura pendiente con --config completa para saber por qué." % (flow_name, fmt(round(blocked[0] * 100, 1))))
@@ -14583,6 +14708,74 @@ def diagnose_flow(args, folder, plan, flow_name, phase, rows, tp):
 
 
 # ── resumen y comparar ───────────────────────────────────────────────────────
+
+def host_of(service, urls):
+    """El host de un servicio según su ruta real; '' si no se sabe."""
+    found = re.match(r"https?://([^/]+)", urls.get(service) or "")
+    return found.group(1) if found else ""
+
+
+def connection_stats(rows, flow, phase):
+    """E6: {servicio: (corridas con conexión nueva, corridas, mediana de la conexión en esas corridas en ms, llamadas por
+    corrida, conexiones nuevas por corrida o None)} de los servicios del flujo en la fase."""
+    data = {}
+    for row in rows:
+        if row["flujo"] != flow or row["fase"] != phase:
+            continue
+        found = re.fullmatch(r"red (.+) (conexion_ms|conexiones_nuevas|llamadas)", row["metrica"])
+        if found:
+            data.setdefault(found.group(1), {}).setdefault(found.group(2), {})[row["corrida"]] = row["valor"]
+    out = {}
+    for service, values in data.items():
+        times = values.get("conexion_ms") or {}
+        news = values.get("conexiones_nuevas")
+        if not times and not news:
+            continue
+        calls = values.get("llamadas") or {}
+        # Todas las corridas del servicio: una sin fila de conexión es una en la que la traza no vio ninguna conexión
+        # nueva (todas reusaron la que abrió `preparar`): cuenta como 0, no se descarta.
+        every = set(calls) | set(times) | set(news or {})
+        if news:  # cuántas llamadas abrieron conexión: conexion_ms es la mediana por llamada y da 0 si la mayoría reusa
+            runs = [run for run in every if news.get(run, 0) > 0]
+        else:
+            runs = [run for run in every if times.get(run, 0) > 0]
+        positive = [times[run] for run in runs if times.get(run, 0) > 0]
+        out[service] = (len(runs), len(every), statistics.median(positive) if positive else None,
+                        statistics.median(calls.values()) if calls else None,
+                        statistics.median(news.get(run, 0) for run in every) if news else None)
+    return out
+
+
+def connections_md(rows, flow, phase, urls):
+    """E6: la tabla de conexiones nuevas por servicio y el candidato "conexiones nuevas ≈ llamadas a un mismo host"
+    (varios clientes HTTP sin compartir el pool, o `Connection: close`), aunque no esté en el camino de la métrica
+    principal."""
+    stats = connection_stats(rows, flow, phase)
+    if not stats:
+        return []
+    md = ["## Conexiones nuevas por servicio (%s)" % flow, "",
+          "| Servicio | Corridas con conexión nueva | Conexión (mediana) | Llamadas por corrida | Conexiones nuevas por corrida |",
+          "| --- | --- | --- | --- | --- |"]
+    for service in sorted(stats, key=lambda key: (-stats[key][0], key)):
+        opened, total, median, calls, news = stats[service]
+        md.append("| %s | %d de %d | %s | %s | %s |" % (route_text(service, urls), opened, total,
+                                                         fmt(round(median)) + " ms" if median else "—",
+                                                         fmt(calls) if calls is not None else "—",
+                                                         fmt(news) if news is not None else "—"))
+    hosts = {}
+    for service, (opened, total, median, calls, news) in stats.items():
+        bucket = hosts.setdefault(host_of(service, urls) or service, [0, 0, 0])  # sin ruta real: el servicio solo
+        bucket[0] += calls or 0
+        bucket[1] += news if news is not None else (calls or 0) * (opened / float(total) if total else 0)
+        bucket[2] += 1
+    for host, (calls, news, count) in sorted(hosts.items()):
+        if calls >= 3 and news >= 0.8 * calls:
+            md += ["", "**Candidato · conexiones nuevas ≈ llamadas** (%s): %s llamadas y unas %s conexiones nuevas por corrida "
+                       "en %d servicio%s. Varios clientes HTTP que no comparten el pool de conexiones, o `Connection: "
+                       "close`, hacen que cada llamada pague DNS, TCP y TLS de nuevo; revísalo aunque no esté en el camino "
+                       "de la métrica principal." % (host, fmt(calls), fmt(round(news)), count, "" if count == 1 else "s")]
+    return md
+
 
 def cmd_resumen(args):
     rows = read_rows(args.csv)
@@ -16025,7 +16218,7 @@ def segment_network_md(rows, plan, phases=("antes",)):
 
 SERVICE_ROW = re.compile(r"red (.+) llamadas")
 # Las filas que service_metrics agrega al final de cada corrida.
-SERVICE_EXTRA = re.compile(r"red .+ (?:repetidas_2s|solapadas|conexion_ms|inicio_ms|fin_ms)|[A-Za-z][\w-]* red .+ llamadas|"
+SERVICE_EXTRA = re.compile(r"red .+ (?:repetidas_2s|solapadas|conexion_ms|conexiones_nuevas|inicio_ms|fin_ms)|[A-Za-z][\w-]* red .+ llamadas|"
                            r"[A-Za-z][\w-]* red .+ repetidas|"
                            r"red_en_curso_ms|[A-Za-z][\w-]* (?:inicio_ms|fin_ms)")
 SERVICES_TOP = 5
@@ -18934,6 +19127,8 @@ def cmd_nuevo(args):
         plan["instalar"] = args.instalar
     if args.triage:
         plan["profundidad"] = "triage"
+    if getattr(args, "pedido_mejorado", False):  # E2: hubo una sesión 0 · pedido: `siguiente` ofrece anotar su costo
+        plan["pedido_mejorado"] = True
     no_leer = read_no_leer(project_root(folder), extra=args.no_leer)
     if no_leer:
         plan["no_leer"] = no_leer
@@ -21863,6 +22058,14 @@ def setup_estado(root, args, folder, plan):
                 ficha.get("remoto") or NO_REMOTE, ficha.get("applicationId") or "sin dato", ficha.get("skill") or "sin dato",
                 (ficha.get("commit_base") or "sin dato")[:12], len(ficha.get("archivos") or []),
                 "" if len(ficha.get("archivos") or []) == 1 else "s"))
+            if not ficha.get("applicationId"):  # E5: una ficha "app sin dato" se completa con un comando
+                found = app_id_source(root, getattr(args, "paquete", None), plan)
+                print("  ⚠ La ficha del parche no tiene el applicationId (\"app sin dato\"): `--reponer` no puede "
+                      "comprobar que el parche es de esta app. Complétala%s:" % (
+                          " con el que encontré (%s, de %s)" % (found[0], found[1]) if found and found[0] else
+                          ": pon el applicationId del build de medición al final"))
+                print("    %s" % setup_command(root, "--vigente", case["parche"], folder=folder) + (
+                    " --paquete %s" % q(found[0]) if found and found[0] else " --paquete"))
         else:
             foreign = legacy_foreign_of(case)
             if foreign:
@@ -22645,6 +22848,18 @@ def modules_report(root, folder, plan, args):
             raise PerfError("--confirmar va como NOMBRE=codigo o NOMBRE=binario (lo que respondió el usuario cuando Gradle "
                             "no se pudo correr, o que acepta medir un módulo binario desde el módulo app)")
         confirm[name.strip()] = kind
+    notes = {}  # E4: qué toque o pantalla pidió mirar cada módulo y qué se pierde si sigue binario
+    for key in ("para", "pierde"):
+        for raw in getattr(args, key, None) or []:
+            name, sep, text = raw.partition("=")
+            if not sep or not name.strip() or not text.strip():
+                raise PerfError("--%s va como MÓDULO=TEXTO (por ejemplo --%s ':pagos=%s')" % (
+                    key, key, "aquí está el toque de Pagar" if key == "para" else "la métrica del toque a la pantalla"))
+            notes.setdefault(name.strip(), {})[key] = one_line(text)[:160]
+    if notes and not asked and not getattr(args, "comprobar_modulos", False) and not confirm:
+        raise PerfError("--para y --pierde se guardan junto con el mapa de módulos: van con --comprobar-modulos (o con "
+                        "--modulos o --confirmar), así: %s" % " ".join([modules_recheck(root, folder)] + [
+                            "--%s %s" % (key, q(raw)) for key in ("para", "pierde") for raw in getattr(args, key, None) or []]))
     if not asked and not getattr(args, "comprobar_modulos", False) and not confirm:
         if stored:
             print("Módulos del alcance (plan.json; para preguntarle de nuevo a Gradle, --comprobar-modulos):")
@@ -22663,7 +22878,7 @@ def modules_report(root, folder, plan, args):
             names.append(name.strip())
         if sep and where.strip():
             folders[name.strip()] = where.strip()
-    for name in confirm:
+    for name in list(confirm) + list(notes):
         if name not in names:
             names.append(name)
     if not names:
@@ -22690,8 +22905,22 @@ def modules_report(root, folder, plan, args):
         deps, why = (parse_dependencies(block), why) if block is not None else (None, why or block_why)
     modules = classify_modules(root, names, deps, folders, app)
     previous = {item["nombre"]: item for item in stored}
+    changed = []
     for item in modules:
         old = previous.get(item["nombre"]) or {}
+        for key in ("para", "pierde"):  # E4: lo que la sesión 1 anotó del módulo se conserva
+            value = (notes.get(item["nombre"]) or {}).get(key) or old.get(key)
+            if value:
+                item[key] = value
+        if old.get("paso_a_codigo"):
+            item["paso_a_codigo"] = old["paso_a_codigo"]
+        if old.get("tipo") in ("codigo", "binario") and item["tipo"] in ("codigo", "binario") and old["tipo"] != item["tipo"]:
+            changed.append((item["nombre"], old["tipo"], item["tipo"], item.get("para")))
+            if item["tipo"] == "codigo":  # E4: ahora se puede poner la marca: `siguiente` da el chat
+                item["paso_a_codigo"] = datetime.datetime.now().replace(microsecond=0).isoformat()
+                item.pop("aceptado", None)
+            else:
+                item.pop("paso_a_codigo", None)
         if item["nombre"] in confirm:
             if item["tipo"] == "sin confirmar":  # Gradle no lo dijo: vale lo que respondió el usuario
                 item.update(tipo=confirm[item["nombre"]], origen="usuario")
@@ -22720,6 +22949,11 @@ def modules_report(root, folder, plan, args):
                       item["nombre"], item.get("motivo") or "Gradle no lo dijo", item["nombre"], item["nombre"]))
     for line in folder_request(modules):
         print("  " + line)
+    for name, before, after, why in changed:  # E4: lo que cambió de tipo desde la sesión 1, con lo que se puede hacer
+        print("  · %s cambió de %s a %s desde la sesión 1%s" % (
+            name, MODULE_LABEL[before], MODULE_LABEL[after],
+            ": ahora se puede poner la marca%s (`siguiente` te da el chat)" % (" (%s)" % why if why else "")
+            if after == "codigo" else ": ya no se edita; las marcas y mejoras de ese módulo se detienen"))
     wrote = write_modules_block(folder, modules, root, shown_configuration, source if deps is not None else
                                 "lo que respondió el usuario (Gradle no se pudo correr)")
     print("✔ plan.json: `modulos` con %d módulo%s del alcance%s" % (
@@ -22779,16 +23013,34 @@ def confirm_modules(root, folder, plan, stored, confirm):
 def module_steps(folder, plan):
     """Para `siguiente`: si un módulo del alcance llega como binario (o está sin confirmar) y nadie decidió qué hacer, lo
     primero es resolverlo: cambiar el interruptor y comprobar de nuevo, o aceptar que se mide desde el módulo app."""
-    pending = [item for item in blocked_modules(plan) if not item.get("aceptado")]
-    if not pending:
-        return []
     folder = pathlib.Path(folder)
     root = project_root(folder).resolve()
+    pending = [item for item in blocked_modules(plan) if not item.get("aceptado")]
+    converted = [item for item in plan_modules(plan) if item.get("tipo") == "codigo" and item.get("paso_a_codigo")
+                 and (fecha_ts(item["paso_a_codigo"]) or 0) > (fecha_ts(newest_test(read_phases(folder))) or 0)]
+    if converted and not any(name in read_phases(folder) for name in FASES):
+        # E4: un módulo que la sesión 1 encontró binario ahora se compila desde código: se puede poner la marca
+        state = folder.resolve() / "estado.md"
+        what = "; ".join("%s (%s)" % (item["nombre"], item.get("para") or "el toque o la pantalla que lo pidió")
+                         for item in converted)
+        return [{"tipo": "avisos", "titulo": "Un módulo pasó a código", "lineas": [
+            "%s ya se compila desde código (lo dijo `setup --estado --comprobar-modulos`): ahora se puede poner la marca "
+            "que la sesión 1 no pudo poner" % what]},
+            chat("Sigue hb-performance con %s: sesión 1, %s pasó a código: pon la marca o el tramo que faltaba (%s), "
+                 "actualiza el plan y repite la corrida de prueba" % (state, ", ".join(item["nombre"] for item in converted),
+                                                                       what), "intermedio", "medio",
+                 "pone la marca que faltaba en el módulo que ahora es código, actualiza el plan y repite la prueba", plan)]
+    if not pending:
+        return []
     lines = []
     for item in pending:
         if item["tipo"] == "binario":
             lines.append("%s llega como binario (%s): %s" % (item["nombre"], item.get("artefacto") or "sin versión",
                                                            switch_text(substitution_switch(root, item), item)))
+            if item.get("para") or item.get("pierde"):
+                lines.append("%s: lo pidió %s; si sigue binario, se pierde %s" % (
+                    item["nombre"], item.get("para") or "el alcance", item.get("pierde") or "medir dentro del módulo: "
+                    "se mide desde el módulo app, con menos precisión"))
         else:
             lines.append("%s está sin confirmar (%s): pregúntale a Gradle de nuevo o registra lo que diga el usuario" % (
                 item["nombre"], item.get("motivo") or "Gradle no lo dijo"))
@@ -22806,12 +23058,23 @@ def module_steps(folder, plan):
                                   "córrelo solo si es así; si llega como binario, el mismo comando con =binario"))
     binaries = [item for item in pending if item["tipo"] == "binario"]
     if binaries:
-        steps.append(terminal(setup_command(root, "--estado", *[part for item in binaries for part in (
-            "--confirmar", "%s=binario" % item["nombre"])], folder=folder),
-            "o deja registrado que %s se queda%s como binario: se mide desde el módulo app (con menos precisión), el "
-            "hallazgo va como \"fuera del alcance: módulo compilado\" y la mejora es del lado de la app o un pedido al "
-            "equipo dueño" % (", ".join(item["nombre"] for item in binaries), "" if len(binaries) == 1 else "n"),
-            "elige este solo si no puedes o no quieres compilar el módulo desde código"))
+        # E4: pasarlo a código es una opción, no un paso obligatorio: "Elige uno"
+        recheck = steps.pop(1)
+        steps.insert(1, {"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que corresponda)",
+                         "opciones": [
+            ("Pasarlo a código", "cuando quieres la marca o el tramo que pide ese módulo (%s): cambia tú el interruptor "
+                                 "que dice arriba y sincroniza Gradle" % "; ".join(
+                                     item.get("para") or item["nombre"] for item in binaries), recheck),
+            ("Dejarlo binario", "cuando no puedes o no quieres compilarlo desde código: se mide desde el módulo app (con "
+                                "menos precisión)%s" % ("; se pierde %s" % "; ".join(
+                                    item["pierde"] for item in binaries if item.get("pierde"))
+                                    if any(item.get("pierde") for item in binaries) else ""),
+             terminal(setup_command(root, "--estado", *[part for item in binaries for part in (
+                 "--confirmar", "%s=binario" % item["nombre"])], folder=folder),
+                 "deja registrado que %s se queda%s como binario: el hallazgo va como \"fuera del alcance: módulo "
+                 "compilado\" y la mejora es del lado de la app o un pedido al equipo dueño" % (
+                     ", ".join(item["nombre"] for item in binaries), "" if len(binaries) == 1 else "n"),
+                 "nada"))]})
     return steps
 
 
@@ -22841,6 +23104,9 @@ def main(argv=None):
     p.add_argument("--serial", help="dispositivo de medición; queda en el plan y lo usan todas las capturas")
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (queda en el plan)")
     p.add_argument("--triage", action="store_true", help="profundidad triage: 3 corridas, sin control, termina en el diagnóstico")
+    p.add_argument("--pedido-mejorado", dest="pedido_mejorado", action="store_true",
+                   help="el pedido trae la línea \"(pedido mejorado con la sesión 0 · pedido)\": `siguiente` ofrece el "
+                        "comando para anotar el costo de esa sesión")
     p.add_argument("--no-leer", dest="no_leer", action="append", default=[], metavar="RUTA",
                    help="ruta o patrón que el agente no debe leer (pruebas a ciegas); se repite. Se suma a la línea "
                         "'No leer:' de AGENTS.md")
@@ -22892,6 +23158,12 @@ def main(argv=None):
     p.add_argument("--marcas-a-mano", dest="marcas_a_mano", action="store_true",
                    help="las marcas ya se repusieron a mano (su parche no aplicaba): no las repone y cierra sus filas viejas")
     p.set_defaults(func=cmd_reanudar)
+
+    p = sub.add_parser("aprobar", help="registra tu aprobación de la ficha y el plan (o, con --pendiente, que la sesión 1 "
+                                       "terminó sin ella: `siguiente` te dice qué revisar y cómo aprobar)")
+    p.add_argument("--carpeta", required=True)
+    p.add_argument("--pendiente", action="store_true", help="la sesión 1 terminó sin la aprobación")
+    p.set_defaults(func=cmd_aprobar)
 
     p = sub.add_parser("instalar", help="compila e instala con el 'instalar' del plan y registra si compiló (si falla, "
                                         "`siguiente` da primero compilar de nuevo, con el motivo)")
@@ -22996,6 +23268,11 @@ def main(argv=None):
     p.add_argument("--confirmar", action="append", metavar="MÓDULO=codigo|binario",
                    help="lo que respondió el usuario cuando Gradle no se pudo correr, o que acepta medir un módulo binario "
                         "desde el módulo app (se repite)")
+    p.add_argument("--para", action="append", metavar="MÓDULO=TEXTO",
+                   help="con --modulos: qué toque o pantalla pidió mirar ese módulo (\"aquí está el toque de X\"); "
+                        "`siguiente` lo dice si el módulo es binario")
+    p.add_argument("--pierde", action="append", metavar="MÓDULO=TEXTO",
+                   help="con --modulos: qué se pierde si ese módulo sigue binario (por ejemplo, una métrica)")
     p.add_argument("--app", help="el módulo de la app para `dependencies` (por defecto, el de `instalar` del plan, o app)")
     p.add_argument("--configuracion",
                    help="la configuración de Gradle de la variante medida (por defecto <variante>RuntimeClasspath, con la "
