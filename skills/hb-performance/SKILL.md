@@ -5,7 +5,7 @@ license: MIT
 compatibility: "La skill no instala ni configura nada en la máquina: busca cada herramienta donde ya está y dice qué falta. Requiere Python 3.8+ (solo librería estándar), git, adb, trace_processor de Perfetto y un dispositivo con Android 10 o superior (12 o superior para los frames). Según el caso: Java 17+ (Gradle, retrace y Maestro). Opcional: retrace (desofuscar con R8), Maestro (flujos largos), ffmpeg (unir y rotular el video de la prueba), scrcpy (grabarlo sin cortes) y android-profiler (heap dumps)."
 metadata:
   author: hacybeyker
-  version: "0.17.0"
+  version: "0.18.0"
   category: flow
 ---
 

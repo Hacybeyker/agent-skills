@@ -56,11 +56,12 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.17.0"
+VERSION = "0.18.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
-SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0", "0.15.1", "0.16.0", VERSION)
+SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0", "0.15.1", "0.16.0", "0.17.0",
+                VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -7155,6 +7156,9 @@ def print_next(folder, plan, flow=None):
     print("Siguiente · %s (también en estado.md):" % title)
     for line in render_steps(steps, markdown=False, root=project_root(pathlib.Path(folder)).resolve(), plan=plan):
         print("  " + line)
+    if not title.startswith(("investigación cerrada", "triage cerrado")):
+        for line in old_video_lines(folder, plan):  # 0.18.0 · V4: opcional, después de los pasos; no cambia ninguno
+            print("  · " + line)
     for line in cost_lines(folder, plan):
         print("  " + line)
     write_next(folder, title, steps, missing_costs(folder, plan), plan)
@@ -12650,15 +12654,23 @@ VIDEO_DIR = "video"
 VIDEO_TAIL_S = 2  # `video_cola_s`: lo que sigue grabando después del recorrido
 VIDEO_TAIL_MAX_S = 60
 VIDEO_RECORDERS = ("screenrecord", "scrcpy", "auto")
-VIDEO_MARK_S = 1.2  # una marca del plan se ve hasta la siguiente o, como mucho, 1,2 s
+VIDEO_MARK_S = 1.5  # 0.18.0 · V3: una marca del plan es un instante: su chip se ve 1,5 s (o hasta la siguiente)
 VIDEO_MARKS_MAX = 150
 VIDEO_FPS = 30
 VIDEO_BASE_W = 540  # el ancho del prototipo: las bandas y las letras escalan con el ancho del video
-VIDEO_HEAD, VIDEO_FOOT = 132, 74
+VIDEO_HEAD, VIDEO_FOOT = 132, 100  # abajo: la franja, el reloj y las dos líneas de la leyenda (0.18.0 · V2)
 VIDEO_COLORS = {"prep": "6b7380", "med": "3657d6", "rec": "4b5a8f", "fin": "3a3d45"}
-VIDEO_PREP = "Preparación · no se mide"
-VIDEO_BETWEEN = "Recorrido · entre tramos"
+# 0.18.0 · V1: tres capas. El video graba toda la prueba; la traza (Perfetto), desde que arranca hasta el fin del
+# recorrido; la métrica, solo los tramos entre marcas. Cada rótulo dice si la traza graba y si esa parte se mide.
+VIDEO_PREP = "Preparación · sin traza, no se mide"
+VIDEO_PREP_TRACED = "Preparación · traza grabando, no se mide"
+VIDEO_BETWEEN = "Sin medir · traza grabando"
 VIDEO_END = "Fin de la prueba"
+VIDEO_MEASURE = "Medición · %s"
+VIDEO_OLD_PREP, VIDEO_OLD_BETWEEN = "Preparación · no se mide", "Recorrido · entre tramos"  # los de 0.17.0
+VIDEO_EVENTS_VERSION = 2  # 2 (0.18.0): cada marca lleva `papel` y `usada`, y los eventos, `leyenda`; la 1 se sigue leyendo
+VIDEO_UNUSED = "(no usada)"
+VIDEO_LEGEND_METRIC = "Métrica: solo cuenta lo marcado Medición"
 VIDEO_ALIGN_TOLERANCE_S = 2.0  # el inicio de la traza, llevado al reloj de la computadora, contra cuando arrancó Perfetto
 VIDEO_CONTENT = re.compile(r"^(?:Rotated )?[Cc]ontent area is ")  # screenrecord --verbose (screenrecord.cpp de AOSP)
 SCRCPY_STARTED = re.compile(r"Recording started to \S+ file")  # LOGI de recorder.c de scrcpy
@@ -12865,25 +12877,89 @@ def video_markers(rows, flow):
     return sorted(sections + [row for row in rows or [] if row[0] in ("hilo", "lanzamiento")], key=lambda row: row[1])
 
 
+def video_span_words(spec):
+    """El nombre de un tramo en palabras: su `titulo` o su `nombre` sin guiones."""
+    return str(spec.get("titulo") or str(spec.get("nombre") or "").replace("_", " ").replace("-", " ")).strip()
+
+
+def occurrences_at(markers, marker, default_point, when):
+    """Las ocurrencias [(ts, nombre)] de una marca del plan cuyo punto (`inicio` o `fin`) cae en `when`: la que eligió
+    resolve_span (la regla `cual` de las métricas). No elige nada: solo dice cuál fue."""
+    if when is None or not isinstance(marker, dict) or not marker.get("marca"):
+        return []
+    point = marker.get("punto", default_point)
+    return [(row[1], row[4]) for row in markers if fnmatch.fnmatchcase(row[4], marker["marca"])
+            and (row[1] if point == "inicio" else row[1] + max(row[2], 0)) == when]
+
+
+def video_mark_roles(markers, flow, flow_name):
+    """0.18.0 · V3: ({ocurrencia (ts, nombre): [papeles]}, {ocurrencias que el plan usa}, {ocurrencia: instante}). El
+    papel es el de los tramos que el video muestra ("fin de <tramo>" antes que "inicio de <tramo>"; sin tramos, los de la
+    ventana del flujo). Usada es la ocurrencia que eligió resolve_span para algo que el flujo mide entre dos marcas (la
+    ventana, una métrica de usuario o un tramo) o para una pausa: sale de la misma regla que las métricas, sin
+    recalcularla con otra. El instante es el del punto que le da su papel (el fin de una sección que cierra un tramo, no
+    su inicio): así el chip "fin de <tramo>" sale cuando termina "Medición · <tramo>"."""
+    roles, used, instants = {}, set(), {}
+    shown = [(video_span_words(spec), spec) for spec, bounds in segment_windows(markers, flow.get("segmentos") or []) if bounds]
+    if not shown and isinstance(flow.get("ventana"), dict) and resolve_window(markers, flow["ventana"]):
+        shown = [(flow_words(flow, flow_name), flow["ventana"])]
+    for side, default_point, word in (("hasta", "fin", "fin"), ("desde", "inicio", "inicio")):
+        for label, spec in shown:
+            bounds = span_bounds(markers, spec)
+            if not bounds:
+                continue
+            when = bounds[0 if side == "desde" else 1]
+            for key in occurrences_at(markers, spec.get(side), default_point, when):
+                text = "%s de %s" % (word, label)
+                instants.setdefault(key, when)
+                if text not in roles.setdefault(key, []):
+                    roles[key].append(text)
+    for _, spec in measured_spans(flow):
+        bounds = span_bounds(markers, spec)
+        if bounds:
+            used.update(occurrences_at(markers, spec["desde"], "inicio", bounds[0]))
+            used.update(occurrences_at(markers, spec["hasta"], "fin", bounds[1]))
+    for pause in flow.get("pausas") or []:
+        if not isinstance(pause, dict) or not isinstance(pause.get("desde"), dict) or not isinstance(pause.get("hasta"), dict):
+            continue
+        bounds = pause_bounds(markers, pause)
+        if bounds:
+            used.update(occurrences_at(markers, pause["desde"], "fin", bounds[0]))
+            used.update(occurrences_at(markers, pause["hasta"], "inicio", bounds[1]))
+    return roles, used | set(roles), instants
+
+
+def trace_marks(rows, flow, flow_name):
+    """Las ocurrencias de las marcas del plan en una traza, en orden: [{"ns" (inicio de la sección), "instante" (ns: el
+    del punto que le da su papel; sin papel, su inicio), "nombre", "papel", "usada"}]."""
+    markers = video_markers(rows, flow)
+    patterns = [mark for mark, _ in plan_marks(flow)]
+    roles, used, instants = video_mark_roles(markers, flow, flow_name)
+    marks, seen = [], set()
+    for row in markers:
+        key = (row[1], row[4])
+        if any(fnmatch.fnmatchcase(row[4], pattern) for pattern in patterns) and key not in seen:
+            seen.add(key)
+            marks.append({"ns": row[1], "instante": instants.get(key, row[1]), "nombre": row[4],
+                          "papel": " · ".join(roles.get(key, [])), "usada": key in used})
+    return marks
+
+
 def video_trace_events(rows, flow, flow_name, convert):
-    """V2: (tramos [(rótulo, desde, hasta)], marcas [(hora, nombre)]) de la traza, en la hora de la computadora. Los
-    tramos del plan con su título (o su nombre en palabras); sin tramos, la ventana del flujo."""
+    """V2: (tramos [(rótulo, desde, hasta)], marcas [(hora, nombre, papel, usada)]) de la traza, en la hora de la
+    computadora. Los tramos del plan con su título (o su nombre en palabras); sin tramos, la ventana del flujo. Cada
+    ocurrencia de una marca del plan va con su papel y con si el plan la usa (0.18.0 · V3, trace_marks)."""
     markers = video_markers(rows, flow)
     spans = []
     for spec, bounds in segment_windows(markers, flow.get("segmentos") or []):
         if bounds:
-            spans.append((str(spec.get("titulo") or spec["nombre"].replace("_", " ").replace("-", " ")).strip(),
-                          convert(bounds[0]), convert(bounds[1])))
+            spans.append((video_span_words(spec), convert(bounds[0]), convert(bounds[1])))
     if not spans and isinstance(flow.get("ventana"), dict):
         window = resolve_window(markers, flow["ventana"])
         if window:
             spans.append((flow_words(flow, flow_name), convert(window[0]), convert(window[1])))
-    patterns = [mark for mark, _ in plan_marks(flow)]
-    marks, seen = [], set()
-    for row in markers:
-        if any(fnmatch.fnmatchcase(row[4], pattern) for pattern in patterns) and (row[1], row[4]) not in seen:
-            seen.add((row[1], row[4]))
-            marks.append((convert(row[1]), row[4]))
+    marks = [(convert(mark["instante"]), mark["nombre"], mark["papel"], mark["usada"])
+             for mark in trace_marks(rows, flow, flow_name)]
     return spans, marks
 
 
@@ -12891,10 +12967,13 @@ def flow_words(flow, flow_name):
     return str((flow or {}).get("titulo") or flow_name.replace("_", " ").replace("-", " ")).strip()
 
 
-def video_phases(duration, route, spans, label):
-    """V2: las fases contiguas de 0 a `duration` (segundos desde el primer tramo): preparación (no se mide) hasta que
-    empieza el recorrido; cada tramo del plan ("Medición · <tramo>") y lo que queda entre ellos; el fin. Sin tramos
-    ubicados, todo el recorrido es "Medición · <flujo>"."""
+def video_phases(duration, route, spans, label, traced=None, prepare=None):
+    """V2: las fases contiguas de 0 a `duration` (segundos desde el primer tramo de video). 0.18.0 · V1: cada rótulo dice
+    si la traza graba y si se mide. Hasta que arranca la traza (`traced`), preparación sin traza; desde ahí hasta el
+    recorrido, preparación con la traza grabando si 'preparar' corre dentro de la traza (`prepare`, su inicio y su fin) o,
+    si no, tiempo sin medir con la traza grabando; cada tramo del plan ("Medición · <tramo>") y, entre ellos, sin medir;
+    el fin. Sin tramos ubicados, todo el recorrido es "Medición · <flujo>". Sin `traced` (una prueba sin traza, o los
+    eventos de 0.17.0), toda la preparación va sin traza."""
     out = []
 
     def add(start, end, text, kind):
@@ -12902,28 +12981,54 @@ def video_phases(duration, route, spans, label):
         if end - start >= 0.05:
             out.append({"desde": start, "hasta": end, "rotulo": text, "tipo": kind})
 
-    if not route or route[0] is None:
-        add(0.0, duration, VIDEO_PREP, "prep")
+    if not route or route[0] is None:  # 'preparar' no terminó: todo es preparación
+        inside = traced is not None and prepare_inside_trace(traced, prepare)
+        add(0.0, traced if inside else duration, VIDEO_PREP, "prep")
+        if inside:
+            add(traced, duration, VIDEO_PREP_TRACED, "prep")
         return contiguous(out, duration)
     start = route[0]
     end = route[1] if route[1] is not None else duration
-    add(0.0, start, VIDEO_PREP, "prep")
     cursor = start
+    known = traced is not None and start - traced >= 0.1  # la traza arrancó antes del recorrido, y se sabe cuándo
+    if not known:
+        add(0.0, start, VIDEO_PREP, "prep")
+    else:
+        add(0.0, traced, VIDEO_PREP, "prep")
+        if prepare_inside_trace(traced, prepare):
+            add(traced, start, VIDEO_PREP_TRACED, "prep")
+        else:  # sin 'preparar' dentro de la traza, de que arranca la traza al primer tramo es tiempo sin medir
+            cursor = max(0.0, traced)
     placed = False
     for text, first, last in sorted(spans, key=lambda span: span[1]):
-        first, last = max(first, cursor), min(last, end)
+        first, last = max(first, start, cursor), min(last, end)
         if last - first < 0.05:
             continue
         if first - cursor >= 0.05:
             add(cursor, first, VIDEO_BETWEEN, "rec")
-        add(first, last, "Medición · %s" % text, "med")
+        add(first, last, VIDEO_MEASURE % text, "med")
         cursor, placed = last, True
     if not placed:
-        add(start, end, "Medición · %s" % label, "med")
+        if start - cursor >= 0.05:
+            add(cursor, start, VIDEO_BETWEEN, "rec")
+        add(start, end, VIDEO_MEASURE % label, "med")
     elif end - cursor >= 0.05:
         add(cursor, end, VIDEO_BETWEEN, "rec")
     add(end, duration, VIDEO_END, "fin")
     return contiguous(out, duration)
+
+
+def prepare_inside_trace(traced, prepare):
+    """True si 'preparar' empezó con la traza ya grabando (`traza_desde_preparar`): su inicio no es anterior al de la
+    traza. Las dos horas, en segundos del video."""
+    return traced is not None and bool(prepare) and prepare[0] is not None and prepare[0] >= traced - 0.05
+
+
+def video_legend(traced, inside):
+    """0.18.0 · V2: las dos líneas de la leyenda fija, con las tres capas: el video, la traza y la métrica."""
+    trace = ("Traza: no hay en esta prueba" if traced is None else "Traza: desde la preparación" if inside else
+             "Traza: desde el fin de la preparación")
+    return ["Video: toda la prueba · %s" % trace, VIDEO_LEGEND_METRIC]
 
 
 def contiguous(phases, duration):
@@ -12937,7 +13042,8 @@ def contiguous(phases, duration):
 
 def video_events(flow_name, recorder, parts, starts, ended, clock, spans=(), marks=(), alignment=None, label=None):
     """V2: el contenido de eventos.json. `parts` son las rutas de los tramos relativas a la carpeta de la investigación;
-    `starts`, `ended`, `clock` (preparar y recorrido), los tramos y las marcas, horas de la computadora."""
+    `starts`, `ended`, `clock` (preparar, traza y recorrido), los tramos y las marcas, horas de la computadora. Cada
+    marca es (hora, nombre, papel, usada) o, sin el papel, (hora, nombre): cuenta como usada."""
     origin = starts[0]
     duration = round(max(0.1, ended - origin), 2)
 
@@ -12947,29 +13053,86 @@ def video_events(flow_name, recorder, parts, starts, ended, clock, spans=(), mar
     route = (rel(clock.get("recorrido_inicio")), rel(clock.get("recorrido_fin"))) \
         if clock.get("recorrido_inicio") is not None else None
     shifted = [(text, rel(first), rel(last)) for text, first, last in spans]
-    placed = sorted((round(when - origin, 2), name) for when, name in marks if 0 <= when - origin <= duration)
-    events = {"version": 1, "flujo": flow_name, "grabador": recorder,
+    placed = []
+    for mark in marks:
+        when = mark[0] - origin
+        if 0 <= when <= duration:
+            placed.append({"t": round(when, 2), "nombre": mark[1], "papel": mark[2] if len(mark) > 2 else "",
+                           "usada": bool(mark[3]) if len(mark) > 3 else True})
+    placed.sort(key=lambda item: (item["t"], item["nombre"]))
+    total = len(placed)
+    left_out = 0
+    if total > VIDEO_MARKS_MAX:  # las que el plan no usa son las primeras que quedan fuera
+        used = [item for item in placed if item["usada"]][:VIDEO_MARKS_MAX]
+        unused = [item for item in placed if not item["usada"]][:VIDEO_MARKS_MAX - len(used)]
+        left_out = len([item for item in placed if not item["usada"]]) - len(unused)
+        placed = sorted(used + unused, key=lambda item: (item["t"], item["nombre"]))
+    traced = rel(clock.get("traza"))
+    prepare = [rel(clock.get("preparar_inicio")), rel(clock.get("preparar_fin"))] \
+        if clock.get("preparar_inicio") is not None else None
+    events = {"version": VIDEO_EVENTS_VERSION, "flujo": flow_name, "grabador": recorder,
               "tramos_video": [{"archivo": str(part).replace(os.sep, "/"), "inicio": rel(start)}
                                for part, start in zip(parts, starts)],
-              "fases": video_phases(duration, route, shifted, label or flow_name),
-              "marcas": [{"t": when, "nombre": name} for when, name in placed[:VIDEO_MARKS_MAX]],
+              "fases": video_phases(duration, route, shifted, label or flow_name, traced, prepare),
+              "marcas": placed, "leyenda": video_legend(traced, prepare_inside_trace(traced, prepare)),
               "duracion": duration, "alineacion": dict(alignment or {"marcas": "sin traza", "detalle": ""})}
-    if clock.get("preparar_inicio") is not None:
-        events["preparar"] = [rel(clock.get("preparar_inicio")), rel(clock.get("preparar_fin"))]
-    if len(placed) > VIDEO_MARKS_MAX:
-        events["alineacion"]["detalle"] = ("%s; se muestran las primeras %d marcas de %d" % (
-            events["alineacion"].get("detalle") or "", VIDEO_MARKS_MAX, len(placed))).lstrip("; ")
+    if prepare is not None:
+        events["preparar"] = prepare
+    if traced is not None:
+        events["traza"] = traced
+    if total > VIDEO_MARKS_MAX:
+        shown = "se muestran %d marcas de %d (quedaron fuera %d que el plan no usa)" % (len(placed), total, left_out) \
+            if left_out else "se muestran las primeras %d marcas de %d" % (len(placed), total)
+        events["alineacion"]["detalle"] = ("%s; %s" % (events["alineacion"].get("detalle") or "", shown)).lstrip("; ")
     return events
 
 
+def mark_used(mark):
+    """True si el plan usa esa ocurrencia de la marca; una marca de 0.17.0 (sin `usada`) cuenta como usada."""
+    return mark.get("usada") is not False
+
+
 def mark_windows(events):
-    """[(desde, hasta, nombre)] en que se ve cada marca: hasta la siguiente o VIDEO_MARK_S, lo que llegue antes."""
+    """[(desde, hasta, marca)] en que se ve el chip de cada marca: VIDEO_MARK_S desde su instante o hasta la marca
+    siguiente, lo que llegue antes (hay un solo lugar para el chip). Una ocurrencia que el plan no usa nunca tapa a una
+    usada: se ve solo cuando no hay ninguna usada a la vista, y si no le queda lugar, no va (0.18.0 · V3)."""
     marks = events.get("marcas") or []
     out = []
-    for i, mark in enumerate(marks):
-        following = marks[i + 1]["t"] if i + 1 < len(marks) else events["duracion"]
-        out.append((mark["t"], min(mark["t"] + VIDEO_MARK_S, max(following, mark["t"] + 0.1)), mark["nombre"]))
-    return out
+    for group in ([mark for mark in marks if mark_used(mark)], [mark for mark in marks if not mark_used(mark)]):
+        busy = [(start, end) for start, end, mark in out if mark_used(mark)]
+        for i, mark in enumerate(group):
+            following = group[i + 1]["t"] if i + 1 < len(group) else events["duracion"]
+            start, end = mark["t"], min(mark["t"] + VIDEO_MARK_S, max(following, mark["t"] + 0.1))
+            if not mark_used(mark):
+                for first, last in busy:  # el lugar que deja libre el chip de una marca usada
+                    if first <= start < last:
+                        start = last
+                    elif start < first < end:
+                        end = first
+                if end - start < 0.1:
+                    continue
+            out.append((start, end, mark))
+    return sorted(out, key=lambda item: (item[0], item[2]["t"]))
+
+
+def chip_texts(mark):
+    """(texto del chip, nombre técnico en letra menor o '') de una marca: su papel si lo tiene ("fin de A · inicio de B")
+    con el nombre técnico después; sin papel, el nombre; la que el plan no usa, con "(no usada)"."""
+    if not mark_used(mark):
+        return "%s %s" % (mark["nombre"], VIDEO_UNUSED), ""
+    if mark.get("papel"):
+        return "● %s" % mark["papel"], mark["nombre"]
+    return "● %s" % mark["nombre"], ""
+
+
+def fit_text(text, size, minimum, wide, width=None):
+    """(texto, tamaño de letra) con los que `text` entra en el ancho del video de referencia: baja la letra hasta
+    `minimum` y, si tampoco entra, corta el texto con «…». `wide` es el ancho medio de un carácter, en em (aproximado: las
+    fuentes del sistema no son la misma en todas las máquinas)."""
+    width = width or VIDEO_BASE_W - 40
+    fitted = max(minimum, min(size, int(width / (max(len(text), 1) * wide))))
+    room = int(width / (fitted * wide))
+    return (text if len(text) <= room else text[:max(1, room - 1)].rstrip() + "…"), fitted
 
 
 def video_page_html(events, project, date):
@@ -13021,11 +13184,26 @@ def concat_list(events):
     return "\n".join(lines) + "\n"
 
 
-def video_filter(events, width, height, labels=True):
-    """V3: (filtro de ffmpeg, {archivo: texto}) del video rotulado: una banda arriba (la fase y la marca más reciente del
-    plan) y otra abajo (la franja de fases, el cabezal y el reloj), agregadas con `pad`. Nada se dibuja sobre la imagen
-    del teléfono: todo cae en las bandas. Los textos van en archivos (`textfile`, `expansion=none`): nada que escapar.
-    Sin `labels` (ffmpeg sin drawtext o sin fuente), solo une los tramos."""
+FONT_WIDTHS = (0.62, 0.58)  # ancho medio de un carácter (negrita, regular), en em, de una fuente que no se conoce
+
+
+def font_widths(font):
+    """(negrita, regular): el ancho medio de un carácter de la fuente de los rótulos, en em, para saber si un texto
+    entra. Arial y Liberation son angostas; DejaVu y Verdana, anchas; para otra, un valor prudente."""
+    name = pathlib.Path(str(font[0])).name.lower() if font else ""
+    if "arial" in name or "liberation" in name:
+        return 0.55, 0.5
+    if "dejavu" in name or "verdana" in name:
+        return 0.68, 0.62
+    return FONT_WIDTHS
+
+
+def video_filter(events, width, height, labels=True, widths=FONT_WIDTHS):
+    """V3: (filtro de ffmpeg, {archivo: texto}) del video rotulado: una banda arriba (la fase y el chip de la marca del
+    plan, con su papel) y otra abajo (la franja de fases, el cabezal, el reloj y la leyenda de las tres capas), agregadas
+    con `pad`. Nada se dibuja sobre la imagen del teléfono: todo cae en las bandas. Los textos van en archivos
+    (`textfile`, `expansion=none`): nada que escapar. Sin `labels` (ffmpeg sin drawtext o sin fuente), solo une los
+    tramos."""
     if not labels:
         return "[0:v]fps=%d,format=yuv420p[out]" % VIDEO_FPS, {}
     k = width / float(VIDEO_BASE_W)
@@ -13038,17 +13216,26 @@ def video_filter(events, width, height, labels=True):
 
     for i, phase in enumerate(events["fases"], start=1):
         name = "rotulo-fase-%d.txt" % i
-        texts[name] = phase["rotulo"]
+        texts[name], size = fit_text(phase["rotulo"], 28, 16, widths[0])
         enable = "enable='between(t,%s,%s)'" % (num(phase["desde"]), num(max(phase["desde"], phase["hasta"] - 0.001)))
         chain.append("drawbox=x=0:y=0:w=iw:h=%d:color=0x%s:t=fill:%s" % (px(70), VIDEO_COLORS[phase["tipo"]], enable))
         chain.append("drawtext=fontfile=fuente-negrita.ttf:textfile=%s:expansion=none:fontsize=%d:fontcolor=white:x=%d:"
-                     "y=%d:%s" % (name, px(28), px(20), px(20), enable))
+                     "y=%d:%s" % (name, px(size), px(20), px((70 - size) / 2.0), enable))
     for i, (start, end, mark) in enumerate(mark_windows(events), start=1):
         name = "rotulo-marca-%d.txt" % i
-        texts[name] = "● %s" % mark
-        chain.append("drawtext=fontfile=fuente.ttf:textfile=%s:expansion=none:fontsize=%d:fontcolor=0x9a6400:box=1:"
-                     "boxcolor=0xfff3d6:boxborderw=%d:x=%d:y=%d:enable='between(t,%s,%s)'" % (
-                         name, px(21), px(8), px(20), px(88), num(start), num(max(start, end - 0.001))))
+        main, technical = chip_texts(mark)
+        texts[name], size = fit_text(main, 21, 13, widths[1], VIDEO_BASE_W - 52)
+        enable = "enable='between(t,%s,%s)'" % (num(start), num(max(start, end - 0.001)))
+        # la que el plan no usa, atenuada: gris sobre gris oscuro, nunca con los colores de una marca de borde
+        colors = "fontcolor=0x9a6400:box=1:boxcolor=0xfff3d6" if mark_used(mark) else \
+            "fontcolor=0x9ca2ad:box=1:boxcolor=0x2a2d35"
+        chain.append("drawtext=fontfile=fuente.ttf:textfile=%s:expansion=none:fontsize=%d:%s:boxborderw=%d:x=%d:y=%d:%s" % (
+            name, px(size), colors, px(6), px(20), px(84), enable))
+        if technical:
+            small = "rotulo-marca-%d-nombre.txt" % i
+            texts[small], size = fit_text(technical, 13, 10, widths[1])
+            chain.append("drawtext=fontfile=fuente.ttf:textfile=%s:expansion=none:fontsize=%d:fontcolor=0x9ca2ad:x=%d:y=%d:"
+                         "%s" % (small, px(size), px(20), px(114), enable))
     bar = head + height + px(30)
     for phase in events["fases"]:
         x = int(phase["desde"] / duration * width)
@@ -13056,10 +13243,23 @@ def video_filter(events, width, height, labels=True):
         chain.append("drawbox=x=%d:y=%d:w=%d:h=%d:color=0x%s:t=fill" % (x, bar, span, px(16), VIDEO_COLORS[phase["tipo"]]))
     chain.append("drawtext=fontfile=fuente.ttf:text='%%{pts\\:hms}':fontsize=%d:fontcolor=0xd5d8de:x=w-tw-%d:y=%d" % (
         px(18), px(16), head + height + px(6)))
+    for i, line in enumerate(video_legend_lines(events), start=1):  # 0.18.0 · V2: siempre a la vista, junto a la franja
+        name = "leyenda-%d.txt" % i
+        texts[name], size = fit_text(line, 14, 10, widths[1])
+        chain.append("drawtext=fontfile=fuente.ttf:textfile=%s:expansion=none:fontsize=%d:fontcolor=0xb3b8c2:x=%d:y=%d" % (
+            name, px(size), px(20), head + height + px(36 + 20 * i)))
     graph = ["[0:v]fps=%d,pad=iw:ih+%d:0:%d:color=0x121317,%s[p1]" % (VIDEO_FPS, head + foot, head, ",".join(chain)),
              "color=c=0xbf3a2f:s=%dx%d:r=%d[ph]" % (max(2, px(4)), px(30), VIDEO_FPS),
              "[p1][ph]overlay=x='t/%s*%d':y=%d:shortest=1,format=yuv420p[out]" % (num(duration), width, bar - px(7))]
     return ";".join(graph), texts
+
+
+def video_legend_lines(events):
+    """Las líneas de la leyenda de unos eventos; los de 0.17.0 no la traen: la de una traza fuera de 'preparar'."""
+    legend = events.get("leyenda")
+    if isinstance(legend, list) and legend and all(isinstance(line, str) for line in legend):
+        return legend[:2]
+    return video_legend(0.0, False)
 
 
 def encoder_args(encoder):
@@ -13133,7 +13333,7 @@ def join_test_video(folder, events, plan, flow, binary=None):
     # unir un video de varios minutos puede tardar: se dice antes
     print("… %s el video de la prueba con ffmpeg (%s)" % ("uniendo y rotulando" if labels else "uniendo", binary),
           flush=True)
-    graph, texts = video_filter(events, size[0] if size else 0, size[1] if size else 0, labels)
+    graph, texts = video_filter(events, size[0] if size else 0, size[1] if size else 0, labels, font_widths(font))
     for name, text in texts.items():
         (work / name).write_text(text, encoding="utf-8")
     (work / "lista.txt").write_text(concat_list(events), encoding="utf-8")
@@ -13287,7 +13487,7 @@ class TestVideo:
         """(tramos, marcas, {"marcas": estado, "detalle": …}) para eventos.json."""
         if not self.rows:
             return [], [], {"marcas": "sin traza", "detalle": "la corrida no llegó a procesar su traza: los rótulos son "
-                                                              "los de la computadora (preparación, recorrido y fin)"}
+                                                              "los de la computadora (preparación, medición y fin)"}
         convert, state, detail = trace_clock(self.rows, self.clock_rows, self.offset, self.clock.get("traza"))
         if convert is None:
             return [], [], {"marcas": "falló", "detalle": detail}
@@ -13359,9 +13559,9 @@ def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=No
         save_test_video(folder, flow_name, events)
     count = len(events["tramos_video"])
     tail = video_tail(flow, plan)
-    what = ("desde que se abre la app ('preparar' incluido) hasta %s; rótulos de cada parte: preparación (no se mide), cada "
-            "tramo medido, las marcas del plan y el fin" % ("que termina el recorrido" if not tail else
-                                                            "%s s después del recorrido" % fmt(tail)))
+    what = ("desde que se abre la app ('preparar' incluido) hasta %s; el rótulo de cada parte dice si la traza graba y si "
+            "se mide: solo cuenta lo marcado «Medición». Cada marca del plan sale en su instante, con su papel (inicio o "
+            "fin de un tramo)" % ("que termina el recorrido" if not tail else "%s s después del recorrido" % fmt(tail)))
     pieces = "el tramo de %s" % work if count == 1 else "los %d tramos de %s seguidos" % (count, work)
     again = perf_command(root, "video", "--carpeta", relative_folder(folder, root), "--flujo", flow_name)
     lines = []
@@ -13396,7 +13596,7 @@ def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=No
     if state in ("aproximada", "falló"):
         lines.append("· Marcas del plan en el video: %s (%s)" % (
             "ubicadas de forma aproximada" if state == "aproximada" else "no se pudieron ubicar; el video sale igual, "
-            "con los rótulos de preparación, recorrido y fin", events["alineacion"].get("detalle") or "sin detalle"))
+            "con los rótulos de preparación, medición y fin", events["alineacion"].get("detalle") or "sin detalle"))
     return lines
 
 
@@ -13472,9 +13672,144 @@ def events_problem(events):
     return ""
 
 
+def old_events(events):
+    """True si los eventos son de 0.17.0 (versión 1): rótulos sin las tres capas y marcas sin papel."""
+    return isinstance(events, dict) and to_int(events.get("version") or 1) < VIDEO_EVENTS_VERSION
+
+
+ROLES_NO_TRACE, ROLES_RETRY = "sin traza", "traza sin leer"  # `papeles` de unos eventos de 0.17.0 rearmados sin V3
+
+
+def test_trace(folder, flow_name):
+    """La traza de la corrida de prueba de un flujo (prueba/<flujo>_<n>.perfetto-trace, comprimida o no): la más nueva,
+    o None."""
+    pattern = re.compile(re.escape(flow_name) + r"_\d+\.perfetto-trace(?:\.gz)?")
+    found = []
+    for path in (pathlib.Path(folder) / "prueba").glob("*.perfetto-trace*"):
+        try:
+            if pattern.fullmatch(path.name):
+                found.append((path.stat().st_mtime, path.name, path))
+        except OSError:
+            continue
+    return max(found)[2] if found else None
+
+
+def old_marks_roles(events, rows, flow, flow_name):
+    """0.18.0 · V4: las marcas de unos eventos de 0.17.0 con `papel` y `usada`, desde la traza de su prueba. Los eventos
+    no guardan el reloj: se prueba cada lugar de la traza donde pudo caer la primera marca y vale el que hace coincidir
+    todas (cada marca del video está en la traza, y cada ocurrencia de la traza que cae dentro del video está entre las
+    marcas, salvo que se hayan recortado por el tope). Si ninguno coincide, la traza es de otra corrida: None. La marca
+    con papel pasa al instante de su punto (0.17.0 la ponía en el inicio de su sección)."""
+    marks = events.get("marcas") or []
+    if not marks:
+        return []
+    seen = trace_marks(rows, flow, flow_name)
+    duration = events.get("duracion") or 0
+    whole = len(marks) < VIDEO_MARKS_MAX  # sin recortar: están todas las que caen dentro del video
+    for anchor in [item for item in seen if item["nombre"] == marks[0]["nombre"]]:
+        shift = marks[0]["t"] - anchor["ns"] / 1e9
+
+        def near(item, mark, shift=shift):
+            return item["nombre"] == mark["nombre"] and abs(item["ns"] / 1e9 + shift - mark["t"]) <= 0.02
+
+        hits = [next((item for item in seen if near(item, mark)), None) for mark in marks]
+        if any(hit is None for hit in hits):
+            continue
+        if whole and any(0.02 < item["ns"] / 1e9 + shift < duration - 0.02 and not any(near(item, mark) for mark in marks)
+                         for item in seen):
+            continue
+        out = [dict(mark, t=round(min(duration or mark["t"], mark["t"] + (hit["instante"] - hit["ns"]) / 1e9), 2),
+                    papel=hit["papel"], usada=bool(hit["usada"])) for mark, hit in zip(marks, hits)]
+        return sorted(out, key=lambda mark: (mark["t"], mark["nombre"]))
+    return None
+
+
+def upgrade_events(folder, events, plan, flow, flow_name):
+    """0.18.0 · V4: (eventos, líneas que lo cuentan). Los de una prueba de 0.17.0 (versión 1) pasan a los rótulos de
+    ahora sin repetir la prueba: los textos de las fases (V1) y la leyenda (V2) siempre; el papel de cada marca y si el
+    plan la usa (V3), con la traza de esa prueba. Sin la traza, o si no es la de ese video, sale con V1 y V2 y lo dice;
+    si la traza está y no se pudo leer, también, y otro `video` lo reintenta (`papeles` lo anota). Los de esta versión
+    quedan igual."""
+    pending = isinstance(events, dict) and events.get("papeles") in (ROLES_NO_TRACE, ROLES_RETRY)
+    if not old_events(events) and not pending:
+        return events, []
+    events = json.loads(json.dumps(events))
+    notes = []
+    if old_events(events):
+        inside = bool(flow.get("traza_desde_preparar")) and bool(str(flow.get("preparar") or "").strip()) \
+            and not startup_spec(flow)
+        renamed = {VIDEO_OLD_PREP: VIDEO_PREP_TRACED if inside else VIDEO_PREP, VIDEO_OLD_BETWEEN: VIDEO_BETWEEN}
+        for phase in events["fases"]:
+            phase["rotulo"] = renamed.get(phase["rotulo"], phase["rotulo"])
+        events["leyenda"] = video_legend(0.0, inside)
+        events["version"] = VIDEO_EVENTS_VERSION
+        notes.append("· El video era de una prueba de hb-performance 0.17.0: lo armé de nuevo con los rótulos de ahora "
+                     "(cada parte dice si la traza graba y si se mide, y la leyenda nombra el video, la traza y la "
+                     "métrica), sin repetir la prueba. Esa prueba no anotó cuándo arrancó la traza: la preparación va "
+                     "entera con un solo rótulo.")
+    events.pop("papeles", None)
+    if not events.get("marcas"):
+        return events, notes
+    root = project_root(pathlib.Path(folder)).resolve()
+    again = perf_command(root, "video", "--carpeta", relative_folder(pathlib.Path(folder), root), "--flujo", flow_name)
+    test_run = perf_command(root, *capture_args(folder, plan, flow_name, root) + ["--prueba"]) \
+        if flow_name in (plan.get("flujos") or {}) else ""
+    marks, why, retry = None, "", False
+    trace = test_trace(folder, flow_name)
+    if trace is None:
+        why = "no está la traza de esa prueba en %s" % (pathlib.Path(folder) / "prueba")
+    else:
+        try:
+            sql = fill_sql((ASSETS / "queries" / "metricas.sql").read_text(encoding="utf-8"), plan.get("paquete", ""),
+                           {"INPUT_GLOB": plan.get("input_slices") or INPUT_SLICES})
+            sets = run_tp_batch(find_tp(None), trace, [("metricas", sql)])["metricas"]
+            marks = old_marks_roles(events, trace_rows(*sets[-1]), flow, flow_name)
+            if marks is None:
+                why = "%s no es la traza de ese video (sus marcas no coinciden)" % trace
+        except (PerfError, OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
+            why, retry = "no pude leer %s (%s)" % (trace, one_line(str(error))[:160]), True
+    if marks is not None:
+        events["marcas"] = marks
+        if not notes:
+            notes.append("· Las marcas del video ya tienen su papel (inicio o fin de un tramo), con la traza de su prueba.")
+        return events, notes
+    events["papeles"] = ROLES_RETRY if retry else ROLES_NO_TRACE
+    notes.append("· Las marcas quedan sin su papel (inicio o fin de un tramo) y sin distinguir las que el plan no usa: "
+                 "%s. Los rótulos de cada parte y la leyenda sí son los de ahora. %s" % (
+                     why, "La traza sigue ahí: cuando se pueda leer (trace_processor), este comando lo completa sin "
+                          "repetir la prueba: %s" % again if retry else
+                     "Para tenerlos, repite la corrida de prueba (graba el video de nuevo): %s" % test_run if test_run
+                     else "Para tenerlos, repite la corrida de prueba de ese flujo."))
+    return events, notes
+
+
+def old_video_lines(folder, plan):
+    """0.18.0 · V4: lo que `siguiente` dice de un video de prueba de 0.17.0 (eventos.json versión 1): una línea por
+    flujo, con el comando que lo arma de nuevo con los rótulos de ahora. Es opcional: no cambia ningún paso."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    lines = []
+    for path in sorted((folder / VIDEO_DIR).glob("*/eventos.json")):
+        try:
+            events = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        retry = isinstance(events, dict) and events.get("papeles") == ROLES_RETRY  # la traza está: no se pudo leer
+        if not (old_events(events) or retry) or events_problem(events):
+            continue
+        flow_name = next((flow for flow in plan.get("flujos") or {} if slug(flow) == path.parent.name), path.parent.name)
+        lines.append("El video de la prueba de %s es de hb-performance 0.17.0: %s. Opcional (no repite la prueba ni cambia "
+                     "ningún paso): `%s`" % (
+                         flow_name, "a sus marcas les falta el papel (la traza no se pudo leer la vez anterior)" if retry
+                         else "sus rótulos no dicen si la traza graba ni el papel de cada marca", perf_command(root, "video", "--carpeta", relative_folder(folder, root), "--flujo",
+                                                 flow_name)))
+    return lines
+
+
 def cmd_video(args):
     """V3–V5: arma de nuevo el video de la prueba de cada flujo (o del de --flujo) desde video/<flujo>/eventos.json: el
-    visor y, con ffmpeg, el video unido y rotulado. Sirve después de instalar ffmpeg, sin repetir la prueba."""
+    visor y, con ffmpeg, el video unido y rotulado. Sirve después de instalar ffmpeg, sin repetir la prueba, y para pasar
+    el video de una prueba de 0.17.0 a los rótulos de ahora (0.18.0 · V4)."""
     folder = pathlib.Path(args.carpeta)
     if not (folder / "plan.json").is_file():
         raise PerfError("no existe %s: --carpeta es la carpeta de una investigación" % (folder / "plan.json"))
@@ -13501,7 +13836,8 @@ def cmd_video(args):
             raise PerfError("%s %s: no puedo armar el video del flujo %s" % (path, problem, flow_name)).con(
                 guardado="nada", seguir=[test_run])
         flow = (plan.get("flujos") or {}).get(flow_name) or {}
-        for line in write_test_video(folder, flow_name, events, plan, flow):
+        events, notes = upgrade_events(folder, events, plan, flow, flow_name)
+        for line in write_test_video(folder, flow_name, events, plan, flow) + notes:
             print(line)
     print_next(folder, plan)
 

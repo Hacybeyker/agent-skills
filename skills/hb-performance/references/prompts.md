@@ -290,7 +290,7 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --carpeta <carpeta> --h
 
 Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial.
 
-### Unir el video de la prueba (instalaste ffmpeg después de la prueba)
+### Unir el video de la prueba (instalaste ffmpeg después de la prueba, o el video es de 0.17.0)
 
 **Dónde:** terminal, sin chat
 
@@ -298,7 +298,7 @@ Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-ger
 cd <raíz> && python3 -I <skill>/scripts/perf.py video --carpeta <carpeta>
 ```
 
-Arma de nuevo el video de evidencia de cada prueba desde `video/<flujo>/eventos.json`, sin repetirla: el visor `prueba-<flujo>.html` y, con `ffmpeg`, el video unido y rotulado `prueba-<flujo>.mp4` (`--flujo <flujo>` para uno solo). Los tramos originales quedan en `video/<flujo>/`. Cómo instalar `ffmpeg` sin root: `perf.py setup --estado` o [setup.md](setup.md) · Requisitos de la máquina.
+Arma de nuevo el video de evidencia de cada prueba desde `video/<flujo>/eventos.json`, sin repetirla: el visor `prueba-<flujo>.html` y, con `ffmpeg`, el video unido y rotulado `prueba-<flujo>.mp4` (`--flujo <flujo>` para uno solo). Los tramos originales quedan en `video/<flujo>/`. Si la prueba se hizo con 0.17.0, el video sale con los rótulos de ahora (cada parte dice si la traza graba y si se mide; cada marca, su papel), sin repetirla: `siguiente` lo ofrece en una línea opcional. Cómo instalar `ffmpeg` sin root: `perf.py setup --estado` o [setup.md](setup.md) · Requisitos de la máquina.
 
 ### Agregar una métrica, un tramo o una marca
 

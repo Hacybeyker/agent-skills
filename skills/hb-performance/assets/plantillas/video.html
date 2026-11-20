@@ -33,11 +33,17 @@
   .fase { min-height:52px; display:flex; align-items:center; padding:6px 16px; font-weight:700; font-size:17px;
     background:#6b7380; }
   .fase.med { background:#3657d6; } .fase.rec { background:#4b5a8f; } .fase.fin { background:#3a3d45; }
-  .marca { height:34px; display:flex; align-items:center; padding:0 12px; }
-  .marca span { background:#fff3d6; color:#9a6400; border-radius:4px; padding:2px 8px; font-size:13px; visibility:hidden;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+  /* El chip de una marca del plan: su papel (inicio o fin de un tramo) y, en letra menor, su nombre técnico. La
+     ocurrencia que el plan no usa va atenuada, para que nunca parezca el borde de un tramo. */
+  .marca { min-height:38px; display:flex; align-items:center; gap:8px; padding:4px 12px; visibility:hidden; }
+  .marca span { background:#fff3d6; color:#9a6400; border-radius:4px; padding:2px 8px; font-size:13px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; min-width:0; }
+  .marca.no span { background:#2a2d35; color:#9ca2ad; }
+  .marca small { color:#9ca2ad; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    flex:1 1 0; min-width:0; }
   video { width:100%; display:block; background:#000; max-height:70vh; }
-  .pie { position:relative; height:46px; }
+  .pie { position:relative; padding-top:46px; }
+  .leyenda { margin:0; padding:0 12px 10px; font-size:12px; line-height:1.5; color:#b3b8c2; }
   .franja { position:absolute; left:0; right:0; top:18px; height:12px; display:flex; }
   .franja div { height:100%; margin-right:2px; }
   .cab { position:absolute; top:12px; width:3px; height:24px; background:#bf3a2f; }
@@ -50,6 +56,8 @@
   th { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
   td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
   td a { color:var(--accent); text-decoration:none; } td a:hover { text-decoration:underline; }
+  tr.no td { color:var(--muted); }
+  ul.capas { margin:0 0 12px; padding-left:18px; font-size:14px; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle; }
   .note { background:var(--warn-soft); border:1px solid var(--warn); border-radius:10px; padding:10px 14px; font-size:14px;
     margin:0 0 12px; }
@@ -58,22 +66,28 @@
 </style>
 </head>
 <body>
-<header><div class="inner"><button class="theme-btn" id="theme-btn" type="button">Tema</button><p class="kicker">{{PROJECT}}</p><h1>{{TITLE}}</h1><p>La corrida de prueba completa, desde que se abre la app hasta el final. No se mide: sirve para ver qué se va a medir.</p></div></header>
+<header><div class="inner"><button class="theme-btn" id="theme-btn" type="button">Tema</button><p class="kicker">{{PROJECT}}</p><h1>{{TITLE}}</h1><p>La corrida de prueba completa, desde que se abre la app hasta el final. No cuenta como medición: sirve para ver qué se va a medir.</p></div></header>
 <main>
 <div class="player" id="player">
   <div class="fase" id="fase">—</div>
-  <div class="marca"><span id="marca"></span></div>
+  <div class="marca" id="chip"><span id="marca"></span><small id="marca-nombre"></small></div>
   <video id="v" muted playsinline preload="metadata"></video>
-  <div class="pie"><div class="franja" id="franja"></div><div class="cab" id="cab"></div><div class="reloj" id="reloj">0.0 s</div></div>
+  <div class="pie"><div class="franja" id="franja"></div><div class="cab" id="cab"></div><div class="reloj" id="reloj">0.0 s</div><p class="leyenda" id="leyenda"></p></div>
 </div>
 <section>
   <h2>Partes de la prueba</h2>
   <div class="note" id="aviso" hidden></div>
   <p class="sub" id="resumen"></p>
+  <ul class="capas">
+    <li><strong>Video:</strong> la pantalla, de principio a fin. Solo se graba en la prueba.</li>
+    <li><strong>Traza:</strong> lo que registra Perfetto. Cada parte dice si la traza está grabando.</li>
+    <li><strong>Métrica:</strong> solo cuentan las partes marcadas «Medición», de una marca del plan a otra.</li>
+  </ul>
   <div class="ctl"><button class="b" id="play" type="button">▶ Reproducir</button><button class="b" id="rest" type="button">⟲ Desde el inicio</button></div>
   <table><thead><tr><th>Desde</th><th>Parte</th></tr></thead><tbody id="fases"></tbody></table>
   <h2 style="margin-top:16px">Marcas del plan</h2>
-  <table><thead><tr><th>Momento</th><th>Marca</th></tr></thead><tbody id="marcas"></tbody></table>
+  <p class="sub">Cada marca es un instante. Su papel dice qué tramo empieza o termina ahí; «(no usada)» es una vez que la marca salió y el plan no la usa.</p>
+  <table><thead><tr><th>Momento</th><th>Marca</th><th>Papel</th></tr></thead><tbody id="marcas"></tbody></table>
 </section>
 </main>
 <footer>Generado por hb-performance a partir de <code>video/&lt;flujo&gt;/eventos.json</code>. Los tramos de video están en <code>video/&lt;flujo&gt;/</code>, junto a este archivo; si no se ven, abre la página desde la carpeta de la investigación, sin moverla. {{DATE}}.</footer>
@@ -95,7 +109,9 @@
 (function () {
   var EV = JSON.parse(document.getElementById("eventos").textContent);
   var COLORS = {prep: "#6b7380", med: "#3657d6", rec: "#4b5a8f", fin: "#3a3d45"};
-  var MARK_S = 1.2, D = EV.duracion, parts = EV.tramos_video, seg = 0;
+  var MARK_S = 1.5, D = EV.duracion, parts = EV.tramos_video, seg = 0;
+  var NO_USADA = "(no usada)";
+  function used(m) { return m.usada !== false; }
   var v = document.getElementById("v");
   function fmt(t) { return t.toFixed(1) + " s"; }
   function text(el, value) { el.textContent = value; return el; }
@@ -107,8 +123,9 @@
     d.title = f.rotulo;
     fr.appendChild(d);
   });
-  function row(body, t, label, color) {
+  function row(body, t, label, color, role, dim) {
     var tr = document.createElement("tr"), a = document.createElement("a"), td1 = document.createElement("td"), td2 = document.createElement("td");
+    if (dim) tr.className = "no";
     td1.className = "num";
     a.href = "?t=" + t;
     text(a, fmt(t));
@@ -116,18 +133,22 @@
     td1.appendChild(a);
     if (color) { var dot = document.createElement("span"); dot.className = "dot"; dot.style.background = color; td2.appendChild(dot); }
     td2.appendChild(document.createTextNode(label));
-    tr.appendChild(td1); tr.appendChild(td2); body.appendChild(tr);
+    tr.appendChild(td1); tr.appendChild(td2);
+    if (role !== undefined) { var td3 = document.createElement("td"); text(td3, role); tr.appendChild(td3); }
+    body.appendChild(tr);
   }
   EV.fases.forEach(function (f) { row(document.getElementById("fases"), f.desde, f.rotulo, COLORS[f.tipo]); });
   var marks = document.getElementById("marcas");
-  if (!EV.marcas.length) { var tr = document.createElement("tr"), td = document.createElement("td"); td.colSpan = 2; text(td, "Sin marcas del plan ubicadas en el video."); tr.appendChild(td); marks.appendChild(tr); }
-  EV.marcas.forEach(function (m) { row(marks, m.t, m.nombre); });
+  if (!EV.marcas.length) { var tr = document.createElement("tr"), td = document.createElement("td"); td.colSpan = 3; text(td, "Sin marcas del plan ubicadas en el video."); tr.appendChild(td); marks.appendChild(tr); }
+  EV.marcas.forEach(function (m) { row(marks, m.t, m.nombre, null, used(m) ? (m.papel || "—") : NO_USADA, !used(m)); });
+  // La leyenda fija: las tres capas (video, traza y métrica). Los eventos de una versión anterior no la traen.
+  text(document.getElementById("leyenda"), (EV.leyenda && EV.leyenda.length ? EV.leyenda : ["Video: toda la prueba · Traza: desde el fin de la preparación", "Métrica: solo cuenta lo marcado Medición"]).join(" · "));
   text(document.getElementById("resumen"), parts.length + (parts.length === 1 ? " tramo" : " tramos") + " de video (" + EV.grabador + "), " + fmt(D) + " en total. Toca un momento para saltar ahí; también sirve ?t=<segundos> en la dirección.");
   var al = EV.alineacion || {};
   if (al.marcas && al.marcas !== "ok") {
     var note = document.getElementById("aviso");
     note.hidden = false;
-    text(note, (al.marcas === "aproximada" ? "Las marcas del plan están ubicadas de forma aproximada" : al.marcas === "falló" ? "Las marcas del plan no se pudieron ubicar: el video muestra la preparación, el recorrido y el fin" : "Sin las marcas del plan") + (al.detalle ? " (" + al.detalle + ")." : "."));
+    text(note, (al.marcas === "aproximada" ? "Las marcas del plan están ubicadas de forma aproximada" : al.marcas === "falló" ? "Las marcas del plan no se pudieron ubicar: el video muestra la preparación, la medición y el fin" : "Sin las marcas del plan") + (al.detalle ? " (" + al.detalle + ")." : "."));
   }
   function load(i, t, play) {
     seg = i;
@@ -144,9 +165,15 @@
   function paint() {
     var t = Math.min(now(), D), f = EV.fases.filter(function (x) { return t >= x.desde && t < x.hasta; })[0] || EV.fases[EV.fases.length - 1];
     var fe = document.getElementById("fase"); text(fe, f.rotulo); fe.className = "fase " + f.tipo;
-    var m = null;
-    EV.marcas.forEach(function (x, i) { var end = Math.min(x.t + MARK_S, (EV.marcas[i + 1] || {t: D}).t); if (end <= x.t) end = x.t + 0.1; if (t >= x.t && t < end) m = x; });
-    var me = document.getElementById("marca"); text(me, m ? "● " + m.nombre : ""); me.style.visibility = m ? "visible" : "hidden";
+    // Una marca es un instante: su chip se ve MARK_S desde ahí (o hasta la siguiente). La que el plan no usa nunca tapa a una usada.
+    var m = null, extra = null;
+    EV.marcas.forEach(function (x) { if (t >= x.t && t < x.t + MARK_S) { if (used(x)) m = x; else extra = x; } });
+    m = m || extra;
+    var chip = document.getElementById("chip");
+    chip.className = "marca" + (m && !used(m) ? " no" : "");
+    chip.style.visibility = m ? "visible" : "hidden";
+    text(document.getElementById("marca"), !m ? "" : !used(m) ? m.nombre + " " + NO_USADA : "● " + (m.papel || m.nombre));
+    text(document.getElementById("marca-nombre"), m && used(m) && m.papel ? m.nombre : "");
     document.getElementById("cab").style.left = Math.min(100, t / D * 100) + "%";
     text(document.getElementById("reloj"), fmt(t));
   }
