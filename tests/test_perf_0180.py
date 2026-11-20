@@ -25,22 +25,22 @@ SCRIPT = SKILL / "scripts" / "perf.py"
 MS = 1000000
 PARTS = ["video/pedidos/parte1.mp4", "video/pedidos/parte2.mp4"]
 
-# Una traza inventada: la marca `pedidos_vuelta` sale dos veces y el plan usa la última (regla `cual`).
+# Una traza inventada: la marca `pedidos_de_nuevo` sale dos veces y el plan usa la última (regla `cual`).
 ROWS = [("proceso", 0, 0, 0, "com.example.app"), ("limites", 0, 9000 * MS, 0, "")] + \
     [("frame", 1500 * MS + i * 20 * MS, 16 * MS, 0, "None") for i in range(40)] + \
     [("frame", 2600 * MS, 48 * MS, 0, "App Deadline Missed"), ("frame", 7000 * MS, 40 * MS, 0, "App Deadline Missed"),
      ("hilo", 1600 * MS, 90 * MS, 0, "Choreographer#doFrame"), ("hilo", 7100 * MS, 120 * MS, 0, "inflate"),
      ("seccion", 1500 * MS, 1 * MS, 0, "SCREEN Pedidos onCreate"),
      ("seccion", 1700 * MS, 600 * MS, 0, "HTTP GET pedidos"),
-     ("seccion", 2400 * MS, 1 * MS, 0, "MARK pedidos_vuelta"),
+     ("seccion", 2400 * MS, 1 * MS, 0, "MARK pedidos_de_nuevo"),
      ("seccion", 3000 * MS, 1 * MS, 0, "MARK pedidos_visible"),
      ("seccion", 4200 * MS, 1 * MS, 0, "MARK detalle_tap"),
      ("seccion", 4300 * MS, 900 * MS, 0, "HTTP GET pedidos/{id}"),
      ("seccion", 5600 * MS, 1 * MS, 0, "MARK detalle_visible"),
      ("seccion", 6400 * MS, 1 * MS, 0, "MARK volver_tap"),
-     ("seccion", 7600 * MS, 1 * MS, 0, "MARK pedidos_vuelta")]
+     ("seccion", 7600 * MS, 1 * MS, 0, "MARK pedidos_de_nuevo")]
 FLOW = {"titulo": "Pedidos", "preparar": "true",
-        "ventana": {"desde": {"marca": "SCREEN Pedidos onCreate"}, "hasta": {"marca": "MARK pedidos_vuelta"}},
+        "ventana": {"desde": {"marca": "SCREEN Pedidos onCreate"}, "hasta": {"marca": "MARK pedidos_de_nuevo"}},
         "metricas_usuario": [{"nombre": "lista_visible_ms", "desde": {"marca": "SCREEN Pedidos onCreate"},
                               "hasta": {"marca": "MARK pedidos_visible"}}],
         "segmentos": [
@@ -49,7 +49,7 @@ FLOW = {"titulo": "Pedidos", "preparar": "true",
             {"nombre": "abrir_detalle", "titulo": "Abrir el detalle", "desde": {"marca": "MARK detalle_tap"},
              "hasta": {"marca": "MARK detalle_visible"}},
             {"nombre": "volver", "titulo": "Volver a la lista", "desde": {"marca": "MARK volver_tap"},
-             "hasta": {"marca": "MARK pedidos_vuelta", "cual": "ultima"}}]}
+             "hasta": {"marca": "MARK pedidos_de_nuevo", "cual": "ultima"}}]}
 # La traza empieza a los 1003,0 s del reloj de la computadora; el video, a los 1000,0.
 CLOCK_OUTSIDE = {"preparar_inicio": 1000.4, "preparar_fin": 1002.8, "traza": 1003.0, "recorrido_inicio": 1004.5,
                  "recorrido_fin": 1011.2}
@@ -120,7 +120,6 @@ class MeasurementsUnchangedTest(unittest.TestCase):
         self.assertEqual([[m[0], round(m[1], 4), m[2], m[3]] for m in metrics], GOLDEN)
 
     def test_las_fases_de_0170_se_completan_sin_repetirlas(self):
-        self.assertEqual(perf.VERSION, "0.18.0")
         for version in ("0.16.0", "0.17.0", perf.VERSION):
             self.assertTrue(perf.same_capture(version), version)
 
@@ -129,7 +128,7 @@ class MeasurementsUnchangedTest(unittest.TestCase):
         before = [bounds for _, bounds in perf.segment_windows(markers, FLOW["segmentos"])]
         perf.video_mark_roles(markers, FLOW, "pedidos")
         self.assertEqual([bounds for _, bounds in perf.segment_windows(markers, FLOW["segmentos"])], before)
-        self.assertEqual(before[2], (6400 * MS, 7601 * MS))  # la última `pedidos_vuelta`, no la primera
+        self.assertEqual(before[2], (6400 * MS, 7601 * MS))  # la última `pedidos_de_nuevo`, no la primera
 
 
 # ── V1 · Los textos de las fases dicen si la traza graba y si se mide ────────
@@ -224,7 +223,7 @@ class LegendTest(unittest.TestCase):
 
     def test_va_igual_en_el_visor(self):
         events = demo_events(CLOCK_INSIDE)
-        page = perf.video_page_html(events, "App de pedidos", "2026-11-20")
+        page = perf.video_page_html(events, "App de pedidos", "2026-03-02")
         self.assertEqual(perf.embedded_events(page)["leyenda"], events["leyenda"])
         self.assertIn('id="leyenda"', page)
         self.assertIn("EV.leyenda", page)
@@ -244,12 +243,12 @@ class MarkRolesTest(unittest.TestCase):
     def test_papel_y_usada_con_una_marca_que_sale_dos_veces(self):
         self.assertEqual(self.marks(), [
             (4.5, "SCREEN Pedidos onCreate", "inicio de Cargar la lista de pedidos", True),
-            (5.4, "MARK pedidos_vuelta", "", False),  # la primera: el plan usa la última
+            (5.4, "MARK pedidos_de_nuevo", "", False),  # la primera: el plan usa la última
             (6.0, "MARK pedidos_visible", "fin de Cargar la lista de pedidos", True),
             (7.2, "MARK detalle_tap", "inicio de Abrir el detalle", True),
             (8.6, "MARK detalle_visible", "fin de Abrir el detalle", True),
             (9.4, "MARK volver_tap", "inicio de Volver a la lista", True),
-            (10.6, "MARK pedidos_vuelta", "fin de Volver a la lista", True)])
+            (10.6, "MARK pedidos_de_nuevo", "fin de Volver a la lista", True)])
 
     def test_una_marca_que_cierra_un_tramo_y_abre_otro(self):
         flow = dict(FLOW, segmentos=[
@@ -263,10 +262,10 @@ class MarkRolesTest(unittest.TestCase):
     def test_la_regla_cual_decide_la_ocurrencia_usada(self):
         first = dict(FLOW, ventana=None, metricas_usuario=[], segmentos=[
             {"nombre": "volver", "titulo": "Volver", "desde": {"marca": "SCREEN Pedidos onCreate"},
-             "hasta": {"marca": "MARK pedidos_vuelta", "cual": "primera"}}])
-        marks = [mark for mark in self.marks(flow=first) if mark[1] == "MARK pedidos_vuelta"]
-        self.assertEqual(marks, [(5.4, "MARK pedidos_vuelta", "fin de Volver", True),
-                                 (10.6, "MARK pedidos_vuelta", "", False)])
+             "hasta": {"marca": "MARK pedidos_de_nuevo", "cual": "primera"}}])
+        marks = [mark for mark in self.marks(flow=first) if mark[1] == "MARK pedidos_de_nuevo"]
+        self.assertEqual(marks, [(5.4, "MARK pedidos_de_nuevo", "fin de Volver", True),
+                                 (10.6, "MARK pedidos_de_nuevo", "", False)])
 
     def test_la_marca_de_una_metrica_de_usuario_cuenta_como_usada(self):
         flow = {"metricas_usuario": [{"nombre": "detalle_ms", "desde": {"marca": "MARK detalle_tap"},
@@ -277,8 +276,8 @@ class MarkRolesTest(unittest.TestCase):
     def test_sin_tramos_el_papel_es_el_de_la_ventana_del_flujo(self):
         flow = {"titulo": "Pedidos", "ventana": FLOW["ventana"]}
         self.assertEqual(self.marks(flow=flow), [(4.5, "SCREEN Pedidos onCreate", "inicio de Pedidos", True),
-                                                 (5.4, "MARK pedidos_vuelta", "", False),
-                                                 (10.6, "MARK pedidos_vuelta", "fin de Pedidos", True)])
+                                                 (5.4, "MARK pedidos_de_nuevo", "", False),
+                                                 (10.6, "MARK pedidos_de_nuevo", "fin de Pedidos", True)])
 
     def test_la_version_del_formato_es_2(self):
         events = demo_events()
@@ -315,19 +314,19 @@ class MarkChipsTest(unittest.TestCase):
     def test_el_texto_del_chip(self):
         self.assertEqual(perf.chip_texts({"nombre": "MARK volver_tap", "papel": "inicio de Volver", "usada": True}),
                          ("● inicio de Volver", "MARK volver_tap"))
-        self.assertEqual(perf.chip_texts({"nombre": "MARK pedidos_vuelta", "papel": "", "usada": False}),
-                         ("MARK pedidos_vuelta (no usada)", ""))
+        self.assertEqual(perf.chip_texts({"nombre": "MARK pedidos_de_nuevo", "papel": "", "usada": False}),
+                         ("MARK pedidos_de_nuevo (no usada)", ""))
         self.assertEqual(perf.chip_texts({"nombre": "MARK suelta", "papel": "", "usada": True}), ("● MARK suelta", ""))
         self.assertEqual(perf.chip_texts({"nombre": "MARK de_0170"}), ("● MARK de_0170", ""))  # sin los campos nuevos
 
     def test_en_el_video_la_no_usada_va_atenuada(self):
         events = {"duracion": 12.0, "fases": [{"desde": 0.0, "hasta": 12.0, "rotulo": "Medición · Pedidos", "tipo": "med"}],
                   "marcas": [{"t": 2.0, "nombre": "MARK volver_tap", "papel": "inicio de Volver a la lista", "usada": True},
-                             {"t": 6.0, "nombre": "MARK pedidos_vuelta", "papel": "", "usada": False}]}
+                             {"t": 6.0, "nombre": "MARK pedidos_de_nuevo", "papel": "", "usada": False}]}
         graph, texts = perf.video_filter(events, 540, 1170)
         self.assertEqual(texts["rotulo-marca-1.txt"], "● inicio de Volver a la lista")
         self.assertEqual(texts["rotulo-marca-1-nombre.txt"], "MARK volver_tap")  # el nombre técnico, en letra menor
-        self.assertEqual(texts["rotulo-marca-2.txt"], "MARK pedidos_vuelta (no usada)")
+        self.assertEqual(texts["rotulo-marca-2.txt"], "MARK pedidos_de_nuevo (no usada)")
         self.assertNotIn("rotulo-marca-2-nombre.txt", texts)
         used = re.search(r"drawtext=[^,;]*textfile=rotulo-marca-1\.txt[^,;]*", graph).group(0)
         unused = re.search(r"drawtext=[^,;]*textfile=rotulo-marca-2\.txt[^,;]*", graph).group(0)
@@ -350,10 +349,10 @@ class MarkChipsTest(unittest.TestCase):
 class ViewerRolesTest(unittest.TestCase):
     def test_el_visor_lleva_los_campos_nuevos(self):
         events = demo_events()
-        page = perf.video_page_html(events, "App de pedidos", "2026-11-20")
+        page = perf.video_page_html(events, "App de pedidos", "2026-03-02")
         embedded = perf.embedded_events(page)
         self.assertEqual(embedded, events)
-        self.assertEqual(embedded["marcas"][1], {"t": 5.4, "nombre": "MARK pedidos_vuelta", "papel": "", "usada": False})
+        self.assertEqual(embedded["marcas"][1], {"t": 5.4, "nombre": "MARK pedidos_de_nuevo", "papel": "", "usada": False})
         self.assertIn("var MARK_S = %s," % perf.VIDEO_MARK_S, page)  # la misma duración del chip que en el video
         self.assertIn('var NO_USADA = "%s";' % perf.VIDEO_UNUSED, page)
         self.assertIn("<th>Papel</th>", page)
@@ -364,7 +363,7 @@ class ViewerRolesTest(unittest.TestCase):
 
     def test_el_visor_lee_unos_eventos_de_0170(self):
         old = as_version_1(demo_events())
-        page = perf.video_page_html(old, "App de pedidos", "2026-11-20")
+        page = perf.video_page_html(old, "App de pedidos", "2026-03-02")
         self.assertEqual(perf.embedded_events(page), old)
         self.assertIn("m.usada !== false", page)  # sin `usada`, la marca cuenta como usada
         self.assertIn("m.papel || m.nombre", page)  # sin `papel`, su nombre
@@ -745,7 +744,7 @@ class OldReportOfferTest(DecisionBase):
 
     def test_no_lo_ofrece_con_la_estructura_de_ahora(self):
         page = perf.report_page("App de pedidos", "Performance · Pedidos", "Reporte técnico dev", "dev",
-                                [("resumen", "Resumen", "<p>x</p>")], "2026-11-20")
+                                [("resumen", "Resumen", "<p>x</p>")], "2026-03-02")
         write(self.folder / "reporte-inicial-dev.html", page)
         out = self.ok_in("siguiente", "--carpeta", self.rel)
         self.assertNotIn("Opcional, antes de decidir", out)
@@ -753,7 +752,7 @@ class OldReportOfferTest(DecisionBase):
 
     def test_la_estructura_sale_de_la_marca_de_la_pagina(self):
         page = perf.report_page("App de pedidos", "Performance · Pedidos", "", "gerencia",
-                                [("resumen", "Resumen", "<p>x</p>")], "2026-11-20")
+                                [("resumen", "Resumen", "<p>x</p>")], "2026-03-02")
         self.assertIn('<meta name="hb-perf-reporte" content="estructura-2">', page)
         self.assertNotIn(perf.VERSION, page)  # la versión de la skill no va en los HTML
         self.assertNotIn("{{", page)
@@ -1203,6 +1202,67 @@ class TestRunSectionsTest(CaptureBase):
         self.assertIn("| GET items/{id} | 2 | 0 | 0 | 0 |", detail.read_text(encoding="utf-8"))
         self.assertIn("| MainActivity onResume | 1 |", detail.read_text(encoding="utf-8"))
         self.assertLess(out.index("Secciones propias:"), out.rindex("Siguiente"))
+
+
+class TestRunInvalidSectionsTest(CaptureBase):
+    def test_una_prueba_invalida_tambien_deja_la_linea_corta(self):
+        self.tp_outputs(GOOD.replace("SCREEN MainActivity onResume", "SCREEN LoginActivity onCreate"))
+        result = self.perf("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertNotEqual(result.returncode, 0)
+        text = result.stdout + result.stderr
+        detail = self.folder / "prueba" / "home-metricas.md"
+        self.assertIn("Secciones propias: HTTP ×2 · SCREEN ×1 (el detalle, con cada ruta, en %s)" % detail, text)
+        self.assertTrue(detail.read_text(encoding="utf-8").startswith("# Corrida de prueba\n\n## Secciones propias"))
+        self.assertNotIn("Traceback", text)
+
+
+# ── Z · La documentación, coherente con lo nuevo ─────────────────────────────
+
+class DocsTest(unittest.TestCase):
+    def text(self, *parts):
+        return SKILL.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_la_version_esta_en_los_tres_lugares_y_en_ningun_html(self):
+        self.assertIn('  version: "%s"' % perf.VERSION, self.text("SKILL.md"))
+        self.assertIn("| `hb-performance` | Flujo | %s |" % perf.VERSION, (ROOT / "CATALOG.md").read_text(encoding="utf-8"))
+        for page in sorted((SKILL / "assets" / "plantillas").glob("*.html")):
+            self.assertNotIn(perf.VERSION, page.read_text(encoding="utf-8"), page.name)  # la versión solo va en estado.md
+        self.assertLessEqual(len(self.text("SKILL.md").splitlines()), 500)
+
+    def test_las_tres_capas_del_video(self):
+        for name in ("ficha.md", "medicion.md"):
+            doc = self.text("references", name)
+            for row in ("| **Video** | La pantalla, de principio a fin. Solo en la prueba |", "| **Traza** | Lo que cubre Perfetto",
+                        "| **Métrica** | Solo los tramos entre marcas |"):
+                self.assertIn(row, doc, name)
+            self.assertNotIn("Recorrido · entre tramos", doc)
+        ficha = self.text("references", "ficha.md")
+        for label in (perf.VIDEO_PREP, perf.VIDEO_PREP_TRACED, perf.VIDEO_BETWEEN, perf.VIDEO_END, "(no usada)"):
+            self.assertIn(label, ficha)
+        self.assertIn(perf.VIDEO_LEGEND_METRIC, ficha)
+
+    def test_archivar_reabrir_y_la_actualizacion_de_la_skill(self):
+        skill = self.text("SKILL.md")
+        prompts = self.text("references", "prompts.md")
+        for doc in (skill, prompts, self.text("references", "medicion.md")):
+            self.assertIn("archivar", doc)
+        for doc in (skill, prompts, self.text("references", "diagnostico.md")):
+            self.assertIn("--reabrir", doc)
+        self.assertIn("### Archivar una investigación que no se va a retomar", prompts)
+        self.assertIn("### Reabrir una decisión", prompts)
+        self.assertIn("archivada", self.text("references", "cierre.md"))
+        for doc in ((ROOT / "README.md").read_text(encoding="utf-8"), self.text("references", "setup.md")):
+            self.assertIn("skills update -g", doc)
+            self.assertIn("una copia a mano la saca del registro de la CLI", doc)
+        repo = (ROOT / "PROMPTS.md").read_text(encoding="utf-8")
+        for word in ("perf.py archivar", "--reabrir", "skills update -g"):
+            self.assertIn(word, repo)
+
+    def test_cada_comando_nuevo_tiene_su_ayuda(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('sub.add_parser("archivar"', source)
+        self.assertIn('p.add_argument("--reabrir"', source)
+        self.assertIn("  archivar      archiva una investigación que no se va a retomar", source)  # la lista del encabezado
 
 
 if __name__ == "__main__":

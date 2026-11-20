@@ -7325,7 +7325,7 @@ def print_next(folder, plan, flow=None):
         for line, kept in said_once_lines(folder, plan):  # S2: una sola vez por investigación
             print("  · Línea base de una versión anterior (%sno se repite): %s" % (
                 "queda en \"Decisiones\" de estado.md y " if kept else "", line))
-    if not title.startswith(("investigación cerrada", "triage cerrado")):
+    if not title.startswith(("investigación cerrada", "triage cerrado", "en pausa", "archivada")):
         for line in old_video_lines(folder, plan):  # 0.18.0 · V4: opcional, después de los pasos; no cambia ninguno
             print("  · " + line)
     for line in cost_lines(folder, plan):
@@ -21349,9 +21349,9 @@ def old_structure(path):
 
 
 def old_report_step(folder, root, rel, kind="inicial"):
-    """S3: si el reporte HTML que hay es de una estructura anterior, el paso opcional que lo genera de nuevo con la de
-    ahora (guardando antes una copia del anterior), como un aviso con su comando: no desplaza los caminos de la
-    decisión. None si no hace falta."""
+    """S3: si el reporte HTML que hay es de una estructura anterior, el aviso opcional, con su comando, que lo genera de
+    nuevo con la de ahora (guardando antes una copia del anterior). No es un paso numerado: no desplaza los caminos de
+    la decisión. None si no hace falta."""
     report = report_file(folder, kind)
     if report is None or not old_structure(report):
         return None
