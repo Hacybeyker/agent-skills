@@ -967,7 +967,8 @@ class SetupRestoreTest(SetupBase):
             with self.subTest(carpeta=bool(extra)):
                 out = self.good("setup", "--reponer", *extra) if extra else self.good("setup", "--reponer", "--simular")
         out = self.good("setup", "--estado")  # también sin --carpeta: mira las investigaciones abiertas del proyecto
-        self.assertIn("No lo actualices ahora: hay una investigación que ya midió (reports/perf/pagos/2099-01-01)", out)
+        self.assertIn("No lo actualices ahora: hay una investigación que ya midió", out)
+        self.assertRegex(out, r"- reports/perf/pagos/2099-01-01: abierta; su última medición fue hace \d+ días \(2020-01-01\)")
         self.assertNotIn("--actualizar", "\n".join(pasteable(out)[0]))
 
     def test_ya_puesto_y_simular(self):

@@ -8,15 +8,17 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import ROOT, write
-from test_perf import AGENT_ENV, perf
-from test_perf_0150 import TriageBase, commands_in
-from test_perf_0160 import CaptureBase, ReportFixtureBase
+from helpers import ROOT, git, write
+from test_perf import AGENT_ENV, GOOD, perf
+from test_perf_0140 import SetupBase
+from test_perf_0150 import LISTA, TriageBase, commands_in
+from test_perf_0160 import CaptureBase, ReportFixtureBase, dead_pid
 
 SKILL = ROOT / "skills" / "hb-performance"
 SCRIPT = SKILL / "scripts" / "perf.py"
@@ -893,6 +895,314 @@ class ReopenTest(DecisionBase):
         self.assertIn("no es \"sin decidir\": para eso, --reabrir", text)
         self.assertIn("vuelven a \"propuesta\" (sin decidir)", text)
         self.assertIn("no toca código", text)
+
+
+# ── P · Pausar y archivar ────────────────────────────────────────────────────
+
+def all_files(folder):
+    """{ruta: contenido} de todo lo que hay en una carpeta."""
+    return {path.relative_to(folder).as_posix(): path.read_bytes() for path in sorted(folder.rglob("*")) if path.is_file()}
+
+
+class ArchiveTest(TriageBase):
+    """P1: `archivar` pide la pausa si quedan marcas en el árbol, no borra nada y `reanudar` la retoma."""
+
+    def test_con_marcas_en_el_arbol_se_detiene_y_da_pausar(self):
+        before = all_files(self.folder), (self.root / "app" / "Lista.kt").read_text(encoding="utf-8")
+        result = self.run_in("archivar", "--carpeta", self.rel)
+        self.assertNotEqual(result.returncode, 0)
+        text = result.stdout + result.stderr
+        self.assertIn("no la archivé: todavía tiene marcas o cambios temporales en el árbol (app/Lista.kt)", text)
+        commands = commands_in(text)
+        self.assertTrue(commands[0].endswith("pausar --carpeta %s" % self.rel), commands)
+        self.assertTrue(commands[1].endswith("archivar --carpeta %s" % self.rel), commands)
+        self.assertNotIn("Traceback", text)
+        self.assertEqual((all_files(self.folder), (self.root / "app" / "Lista.kt").read_text(encoding="utf-8")), before)
+
+    def test_en_pausa_se_archiva_sin_borrar_nada_y_se_puede_reanudar(self):
+        self.ok_in("pausar", "--carpeta", self.rel)
+        before = all_files(self.folder)
+        out = self.ok_in("archivar", "--carpeta", self.rel, "--motivo", "el flujo se rediseña el próximo trimestre")
+        self.assertIn("✔ Archivada: triage terminado, lista para pasar a riguroso", out)
+        self.assertIn("motivo: el flujo se rediseña el próximo trimestre", out)
+        self.assertIn("No se borró nada", out)
+        self.assertIn("Siguiente · archivada: triage terminado", out)
+        after = all_files(self.folder)
+        self.assertEqual(set(after), set(before))  # ni un archivo menos, ni uno más
+        self.assertEqual({name for name in after if after[name] != before[name]}, {"estado.md", "pausa.json"})
+        self.assertEqual(git(self.root, "status", "--short").strip(), "")  # no toca código
+        record = json.loads((self.folder / "pausa.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["estado"], "en pausa")
+        self.assertEqual(record["archivada"]["motivo"], "el flujo se rediseña el próximo trimestre")
+        self.assertRegex(record["archivada"]["fecha"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+        self.assertRegex((self.folder / "estado.md").read_text(encoding="utf-8"),
+                         r"- %s: archivada: el flujo se rediseña el próximo trimestre \(perf\.py archivar\)" % DATE_TIME)
+        self.assertEqual(perf.investigation_status(self.folder, self.plan())[0], "archivada")
+        self.assertEqual(perf.investigation_label(self.folder, self.plan()), ("archivada", "c-same"))
+        # `siguiente` y `estado` dejan de contarla
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("Archivada desde", out)
+        self.assertIn("la investigación queda archivada", out)
+        out = self.ok_in("estado")
+        self.assertIn("· archivada ·", out)
+        self.assertIn("Ninguna investigación abierta ni en pausa", out)
+        self.assertEqual(perf.open_investigation_steps(self.root), [])
+        # archivarla de nuevo no cambia nada
+        again = self.ok_in("archivar", "--carpeta", self.rel)
+        self.assertIn("ya está archivada", again)
+        self.assertEqual(json.loads((self.folder / "pausa.json").read_text(encoding="utf-8")), record)
+        # reanudar una archivada funciona y avisa que la línea base puede no servir
+        out = self.ok_in("reanudar", "--carpeta", self.rel)
+        self.assertIn("⚠ Estaba archivada desde", out)
+        self.assertIn("la línea base puede no servir", out)
+        self.assertIn("2. Marcas: repuestas", out)
+        self.assertIn("3. Código:", out)
+        self.assertIn("4. La línea base", out)
+        resumed = json.loads((self.folder / "pausa.json").read_text(encoding="utf-8"))
+        self.assertEqual(resumed["estado"], "reanudada")
+        self.assertNotIn("archivada", resumed)
+        self.assertEqual(resumed["estuvo_archivada"], record["archivada"])
+        self.assertEqual(perf.investigation_status(self.folder, self.plan())[0], "abierta")
+        self.assertRegex((self.folder / "estado.md").read_text(encoding="utf-8"),
+                         r"- %s: retomada: ya no está archivada \(perf\.py reanudar\)" % DATE_TIME)
+
+    def test_reanudar_simulado_de_una_archivada_no_escribe_nada(self):
+        self.ok_in("pausar", "--carpeta", self.rel)
+        self.ok_in("archivar", "--carpeta", self.rel)
+        before = all_files(self.folder), git(self.root, "status", "--short")
+        out = self.ok_in("reanudar", "--carpeta", self.rel, "--simular")
+        self.assertIn("Estaba archivada desde", out)
+        self.assertIn("la retomaría", out)
+        self.assertEqual((all_files(self.folder), git(self.root, "status", "--short")), before)
+        self.assertEqual(perf.investigation_status(self.folder, self.plan())[0], "archivada")
+
+    def test_con_algo_a_medias_primero_se_recupera(self):
+        self.ok_in("pausar", "--carpeta", self.rel)
+        write(self.folder / ".en-curso.json", json.dumps({"comando": "capturar", "fase": "antes", "flujo": "catalogo-lista",
+                                                          "pid": dead_pid(), "inicio": "2026-03-02T10:00:00"}))
+        before = (self.folder / "pausa.json").read_text(encoding="utf-8")
+        result = self.run_in("archivar", "--carpeta", self.rel)
+        self.assertNotEqual(result.returncode, 0)
+        text = result.stdout + result.stderr
+        self.assertIn("no la archivé: quedó algo a medias en esta carpeta (capturar)", text)
+        self.assertTrue(commands_in(text)[0].endswith("siguiente --carpeta %s" % self.rel))
+        self.assertEqual((self.folder / "pausa.json").read_text(encoding="utf-8"), before)
+
+    def test_una_cerrada_no_se_archiva(self):
+        self.ok_in("cerrar", "--carpeta", self.rel, "--dod")
+        out = self.ok_in("archivar", "--carpeta", self.rel)
+        self.assertIn("ya está cerrada: no hace falta archivarla", out)
+        self.assertEqual(perf.archived(self.folder), {})
+
+    def test_sin_marcas_en_el_arbol_se_archiva_sin_pausar(self):
+        write(self.root / "app" / "Lista.kt", LISTA)  # sin la marca
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        write(self.folder / "estado.md", state.replace("| `app/Lista.kt` | . | marca | — | no |\n", ""))
+        out = self.ok_in("archivar", "--carpeta", self.rel)
+        self.assertIn("✔ Archivada: triage terminado, lista para pasar a riguroso", out)  # el estado, una sola vez
+        record = json.loads((self.folder / "pausa.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["estado"], "en pausa")  # queda como una pausa: `reanudar` la retoma
+        self.assertEqual(list(record["commits"].values()), [git(self.root, "rev-parse", "HEAD").strip()])
+        self.assertEqual(record["archivada"]["motivo"], "")
+        out = self.ok_in("reanudar", "--carpeta", self.rel)
+        self.assertIn("⚠ Estaba archivada desde", out)
+        self.assertIn("2. Marcas: no hay cambios temporales que reponer.", out)
+
+    def test_la_ayuda_dice_que_no_borra(self):
+        result = self.run_in("archivar", "--help")
+        text = re.sub(r"\s+", " ", result.stdout)
+        self.assertIn("No borra nada", text)
+        self.assertIn("--motivo", text)
+
+
+class PauseOutputTest(DecisionBase):
+    """P3: la salida de `pausar` nombra el repo por su carpeta y no repite el estado."""
+
+    def test_el_repo_del_proyecto_va_por_su_carpeta_y_el_estado_una_vez(self):
+        self.ok_in("decidir", "--carpeta", self.rel, "--aprobar", "M1")
+        out = self.ok_in("pausar", "--carpeta", self.rel)
+        head = git(self.root, "rev-parse", "HEAD").strip()[:12]
+        line = next(line for line in out.splitlines() if line.startswith("✔ En pausa:"))
+        self.assertEqual(line, "✔ En pausa: sesión 3 · M1 (al reanudar sigue desde ahí). Commits anotados: proyecto %s. El "
+                               "setup queda puesto; los reportes no cambiaron." % head)
+        self.assertNotIn("Commits anotados: . ", out)
+        self.assertEqual(line.count("sesión 3 · M1"), 1)
+        self.assertIn("Siguiente · en pausa: sesión 3 · M1 (al reanudar sigue desde ahí)", out)
+        self.assertNotIn("lista para seguir con", out)
+        self.assertIn("Si no la vas a retomar, archívala en vez de reanudarla", out)
+        commands = commands_in(out)
+        self.assertTrue(commands[0].endswith("reanudar --carpeta %s" % self.rel), commands)
+        self.assertFalse(any(" archivar " in command for command in commands), commands)  # no es un paso: es el otro camino
+
+    def test_la_pausa_en_palabras(self):
+        self.assertEqual(perf.pause_words({"fase": "sesión 3 · M1", "lista_para": "seguir con: sesión 3 · M1"}),
+                         "sesión 3 · M1 (al reanudar sigue desde ahí)")
+        self.assertEqual(perf.pause_words({"fase": "triage terminado", "lista_para": "pasar a riguroso"}),
+                         "triage terminado, lista para pasar a riguroso")
+        self.assertEqual(perf.repo_label(self.root, self.root), "proyecto")
+        self.assertEqual(perf.repo_label(self.root / "libs" / "red", self.root), "libs/red")
+        self.assertEqual(perf.commits_text({str(self.root): "0123456789abcdef"}, self.root), "proyecto 0123456789ab")
+
+
+class SetupBlockedAgeTest(SetupBase):
+    """P2: el aviso que impide actualizar el parche del setup lista cada investigación con su estado y desde cuándo, da
+    `archivar` y `cerrar`, y deja de contar las archivadas y las cerradas."""
+
+    def setUp(self):
+        super().setUp()
+        patch, ficha = self.in_patch()
+        write(patch.parent / (patch.name + ".json"), json.dumps(dict(ficha, skill="0.13.0")))
+        self.good("setup", "--reponer")
+        self.folder = self.investigation()
+        self.rel = self.folder.relative_to(self.root).as_posix()
+        write(self.folder / "fases.json", json.dumps({"antes": {"fecha": "2020-01-01T10:00:00", "corridas": 10}}))
+
+    def pause(self):
+        write(self.folder / "pausa.json", json.dumps({"estado": "en pausa", "fecha": "2020-01-02T21:00:00",
+                                                      "fase": "decisión del usuario", "lista_para": "decidir"}))
+
+    def test_lista_cada_una_con_su_estado_y_desde_cuando(self):
+        self.pause()
+        out = self.good("setup", "--estado")
+        self.assertIn("No lo actualices ahora: hay una investigación que ya midió", out)
+        self.assertRegex(out, r"- %s: en pausa desde hace \d+ días \(2020-01-02\)" % re.escape(self.rel))
+        self.assertRegex(out, r"si la vas a retomar:\s+cd \S+ && python3 -I \S+perf\.py reanudar --carpeta %s"
+                         % re.escape(self.rel))
+        self.assertNotIn(" cerrar --carpeta", out)  # en pausa, `cerrar` no la termina: no se ofrece
+        self.assertRegex(out, r"si no se va a retomar:\s+cd \S+ && python3 -I \S+perf\.py archivar --carpeta %s"
+                         % re.escape(self.rel))
+        self.assertIn("Las cerradas y las archivadas no cuentan", out)
+
+    def test_archivada_deja_de_contar_y_el_setup_se_puede_actualizar(self):
+        self.pause()
+        out = self.good("setup", "--estado")
+        archive = next(line.split(":", 1)[1].strip() for line in out.splitlines() if "si no se va a retomar:" in line)
+        done = subprocess.run(["/bin/sh", "-c", archive], env=self.env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)  # el comando, tal como lo imprime la skill
+        self.assertIn("✔ Archivada", done.stdout)
+        out = self.good("setup", "--estado")
+        self.assertNotIn("No lo actualices ahora", out)
+        self.assertIn("conviene actualizar la instrumentación antes de medir", out)
+        self.assertEqual(perf.measured_blocking(self.root, [self.folder]), [])
+
+    def test_antiguedad_y_estados_que_no_cuentan(self):
+        now = perf.fecha_ts("2020-01-05T08:00:00")
+        self.assertEqual(perf.age_words("2020-01-02T21:00:00", now), "hace 3 días")  # días de calendario, no bloques de 24 h
+        self.assertEqual(perf.age_words("2020-01-04T23:59:00", now), "hace 1 día")
+        self.assertEqual(perf.age_words("2020-01-05T00:01:00", now), "hoy")
+        self.assertEqual(perf.age_words("2020-01-09", now), "hoy")  # una fecha futura no da un número negativo
+        self.assertEqual(perf.age_words("sin fecha", now), "")
+        found = perf.measured_blocking(self.root, [self.folder], now)
+        self.assertEqual([(status, since) for _, status, since, _ in found],
+                         [("abierta", "abierta; su última medición fue hace 4 días (2020-01-01)")])
+        self.assertFalse(found[0][3])  # a medio medir: `cerrar` no la termina
+        out = self.good("setup", "--estado")
+        self.assertRegex(out, r"para terminarla:\s+cd \S+ && python3 -I \S+perf\.py siguiente --carpeta %s" % re.escape(self.rel))
+        self.assertNotIn(" cerrar --carpeta", out)
+        with mock.patch.object(perf, "investigation_status",
+                               return_value=("abierta", {}, [], [], "decisión del usuario (sin chat)")):
+            self.assertTrue(perf.measured_blocking(self.root, [self.folder], now)[0][3])  # ahí `cerrar` sí la termina
+        self.pause()
+        found = perf.measured_blocking(self.root, [self.folder], now)
+        self.assertEqual([(status, since, closable) for _, status, since, closable in found],
+                         [("en pausa", "en pausa desde hace 3 días (2020-01-02)", False)])
+        with mock.patch.object(perf, "investigation_status", return_value=("cerrada", {}, [], [], "investigación cerrada")):
+            self.assertEqual(perf.measured_blocking(self.root, [self.folder], now), [])  # una cerrada tampoco cuenta
+        write(self.folder / "fases.json", "{}")
+        self.assertEqual(perf.measured_blocking(self.root, [self.folder], now), [])  # sin mediciones no impide nada
+
+
+class UnifiedReportArchivedTest(ReportFixtureBase):
+    """P1: `reporte --gerencia-unificado --todas` muestra una archivada como "archivada"."""
+
+    def test_la_muestra_como_archivada(self):
+        other = self.investigation(name="lista")
+        write(other / "pausa.json", json.dumps({
+            "estado": "en pausa", "fecha": "2026-03-04T10:00:00", "fase": "decisión del usuario", "lista_para": "decidir",
+            "archivada": {"fecha": "2026-03-06T10:00:00", "motivo": "no se va a retomar"}}))
+        for folder in (self.folder, other):
+            self.ok("reporte", "--carpeta", folder, "--inicial")
+        self.ok("reporte", "--gerencia-unificado", "--todas")
+        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        labels = re.findall(r'<section id="inv\d">\s*<h2>[^<]*</h2>\s*<p class="sub">[^<]* · <span class="chip [^"]*">'
+                            r'([^<]+)</span>', page)
+        self.assertEqual(sorted(labels).count("archivada"), 1)
+        self.assertEqual(len(labels), 2)
+        self.assertNotIn(perf.VERSION, page)
+
+
+# ── O1 · "Secciones propias" de la prueba, en una línea corta ────────────────
+
+NAMES = dict([("HTTP GET pedidos", 7), ("HTTP GET pedidos/{id}", 4),
+              ("QUEUE GET pedidos", 7), ("QUEUE GET pedidos/{id}", 4), ("CONN GET pedidos", 3), ("CONN GET pedidos/{id}", 2),
+              ("TTFB GET pedidos", 7), ("TTFB GET pedidos/{id}", 4), ("SCREEN Pedidos onCreate", 9),
+              ("SCREEN Detalle onResume", 5), ("MARK pedidos_visible", 3), ("carga-inicial", 2)])
+
+
+class SectionsLineTest(unittest.TestCase):
+    def test_el_conteo_por_tipo_va_en_una_linea(self):
+        self.assertEqual(perf.sections_counts(NAMES),
+                         "HTTP ×11 · QUEUE ×11 · CONN ×5 · TTFB ×11 · SCREEN ×14 · MARK ×3 · otras ×2")
+        self.assertEqual(perf.sections_counts({}), "ninguna")
+
+    def test_el_detalle_trae_cada_ruta_una_sola_vez(self):
+        detail = perf.sections_detail(NAMES)
+        self.assertIn("| Ruta | HTTP | QUEUE | CONN | TTFB |", detail)
+        self.assertIn("| GET pedidos/{id} | 4 | 4 | 2 | 4 |", detail)
+        self.assertIn("| GET pedidos | 7 | 7 | 3 | 7 |", detail)
+        self.assertEqual(detail.count("GET pedidos/{id}"), 1)  # no una vez por tipo
+        self.assertIn("### SCREEN", detail)
+        self.assertIn("| Pedidos onCreate | 9 |", detail)
+        self.assertIn("| carga-inicial | 2 |", detail)
+
+    def test_la_linea_dice_donde_quedo_el_detalle(self):
+        with TempFolder() as folder:
+            path = folder / "prueba" / "pedidos-metricas.md"
+            line = perf.sections_line(NAMES, path, False)
+            self.assertEqual(line, "Secciones propias: HTTP ×11 · QUEUE ×11 · CONN ×5 · TTFB ×11 · SCREEN ×14 · MARK ×3 · "
+                                   "otras ×2 (el detalle, con cada ruta, en %s)" % path)
+            self.assertNotIn("GET pedidos", line)  # las rutas ya no van en la línea
+            text = path.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("# Corrida de prueba\n\n## Secciones propias"))
+            # debajo de la tabla de métricas que escribió esta misma prueba
+            write(path, "# Métricas de la corrida de prueba\n\n| Métrica | Valor | Familia |\n")
+            perf.sections_line(NAMES, path, True)
+            text = path.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("# Métricas de la corrida de prueba\n\n| Métrica |"))
+            self.assertEqual(text.count("## Secciones propias"), 1)
+            # una prueba posterior sin tabla completa no deja la tabla de la anterior
+            perf.sections_line(NAMES, path, False)
+            self.assertNotIn("# Métricas de la corrida de prueba", path.read_text(encoding="utf-8"))
+            self.assertEqual(perf.sections_line({}, path, False), "Secciones propias: ninguna")
+
+    def test_si_no_se_puede_guardar_lo_dice(self):
+        with TempFolder() as folder:
+            write(folder / "prueba", "un archivo donde iría la carpeta")
+            line = perf.sections_line(NAMES, folder / "prueba" / "pedidos-metricas.md", False)
+            self.assertIn("(no pude guardar el detalle en ", line)
+            self.assertTrue(line.startswith("Secciones propias: HTTP ×11"))
+
+
+class TempFolder:
+    def __enter__(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        return Path(self.tmp.name)
+
+    def __exit__(self, *exc):
+        self.tmp.cleanup()
+
+
+class TestRunSectionsTest(CaptureBase):
+    def test_la_prueba_imprime_la_linea_corta_y_deja_el_detalle(self):
+        self.tp_outputs(GOOD)
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        detail = self.folder / "prueba" / "home-metricas.md"
+        line = next(line for line in out.splitlines() if line.startswith("Secciones propias:"))
+        self.assertEqual(line, "Secciones propias: HTTP ×2 · SCREEN ×1 (el detalle, con cada ruta, en %s)" % detail)
+        self.assertIn("| GET items/{id} | 2 | 0 | 0 | 0 |", detail.read_text(encoding="utf-8"))
+        self.assertIn("| MainActivity onResume | 1 |", detail.read_text(encoding="utf-8"))
+        self.assertLess(out.index("Secciones propias:"), out.rindex("Siguiente"))
 
 
 if __name__ == "__main__":

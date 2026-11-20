@@ -563,7 +563,7 @@ class PauseResumeTest(TriageBase):
         self.assertIn("app/Lista.kt:7 se movió a ~9 (+2 líneas)", simulated)
         self.assertNotIn("MarkTrace", (self.root / "app" / "Lista.kt").read_text(encoding="utf-8"))
         out = self.ok_in("reanudar", "--carpeta", self.rel)
-        self.assertIn("2. Marcas: repuestas en .", out)
+        self.assertIn("2. Marcas: repuestas en proyecto con ", out)  # 0.18.0 · P3: el repo, por su carpeta
         self.assertIn("MarkTrace", (self.root / "app" / "Lista.kt").read_text(encoding="utf-8"))
         self.assertIn("4. La línea base no sirve", out)
         self.assertIn("rehacer antes", out)
