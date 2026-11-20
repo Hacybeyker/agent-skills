@@ -94,7 +94,7 @@ Termina en el reporte inicial.
 cd <raíz> && python3 -I <skill>/scripts/perf.py setup --estado
 ```
 
-Solo lectura. Lista las herramientas de la máquina (obligatorias: Python 3.8 o superior, git, `adb` y `trace_processor`; según el caso, Java 17 o superior; opcionales, `retrace` y Maestro) con la ruta donde encontró cada una, también fuera del `PATH`. **La skill no instala ni configura nada:** si falta una, dice para qué sirve y dónde obtenerla, y la instalas tú o tu herramienta de entorno. Después dice el caso del setup del proyecto (versionado, en un parche o sin setup), el parche vigente con su ficha y el paso que sigue.
+Solo lectura. Lista las herramientas de la máquina (obligatorias: Python 3.8 o superior, git, `adb` y `trace_processor`; según el caso, Java 17 o superior; opcionales, `retrace`, Maestro, `ffmpeg` y `scrcpy`) con la ruta donde encontró cada una, también fuera del `PATH`. **La skill no instala ni configura nada:** si falta una, dice para qué sirve y dónde obtenerla, y la instalas tú o tu herramienta de entorno. Después dice el caso del setup del proyecto (versionado, en un parche o sin setup), el parche vigente con su ficha y el paso que sigue.
 
 ### Prueba de humo del setup
 
@@ -289,6 +289,16 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --carpeta <carpeta> --h
 ```
 
 Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial.
+
+### Unir el video de la prueba (instalaste ffmpeg después de la prueba)
+
+**Dónde:** terminal, sin chat
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py video --carpeta <carpeta>
+```
+
+Arma de nuevo el video de evidencia de cada prueba desde `video/<flujo>/eventos.json`, sin repetirla: el visor `prueba-<flujo>.html` y, con `ffmpeg`, el video unido y rotulado `prueba-<flujo>.mp4` (`--flujo <flujo>` para uno solo). Los tramos originales quedan en `video/<flujo>/`. Cómo instalar `ffmpeg` sin root: `perf.py setup --estado` o [setup.md](setup.md) · Requisitos de la máquina.
 
 ### Agregar una métrica, un tramo o una marca
 

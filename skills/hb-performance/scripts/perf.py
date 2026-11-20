@@ -12705,7 +12705,8 @@ _FFMPEG_FEATURES = {}
 
 def ffmpeg_binary():
     """El ffmpeg para el video: `FFMPEG=<ruta>` (vacío: ninguno) o, entre el del PATH, el de ~/.local/bin y el
-    `ffmpeg-full` de Homebrew (keg-only: no está en el PATH), el primero que trae drawtext; si ninguno, el primero."""
+    `ffmpeg-full` de Homebrew (keg-only: no está en el PATH), el primero que trae drawtext y un H.264; si ninguno, el
+    primero con H.264 y, si tampoco, el primero."""
     value = os.environ.get("FFMPEG")
     if value is not None:
         return value if value and is_executable(value) else None
@@ -12714,7 +12715,10 @@ def ffmpeg_binary():
         if candidate and is_executable(candidate) and candidate not in found:
             found.append(candidate)
     if len(found) > 1:
-        return next((candidate for candidate in found if ffmpeg_features(candidate)["drawtext"]), found[0])
+        features = {candidate: ffmpeg_features(candidate) for candidate in found}
+        return next((candidate for candidate in found if features[candidate]["drawtext"]
+                     and features[candidate]["codificador"]),
+                    next((candidate for candidate in found if features[candidate]["codificador"]), found[0]))
     return found[0] if found else None
 
 
@@ -13103,14 +13107,20 @@ def join_test_video(folder, events, plan, flow, binary=None):
     work = video_folder(folder, events["flujo"])
     size = video_size(binary, work / pathlib.PurePosixPath(events["tramos_video"][0]["archivo"]).name)
     font = video_font(plan, flow)
+    chosen = (flow or {}).get("video_fuente") or (plan or {}).get("video_fuente")
     labels = bool(features["drawtext"] and font and size)
     if not labels:
         out["motivo"] = ("ese ffmpeg no trae drawtext (se compila con libfreetype)" if not features["drawtext"] else
+                         "no encontré la fuente de \"video_fuente\" (%s, relativa a la raíz del proyecto)" % chosen
+                         if not font and chosen else
                          "no encontré una fuente: pon \"video_fuente\" en el flujo del plan (la ruta de un .ttf)"
                          if not font else "no pude leer el tamaño del video")
     else:
         link_font(font[0], work / "fuente.ttf")
         link_font(font[1], work / "fuente-negrita.ttf")
+    # unir un video de varios minutos puede tardar: se dice antes
+    print("… %s el video de la prueba con ffmpeg (%s)" % ("uniendo y rotulando" if labels else "uniendo", binary),
+          flush=True)
     graph, texts = video_filter(events, size[0] if size else 0, size[1] if size else 0, labels)
     for name, text in texts.items():
         (work / name).write_text(text, encoding="utf-8")
@@ -13163,9 +13173,10 @@ def ffmpeg_install_steps(system=None, machine=None, brew=None):
 def ffmpeg_install_line(what):
     """La línea con el comando que instala un ffmpeg que trae `what` (drawtext o libx264), sin root."""
     first = ffmpeg_install_steps()[0]
-    return "    instala un ffmpeg con %s (%s; las otras formas, con `perf.py setup --estado`): %s" % (
-        what, "ffmpeg-full de Homebrew" if "brew install" in first[1] else "el build estático, verificando su SHA256",
-        first[1])
+    return ("    instala un ffmpeg con %s (%s; no pisa el que ya tienes: si perf.py elige otro, pon FFMPEG=<ruta> delante de "
+            "python3, después del `cd … &&`; las otras formas, con `perf.py setup --estado`): %s" % (
+                what, "ffmpeg-full de Homebrew" if "brew install" in first[1] else
+                "el build estático, verificando su SHA256, en ~/.local/bin si ahí no hay otro", first[1]))
 
 
 def ffmpeg_hint(root, folder, flow_name):
@@ -13181,8 +13192,9 @@ def ffmpeg_hint(root, folder, flow_name):
 
 def scrcpy_install_steps(brew=None):
     brew = shutil.which("brew") if brew is None else brew
-    return [("con Homebrew (ya lo tienes)" if brew else "con Homebrew, si lo usas", "cd ~ && brew install scrcpy"),
-            ("o la versión de tu sistema de %s/releases (revisa que acepte --no-playback y --no-window)" % SCRCPY_URL, "")]
+    return [("Con Homebrew (ya lo tienes)" if brew else "Con Homebrew, si lo usas", "cd ~ && brew install scrcpy"),
+            ("o la versión de tu sistema de %s/releases (tiene que aceptar --no-playback, --no-window y --record)"
+             % SCRCPY_URL, "")]
 
 
 class TestVideo:
@@ -13322,13 +13334,12 @@ def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=No
     anota si la prueba de ahora lo unió y con rótulos ("unido"), así `siguiente` nunca manda a mirar uno viejo. Devuelve
     las líneas que lo cuentan (dónde quedó cada cosa, qué muestra y, si falta algo, el paso para conseguirlo)."""
     folder = pathlib.Path(folder)
-    events = dict(events, flujo=flow_name)
+    events = dict(events)
+    if slug(str(events.get("flujo") or "")) != slug(flow_name):  # el nombre legible, si es el mismo flujo
+        events["flujo"] = flow_name
     events.pop("unido", None)
     work, page = save_test_video(folder, flow_name, events)  # el visor, antes de unir: sirve aunque ffmpeg falle
     root = project_root(folder).resolve()
-    binary = binary or (ffmpeg_binary() if join else None)
-    if binary:  # unir y rotular un video de varios minutos puede tardar: se dice antes
-        print("… uniendo y rotulando el video de la prueba con ffmpeg (%s)" % binary, flush=True)
     result = join_test_video(folder, events, plan, flow, binary) if join else {"video": None, "motivo": "cortado"}
     if result.get("video"):
         events["unido"] = {"archivo": pathlib.Path(result["video"]).name, "rotulado": bool(result["rotulado"])}
@@ -13791,7 +13802,7 @@ def start_video(adb, limit=VIDEO_LIMIT_S):
     try:
         adb.shell("rm -f %s" % VIDEO_REMOTE, timeout=20)
         return subprocess.Popen(adb.base + ["shell", "screenrecord", "--time-limit", str(int(limit)), VIDEO_REMOTE],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, PerfError, subprocess.SubprocessError):
         return None
 

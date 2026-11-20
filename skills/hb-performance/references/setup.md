@@ -91,6 +91,8 @@ La variante medida no es depurable, y hay comportamiento que depende de eso sin 
 | Java 17 o superior | Según el caso | Gradle (el DoD y el mapa de módulos), `retrace` y Maestro | `JAVA_HOME`, el `PATH` y el JBR de Android Studio (`/Applications/Android Studio.app/Contents/jbr/Contents/Home` en macOS; en Linux, `/usr/local/android-studio/jbr`, `/opt/android-studio/jbr` y `~/android-studio/jbr`). El que encuentra fuera del `PATH` se pasa **solo a sus procesos hijos**: el entorno del usuario no cambia. Con otra instalación, `JAVA_HOME=<ruta>` delante del comando |
 | `retrace` | Opcional | Desofuscar con el mapping de R8 | `RETRACE=<ruta>`, el `PATH` y `cmdline-tools/*/bin` del SDK |
 | Maestro | Opcional | Llevar la app al punto de partida en flujos largos (`preparar`) | El `PATH` y `~/.maestro/bin` |
+| `ffmpeg` | Opcional | Unir el video de la prueba en uno solo, con sus rótulos ([ficha.md](ficha.md) · Recorrido en palabras y video de la prueba). Sin él, el video queda en tramos con su visor HTML | `FFMPEG=<ruta>`, el `PATH`, `~/.local/bin` y el `ffmpeg-full` de Homebrew (`/opt/homebrew/opt/ffmpeg-full/bin`, `/usr/local/opt/ffmpeg-full/bin`, `/home/linuxbrew/.linuxbrew/opt/ffmpeg-full/bin`), aunque no estén en el `PATH`; si hay varios, el primero que trae `drawtext` y un H.264, después el primero con H.264 |
+| `scrcpy` | Opcional | Grabar la prueba en un solo archivo, sin el tope de 180 s de `screenrecord` (`"video_grabador": "scrcpy"` en el plan) | `SCRCPY=<ruta>`, el `PATH` y `~/.local/bin` |
 
 Cuando usa una herramienta que encontró fuera del `PATH`, lo dice una vez ("uso adb de <ruta>"). Los procesos que lanza (`preparar`, el recorrido, el DoD, `retrace`, Gradle) reciben esas rutas al final de su `PATH`, sin tapar nada de lo que ya está.
 
@@ -101,6 +103,42 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py setu
 ```
 
 Si falta una obligatoria, díselo al usuario con lo que imprime ese comando y espera a que la instale él: no la instales tú ni le pases un comando que edite su configuración. Para `trace_processor`, el comando que lo usa se detiene con el paso que lo descarga a `~/.local/bin` **solo si ese archivo no existe** (nunca reemplaza uno que ya esté); con eso basta, porque `perf.py` lo encuentra ahí sin el `PATH`. Si el usuario lo quiere en el `PATH`, lo agrega él.
+
+### `ffmpeg` y `scrcpy` (opcionales, para el video de la prueba)
+
+`setup --estado` los lista con `·` si faltan, con la comprobación y los comandos para instalarlos. **La skill solo los muestra: no corre ninguno.** La comprobación que vale es la de `setup --estado`, porque también mira fuera del `PATH` (`~/.local/bin` y `ffmpeg-full`); a mano, para el del `PATH`:
+
+```bash
+cd ~ && command -v ffmpeg && ffmpeg -hide_banner -filters | grep drawtext
+```
+
+`drawtext` (los rótulos) necesita un `ffmpeg` compilado con `libfreetype`. Para instalarlo **sin root y sin haber usado `dev-setup`**, comprobando primero y sin tocar lo que ya exista ni el perfil del shell (elige uno):
+
+- **Con Homebrew, si ya lo tienes:** `ffmpeg-full`. El `ffmpeg` normal de Homebrew no trae `drawtext` (no se compila con `libfreetype`); `ffmpeg-full` sí, y es *keg-only*: no se enlaza al `PATH` ni pisa otro `ffmpeg`, y `perf.py` lo busca en su carpeta.
+
+  ```bash
+  cd ~ && brew install ffmpeg-full
+  ```
+
+- **Sin Homebrew:** el build estático firmado de [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de/) para la arquitectura de la Mac (`arm64` en Apple Silicon, `amd64` en Intel; en Linux, `linux/amd64` o `linux/arm64` y `sha256sum` en lugar de `shasum -a 256`). Baja el zip y su `.sha256` (el formato de `shasum`: `<hash>  ffmpeg.zip`), verifica el SHA256 **antes** de copiarlo y lo deja en `~/.local/bin`, donde `perf.py` lo encuentra aunque esa carpeta no esté en el `PATH`; si ya hay un `~/.local/bin/ffmpeg`, se detiene sin pisarlo:
+
+  ```bash
+  cd "$(mktemp -d)" && url=$(curl -fsS -o /dev/null -w '%{redirect_url}' https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip) && curl -fsSLo ffmpeg.zip "$url" && curl -fsSLo ffmpeg.zip.sha256 "$url.sha256" && shasum -a 256 -c ffmpeg.zip.sha256 && unzip -q ffmpeg.zip && test -f ffmpeg && test ! -e ~/.local/bin/ffmpeg && mkdir -p ~/.local/bin && cp ffmpeg ~/.local/bin/ffmpeg && ~/.local/bin/ffmpeg -hide_banner -version
+  ```
+
+- **Con `dev-setup`:** si lo usas, instala `ffmpeg` por su cuenta; la skill solo lo busca.
+
+Después de instalarlo, `perf.py video --carpeta <carpeta>` une el video de una prueba ya hecha, sin repetirla. Si `perf.py` elige otro `ffmpeg`, pon `FFMPEG=<ruta>` delante de `python3` (después del `cd … &&`).
+
+`scrcpy` se comprueba y se instala así (o desde sus [versiones publicadas](https://github.com/Genymobile/scrcpy/releases)); tiene que aceptar `--no-playback`, `--no-window` y `--record` (lo comprueba `perf.py` con su `--help`):
+
+```bash
+cd ~ && command -v scrcpy
+```
+
+```bash
+cd ~ && brew install scrcpy
+```
 
 ## Instrumentación y cableado
 

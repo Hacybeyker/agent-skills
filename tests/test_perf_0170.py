@@ -252,6 +252,15 @@ class FfmpegCommandTest(unittest.TestCase):
         self.assertIn("-c:v h264_videotoolbox", text)
         self.assertNotIn("-preset", text)
 
+    def test_entre_varios_ffmpeg_elige_el_que_trae_drawtext_y_h264(self):
+        with TempDir() as folder:
+            without_h264, complete = fake_ffmpeg(folder, encoder=False), fake_ffmpeg(folder)
+            with mock.patch.object(perf.shutil, "which", return_value=without_h264), \
+                    mock.patch.object(perf, "FFMPEG_FULL", (complete,)), mock.patch.dict(os.environ, {}), \
+                    mock.patch.object(perf, "home_dir", return_value=folder / "sin-home"):
+                os.environ.pop("FFMPEG", None)
+                self.assertEqual(perf.ffmpeg_binary(), complete)
+
     def test_que_trae_ese_ffmpeg(self):
         filters = " T.. drawbox           V->V       Draw a colored box on the input video.\n" \
                   " T.C drawtext          V->V       Draw text on top of video frames using libfreetype library.\n"
@@ -317,6 +326,15 @@ class VideoChainStartTest(unittest.TestCase):
         self.assertTrue(precise)
         self.assertGreaterEqual(starts[0], chain.launched[0])
         self.assertTrue(adb.calls[0].startswith("rm -f /sdcard/hbperf-prueba.mp4 /sdcard/hbperf-prueba-2.mp4"))
+
+    def test_screenrecord_no_lee_la_terminal(self):
+        with TempDir() as folder:
+            seen = folder / "entrada.txt"
+            adb = FakeAdb(["sh", "-c", "cat > %s" % seen, "x"])  # lo que llegue por la entrada estándar
+            chain = perf.VideoChain(adb, 180).start()
+            self.assertTrue(wait_until(lambda: chain.process.poll() is not None))  # EOF enseguida: no espera la terminal
+            chain.stop(names=lambda number: folder / ("parte%d.mp4" % number))
+            self.assertEqual(seen.read_text(encoding="utf-8"), "")
 
     def test_sin_la_linea_de_inicio_vale_cuando_se_lanzo(self):
         chain = perf.VideoChain(FakeAdb(["sh", "-c", "exit 0", "x"]), 180).start()
@@ -629,8 +647,14 @@ class JoinFailuresTest(unittest.TestCase):
         work = folder / "video" / "home"
         write(work / "parte1.mp4", "x")
         events = prototype_events(parts=["video/home/parte1.mp4"], starts=[1000.0])
-        return perf.write_test_video(folder, "home", events, {}, {"video_fuente": str(folder / "f.ttf")},
-                                     binary=fake_ffmpeg(folder, **fake) if fake is not None else None)
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lines = perf.write_test_video(folder, "home", events, {}, {"video_fuente": str(folder / "f.ttf")},
+                                          binary=fake_ffmpeg(folder, **fake))
+        self.progress = out.getvalue()
+        return lines
 
     def test_ffmpeg_que_falla_deja_el_visor_y_su_registro(self):
         with TempDir() as folder:
@@ -638,6 +662,7 @@ class JoinFailuresTest(unittest.TestCase):
             lines = self.run_join(folder, code=3)
             text = "\n".join(lines)
             self.assertIn("No pude unir los tramos en un solo video: ffmpeg terminó con error", text)
+            self.assertIn("… uniendo y rotulando el video de la prueba con ffmpeg", self.progress)
             self.assertIn("para reintentarlo:", text)
             self.assertTrue((folder / "video" / "home" / "ffmpeg.log").is_file())
             self.assertTrue((folder / "prueba-home.html").is_file())
@@ -650,6 +675,8 @@ class JoinFailuresTest(unittest.TestCase):
             text = "\n".join(self.run_join(folder, encoder=False))
             self.assertIn("no trae un codificador H.264", text)
             self.assertIn("instala un ffmpeg con libx264", text)
+            self.assertIn("FFMPEG=<ruta>", text)
+            self.assertEqual(self.progress, "")  # sin H.264 no dice que está uniendo
 
     def test_la_prueba_cortada_dice_como_unirlo_despues(self):
         with TempDir() as folder:
@@ -683,6 +710,16 @@ class JoinFailuresTest(unittest.TestCase):
                 write(folder / "video" / name / "eventos.json", json.dumps({"unido": {"rotulado": True}}))
                 write(folder / ("prueba-%s.mp4" % name), "video")
             self.assertEqual(perf.test_videos(folder), [folder / "prueba-paso.mp4", folder / "prueba-paso-2.mp4"])
+
+    def test_el_visor_conserva_el_nombre_del_flujo(self):
+        with TempDir() as folder:
+            events = prototype_events(parts=["video/pedidos-lista/parte1.mp4"], starts=[1000.0], flow_name="Pedidos lista")
+            perf.write_test_video(folder, "pedidos-lista", events, {}, {}, join=False)
+            saved = json.loads((folder / "video" / "pedidos-lista" / "eventos.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["flujo"], "Pedidos lista")
+            perf.write_test_video(folder, "otro", dict(events, flujo="cualquiera"), {}, {}, join=False)
+            saved = json.loads((folder / "video" / "otro" / "eventos.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["flujo"], "otro")
 
     def test_eventos_con_fases_incompletas(self):
         events = prototype_events()
@@ -751,7 +788,12 @@ def close(color, hex_color, tolerance=40):
 @unittest.skipUnless(FFMPEG_OK, SKIP)
 class FfmpegRealTest(unittest.TestCase):
     def setUp(self):
+        import contextlib
+        import io
         import tempfile
+        quiet = contextlib.redirect_stdout(io.StringIO())  # la línea "… uniendo" no ensucia la salida de los tests
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
         self.tmp = tempfile.TemporaryDirectory()
         self.folder = Path(self.tmp.name)
         work = self.folder / "video" / "home"
@@ -789,7 +831,7 @@ class FfmpegRealTest(unittest.TestCase):
     def test_sin_fuente_une_los_tramos_sin_rotulos(self):
         result = perf.join_test_video(self.folder, self.events, {}, {"video_fuente": str(self.folder / "no.ttf")}, FFMPEG)
         self.assertFalse(result["rotulado"])
-        self.assertIn("video_fuente", result["motivo"])
+        self.assertIn("no encontré la fuente de \"video_fuente\"", result["motivo"])
         width, height, duration = probe(result["video"])
         self.assertEqual((width, height), (270, 480))
         self.assertAlmostEqual(duration, 4.0, delta=0.3)
