@@ -412,6 +412,15 @@ if args == ["devices"]:
         sys.exit(0)
     print("List of devices attached\n" + "".join("%s\tdevice\n" % d for d in os.environ.get("FAKE_DEVICES", "emulator-5554").split(",")))
     sys.exit(0)
+if os.environ.get("FAKE_MATA") and os.environ["FAKE_MATA"].partition(":")[0] in " ".join(args):
+    # 0.16.0 · T1: perf.py muere (la terminal se cerró) en la llamada N que contiene la palabra: no limpia nada
+    mark = os.environ["FAKE_LOG"] + ".mata"
+    count = int(open(mark).read()) + 1 if os.path.exists(mark) else 1
+    open(mark, "w").write(str(count))
+    if count == int(os.environ["FAKE_MATA"].partition(":")[2]):
+        import signal
+        os.kill(os.getppid(), signal.SIGKILL)
+        sys.exit(1)
 if os.environ.get("FAKE_DESCONECTA") and os.environ["FAKE_DESCONECTA"] in " ".join(args):
     sys.stderr.write("adb: device 'emulator-5554' not found\n")  # el cable se soltó a mitad del comando
     sys.exit(1)

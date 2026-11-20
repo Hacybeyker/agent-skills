@@ -1232,6 +1232,163 @@ class ReportStructureTest(PerfBase):
         self.assertIn("dos o más investigaciones", result.stderr)
 
 
+# ── T · Aceptación de punta a punta (solo los comandos que imprime `siguiente`) ──
+
+from test_perf_0150 import T_TRACE, TWO_FLOW_PLAN, AcceptanceBase, step_commands  # noqa: E402
+
+FAILING_BUILD = ("#!/bin/sh\nif [ -f \"$(dirname \"$0\")/compila-bien\" ]; then echo 'BUILD SUCCESSFUL'; exit 0; fi\n"
+                 "echo 'FAILURE: Build failed with an exception.'\necho '* What went wrong:'\n"
+                 "echo 'Could not resolve com.example:pagos:1.2.0 (repositorio de artefactos inaccesible)'\nexit 1\n")
+
+
+class AcceptanceT1Riguroso(AcceptanceBase):
+    """T1: riguroso desde cero, ejecutando solo lo que imprime `siguiente`: pedido mejorado → APK viejo → compilación
+    fallida → compila → prueba con el buffer chico subido y las rutas leídas → antes con un 'preparar' que se salta
+    una pantalla en los intentos pares → corte en medio del control y `recuperar` → diagnóstico → sesión 2 → "Elige
+    uno" sin decisión → pausar."""
+
+    def last(self, output, words):
+        return next(command for _, command in step_commands(output) if words in command)
+
+    def test_t1(self):
+        build = self.root / "compilar.sh"
+        write(build, FAILING_BUILD)
+        build.chmod(0o755)
+        counter = self.dir / "intentos.txt"
+        prepare = self.root / "preparar.sh"
+        # desde que se mide, la pantalla con límite de frecuencia no sale en los intentos pares (las pruebas, antes)
+        write(prepare, "#!/bin/sh\n[ -f %s ] || exit 0\nn=$(cat %s 2>/dev/null || echo 0)\necho $((n+1)) > %s\n"
+                       "if [ $((n %% 2)) -eq 1 ]; then echo \"se saltó 'Aviso de novedades': la app llegó a 'Pedidos'\" >&2; "
+                       "exit 1; fi\n" % (self.dir / "midiendo", counter, counter))
+        self.perf_in_root("nuevo", "--paquete", "com.ejemplo.app", "--flujo", "catalogo-lista", "--carpeta", self.rel,
+                          "--pedido-mejorado")
+        plan = perf.load_plan(self.folder / "plan.json")
+        flow = json.loads(json.dumps(TWO_FLOW_PLAN["catalogo-lista"]))
+        flow["preparar"] = "sh preparar.sh"
+        plan.update(flujos={"catalogo-lista": flow}, principales=["abrir_ms"], instalar="sh compilar.sh", corridas=5)
+        write(self.folder / "plan.json", json.dumps(plan))
+        self.session1()
+        out = self.next_out()
+        self.assertIn("--sesion '0 · pedido'", out)  # E2: el costo del pedido mejorado, entre las sin anotar
+        # B2: la marca está en el código, pero el APK instalado es anterior: la traza no la trae y `siguiente` pide
+        # compilar e instalar, nunca revisar el código
+        source = self.root / "app" / "ListaPantalla.kt"
+        write(source, "class ListaPantalla {\n    fun mostrar() { MarkTrace.mark(\"lista_visible\") }\n}\n")
+        os.utime(str(source), (4102444800, 4102444800))
+        self.env["FAKE_UPDATED"] = "2001-01-01 10:00:00"
+        self.tp_outputs(T_TRACE.replace('"seccion",600000000,0,0,"MARK lista_visible"\n', ""))
+        prueba = self.run_step(self.last(out, "--prueba"))
+        self.assertIn("anterior a las marcas", prueba)
+        out = self.next_out()
+        self.assertNotIn("Chat nuevo", out.split("Costo")[0])
+        install = self.last(out, " instalar --carpeta")
+        # B1: la compilación falla: `siguiente` da la primera línea útil y pide compilar de nuevo, nunca un chat
+        done = run_shell(install, self.env)
+        self.assertNotEqual(done.returncode, 0)
+        out = self.next_out()
+        self.assertIn("compilación fallida: Could not resolve com.example:pagos:1.2.0", out)
+        self.assertNotIn("Chat nuevo", out.split("Costo")[0])  # compilar, nunca un chat que revise el código
+        write(self.root / "compila-bien", "")
+        self.env["FAKE_UPDATED"] = "2100-06-01 10:00:00"
+        self.tp_outputs(T_TRACE)  # el build nuevo emite la marca
+        self.run_step(self.last(out, " instalar --carpeta"))
+        out = self.next_out()
+        self.assertNotIn("compilación fallida", out)
+        # B6 y B5: el buffer chico se sube (y queda para revertir) y las rutas se leen
+        self.env["FAKE_LOGCAT_G"] = "main: ring buffer is 256 KiB (250 KiB consumed)"
+        self.env["FAKE_LOGCAT_PERF"] = ("11-05 10:00:00.000  1234  1234 I hb-perf : servicio\tGET\tpedidos/{id}\t"
+                                        "https://api.example.com/ms-pedidos/v2.1/pedidos/42")
+        prueba = self.run_step(self.last(out, "--prueba"))
+        self.assertIn("buffer de logcat de 256 KiB", prueba)
+        self.assertIn("-G 256K", (self.folder / "estado.md").read_text(encoding="utf-8"))  # para revertirlo
+        self.assertTrue(any("pedidos/{id}" in key for key in perf.service_urls(self.folder)))  # B5: rutas leídas
+        # C1–C3: antes con un 'preparar' que se salta la pantalla en los intentos pares
+        out = self.next_out()
+        write(self.dir / "midiendo", "")
+        before = self.run_step(self.last(out, "--fase antes"))
+        self.assertIn("Se saltó 'Aviso de novedades': la app llegó directo a 'Pedidos'", before)
+        self.assertEqual(perf.csv_runs(self.folder, "antes", "catalogo-lista"), list(range(1, 6)))
+        # A1–A3: la terminal se cierra en medio del control; `siguiente` da `recuperar` y la fase termina con 10
+        out = self.next_out()
+        control = self.last(out, "--fase control")
+        self.env["FAKE_MATA"] = "pidof:5"
+        killed = run_shell(control, self.env)
+        self.assertNotEqual(killed.returncode, 0)
+        del self.env["FAKE_MATA"]
+        out = self.next_out()
+        recover = self.run_step(self.last(out, "recuperar --carpeta"))
+        self.assertIn("Corridas válidas de control", recover)
+        out = self.next_out()
+        rest = self.last(out, "--fase control")
+        valid = len(perf.csv_runs(self.folder, "control", "catalogo-lista"))
+        self.assertGreaterEqual(valid, 1)  # el corte dejó corridas válidas: se cuentan, no se repiten
+        self.assertIn("--corridas %d" % (5 - valid), rest)
+        self.run_step(rest)
+        self.assertEqual(perf.csv_runs(self.folder, "control", "catalogo-lista"), list(range(1, 6)))
+        self.assertEqual(json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))["control"]["corridas"], 5)
+        # diagnóstico, sesión 2 y "Elige uno" sin decisión (S1) → pausar
+        out = self.next_out()
+        self.run_step(self.last(out, " diagnostico --carpeta"))
+        out = self.session2()
+        out = self.next_out()
+        self.assertIn("Elige uno", out)
+        self.follow(out, choose="Pausar para después")
+        out = self.next_out()
+        self.assertIn("en pausa", out)
+        self.assertTrue(step_commands(out)[0][1].endswith("reanudar --carpeta %s" % self.rel))
+        self.assertIn("--sesion '0 · pedido'", out)  # E2: sigue entre las sin anotar
+        self.assertTrue(all(command.startswith("cd ") for command in self.ran))
+
+
+T2_DEPS_BINARY = ("profilingRuntimeClasspath - Runtime classpath\n+--- project :feature:pedidos\n"
+                  "\\--- com.example:pagos:1.2.0\n")
+T2_DEPS_CODE = ("profilingRuntimeClasspath - Runtime classpath\n+--- project :feature:pedidos\n"
+                "\\--- com.example:pagos:1.2.0 -> project :pagos\n")
+
+
+class AcceptanceT2ModuloBinario(AcceptanceBase):
+    """T2: la marca que se quiere cae en un módulo binario → "Elige uno" → el usuario lo pasa a código y
+    `--comprobar-modulos` lo detecta y da el paso → la huella de módulos cambia entre fases y se avisa."""
+
+    def last(self, output, words):
+        return next(command for _, command in step_commands(output) if words in command)
+
+    def test_t2(self):
+        gradlew = self.root / "gradlew"
+        write(gradlew, "#!/bin/sh\ncat \"$GRADLE_DEPS\"\n")  # el Gradle de mentira: la salida de :app:dependencies
+        gradlew.chmod(0o755)
+        deps = self.dir / "deps.txt"
+        write(deps, T2_DEPS_BINARY)
+        self.env["GRADLE_DEPS"] = str(deps)
+        flows = {"catalogo-lista": json.loads(json.dumps(TWO_FLOW_PLAN["catalogo-lista"]))}
+        self.make_plan(flows, triage=False, instalar="./gradlew :app:installProfiling")
+        # la sesión 1 registra el módulo del alcance y para qué hacía falta
+        self.perf_in_root("setup", "--estado", "--carpeta", self.rel, "--modulos", "com.example:pagos", "--para",
+                          "com.example:pagos=aquí está el toque de Pagar")
+        out = self.next_out()
+        self.assertIn("lo pidió aquí está el toque de Pagar", out)
+        self.assertIn("A. Pasarlo a código", out)
+        self.assertIn("B. Dejarlo binario", out)
+        prueba = self.last(out, "--prueba")
+        write(deps, T2_DEPS_CODE)  # el usuario cambia el interruptor del proyecto y sincroniza Gradle
+        recheck = self.follow(out, stop=lambda command: "--prueba" in command or "--fase" in command,
+                              choose="Pasarlo a código")
+        self.assertIn("com.example:pagos cambió de binario (llega compilado) a código desde la sesión 1: ahora se "
+                      "puede poner la marca (aquí está el toque de Pagar)", recheck)
+        out = self.next_out()
+        self.assertIn("Un módulo pasó a código", out)
+        self.assertIn("pon la marca o el tramo que faltaba", out)
+        self.run_step(prueba)  # la sesión 1 corta pone la marca y repite la prueba, como dice el chat
+        out = self.next_out()
+        self.assertNotIn("Un módulo pasó a código", out)
+        self.run_step(self.last(out, "--fase antes"))
+        write(deps, T2_DEPS_BINARY)  # alguien vuelve el interruptor: el control se mide con el módulo binario
+        control = self.run_step(self.last(self.next_out(), "--fase control"))
+        self.assertIn("la huella de los módulos cambió desde la fase antes", control)
+        comparison = self.perf_in_root("comparar", self.folder / "metricas.csv")  # el cierre compara (cierre.md)
+        self.assertIn("huella de los módulos", comparison)
+
+
 # ── Q · Lo que quedaba pendiente de 0.15.x ───────────────────────────────────
 
 class PendingQTest(TriageBase):
@@ -1340,6 +1497,144 @@ class ReportFollowUpTest(PerfBase):
         self.assertNotIn("(0 servicios)", dev)
         self.assertEqual(perf.names_and_more(list("abcdefg"), 5), "a, b, c, d, e y 2 más")
         self.assertEqual(perf.names_and_more(["GET a"], 5), "GET a")
+
+
+# ── T3, T3b y T4 · Reportes de punta a punta ─────────────────────────────────
+
+class ReportFixtureBase(PerfBase):
+    """Una investigación de fixture en un proyecto con AGENTS.md (como ReportStructureTest, sin repetir sus tests)."""
+
+    investigation = ReportStructureTest.investigation
+
+    def setUp(self):
+        super().setUp()
+        (self.dir / "home").mkdir()  # un HOME vacío y git sin la configuración de la máquina
+        self.env.update(HOME=str(self.dir / "home"), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        write(self.dir / "AGENTS.md", "# App de pedidos\n\n## Rendimiento\n\n- applicationId: com.example.app\n")
+        self.folder = self.investigation()
+
+
+class AcceptanceT3Reportes(ReportFixtureBase):
+    """T3: los reportes inicial y final de una investigación con todo lo que pide R (datos inventados): una métrica
+    dentro de la variación normal, un servicio con su versión y otro sin ruta real, y un hallazgo del servidor."""
+
+    def test_t3(self):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        flow = next(iter(plan["flujos"]))
+        noise = {"antes": [100, 101, 102, 100, 101], "control": [104, 105, 103, 104, 105], "despues": [98, 98, 97, 98, 98]}
+        with (self.folder / "metricas.csv").open("a", encoding="utf-8") as handle:
+            for phase, values in noise.items():
+                handle.write("".join("%s,%s,volver_ms,%d,%d,ms,menor,app\n" % (phase, flow, run, value)
+                                     for run, value in enumerate(values, 1)))
+            handle.write("".join("%s,%s,red GET catalogo/destacados llamadas,%d,1,llamadas,menor,app\n" % (phase, flow, run)
+                                 for phase in ("antes", "control") for run in range(1, 6)))
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        write(self.folder / "estado.md", state.replace(
+            "| H1 |", "| H4 | El catálogo responde lento | TTFB 0,9 s en las 5 corridas | el servidor tarda en responder | "
+                     "sin confirmar | — |\n| H1 |", 1))
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        initial_dev = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        initial_business = (self.folder / "reporte-inicial-gerencia.html").read_text(encoding="utf-8")
+        final_dev = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
+        final_business = (self.folder / "reporte-final-gerencia.html").read_text(encoding="utf-8")
+        self.assertIn("Sin la ruta real (y su versión) de 1 servicio (GET catalogo/destacados)", initial_dev)  # R6
+        self.assertIn("ms-pedidos · v2.1", initial_dev)
+        self.assertIn("Servicios que más tiempo suman", initial_dev)  # R5: con gráficos también en el inicial
+        self.assertIn('<span class="chip c-same">Dentro de la variación normal</span>', final_dev)  # R9
+        self.assertIn("del servidor", initial_business)  # el hallazgo que no depende de la app
+        for page in (initial_business, final_business):
+            self.assertNotIn("USD", page)
+            self.assertNotIn("Costo", page)
+        self.assertNotIn('id="pendiente"', initial_business)
+        self.assertIn('id="pendiente"', final_business)
+        for page in (initial_dev, initial_business, final_dev, final_business):
+            self.assertIn("App de pedidos", page)  # R1: el nombre del proyecto, el título sin fecha y el pie con la fecha
+            self.assertIn("Performance · Detalle de un ítem</h1>", page)
+            self.assertRegex(page.split("Los números son medianas")[1], r"\d{4}-\d{2}-\d{2}")
+            self.assertEqual("Reporte técnico dev" in page, page in (initial_dev, final_dev))
+            self.assertEqual(len(re.findall(r"<script", page)), 1)  # solo el del botón de tema
+            self.assertNotRegex(page, r'(?:src|href)="(?:https?:)?//')
+            self.assertIn("theme-btn", page)
+
+
+class AcceptanceT3bUnificado(ReportFixtureBase):
+    """T3b: el reporte de gerencia unificado con tres investigaciones inventadas: un triage con su reporte inicial, un
+    riguroso cerrado con una mejora aplicada después, en código que citan las otras, y una en pausa."""
+
+    def dated(self, folder, day):
+        phases = json.loads((folder / "fases.json").read_text(encoding="utf-8"))
+        for record in phases.values():  # el mismo orden y la misma hora de cada fase, otro día
+            record["fecha"] = "2026-04-%02d%s" % (day, record["fecha"][10:])
+        write(folder / "fases.json", json.dumps(phases))
+
+    def test_t3b(self):
+        triage = self.folder
+        plan = json.loads((triage / "plan.json").read_text(encoding="utf-8"))
+        plan["profundidad"] = "triage"
+        write(triage / "plan.json", json.dumps(plan))
+        self.dated(triage, 10)
+        closed = self.investigation(name="cierre")
+        plan = json.loads((closed / "plan.json").read_text(encoding="utf-8"))
+        applied = next(item for item in plan["mejoras"] if item.get("estado") == "aplicada")
+        applied["archivos"] = [{"ruta": "feature/detalle/src/main/kotlin/com/example/detalle/DetalleViewModel.kt"}]
+        write(closed / "plan.json", json.dumps(plan))
+        paused = self.investigation(name="pausa")
+        write(paused / "pausa.json", json.dumps({"estado": "en pausa", "fecha": "2026-03-04T10:00:00",
+                                                 "fase": "decisión del usuario", "lista_para": "decidir"}))
+        self.dated(paused, 12)
+        for folder in (triage, closed, paused):
+            self.ok("reporte", "--carpeta", folder, "--inicial")
+        self.ok("reporte", "--carpeta", closed)
+        state = (closed / "estado.md").read_text(encoding="utf-8")  # cerrada: la marca quitada y el DoD hecho
+        write(closed / "estado.md", state.replace("con `android.os.Trace` | — | no |",
+                                                  "con `android.os.Trace` | — | sí · perf.py cerrar 2026-03-05 |"))
+        write(closed / "cierre.json", json.dumps({"quitados": 1, "dod": "ok", "fecha": "2026-03-05T10:00:00"}))
+        self.ok("reporte", "--carpeta", closed)
+        out = self.ok("estado")
+        self.assertIn("reporte --gerencia-unificado --todas", out)
+        self.ok("reporte", "--gerencia-unificado", "--todas")
+        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        sections = re.findall(r'<section id="(inv\d)">\s*<h2>[^<]*</h2>\s*<p class="sub">([^<]*) · <span class="chip '
+                              r'[^"]*">([^<]+)</span>', page)
+        self.assertEqual([(date, label) for _, date, label in sections],
+                         [("2026-04-10", "triage"), ("2026-04-12", "en pausa"), ("2026-04-14", "cerrada")])
+        self.assertIn("Resumen de 3 investigaciones", page)
+        self.assertIn('<div class="v">3</div><div class="l">investigaciones</div>', page)
+        self.assertIn('<div class="l">cambios aplicados</div>', page)
+        self.assertIn('<div class="l">flujos medidos</div>', page)
+        self.assertIn("A tener en cuenta", page)
+        self.assertIn("se aplicó en código que pasa por lo que mide", page)  # después del estado inicial de las otras
+        self.assertIn("ese estado inicial puede no servir", page)
+        self.assertNotIn("USD", page)
+        self.assertNotIn("GET pedidos", re.sub(r"<svg.*?</svg>", "", page, flags=re.S))  # sin rutas sueltas en gerencia
+        visible = re.sub(r"<[^>]+>", " ", re.sub(r"<(svg|style|script)\b.*?</\1>", " ", page, flags=re.S))
+        self.assertEqual(perf.TECH_TERMS.findall(visible), [])
+
+
+class AcceptanceT4Viejas(PerfBase):
+    """T4: los reportes de investigaciones de versiones anteriores (0.10.0 y una hecha con 0.15.1, con sus reportes de
+    entonces) se regeneran con el formato nuevo, sin error."""
+
+    def test_t4(self):
+        from test_perf_0150 import AcceptanceT4Test
+        (self.dir / "home").mkdir()  # un HOME vacío y git sin la configuración de la máquina
+        self.env.update(HOME=str(self.dir / "home"), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for fixture in ("hb-performance-0.10.0", "hb-performance-0.15.1"):
+            with self.subTest(fixture=fixture):
+                folder = AcceptanceT4Test.regenerate(self, fixture)
+                self.ok("reporte", "--carpeta", folder, "--inicial", "--html")
+                for name in ("reporte-inicial-dev", "reporte-inicial-gerencia", "reporte-final-dev",
+                             "reporte-final-gerencia"):
+                    page = (folder / (name + ".html")).read_text(encoding="utf-8")
+                    text = (folder / (name + ".md")).read_text(encoding="utf-8")
+                    self.assertIn('<section id="resumen">', page)
+                    self.assertNotIn("Anexo", text)
+                    self.assertNotIn("Cómo leer", text)
+                    self.assertIn("Los números son medianas", text)
+                if fixture.endswith("0.15.1"):  # la línea de tiempo y el resumen que dejó 0.15.x se usan sin abrir trazas
+                    business = (folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
+                    self.assertIn("¿En qué se van los", business)
 
 
 if __name__ == "__main__":
