@@ -282,6 +282,7 @@ class FfmpegCommandTest(unittest.TestCase):
         with TempDir() as folder:
             font = folder / "mi fuente.ttf"
             write(font, "x")
+            self.assertEqual(perf.video_font({"video_fuente": "mi fuente.ttf"}, {}, folder)[0], str(font.resolve()))
             self.assertEqual(perf.video_font({}, {"video_fuente": str(font)}), (str(font.resolve()), str(font.resolve())))
             self.assertIsNone(perf.video_font({"video_fuente": str(folder / "no.ttf")}, {}))
             perf.link_font(str(font), folder / "fuente.ttf")
@@ -311,7 +312,7 @@ class RecorderChoiceTest(unittest.TestCase):
     def test_el_comando_de_scrcpy(self):
         recorder = perf.ScrcpyRecorder("/x/scrcpy", "emulator-5554", Path("/x/grabando-scrcpy.mp4"))
         self.assertEqual(recorder.command(), ["/x/scrcpy", "--serial=emulator-5554", "--no-playback", "--no-window",
-                                              "--no-audio", "--record=/x/grabando-scrcpy.mp4"])
+                                              "--no-audio", "--time-limit=1800", "--record=/x/grabando-scrcpy.mp4"])
 
 
 class VideoChainStartTest(unittest.TestCase):
@@ -356,6 +357,17 @@ class VideoChainStartTest(unittest.TestCase):
 
 
 class ScrcpyRecorderTest(unittest.TestCase):
+    def test_si_llega_a_su_tope_lo_dice(self):
+        recorder = perf.ScrcpyRecorder("/x/scrcpy", "", Path("/x/grabando-scrcpy.mp4"))
+        recorder.process = subprocess.Popen(["true"])
+        recorder.process.wait()
+        recorder.launched = [time.time() - recorder.limit - 1]  # empezó hace más de 30 minutos y terminó sola
+        recorder.stop_recording()
+        self.assertTrue(recorder.cut)
+        self.assertEqual(recorder.ended, recorder.launched[0] + recorder.limit)
+        self.assertEqual(recorder.cap_s(), 1800)
+        self.assertEqual(perf.VideoChain(FakeAdb(), 120).cap_s(), 1200)
+
     def test_graba_un_solo_archivo_y_lo_cierra_con_sigint(self):
         with TempDir() as folder:
             fake = folder / "scrcpy"
@@ -811,9 +823,13 @@ class FfmpegRealTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_une_y_rotula_sin_tocar_la_imagen(self):
+    def need_labels(self):
+        """Estos tests rotulan: con un ffmpeg sin drawtext (el normal de Homebrew) o sin una fuente del sistema, se saltan."""
         if perf.video_font({}, {}) is None or not perf.ffmpeg_features(FFMPEG)["drawtext"]:
             self.skipTest("ffmpeg sin drawtext o sin una fuente del sistema")
+
+    def test_une_y_rotula_sin_tocar_la_imagen(self):
+        self.need_labels()
         result = perf.join_test_video(self.folder, self.events, {}, {}, FFMPEG)
         self.assertTrue(result["rotulado"], result)
         video = self.folder / "prueba-home.mp4"
@@ -829,6 +845,7 @@ class FfmpegRealTest(unittest.TestCase):
         self.assertTrue((self.folder / "video" / "home" / "parte1.mp4").is_file())  # los tramos originales quedan
 
     def test_sin_fuente_une_los_tramos_sin_rotulos(self):
+        self.need_labels()  # con drawtext, lo único que falta es la fuente
         result = perf.join_test_video(self.folder, self.events, {}, {"video_fuente": str(self.folder / "no.ttf")}, FFMPEG)
         self.assertFalse(result["rotulado"])
         self.assertIn("no encontré la fuente de \"video_fuente\"", result["motivo"])
@@ -837,6 +854,7 @@ class FfmpegRealTest(unittest.TestCase):
         self.assertAlmostEqual(duration, 4.0, delta=0.3)
 
     def test_el_comando_video_arma_el_mp4_sin_repetir_la_prueba(self):
+        self.need_labels()
         work = self.folder / "video" / "home"
         (work / "eventos.json").write_text(json.dumps(self.events), encoding="utf-8")
         write(self.folder / "plan.json", json.dumps({"paquete": "com.example.app", "flujos": {"home": {}}}))

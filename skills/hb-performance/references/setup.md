@@ -130,7 +130,7 @@ cd ~ && command -v ffmpeg && ffmpeg -hide_banner -filters | grep drawtext
 
 Después de instalarlo, `perf.py video --carpeta <carpeta>` une el video de una prueba ya hecha, sin repetirla. Si `perf.py` elige otro `ffmpeg`, pon `FFMPEG=<ruta>` delante de `python3` (después del `cd … &&`).
 
-`scrcpy` se comprueba y se instala así (o desde sus [versiones publicadas](https://github.com/Genymobile/scrcpy/releases)); tiene que aceptar `--no-playback`, `--no-window` y `--record` (lo comprueba `perf.py` con su `--help`):
+`scrcpy` se comprueba y, con Homebrew si ya lo tienes, se instala así (o desde sus [versiones publicadas](https://github.com/Genymobile/scrcpy/releases)); tiene que aceptar `--no-playback`, `--no-window` y `--record` (lo comprueba `perf.py` con su `--help`):
 
 ```bash
 cd ~ && command -v scrcpy

@@ -12428,6 +12428,10 @@ class VideoChain:
     def remote(self, number):
         return VIDEO_REMOTE if number == 1 else VIDEO_REMOTE.replace(".mp4", "-%d.mp4" % number)
 
+    def cap_s(self):
+        """El tope del video entero: VIDEO_SEGMENTS_MAX tramos de `limit` segundos."""
+        return self.limit * VIDEO_SEGMENTS_MAX
+
     def _begin(self):
         remote = self.remote(len(self.remotes) + 1)
         self.process = subprocess.Popen(self.adb.base + ["shell", "screenrecord", "--verbose", "--time-limit",
@@ -12544,12 +12548,16 @@ class ScrcpyRecorder:
     def __init__(self, binary, serial, partial):
         self.binary, self.serial, self.partial = binary, serial, pathlib.Path(partial)
         self.process, self.launched, self.exact, self.ended, self.later = None, [], [], None, None
-        self.cut, self.limit, self.remotes = False, 0, []
+        # --time-limit: el mismo tope de 30 minutos que screenrecord, por si perf.py muere sin poder detenerlo
+        self.cut, self.limit, self.remotes = False, VIDEO_LIMIT_S * VIDEO_SEGMENTS_MAX, []
         self.lock = threading.Lock()
 
     def command(self):
         return [self.binary] + (["--serial=%s" % self.serial] if self.serial else []) + [
-            "--no-playback", "--no-window", "--no-audio", "--record=%s" % self.partial]
+            "--no-playback", "--no-window", "--no-audio", "--time-limit=%d" % self.limit, "--record=%s" % self.partial]
+
+    def cap_s(self):
+        return self.limit
 
     def start(self):
         try:
@@ -12596,6 +12604,8 @@ class ScrcpyRecorder:
                 return
             self.ended = time.time()
             if self.process is None or self.process.poll() is not None:
+                if self.process is not None and self.launched and self.ended - self.launched[0] >= self.limit - 5:
+                    self.cut, self.ended = True, self.launched[0] + self.limit  # terminó sola, en su tope
                 return
             try:
                 self.process.send_signal(signal.SIGINT)
@@ -13067,12 +13077,14 @@ def ffmpeg_command(binary, events, graph, encoder, out):
         "-t", num(events["duracion"]), "-movflags", "+faststart", "-f", "mp4", str(out)]
 
 
-def video_font(plan, flow):
-    """(regular, negrita) para drawtext: `video_fuente` del flujo o del plan (un archivo .ttf/.otf/.ttc) o una del sistema
-    (las de /System/Library/Fonts en macOS, DejaVu o Liberation en Linux). None si no hay ninguna."""
+def video_font(plan, flow, root=None):
+    """(regular, negrita) para drawtext: `video_fuente` del flujo o del plan (un archivo .ttf/.otf/.ttc; una ruta relativa,
+    desde la raíz del proyecto `root`) o una del sistema (las de /System/Library/Fonts en macOS, DejaVu o Liberation en
+    Linux). None si no hay ninguna."""
     chosen = (flow or {}).get("video_fuente") or (plan or {}).get("video_fuente")
-    if chosen:  # relativa a donde se corre el comando (la raíz del proyecto), como los demás campos del plan
-        path = pathlib.Path(os.path.expanduser(str(chosen))).resolve()
+    if chosen:
+        path = pathlib.Path(os.path.expanduser(str(chosen)))
+        path = (pathlib.Path(root) / path if root is not None and not path.is_absolute() else path).resolve()
         return (str(path), str(path)) if path.is_file() else None
     for regular, bold in VIDEO_FONTS:
         if pathlib.Path(regular).is_file():
@@ -13106,7 +13118,7 @@ def join_test_video(folder, events, plan, flow, binary=None):
         return out
     work = video_folder(folder, events["flujo"])
     size = video_size(binary, work / pathlib.PurePosixPath(events["tramos_video"][0]["archivo"]).name)
-    font = video_font(plan, flow)
+    font = video_font(plan, flow, project_root(folder).resolve())
     chosen = (flow or {}).get("video_fuente") or (plan or {}).get("video_fuente")
     labels = bool(features["drawtext"] and font and size)
     if not labels:
@@ -13311,8 +13323,9 @@ class TestVideo:
                               marks, aligned, flow_words(self.flow, self.flow_name))
         lines = write_test_video(self.folder, self.flow_name, events, self.plan, self.flow, join=not quick)
         if getattr(self.recorder, "cut", False):
-            lines.append("· El video se cortó a los %d s: el tope es de %d tramos de screenrecord (o usa video_grabador "
-                         "scrcpy, sin tope)" % (self.recorder.limit * VIDEO_SEGMENTS_MAX, VIDEO_SEGMENTS_MAX))
+            lines.append("· El video se cortó a los %d s: es el tope del video de la prueba (%s); lo que siguió no quedó "
+                         "grabado" % (self.recorder.cap_s(), "%d tramos de screenrecord" % VIDEO_SEGMENTS_MAX
+                                      if self.recorder.kind == "screenrecord" else "--time-limit de scrcpy"))
         for line in lines:
             print(line)
 
@@ -13346,7 +13359,7 @@ def write_test_video(folder, flow_name, events, plan, flow, join=True, binary=No
         save_test_video(folder, flow_name, events)
     count = len(events["tramos_video"])
     tail = video_tail(flow, plan)
-    what = ("de que se abre la app ('preparar' incluido) hasta %s; rótulos de cada parte: preparación (no se mide), cada "
+    what = ("desde que se abre la app ('preparar' incluido) hasta %s; rótulos de cada parte: preparación (no se mide), cada "
             "tramo medido, las marcas del plan y el fin" % ("que termina el recorrido" if not tail else
                                                             "%s s después del recorrido" % fmt(tail)))
     pieces = "el tramo de %s" % work if count == 1 else "los %d tramos de %s seguidos" % (count, work)
