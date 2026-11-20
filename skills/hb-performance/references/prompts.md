@@ -50,7 +50,7 @@ Sin build de profiling, el agente hace el setup (sesión 0) y te deja el comando
 Usa hb-performance: medir <tramo: de qué lista a qué detalle>. Para llegar ahí hay que <login, aceptar términos, omitir huella, ir al tab X>. Dispositivo <serial>. No hagas commit ni push.
 ```
 
-Sesión 1 con el patrón de flujos largos. El texto no fija cómo se recorre: el agente te lo pregunta y recomienda un flow de Maestro en `preparar` y `adb` para el tramo medido; si ya lo tienes decidido, agrégalo al pedido ("recorrido manual", "con deep link") y la pregunta sale igual, con tu elección marcada, para que puedas cambiarla. Si el flujo necesita credenciales, van en variables de entorno: cárgalas en la terminal **antes de abrir el agente** (solo ve las de la terminal desde la que se abrió) y, después, en la terminal donde midas, una por variable, con lectura oculta para las claves: `cd <raíz> && printf 'PERF_CLAVE: ' && read -r -s PERF_CLAVE && echo && export PERF_CLAVE` (y sin `-s` para un usuario: `cd <raíz> && printf 'PERF_USUARIO: ' && read -r PERF_USUARIO && export PERF_USUARIO`). Lo que escribes no queda en el historial ni en ningún archivo. `perf.py siguiente` imprime ese paso primero cuando el plan las necesita.
+Sesión 1 con el patrón de flujos largos. El texto no fija cómo se recorre: el agente te lo pregunta y recomienda un flow de Maestro en `preparar` y `adb` para el tramo medido; si ya lo tienes decidido, agrégalo al pedido ("recorrido manual", "con deep link") y la pregunta sale igual, con tu elección marcada, para que puedas cambiarla. Si el flujo necesita credenciales, van en variables de entorno: cárgalas en la terminal **antes de abrir el agente** (solo ve las de la terminal desde la que se abrió) y, después, en la terminal donde midas, una por variable, con lectura oculta para las claves: `cd <raíz> && printf 'APP_CLAVE_PRUEBA: ' && read -r -s APP_CLAVE_PRUEBA && echo && export APP_CLAVE_PRUEBA` (y sin `-s` para un usuario: `cd <raíz> && printf 'APP_USUARIO_PRUEBA: ' && read -r APP_USUARIO_PRUEBA && export APP_USUARIO_PRUEBA`). Lo que escribes no queda en el historial ni en ningún archivo. `perf.py siguiente` imprime ese paso primero cuando el plan las necesita.
 
 ### Flujo con un paso que hace una persona (autorizar en otra app, completar un pago)
 
@@ -138,7 +138,7 @@ Interrumpir es seguro. Si algo quedó a medias, `siguiente` lo dice y su primer 
 
 ### Pausar una investigación para después
 
-Un triage con mejoras termina con "Elige uno": aplicar ahora, pausar o cerrar. Para pausar (quita las marcas guardándolas en su parche, deja el setup puesto y anota el commit de cada repo):
+Un triage con mejoras termina con "Elige uno": aplicar ahora, pausar o cerrar; una investigación rigurosa sin decisión, con decidir, pausar o cerrar sin aplicar. Para pausar (quita las marcas guardándolas en su parche, deja el setup puesto y anota el commit de cada repo):
 
 **Dónde:** terminal, sin chat
 
@@ -164,7 +164,17 @@ Repone el setup y las marcas, dice qué cambió en el código desde la pausa y s
 cd <raíz> && python3 -I <skill>/scripts/perf.py estado
 ```
 
-Cada una con su estado (abierta, en pausa o cerrada), las marcas puestas por repo, las mejoras y su paso siguiente.
+Cada una con su estado (abierta, en pausa o cerrada), las marcas puestas por repo, las mejoras y su paso siguiente. Con dos o más que ya tienen reporte, también imprime el comando del caso siguiente.
+
+### Un solo reporte de gerencia de varias investigaciones
+
+**Dónde:** terminal, sin chat, en la raíz del proyecto (opcional; no cambia nada en ninguna investigación)
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --gerencia-unificado --todas
+```
+
+Deja `reporte-gerencia-unificado.html` en la carpeta de las investigaciones; con `--carpetas <carpeta> <carpeta>` en lugar de `--todas`, solo esas.
 
 ### No sé cuál es el paso
 
@@ -278,7 +288,7 @@ Con hb-performance, mejora el resumen ejecutivo, el resumen para gerencia y la l
 cd <raíz> && python3 -I <skill>/scripts/perf.py reporte --carpeta <carpeta> --html
 ```
 
-Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (una página en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial.
+Deja las dos versiones: `reporte-final-dev.html` (técnico) y `reporte-final-gerencia.html` (en palabras, para un equipo no técnico). Con `--inicial`, las del reporte inicial.
 
 ### Agregar una métrica, un tramo o una marca
 

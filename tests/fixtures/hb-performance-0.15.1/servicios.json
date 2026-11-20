@@ -1,0 +1,1 @@
+{"servicios": {"GET pedidos/{id}": "https://api.example.com/ms-pedidos/v2.1/pedidos/42"}}

@@ -979,8 +979,12 @@ class SetupRestoreTest(SetupBase):
         self.assertIn("El setup ya está en el árbol", self.good("setup", "--reponer"))
 
 
-class SetupRemoveTest(SetupBase):
+class SetupRemoveCase(SetupBase):
     """A4: quitar el setup, solo o como último paso de `cerrar`."""
+
+
+class SetupRemoveTest(SetupRemoveCase):
+    """0.16.0 · K: la primera mitad de los tests, para que la suite se reparta (la otra mitad está en SetupRemoveMoreTest)."""
 
     def test_tras_actualizar_guarda_antes_de_quitar(self):
         first, _ = self.in_patch()
@@ -1139,6 +1143,10 @@ class SetupRemoveTest(SetupBase):
         self.assertEqual(perf.setup_case(self.root)["caso"], "versionado")  # no pasa a "en parche"
         self.assertNotIn("Setup: en parche", (self.root / "AGENTS.md").read_text(encoding="utf-8"))
         self.assertEqual((self.root / "app" / "build.gradle.kts").read_text(encoding="utf-8"), BUILD)
+
+
+class SetupRemoveMoreTest(SetupRemoveCase):
+    """0.16.0 · K: la segunda mitad de los tests, para que la suite se reparta (la otra mitad está en SetupRemoveTest)."""
 
     def test_con_el_dod_fallido_no_se_quita(self):
         self.in_patch()
@@ -1647,7 +1655,7 @@ class ModulesGateTest(ModulesBase):
               "mostrar el resultado; la traza muestra 600 ms dentro del módulo de pagos. Se propone precargar el catálogo.\n")
         self.assertEqual(self.run_perf("reporte", "--carpeta", self.rel, "--inicial").returncode, 0)
         dev = (self.folder / "reporte-inicial-dev.md").read_text(encoding="utf-8")
-        self.assertIn("## Pedido al equipo dueño del módulo", dev)
+        self.assertIn("Pedido al equipo dueño del módulo", dev)
         self.assertIn("Para enviar al equipo dueño de un módulo que la app consume compilado", dev)
         self.assertIn("Se propone precargar el catálogo", dev)
         self.assertNotIn("Pedido al equipo dueño", (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8"))

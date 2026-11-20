@@ -263,7 +263,7 @@ class ReportsAfterCloseTest(MixedFileBase):
         self.assertEqual(steps[-1]["tipo"], "fin")
         self.ok_in("reporte", "--carpeta", self.rel(), "--html")
         dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("generado el %s" % datetime.date.today().isoformat(), dev)
+        self.assertRegex(dev, r"Generado el \d{4}-\d{2}-\d{2} \d{2}:\d{2}")  # 0.16.0 · R1: en el Resumen, sin depender del reloj
         self.assertIn("cierre hecho: cambios temporales quitados", dev)
         self.assertEqual(perf.next_steps(self.folder, plan)[0], "investigación cerrada")
 
@@ -922,27 +922,28 @@ class VerdictLabelTest(PerfBase):
             row = next(line for line in dev.splitlines() if line.startswith("| contactos | %s |" % perf.plain_metric(
                 metric, plan)))
             self.assertTrue(row.rstrip(" |").endswith("[%s]" % label), row)
-            line = next(line for line in business.splitlines() if line.startswith("- **%s:**" % perf.plain_metric(metric,
-                                                                                                                  plan)))
-            self.assertTrue(line.endswith("[%s]" % label), line)
+            line = next(line for line in business.split("## Resultado")[1].splitlines()
+                        if line.startswith(perf.plain_metric(metric, plan)))
+            self.assertTrue(line.endswith("[%s]" % label), line)  # 0.16.0 · R5: el título del gráfico con su etiqueta
         result = business[business.index("## Resultado"):]
         self.assertIn("Qué significa cada etiqueta:", result)
         self.assertIn("- [Mejora] el cambio es mayor que la variación normal entre mediciones", result)
         html = (self.folder / "reporte-final-gerencia.html").read_text(encoding="utf-8")
-        self.assertIn('<span class="verdict label v-better">Mejora</span>', html)
-        self.assertNotIn("[Mejora]", html)  # en el HTML va con texto y color, no con corchetes
+        self.assertIn('<span class="chip c-ok">Mejora</span>', html)  # 0.16.0 · R1: la etiqueta como chip
+        self.assertNotIn("[Mejora]</", html)  # en el HTML va con texto y color, no con corchetes
         dev_html = (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8")
-        self.assertIn('<span class="verdict label v-better">Mejora</span>', dev_html)
+        self.assertIn('<span class="chip c-ok">Mejora</span>', dev_html)
 
     def test_orientativo_y_los_demas(self):
         r = {"veredicto": "mejora", "avisos": [perf.MARK_CHANGED]}
         self.assertEqual(perf.verdict_label(r), "Orientativo")
         self.assertEqual(perf.verdict_label({"veredicto": "mejora", "avisos": ["inestable"]}), "Orientativo")
-        self.assertEqual(perf.verdict_label({"veredicto": "dentro del ruido", "avisos": []}), "Dentro del ruido")
+        self.assertEqual(perf.verdict_label({"veredicto": "dentro del ruido", "avisos": []}),
+                         "Dentro de la variación normal")  # 0.16.0 · R5: en palabras
         self.assertEqual(perf.verdict_label({"veredicto": perf.COST_VERDICT, "avisos": []}), "Costo conocido")
         self.assertEqual(perf.verdict_label({"veredicto": perf.FOREIGN_VERDICT, "avisos": []}), "Ajeno · sin veredicto")
-        legend = perf.label_legend({"Dentro del ruido"})
-        self.assertEqual(legend, "- [Dentro del ruido] la diferencia es menor que la variación normal entre mediciones; no "
+        legend = perf.label_legend({"Dentro de la variación normal"})
+        self.assertEqual(legend, "- [Dentro de la variación normal] la diferencia es menor que la variación normal entre mediciones; no "
                                  "se puede afirmar que cambió.")
         for label in set(perf.VERDICT_LABELS.values()) | {"Orientativo"}:
             self.assertIn(label, perf.LABEL_LEGEND)  # cada etiqueta tiene su línea para un lector no técnico

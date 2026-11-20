@@ -75,9 +75,9 @@ Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 
 
 ## Costo esperado por sesión
 
-`perf.py consumo` compara el costo de cada sesión que anotas con esta tabla, según el tipo de sesión y el tamaño del proyecto, y si se pasó lo dice en una frase ("la sesión 2 costó 2,4 USD; lo esperado es 0,5–1,5: consumió más de lo que debía"), en `estado.md` (debajo de la tabla "Consumo") y en el anexo de costo del reporte técnico. **Nunca detiene nada**: se gasta lo que haga falta. Una sesión que cuesta varias veces lo esperado suele estar explorando lo que la skill hace sola; más de 5 USD en una sesión es anormal.
+`perf.py consumo` compara el costo de cada sesión que anotas con esta tabla, según el tipo de sesión y el tamaño del proyecto, y si se pasó lo dice en una frase ("la sesión 2 costó 2,4 USD; lo esperado es 0,5–1,5: consumió más de lo que debía"), en `estado.md` (debajo de la tabla "Consumo") y en la sección de costo del reporte técnico. **Nunca detiene nada**: se gasta lo que haga falta. Una sesión que cuesta varias veces lo esperado suele estar explorando lo que la skill hace sola; más de 5 USD en una sesión es anormal.
 
-**Tamaño del proyecto:** la línea `Tamaño del proyecto: pequeño | mediano | grande` de la sección de rendimiento de `AGENTS.md`; sin ella, los módulos que incluye `settings.gradle(.kts)`: hasta 5, pequeño; hasta 25, mediano; más, grande.
+**Tamaño del proyecto:** la línea `Tamaño del proyecto: pequeño | mediano | grande` de la sección de rendimiento de `AGENTS.md`; sin ella, la cantidad de módulos más alta entre los que incluye `settings.gradle(.kts)`, los que resuelve `:app:dependencies` para la investigación (proyectos y artefactos internos del mismo grupo que la app, es decir, con los dos primeros segmentos de `paquete`, como los módulos que llegan como binarios; un grupo público como `io.github` o `com.google` no cuenta) y los del mapa de módulos del plan: hasta 5, pequeño; hasta 25, mediano; más, grande. El aviso dice qué tamaño usó y de dónde salió.
 
 | Sesión | Pequeño | Mediano | Grande |
 | --- | --- | --- | --- |

@@ -636,11 +636,12 @@ class InterruptedTest(TriageBase):
             "perfetto": {"pid": "4242", "remota": "/data/misc/perfetto-traces/hbperf-1.perfetto-trace",
                          "serial": "emulator-5554"}}))
         out = self.ok_in("siguiente", "--carpeta", self.rel)
-        self.assertIn("quedó algo a medias: la captura de antes del flujo catalogo-lista se interrumpió en la corrida 2", out)
+        self.assertIn("quedó algo a medias: la captura de antes del flujo catalogo-lista se interrumpió buscando la "
+                      "corrida 1 (ninguna válida en metricas.csv todavía)", out)  # 0.16.0: el número sale de los datos
         self.assertIn("Interrumpir es seguro", out)
         self.assertTrue(commands_in(out)[0].endswith("recuperar --carpeta %s" % self.rel))
         out = self.ok_in("recuperar", "--carpeta", self.rel)
-        self.assertIn("Detuve la traza que seguía grabando en el dispositivo", out)
+        self.assertIn("Perfetto: detenido (proceso 4242) y traza borrada del dispositivo", out)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("kill -TERM 4242", log)
         self.assertIn("rm -f /data/misc/perfetto-traces/hbperf-1.perfetto-trace", log)
@@ -1200,8 +1201,8 @@ class AcceptanceT4Test(PerfBase):
             with self.subTest(fixture=fixture):
                 folder = self.regenerate(fixture)
                 dev = (folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-                main = dev.split("\n## Anexo")[0]
-                self.assertLessEqual(perf.words_count(main), perf.MAIN_WORDS_MAX)
+                main = dev  # 0.16.0 · R10: sin anexo y sin el tope de 1 500 palabras (el usuario aprobó la estructura)
+                page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
                 self.assertIn("+    val linea119 = cargar(119)", dev)  # el diff completo
                 self.assertNotRegex(dev, r"y \d+ líneas más")  # ningún diff truncado
                 visible = re.sub(r"```.*?```", "", dev, flags=re.S)
@@ -1214,9 +1215,8 @@ class AcceptanceT4Test(PerfBase):
                 for word in ("## Costo", "Costo de la investigación", "USD", "Más detalle", "Un punto técnico",
                              "descart", "sin confirmar"):
                     self.assertNotIn(word, business)
-                page = (folder / "reporte-final-dev.html").read_text(encoding="utf-8")
-                self.assertNotIn("<script", page.lower())
-                self.assertIn('class="anexo"', page)
+                self.assertNotRegex(page, r"<script[^>]*\bsrc=")  # R1: solo el script corto del tema, en la página
+                self.assertNotIn('class="anexo"', page)
 
 class AcceptanceT5Test(AcceptanceBase):
     """T5: varias investigaciones abiertas: `estado` sin --carpeta y el aviso de `nuevo`."""
@@ -1385,16 +1385,16 @@ class ImprovementTextsTest(PerfBase):
     def test_paneles_topes_y_hallazgos(self):
         out = self.ok("reporte", "--carpeta", self.folder, "--html")
         dev = (self.folder / "reporte-final-dev.md").read_text(encoding="utf-8")
-        self.assertIn("<summary>M1 · Una sola llamada · [Mejora] · riesgo medio</summary>", dev)
-        self.assertIn("<summary>app/Lista.kt · riesgo medio</summary>", dev)
-        self.assertIn("- **Antes:** pedía dos veces", dev)
+        self.assertIn("M1 Una sola llamada [Mejora] [aplicada] [riesgo medio]", dev)  # 0.16.0 · R3: la card
+        self.assertIn("app/Lista.kt · riesgo medio", dev)
+        self.assertIn("Antes: pedía dos veces", dev)
         self.assertIn("+    fun f149() = 149", dev)  # el diff completo
-        self.assertIn("- **Por qué:** La lista tarda (H1)", dev)
+        self.assertIn("| H1 · La lista tarda |", dev)
         self.assertIn("La mejora M2: su hallazgo H2 está sin confirmar. Solo los hallazgos confirmados", out)  # E5
         self.assertIn("Resumen ejecutivo pasa su tope: 2 líneas de más (tiene 7; el tope es 5)", out)  # H6
         self.assertIn("M1 · app/Lista.kt · contras pasa su tope: 10 palabras de más", out)
         business = (self.folder / "reporte-final-gerencia.md").read_text(encoding="utf-8")
-        self.assertIn("- Una sola llamada: Toca la carga de la lista: riesgo medio.", business)  # G1
+        self.assertIn("| M1 · Una sola llamada | [medio] | toca la carga de la lista |", business)  # 0.16.0 · R5
         self.assertNotIn("Un tirón", business)
 
     def test_decidir_aplicada_pide_la_explicacion_de_cada_archivo(self):
@@ -1429,7 +1429,8 @@ class DodSafetyTest(PerfBase):
                                       "    ```\n")
         commands, skipped = perf.dod_entries(self.dir)
         root = perf.q(self.dir)
-        self.assertEqual(commands, ["cd %s && ./gradlew lint" % root, "cd %s && ./gradlew check" % root,
+        self.assertEqual(commands, ["cd %s && ./gradlew lint" % root, "cd %s && ./gradlew test" % root,  # 0.16.0 · Q
+                                    "cd %s && ./gradlew check" % root,
                                     "cd %s && $ANDROID_HOME/platform-tools/adb devices" % root])
         reasons = dict(skipped)
         self.assertIn("lo prohíbe o lo pone como condición",
