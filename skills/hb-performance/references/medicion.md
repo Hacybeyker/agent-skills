@@ -146,7 +146,7 @@ Un flujo con `"tipo": "repeticion"` mide si la memoria crece al repetir un ciclo
 
 ## Pausar y reanudar
 
-Un triage que propone mejoras termina con **tres caminos excluyentes** ("Elige uno"): **aplicar ahora** (`decidir --profundidad riguroso`), **pausar para después** (`pausar`) o **cerrar del todo** (`cerrar`). Nunca `cerrar` primero: quita las marcas y el setup que la medición necesita.
+Un triage que propone mejoras termina con **tres caminos excluyentes** ("Elige uno"): **aplicar ahora** (`decidir --profundidad riguroso`), **pausar para después** (`pausar`) o **cerrar del todo** (`cerrar`). Nunca `cerrar` primero: quita las marcas y el setup que la medición necesita. Una investigación rigurosa con mejoras propuestas y sin decisión da lo mismo: **decidir ahora** (`decidir` con los ids), **pausar para después** (`pausar`) o **cerrar sin aplicar** (`cerrar`).
 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/perf.py pausar --carpeta <carpeta>

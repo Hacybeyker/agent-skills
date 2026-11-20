@@ -34,6 +34,16 @@ perf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(perf)
 
 
+def decision_text(steps):
+    """El comando `decidir` de los pasos: la primera opción de "Elige uno" (S1 de 0.16.0) o un paso de terminal."""
+    for step in steps:
+        if step["tipo"] == "opciones":
+            return step["opciones"][0][2]["texto"]
+        if step["tipo"] == "terminal" and "decidir" in step["texto"]:
+            return step["texto"]
+    return ""
+
+
 def inspect_source():
     return SCRIPT.read_text(encoding="utf-8")
 
@@ -1534,8 +1544,8 @@ class NextStepTest(PerfBase):
         self.plan["mejoras"] = [{"id": "M1", "titulo": "a"}, {"id": "M2", "titulo": "b", "estado": "propuesta"}]
         title, steps = self.step()
         self.assertEqual(title, "decisión del usuario (sin chat)")
-        self.assertIn("decidir --carpeta", steps[0]["texto"])
-        self.assertIn("--aprobar M1,M2", steps[0]["texto"])
+        self.assertIn("decidir --carpeta", decision_text(steps))  # 0.16.0 · S1: la primera opción de "Elige uno"
+        self.assertIn("--aprobar M1,M2", decision_text(steps))
         self.plan["mejoras"][1]["estado"] = "aprobada"
         step = self.step()[1][0]
         self.assertIn("sesión 3, aplica M2", step["texto"])
@@ -5070,7 +5080,7 @@ class TriageToRigorousTest(PerfBase):
         self.measured(10, control=10)
         title, steps = self.step()
         self.assertEqual(title, "decisión del usuario (sin chat)")
-        self.assertIn("--aprobar M1", steps[0]["texto"])
+        self.assertIn("--aprobar M1", decision_text(steps))
         self.measured(12, control=5, skill=None)  # de sobra, y de una versión anterior: completa también
         self.assertEqual(self.step()[0], "decisión del usuario (sin chat)")
 
@@ -6461,7 +6471,7 @@ class TestRunWarningsTest(DeviceBase):
         self.assertIn("(app/src/main/kotlin/com/example/app/RepartoScreen.kt:4)", chat)
         self.assertRegex(out, r"1\. Chat nuevo · Modelo: Sonnet 5\.5 · Esfuerzo: medio")
         self.assertRegex(out, r"2\. Terminal \(sin chat\) · compila e instala")
-        self.assertIn("./gradlew :app:installProfiling", out)
+        self.assertIn("instalar --carpeta", out)  # 0.16.0 · S2: por perf.py, que registra si compiló
         self.assertRegex(out, r"3\. Terminal \(sin chat\) · repite la corrida de prueba")
         self.assertRegex(out, r"4\. Terminal \(sin chat\) · OPCIÓN, solo si decides medir igual")
         option = lines[next(i for i, line in enumerate(lines) if "OPCIÓN" in line) + 1]
@@ -8267,7 +8277,7 @@ class DevSettingsTest(DeviceBase):
         self.assertIn("window_animation_scale 1", steps[1]["texto"])
         self.assertIn("1) la marca 'MARK x' no salió", steps[2]["texto"])
         self.assertNotIn("animación", steps[2]["texto"])
-        self.assertIn("installX", steps[3]["texto"])
+        self.assertIn("instalar --carpeta", steps[3]["texto"])  # 0.16.0 · S2: por perf.py, que registra si compiló
 
 
 FIXTURE_090 = ROOT / "tests" / "fixtures" / "hb-performance-0.9.0"
@@ -9330,7 +9340,7 @@ class EveryStateEndsWithAStepTest(PerfBase):
                 plan = dict(self.plan, mejoras=mejoras)
                 write(self.folder / "plan.json", json.dumps(plan))
                 title, steps = perf.next_steps(self.folder, plan)
-                actionable = [step for step in steps if step["tipo"] in ("terminal", "chat", "accion", "fin")]
+                actionable = [step for step in steps if step["tipo"] in ("terminal", "chat", "accion", "fin", "opciones")]
                 self.assertTrue(actionable, (name, title, steps))
                 if title == "investigación cerrada":
                     self.assertEqual(steps[-1]["tipo"], "fin")

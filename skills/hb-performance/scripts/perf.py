@@ -4396,6 +4396,7 @@ def next_steps(folder, plan, flow=None):
             title = title + " · falta el DoD después de quitar los cambios temporales"
             steps = [dod] + [dict(step, texto=DONE_AFTER_DOD) if step["tipo"] == "fin" else step for step in steps]
         elif title.startswith("investigación cerrada") and not (pathlib.Path(folder) / CLOSE_FILE).is_file() and \
+                not read_setup_close(folder).get("cerrar") and \
                 not version_at_least(phase_skill(read_phases(folder).get("despues")), "0.12.0"):
             # A6: cerrada con una versión anterior, sin registro del cierre: el DoD después de cerrar no está anotado.
             root = project_root(folder).resolve()
@@ -5411,6 +5412,16 @@ def plan_steps(folder, plan, flow=None):
                          "fase después", "revisa que todas las marcas del plan salgan con ✔; si falta alguna, el paso "
                          "siguiente es ajustarla")]
         old_apk = [item for item in test_warnings(root / folder, flow) if item.get("tipo") == "apk_viejo"]
+        built = last_build(root / folder)
+        if old_apk and built.get("estado") == "ok" and (fecha_ts(built.get("fecha")) or 0) > tested:
+            # S2: ya compiló e instaló después de esa prueba (`perf.py instalar`): solo falta repetirla
+            return "repite la corrida de prueba con el build nuevo (antes de medir después)", [
+                {"tipo": "avisos", "titulo": "Avisos de una prueba anterior", "lineas": [
+                    "La última corrida de prueba (%s) es anterior a la última compilación (%s): repite la prueba con el "
+                    "build nuevo" % (str(test.get("fecha") or "—")[:16].replace("T", " "),
+                                     str(built.get("fecha") or "—")[:16].replace("T", " "))]},
+                terminal(command(*(capture + ["--prueba"])), "repite la corrida de prueba con el build nuevo",
+                         "revisa que todas las marcas del plan salgan con ✔")]
         if old_apk:
             # B2: el APK de la prueba era anterior a las marcas o a la mejora: compilar e instalar, nunca ajustar marcas
             return "el APK instalado es anterior a la mejora o a las marcas (antes de medir después)", [
@@ -5437,11 +5448,37 @@ def plan_steps(folder, plan, flow=None):
                      + (" (de nuevo: la medición anterior de después es vieja)" if stale else ""), you_run),
             session4]
     if "propuesta" in estados:
+        # S1: riguroso con mejoras propuestas y sin decisión: los mismos caminos excluyentes que un triage
         ids = ",".join(m["id"] for m in mejoras if m.get("estado", "propuesta") == "propuesta")
-        return "decisión del usuario (sin chat)", [
-            terminal(command("decidir", "--carpeta", folder, "--aprobar", ids, "--descartar", "-", "--pendiente", "-"),
-                     "registra qué mejoras se aplican y da el chat de la sesión 3",
-                     "deja en cada lista los ids que correspondan (- es ninguno); mira las mejoras en estado.md")]
+        report = initial if initial.is_file() else None
+        if closed_by_cerrar(state.parent) and not pending_temp(state.parent):  # eligió "Cerrar sin aplicar"
+            business = audience_file(state.parent, "inicial", "gerencia")
+            return "investigación cerrada · sin aplicar las mejoras propuestas", (
+                [{"tipo": "archivo", "texto": str(report), "que": "el reporte inicial (diagnóstico y plan de mejoras): es "
+                  "el reporte de esta investigación"}] if report else []) + (
+                [{"tipo": "archivo", "texto": str(business), "que": "el mismo reporte para gerencia"}]
+                if business else []) + [{"tipo": "fin", "texto": DONE}]
+        options = [
+            ("Decidir ahora", "cuando ya sabes cuáles aplicar (%s): mira las mejoras en estado.md o en el reporte "
+                              "inicial" % ids.replace(",", ", "),
+             terminal(command("decidir", "--carpeta", folder, "--aprobar", ids, "--descartar", "-", "--pendiente", "-"),
+                      "registra qué mejoras se aplican y da el chat de la sesión 3",
+                      "deja en cada lista los ids que correspondan (- es ninguno)")),
+            ("Pausar para después", "cuando la decisión llega más adelante (días o semanas) o vas a empezar otra "
+                                    "investigación",
+             terminal(command("pausar", "--carpeta", folder),
+                      "quita las marcas y los cambios temporales guardándolos en su parche (con respaldo), deja el setup "
+                      "puesto, anota el commit de cada repo y deja la investigación lista para `reanudar`",
+                      "nada; si algo no revierte limpio, se detiene sin tocar nada")),
+            ("Cerrar sin aplicar", "cuando no vas a aplicar ninguna mejora: la investigación termina con el reporte "
+                                   "inicial",
+             terminal(command("cerrar", "--carpeta", folder),
+                      "quita las marcas y los cambios temporales (con su parche) y, después del DoD, el setup si va en un "
+                      "parche", "nada; si algo no revierte limpio, se detiene sin tocar nada"))]
+        return "decisión del usuario (sin chat)", (
+            [{"tipo": "archivo", "texto": str(report), "que": "el reporte inicial (diagnóstico y plan de mejoras)"}]
+            if report else []) + [{"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que "
+                                                                    "corresponda)", "opciones": options}]
     if mejoras:
         return "sesión 4 · cierre sin mejoras aplicadas", [session4]
     if initial.is_file():
@@ -5485,6 +5522,20 @@ def plan_steps(folder, plan, flow=None):
         you_run = you_run.replace(str(runs), "3")
         runs = 3
     pending = test_warnings(root / folder, flow) if "antes" not in phases else []
+    tested_at = ((read_notes(root / folder).get("prueba") or {}).get(flow) or {}).get("fecha") if pending else None
+    built = last_build(root / folder)
+    configured = any(item.get("comandos") and item.get("tipo") != "apk_viejo" for item in pending)  # compilar no los arregla
+    if pending and not configured and built.get("estado") == "ok" and \
+            (fecha_ts(built.get("fecha")) or 0) > (fecha_ts(tested_at) or 0):
+        # S2: los avisos son de una prueba anterior a la última compilación: no son el paso siguiente; repetir la prueba sí
+        return "repite la corrida de prueba con el build nuevo (sin chat)", [
+            {"tipo": "avisos", "titulo": "Avisos de una prueba anterior", "lineas": [
+                "La última corrida de prueba (%s) es anterior a la última compilación (%s): sus avisos pueden estar "
+                "resueltos; repite la prueba para saberlo" % (str(tested_at or "—")[:16].replace("T", " "),
+                                                              str(built.get("fecha") or "—")[:16].replace("T", " "))]},
+            terminal(command(*(capture + ["--prueba"])), "repite la corrida de prueba con el build nuevo: si sale sin "
+                     "avisos, quedan resueltos y `siguiente` da el paso que sigue", "revisa que todas las marcas del plan "
+                     "salgan con ✔")]
     if pending:
         # La última corrida de prueba dejó avisos: medir así da un antes sin red o que mide el recorrido. Primero se
         # corrigen; medir igual queda como opción.
@@ -7456,6 +7507,7 @@ def cmd_pausar(args):
     title, _ = next_steps(folder, plan)
     triage = plan.get("profundidad") == "triage"
     ready = ("pasar a riguroso y aplicar una mejora (`decidir --profundidad riguroso`)" if triage and unapplied(plan)
+             else "decidir qué mejoras aplicar (`decidir`)" if title.startswith("decisión del usuario")
              else "seguir con: %s" % title)
     phase = "triage terminado" if triage and report_file(folder, "inicial") else title
     simulate = bool(args.simular)
@@ -10788,7 +10840,7 @@ def install_via_perf(root, folder, what, you, plan=None):
     plan = plan if plan is not None else folder_plan(pathlib.Path(folder))
     if not plan.get("instalar"):
         return {"tipo": "accion", "que": what, "tu": NO_INSTALL + "; si compilaste e instalaste por otro camino, la corrida "
-                "de prueba lo reconoce sola (compara la fecha de instalación con la del fallo)", "instala": True}
+                "de prueba lo reconoce sola (mira la fecha de instalación del APK)", "instala": True}
     return dict(terminal(perf_command(root, "instalar", "--carpeta", relative_folder(pathlib.Path(folder), root)), what,
                          you), instala=True)
 
@@ -11751,8 +11803,8 @@ def marks_fix_steps(folder, plan, flow, marks, phase, why):
             % (state, why, ", ".join(marks), " (dónde se emiten hoy: %s)" % ", ".join(places[:6]) if places else ""))
     return [chat(text, "intermedio", "medio", "ajusta las marcas que dejaron de salir, al mismo punto semántico; no "
                  "compila, no instala y no captura", plan),
-            install_step(plan, root, "compila e instala el build de profiling con las marcas ajustadas",
-                     "espera"),
+            install_via_perf(root, folder, "compila e instala el build de profiling con las marcas ajustadas (perf.py "
+                             "registra si compiló)", "espera; si la compilación falla, `siguiente` te da el motivo", plan),
             terminal(perf_command(root, *(capture_args(folder, plan, flow, root) + ["--prueba"])),
                      "una corrida de prueba: confirma que salen todas las marcas del plan; si salen, te da el comando de "
                      "la fase %s" % phase, "revisa que todas las marcas del plan salgan con ✔")]
@@ -11789,13 +11841,16 @@ def test_warning_steps(folder, root, plan, flow, pending, resume, capture_test, 
         elif commands:
             steps.append(terminal(commands[0][1], commands[0][0], "córrelo en la terminal donde mides; no cambia el código "
                                   "ni la app"))
-    if in_code:
+    if in_code and rebuilt:  # S2: compiló después de esta prueba: primero repetirla; puede que ya no estén
+        steps[0]["lineas"].append("La prueba es anterior a la última compilación: repítela antes de corregir en el código; "
+                                  "los avisos que sigan saldrán de nuevo")
+    elif in_code:
         prompt = ("%s: corrige los avisos de la corrida de prueba del flujo '%s', sin compilar, instalar ni capturar (eso "
                   "lo hago yo en mi terminal): %s." % (resume, flow, "; ".join(listed)))
         steps += [chat(prompt, "intermedio", "medio", "corrige en el código o en plan.json lo que dicen los avisos; no "
                        "compila, no instala y no captura", plan),
-                  install_step(plan, root, "compila e instala el build de profiling con las correcciones",
-                           "espera; si solo cambió plan.json, salta este paso")]
+                  install_via_perf(root, folder, "compila e instala el build de profiling con las correcciones (perf.py "
+                                   "registra si compiló)", "espera; si solo cambió plan.json, salta este paso", plan)]
     retry = terminal(capture_test, "repite la corrida de prueba: si sale sin avisos, quedan resueltos y el paso siguiente "
                      "pasa a ser medir antes", "lo mismo que en una corrida, una sola vez")
     if old_apk:  # B2: medir con el APK anterior mediría la app sin las marcas: no se ofrece

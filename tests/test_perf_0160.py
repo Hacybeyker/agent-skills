@@ -691,6 +691,15 @@ class SessionsTest(TriageBase):
         self.assertTrue(json.loads((self.root / "reports/perf/otra/plan.json").read_text(encoding="utf-8"))
                         ["pedido_mejorado"])
 
+    def test_riguroso_sin_decision_da_elige_uno(self):
+        self.rigorous()
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("Elige uno", out)
+        commands = commands_in(out)
+        self.assertTrue(any("decidir --carpeta" in command for command in commands))
+        self.assertTrue(any(command.endswith("pausar --carpeta %s" % self.rel) for command in commands))
+        self.assertTrue(any(command.endswith("cerrar --carpeta %s" % self.rel) for command in commands))
+
     def test_aprobacion_pendiente_da_que_revisar_y_como_aprobar(self):
         self.before_measuring()
         out = self.ok_in("aprobar", "--carpeta", self.rel, "--pendiente")
@@ -701,6 +710,17 @@ class SessionsTest(TriageBase):
         out = self.ok_in("aprobar", "--carpeta", self.rel)
         self.assertIn("Ficha y plan aprobados", out)
         self.assertNotIn("Falta tu aprobación", out)
+
+    def test_avisos_de_una_prueba_anterior_a_la_compilacion_piden_repetir_la_prueba(self):
+        self.before_measuring()
+        write(self.folder / "advertencias.json", json.dumps({
+            "prueba": {"catalogo-lista": {"fecha": "2026-03-02T10:00:00", "avisos": [
+                {"tipo": "marca", "texto": "la marca 'MARK lista' no salió", "corto": "revisa dónde se emite"}]}},
+            "compilacion": {"estado": "ok", "fecha": "2026-03-02T11:00:00"}}))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("anterior a la última compilación", out)
+        self.assertNotIn("Chat nuevo", out)
+        self.assertIn("--prueba", commands_in(out)[0])
 
     def test_una_lista_donde_va_un_texto_se_une(self):
         plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
@@ -874,6 +894,98 @@ class PatchAppIdTest(SetupBase):
         out = self.good("setup", "--estado")
         self.assertIn("Complétala con el que encontré (%s, de la sección de rendimiento de AGENTS.md)" % PKG, out)
         self.assertRegex(out, r"setup --vigente \S+perf-setup-\S+\.patch --paquete %s" % re.escape(PKG))
+
+
+class ReviewSTest(TriageBase):
+    """S1 y S2: cerrar y pausar desde el "Elige uno" de riguroso, y la compilación registrada antes de medir después."""
+
+    def rigorous(self, mejoras=None):
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        plan.pop("profundidad", None)
+        if mejoras is not None:
+            plan["mejoras"] = mejoras
+        write(self.folder / "plan.json", json.dumps(plan))
+        write(self.folder / "fases.json", json.dumps({
+            "antes": {"fecha": "2026-03-02T10:00:00", "corridas": 10, "flujos": {"catalogo-lista": {"corridas": 10}}},
+            "control": {"fecha": "2026-03-02T11:00:00", "corridas": 10, "flujos": {"catalogo-lista": {"corridas": 10}}}}))
+
+    def test_cerrar_sin_aplicar_termina_la_investigacion(self):
+        self.rigorous()
+        self.ok_in("cerrar", "--carpeta", self.rel, "--dod")
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("investigación cerrada · sin aplicar las mejoras propuestas", out)
+        self.assertIn("reporte-inicial-dev.md", out)
+        self.assertFalse(any("decidir --carpeta" in command for command in commands_in(out)), out)
+        self.assertIn(perf.NO_STEPS_LEFT, out)
+
+    def test_cerrar_sin_dod_y_sin_marcas_no_pide_el_dod_de_una_version_anterior(self):
+        from test_perf_0150 import LISTA
+        self.rigorous()
+        write(self.root / "app" / "Lista.kt", LISTA)  # sin cambios temporales: un arranque sin marcas
+        state = (self.folder / "estado.md").read_text(encoding="utf-8").replace("| `app/Lista.kt` | . | marca | — | no |\n", "")
+        write(self.folder / "estado.md", state)
+        self.ok_in("cerrar", "--carpeta", self.rel)
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("investigación cerrada · sin aplicar las mejoras propuestas", out)
+        self.assertNotIn("versión anterior", out)
+        self.assertIn(perf.NO_STEPS_LEFT, out)
+
+    def test_avisos_de_configuracion_y_de_marca_con_una_compilacion_nueva_no_dan_el_chat(self):
+        pending = [{"tipo": "ajustes", "texto": "animaciones en 0.5", "comandos": [["deja las animaciones normales",
+                                                                                "adb shell settings put global x 1"]]},
+                   {"tipo": "marca", "texto": "la marca 'MARK lista' no salió", "corto": "revisa dónde se emite"}]
+        write(self.folder / "advertencias.json", json.dumps({
+            "prueba": {"catalogo-lista": {"fecha": "2026-03-02T10:00:00", "avisos": pending}},
+            "compilacion": {"estado": "ok", "fecha": "2026-03-02T11:00:00"}}))
+        steps = perf.test_warning_steps(self.folder, self.root, {"instalar": "./instalar.sh"}, "catalogo-lista", pending,
+                                        "Sigue", "cd . && capturar --prueba", "cd . && capturar --fase antes", "nada")
+        self.assertEqual([step["tipo"] for step in steps], ["avisos", "terminal", "terminal", "terminal"])
+        self.assertIn("anterior a la última compilación", steps[0]["lineas"][-1])
+
+    def test_pausar_y_reanudar_vuelven_a_la_decision(self):
+        self.rigorous()
+        out = self.ok_in("pausar", "--carpeta", self.rel)
+        self.assertIn("lista para decidir qué mejoras aplicar (`decidir`)", out)
+        self.assertNotIn("lista para seguir con: decisión del usuario", out)
+        self.ok_in("reanudar", "--carpeta", self.rel)
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("Elige uno", out)
+        self.assertTrue(any("decidir --carpeta" in command for command in commands_in(out)))
+
+    def test_apk_viejo_antes_de_despues_con_una_compilacion_nueva_solo_repite_la_prueba(self):
+        mejora = dict(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["mejoras"][0],
+                      estado="aplicada", aplicada_en="2026-03-03T09:00:00")
+        self.rigorous([mejora])
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        phases["prueba"] = {"fecha": "2026-03-03T10:00:00", "marcas_ok": False,
+                            "flujos": {"catalogo-lista": {"fecha": "2026-03-03T10:00:00", "marcas_ok": False}}}
+        write(self.folder / "fases.json", json.dumps(phases))
+        write(self.folder / "advertencias.json", json.dumps({
+            "prueba": {"catalogo-lista": {"fecha": "2026-03-03T10:00:00", "avisos": [
+                {"tipo": "apk_viejo", "texto": "el APK instalado es anterior a la mejora"}]}}}))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("Compila e instala antes de probar", out)
+        notes = json.loads((self.folder / "advertencias.json").read_text(encoding="utf-8"))
+        notes["compilacion"] = {"estado": "ok", "fecha": "2026-03-03T11:00:00"}
+        write(self.folder / "advertencias.json", json.dumps(notes))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("repite la corrida de prueba con el build nuevo (antes de medir después)", out)
+        self.assertNotIn("Compila e instala antes de probar", out)
+        self.assertIn("--prueba", commands_in(out)[0])
+
+    def test_s2_sale_en_setup_estado_y_en_recuperar(self):
+        self.rigorous([])
+        write(self.folder / "fases.json", "{}")  # antes de medir: sin fases, diagnóstico ni reporte
+        os.remove(str(self.folder / "diagnostico.md"))
+        os.remove(str(self.folder / "reporte-inicial-dev.md"))
+        write(self.folder / "advertencias.json", json.dumps({
+            "prueba": {"catalogo-lista": {"fecha": "2026-03-02T10:00:00", "avisos": [
+                {"tipo": "marca", "texto": "la marca 'MARK lista' no salió", "corto": "revisa dónde se emite"}]}},
+            "compilacion": {"estado": "ok", "fecha": "2026-03-02T11:00:00"}}))
+        for args in (("setup", "--estado", "--carpeta", self.rel), ("recuperar", "--carpeta", self.rel)):
+            out = self.ok_in(*args)
+            self.assertIn("anterior a la última compilación", out, args)
+            self.assertNotIn("Chat nuevo", out, args)
 
 
 if __name__ == "__main__":
