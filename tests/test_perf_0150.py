@@ -636,11 +636,12 @@ class InterruptedTest(TriageBase):
             "perfetto": {"pid": "4242", "remota": "/data/misc/perfetto-traces/hbperf-1.perfetto-trace",
                          "serial": "emulator-5554"}}))
         out = self.ok_in("siguiente", "--carpeta", self.rel)
-        self.assertIn("quedó algo a medias: la captura de antes del flujo catalogo-lista se interrumpió en la corrida 2", out)
+        self.assertIn("quedó algo a medias: la captura de antes del flujo catalogo-lista se interrumpió buscando la "
+                      "corrida 1 (ninguna válida en metricas.csv todavía)", out)  # 0.16.0: el número sale de los datos
         self.assertIn("Interrumpir es seguro", out)
         self.assertTrue(commands_in(out)[0].endswith("recuperar --carpeta %s" % self.rel))
         out = self.ok_in("recuperar", "--carpeta", self.rel)
-        self.assertIn("Detuve la traza que seguía grabando en el dispositivo", out)
+        self.assertIn("Perfetto: detenido (proceso 4242) y traza borrada del dispositivo", out)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("kill -TERM 4242", log)
         self.assertIn("rm -f /data/misc/perfetto-traces/hbperf-1.perfetto-trace", log)

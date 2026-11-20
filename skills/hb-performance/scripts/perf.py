@@ -3292,7 +3292,8 @@ def save_phases(folder, phases):
 TEST_RECORD = "prueba"  # en fases.json: la última corrida de prueba de cada flujo (no es una fase: no tiene corridas)
 
 
-def save_test_record(folder, flow, seen, missing, marks=None, plan_prints=None, installed=None):
+def save_test_record(folder, flow, seen, missing, marks=None, plan_prints=None, installed=None, modules=None,
+                     outdated=None):
     """Registra en fases.json la última corrida de prueba del flujo: cuándo, qué marcas del plan salieron y cuáles no, y
     la huella de las marcas. `siguiente` la usa para no ofrecer medir después sin una prueba con todas las marcas
     posterior a la última mejora aplicada."""
@@ -3308,7 +3309,12 @@ def save_test_record(folder, flow, seen, missing, marks=None, plan_prints=None, 
     if installed:  # 0.13.0: con qué instalación se hizo la prueba (después solo se mide con esa)
         entry["instalada"] = installed
     tracked[flow] = entry
-    phases[TEST_RECORD] = {"flujos": tracked}
+    kept = {key: value for key, value in record.items() if key != "flujos"}
+    if modules is not None:  # A4: la huella de los módulos de la prueba y el mapa viejo (antes de medir)
+        kept[MODULE_PRINT] = modules
+    if outdated is not None:
+        kept["mapa_viejo"] = [list(item) for item in outdated]
+    phases[TEST_RECORD] = dict(kept, flujos=tracked)
     save_phases(folder, phases)
 
 
@@ -3388,6 +3394,17 @@ def write_phase(folder, phase, data, flow=None):
     pending.update(data.pop("faltan", None) or {})
     if pending:
         data["faltan"] = pending
+    if previous.get("corridas") and previous.get(MODULE_PRINT):
+        # A4: la huella de los módulos de la fase es la de su primera tanda; otra distinta se avisa
+        changes = [item for item in module_print_changes(previous[MODULE_PRINT], data.get(MODULE_PRINT))
+                   if not item.startswith("no se puede comparar")]
+        if changes:
+            data.setdefault("avisos", [])
+            note = "la huella de los módulos cambió entre tandas de la fase (%s): repite la fase con --rehacer" % (
+                "; ".join(changes))
+            if note not in data["avisos"]:
+                data["avisos"].append(note)
+        data[MODULE_PRINT] = previous[MODULE_PRINT]
     merged = merge_run_data(previous, data)
     for key in ("hz_corridas", "avisos", "entorno", "configs", "ajustes"):
         data.pop(key, None)
@@ -5060,7 +5077,12 @@ def plan_steps(folder, plan, flow=None):
             # se da por medida hasta completarla.
             cut = (phases.get(phase) or {}).get("faltan") if isinstance(phases.get(phase), dict) else None
             if isinstance(cut, dict) and to_int(cut.get(member)) > 0:
-                missing = to_int(cut[member])
+                # 0.16.0 · A1: lo que falta es lo del plan menos las corridas con filas en metricas.csv (el registro de
+                # la tanda cortada puede estar atrasado); si ya están todas, la fase está completa
+                have = measured_runs(root / folder, phases, phase, member)
+                missing = to_int(cut[member]) if have is None else flow_runs(plan, member, root / folder)[0] - have
+                if missing <= 0:
+                    continue
                 return "completar la fase %s, que se cortó (sin chat)" % phase, [
                     terminal(command(*(member_capture + ["--fase", phase, "--corridas", missing])),
                              "completa la fase %s con las %d corridas que faltan: la tanda anterior se cortó y las "
@@ -5294,6 +5316,17 @@ def plan_steps(folder, plan, flow=None):
             root / folder, root, plan, flow, pending, resume, command(*(capture + ["--prueba"])),
             command(*(capture + ["--fase", "antes", "--corridas", runs])), you_run)
     if "antes" not in phases:
+        outdated = (phases.get(TEST_RECORD) or {}).get("mapa_viejo") if isinstance(phases.get(TEST_RECORD), dict) else None
+        kinds = {item["nombre"]: item.get("tipo") for item in plan_modules(plan)}
+        outdated = [item for item in outdated or [] if isinstance(item, list) and len(item) == 3
+                    and kinds.get(item[0]) == item[1]]  # lo que `--comprobar-modulos` ya actualizó no se repite
+        if outdated:  # A4: antes de medir, un módulo que cambió de tipo solo pide actualizar el mapa del plan
+            steps.append(terminal(modules_recheck(root, root / folder),
+                                  "actualiza el mapa de módulos del plan: la corrida de prueba vio que %s; así las "
+                                  "compuertas de marcas y mejoras saben qué se puede editar" % "; ".join(
+                                      "%s ahora es %s" % (item[0], MODULE_LABEL.get(item[2], item[2]))
+                                      for item in outdated),
+                                  "nada; después sigue con la medición"))
         if not any((state.parent / "prueba").glob("*.perfetto-trace*")):
             steps.append(terminal(command(*(capture + ["--prueba"])),
                                   "una corrida de prueba: imprime las métricas y qué marcas del plan salieron, sin guardar "
@@ -7031,15 +7064,21 @@ def interrupted_steps(folder, plan, state):
                     state.get("comando", "un comando"), state.get("pid"), str(state.get("inicio") or "—")[11:16])]},
             terminal(perf_command(root, "siguiente", "--carpeta", rel), "cuando termine, el paso siguiente",
                      "nada")])
-    what = {"capturar": "la captura de %s del flujo %s se interrumpió en la corrida %s" % (
-        state.get("fase", "—"), state.get("flujo", "—"), state.get("corrida", "—")),
+    done_runs = csv_runs(folder, state.get("fase"), state.get("flujo")) if state.get("comando") == "capturar" else []
+    what = {"capturar": "la captura de %s del flujo %s se interrumpió buscando la corrida %s (%s)" % (
+        state.get("fase", "—"), state.get("flujo", "—"), len(done_runs) + 1,
+        "%d válida%s en metricas.csv" % (len(done_runs), "" if len(done_runs) == 1 else "s") if done_runs
+        else "ninguna válida en metricas.csv todavía") if state.get("fase") != "prueba" else
+        "la corrida de prueba del flujo %s se interrumpió" % state.get("flujo", "—"),
             "reporte": "el reporte se interrumpió antes de terminar (los archivos pueden estar a medias)",
             "diagnostico": "el diagnóstico se interrumpió antes de terminar"}.get(state.get("comando"),
                                                                                   "un comando se interrumpió")
     lines = [what + ". Interrumpir es seguro: las corridas válidas ya están guardadas y nada del código cambió."]
-    if state.get("perfetto"):
-        lines.append("Quedó registrado Perfetto grabando en el dispositivo (proceso %s): `recuperar` lo detiene y borra "
-                     "esa traza del dispositivo." % state["perfetto"].get("pid"))
+    if isinstance(state.get("perfetto"), dict):  # A3: nunca "proceso None"
+        lines.append(("Quedó registrado Perfetto grabando en el dispositivo (proceso %s): `recuperar` lo detiene y borra "
+                      "esa traza del dispositivo." % state["perfetto"]["pid"]) if state["perfetto"].get("pid") else
+                     "Perfetto pudo quedar grabando en el dispositivo, sin número de proceso registrado: `recuperar` lo "
+                     "busca por nombre, lo detiene y borra esa traza del dispositivo.")
     if state.get("traza"):
         lines.append("La traza parcial de esa corrida (%s) no tiene fila en metricas.csv: `recuperar` la aparta sin "
                      "borrarla." % state["traza"])
@@ -7480,10 +7519,58 @@ def baseline_doubts(folder, plan, changed):
     return out
 
 
+def csv_runs(folder, phase, flow):
+    """A1: las corridas de la fase y el flujo que tienen filas en metricas.csv (los números, ordenados). Es el dato: una
+    corrida cuenta cuando sus métricas quedaron escritas (después de comprimir su traza)."""
+    path = pathlib.Path(folder) / "metricas.csv"
+    if not path.is_file():
+        return []
+    try:
+        return sorted({to_int(r["corrida"]) for r in read_rows(path) if r["fase"] == phase and r["flujo"] == flow})
+    except PerfError:
+        return []
+
+
+def run_trace_exists(folder, phase, flow, n):
+    return any((pathlib.Path(folder) / phase / ("%s_%d.perfetto-trace%s" % (flow, n, suffix))).is_file()
+               for suffix in ("", ".gz"))
+
+
+def set_missing(folder, phase, flow, missing):
+    """Deja en fases.json cuántas corridas le faltan al flujo en esa fase (las quita si no falta ninguna)."""
+    phases = read_phases(folder)
+    record = phases.get(phase)
+    if not isinstance(record, dict):
+        return False
+    pending = dict(record.get("faltan") or {}) if isinstance(record.get("faltan"), dict) else {}
+    before = dict(pending)
+    if missing > 0:
+        pending[flow] = missing
+    else:
+        pending.pop(flow, None)
+    if pending == before:
+        return False
+    if pending:
+        record["faltan"] = pending
+    else:
+        record.pop("faltan", None)
+    save_phases(folder, phases)
+    return True
+
+
+def find_perfetto(adb, name="hbperf-"):
+    """A3: los procesos de Perfetto que grababan la traza `name` (hbperf-<proceso de perf.py>.perfetto-trace), cuando el
+    registro no guardó su número. Nunca otro Perfetto (el del sistema, un perfilador u otra captura): mira la línea de
+    comando de cada uno."""
+    done = adb.shell("for p in $(pidof perfetto); do grep -q %s /proc/$p/cmdline 2>/dev/null && echo $p; done"
+                     % shlex.quote(name), timeout=20)
+    return [pid for pid in re.findall(r"\d+", done.stdout or "")]
+
+
 def cmd_recuperar(args):
     """B10: deja la carpeta lista después de una interrupción: detiene la traza que siguió grabando en el dispositivo y
-    la borra de él, aparta la traza parcial (sin borrarla), anota las corridas válidas de la tanda cortada y da el paso
-    exacto."""
+    la borra de él, aparta la traza parcial (sin borrarla), cuenta las corridas válidas desde metricas.csv (A1) y da el
+    paso exacto. Dice qué hizo, una línea por acción (A3)."""
     folder = pathlib.Path(args.carpeta)
     plan = load_plan(folder / "plan.json")
     state = interrupted(folder)
@@ -7493,47 +7580,103 @@ def cmd_recuperar(args):
     if state.get("viva"):
         raise PerfError("%s sigue corriendo (proceso %s): espera a que termine" % (state.get("comando"), state.get("pid")))
     simulate = bool(args.simular)
-    device = state.get("perfetto") or {}
-    if device.get("pid"):
-        try:
-            adb = Adb(select_device(device.get("serial") or plan.get("serial")))
-            running = "viva" in adb.shell("[ -d /proc/%s ] && grep -q perfetto /proc/%s/cmdline && echo viva || echo "
-                                          "terminada" % (device["pid"], device["pid"])).stdout  # 0.15.1: solo Perfetto
-            if simulate:
-                print("· Simulación: %s" % ("detendría Perfetto (proceso %s) y borraría %s del dispositivo" % (
-                    device["pid"], device.get("remota")) if running else "Perfetto ya no corre; borraría %s del "
-                    "dispositivo" % device.get("remota")))
-            else:
-                if running:
-                    adb.shell("kill -TERM %s" % device["pid"], timeout=20)
-                    wait_perfetto(adb, device["pid"])
-                    print("✔ Detuve la traza que seguía grabando en el dispositivo (Perfetto, proceso %s)." % device["pid"])
-                if device.get("remota"):
-                    adb.shell("rm -f %s" % device["remota"], timeout=20)
-                    print("✔ Borré la traza a medias del dispositivo (%s)." % device["remota"])
-        except PerfError as error:
-            raise PerfError("no pude hablar con el dispositivo para detener la traza que quedó grabando (%s)" % error).con(
-                guardado="nada: la carpeta queda como estaba",
-                seguir=[("conecta el dispositivo y repite (Perfetto se detiene solo al llegar a su tope de duración)",
-                         same_command())])
+    device = state.get("perfetto") if isinstance(state.get("perfetto"), dict) else {}
+    adb = None
+    print("Qué hice:" if not simulate else "Qué haría (simulación, sin tocar nada):")
+    if state.get("comando") == "capturar":
+        # A3: Perfetto. Con número de proceso, ese; sin número (un registro de 0.15.x, o el corte llegó antes de
+        # anotarlo), se busca por nombre solo si la corrida lo tenía en marcha.
+        pid = device.get("pid")
+        # el nombre exacto de la traza en el dispositivo: el mismo número de proceso de perf.py que la grababa
+        own = device.get("remota") or ("%s/hbperf-%s.perfetto-trace" % (REMOTE_DIR, state["pid"]) if state.get("pid")
+                                       else None)
+        if device and not pid:
+            print("  · Perfetto: el registro no guardó su número de proceso; lo busco por nombre en el dispositivo")
+            try:
+                adb = Adb(select_device(device.get("serial") or plan.get("serial")))
+            except PerfError:
+                adb = None  # un registro de 0.15.x: Perfetto ya había terminado; sin dispositivo no se busca
+                print("  · Perfetto: no hay dispositivo para buscarlo; si quedó grabando, se detiene solo al llegar al tope "
+                      "de duración de su configuración")
+        if device and (pid or adb is not None):
+            try:
+                adb = adb if not pid else Adb(select_device(device.get("serial") or plan.get("serial")))
+                pids = [str(pid)] if pid else find_perfetto(adb, pathlib.PurePosixPath(own).name if own else "hbperf-")
+                running = [one for one in pids if "viva" in adb.shell(
+                    "[ -d /proc/%s ] && grep -q perfetto /proc/%s/cmdline && echo viva || echo terminada" % (one, one)
+                ).stdout]  # 0.15.1: solo Perfetto
+                remote = device.get("remota") or (own if running else None)
+                if simulate:
+                    print("  · Perfetto: %s" % ("lo detendría (proceso %s) y borraría su traza del dispositivo" % (
+                        ", ".join(running)) if running else "no seguía grabando"))
+                else:
+                    for one in running:
+                        adb.shell("kill -TERM %s" % one, timeout=20)
+                        wait_perfetto(adb, one)
+                    if remote:
+                        adb.shell("rm -f %s" % shlex.quote(remote), timeout=20)
+                    print("  ✔ Perfetto: %s" % ("detenido (proceso %s) y traza borrada del dispositivo" % ", ".join(running)
+                                                if running else "no seguía grabando" + (
+                                                    "; borré su traza a medias del dispositivo" if remote else "")))
+            except PerfError as error:
+                raise PerfError("no pude hablar con el dispositivo para detener la traza que quedó grabando (%s)"
+                                % error).con(
+                    guardado="nada: la carpeta queda como estaba",
+                    seguir=[("conecta el dispositivo y repite (Perfetto se detiene solo al llegar a su tope de duración)",
+                             same_command())])
+        else:
+            print("  · Perfetto: no quedó registrado grabando (si el corte llegó justo al arrancarlo, se detiene solo al "
+                  "llegar al tope de duración de su configuración)")
     local = pathlib.Path(state["traza"]) if state.get("traza") else None
-    if local is not None and local.exists():
+    if local is not None and not local.is_absolute():
+        local = pathlib.Path(os.getcwd()) / local
+    partial = [path for path in ([local, local.with_name(local.name + ".gz")] if local is not None else [])
+               if path.exists()]
+    if partial and state.get("comando") == "capturar" and state.get("fase") not in (None, "prueba"):
+        # una traza con su fila en metricas.csv es de una corrida válida: no es parcial
+        number = re.search(r"_(\d+)\.perfetto-trace", partial[0].name)
+        if number and to_int(number.group(1)) in csv_runs(folder, state["fase"], state.get("flujo")):
+            partial = []
+    if partial:
         target = folder / ("%s-descartada-%s" % (state.get("fase", "corrida"), datetime.datetime.now().strftime("%H%M%S")))
         if simulate:
-            print("· Simulación: apartaría la traza parcial %s en %s/ (no la borra)." % (local.name, target.name))
+            print("  · Traza parcial: la apartaría en %s/ (no la borra)" % target)
         else:
             target.mkdir(parents=True, exist_ok=True)
-            local.rename(target / local.name)
-            print("✔ Aparté la traza parcial %s en %s/ (no la borré)." % (local.name, target.name))
-    if state.get("comando") == "capturar" and state.get("validas") and not simulate:
+            for path in partial:
+                path.rename(target / path.name)
+            print("  ✔ Traza parcial %s apartada en %s/ (no la borré)" % (partial[0].name, target))
+    else:
+        print("  · Traza parcial: no había")
+    if state.get("comando") == "capturar" and state.get("fase") not in (None, "prueba"):
+        # A1: las corridas válidas se cuentan por las filas de metricas.csv, no por el registro de lo que estaba en
+        # curso; lo que falta es lo del plan menos esas.
+        phase, flow = state["fase"], state.get("flujo")
+        found = csv_runs(folder, phase, flow)
+        plan_total = flow_runs(plan, flow, folder)[0] if flow in (plan.get("flujos") or {}) else \
+            to_int(state.get("objetivo")) + to_int(state.get("inicio_corridas"))
+        missing = max(0, plan_total - len(found))
+        without_trace = [n for n in found if not run_trace_exists(folder, phase, flow, n)]
         phases = read_phases(folder)
-        counted = phase_flow_record(phases, state["fase"], state["flujo"]).get("corridas") or 0
-        if counted < state.get("inicio_corridas", 0) + state["validas"] and state.get("registro"):
-            write_phase(folder, state["fase"], dict(state["registro"], corridas=state["validas"],
-                                                     faltan={state["flujo"]: state["objetivo"] - state["validas"]}),
-                        state["flujo"])
-            print("✔ Anoté en fases.json las %d corridas válidas de la tanda cortada (faltan %d)." % (
-                state["validas"], state["objetivo"] - state["validas"]))
+        recorded = to_int(phase_flow_record(phases, phase, flow).get("corridas"))
+        line = "corridas válidas de %s · %s: %d (las que tienen filas en metricas.csv); el plan pide %d: %s" % (
+            phase, flow, len(found), plan_total, "faltan %d" % missing if missing else "no falta ninguna")
+        if without_trace:
+            line += " (sin su traza en la carpeta: %s)" % ", ".join(str(n) for n in without_trace)
+        if simulate:
+            print("  · " + line[0].upper() + line[1:])
+        else:
+            wrote = False
+            if len(found) > recorded:
+                wrote = True
+                base = dict(state.get("registro") or {}) or {
+                    "fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "skill": VERSION,
+                    "commit": git_info()[0], "sucio": git_info()[1]}
+                base.pop("faltan", None)
+                write_phase(folder, phase, dict(base, corridas=len(found) - recorded), flow)
+            wrote = set_missing(folder, phase, flow, missing) or wrote
+            print("  %s %s%s" % ("✔" if wrote else "·", line[0].upper() + line[1:],
+                                 " (anotado en fases.json)" if wrote else ""))
     if simulate:
         return print_setup_next(project_root(folder).resolve(), "para recuperar de verdad", [terminal(
             same_command(sin=("--simular",)), "el mismo comando sin --simular", "nada")])
@@ -11977,6 +12120,17 @@ def cmd_capturar(args, plan=None):
     environment = device_environment(adb)
     warnings += environment_warnings(environment)
     device_id = {"serial": serial, "modelo": adb.shell("getprop ro.product.model").stdout.strip() or None}
+    modules_now = module_print(project_root(folder).resolve(), plan, folder) if args.plan else None  # A4
+    if modules_now and not args.prueba:
+        for note in phase_module_notes(read_phases(folder), modules_now, phase):
+            warnings.append(note)
+    outdated_map = map_outdated(plan, modules_now) if args.plan else []
+    if outdated_map:  # A4/E4: antes de medir, un cambio solo propone actualizar el mapa del plan
+        print("· El mapa de módulos del plan quedó viejo: %s. %s" % ("; ".join(
+            "%s ahora es %s (el plan dice %s)" % (name, MODULE_LABEL.get(now, now), MODULE_LABEL.get(old, old))
+            for name, old, now in outdated_map), "`siguiente` te da el comando que lo actualiza." if args.prueba and not any(
+                name in read_phases(folder) for name in FASES) else "Para actualizarlo: %s" % modules_recheck(
+                    project_root(folder).resolve(), folder)))
     if args.plan and not args.prueba and not args.forzar and not (phase == "antes" and args.rehacer):
         # 0.15.1: comparar fases medidas en dos dispositivos no vale (lo mismo tras una pausa con otro teléfono)
         measured_phases = read_phases(folder)
@@ -12153,6 +12307,19 @@ def cmd_capturar(args, plan=None):
     if not startup and recorrido != "manual" and not prepare_command and not args.prueba:
         print("⚠ el flujo no tiene 'preparar': entre corridas la app queda donde terminó el recorrido. Si la app es de "
               "una sola actividad, 'inicio' no distingue pantallas: pon en el plan un comando que la devuelva al inicio.")
+    if args.plan and not args.prueba and not args.rehacer:
+        # A2: una fase que fases.json da por cortada pero ya tiene en metricas.csv todas las corridas del plan: no se mide
+        # más (antes de fijar la compilación y del calentamiento)
+        have = measured_runs(folder, read_phases(folder), phase, flow_name) or 0
+        cut = (read_phases(folder).get(phase) or {}).get("faltan")
+        if have and isinstance(cut, dict) and to_int(cut.get(flow_name)) > 0 and have >= flow_runs(plan, flow_name,
+                                                                                                   folder)[0]:
+            set_missing(folder, phase, flow_name, 0)
+            print("· La fase %s del flujo %s ya tiene las %d corridas válidas del plan en metricas.csv (%d): no mido más "
+                  "y quito lo que fases.json decía que faltaba" % (phase, flow_name, flow_runs(plan, flow_name, folder)[0],
+                                                                   have))
+            GUIA.update(guardado="nada nuevo: la fase ya estaba completa", seguir=[])
+            return print_next(folder, plan, flow_name)
     compilation = "sin fijar (--sin-compilar)"
     if args.prueba and not args.sin_compilar and not getattr(args, "compilar", False):
         # La corrida de prueba valida marcas y red: sus números no se guardan ni se comparan, así que no compila.
@@ -12209,6 +12376,24 @@ def cmd_capturar(args, plan=None):
     # Un intento inválido no gasta un número de corrida: va como "intento N (inválido)".
     n = next_run_number(csv_path, phase, flow_name) if not args.prueba else 1
     start = 0 if args.prueba else (measured_runs(folder, read_phases(folder), phase, flow_name) or 0)
+    if args.plan and not args.prueba and start and not args.rehacer:
+        # 0.16.0 · A2: la tanda que completa una fase cortada numera desde la corrida que sigue a las de metricas.csv
+        # hasta las del plan ("corrida 4 de 10", nunca "4 de 11"): pide solo las que faltan para llegar a esas.
+        cut = (read_phases(folder).get(phase) or {}).get("faltan")
+        plan_total = flow_runs(plan, flow_name, folder)[0]
+        if isinstance(cut, dict) and to_int(cut.get(flow_name)) > 0 and start >= plan_total:
+            set_missing(folder, phase, flow_name, 0)
+            print("· La fase %s del flujo %s ya tiene las %d corridas válidas del plan en metricas.csv (%d): no mido más "
+                  "y quito lo que fases.json decía que faltaba" % (phase, flow_name, plan_total, start))
+            GUIA.update(guardado="nada nuevo: la fase ya estaba completa", seguir=[])
+            done_running(folder)
+            return print_next(folder, plan, flow_name)
+        if isinstance(cut, dict) and to_int(cut.get(flow_name)) > 0 and start < plan_total < start + target:
+            print("· La fase %s del flujo %s ya tiene %d corridas válidas en metricas.csv y el plan pide %d: mido %d (no "
+                  "%d), así la fase termina con exactamente las del plan" % (phase, flow_name, start, plan_total,
+                                                                              plan_total - start, target))
+            target = plan_total - start
+            guide()
     failures = []  # por intento inválido: (motivo, marcas del plan que faltaron) para resumir el patrón (invalid_summary)
     # La huella de las marcas del plan y del plan del flujo, fuera de toda traza: queda en fases.json por fase (y en la
     # corrida de prueba), para que `comparar` sepa si una marca cambió entre fases.
@@ -12297,6 +12482,8 @@ def cmd_capturar(args, plan=None):
         if redo_marks:  # se cortó porque faltan siempre las mismas marcas: se rehace, no se completa
             record["rehacer_marcas"] = {flow_name: redo_marks}
         record.update(prints)  # la huella de las marcas y del plan, por flujo (write_phase)
+        if modules_now:  # A4: la de los módulos, por fase
+            record[MODULE_PRINT] = modules_now
         record["memoria"] = bool(args.memoria)
         record["segundos"] = int(round(time.time() - batch_started))
         return record
@@ -12311,8 +12498,11 @@ def cmd_capturar(args, plan=None):
             count_invalid(folder, phase, flow_name, reason)
 
     def on_failure():
-        if valid and not args.prueba:
-            save_record(partial=True)
+        # A1: un corte entre escribir las filas y contar la corrida deja una más en metricas.csv: cuenta esa
+        written = len(csv_runs(folder, phase, flow_name)) - start if args.plan and not args.prueba else valid
+        if max(valid, written) and not args.prueba:
+            write_phase(folder, phase, dict(build_record(partial=True), corridas=max(valid, written),
+                                            faltan={flow_name: max(0, target - max(valid, written))}), flow_name)
 
     GUIA["al_fallar"] = on_failure  # lo llama main() si la tanda se corta: las válidas no quedan sin su registro
     while valid < target:
@@ -12329,6 +12519,16 @@ def cmd_capturar(args, plan=None):
                                         "justo arriba" % (valid, target, attempts))
         attempts += 1
         failure = None
+        if args.plan:
+            # 0.16.0 · A1: el registro de lo que está en curso se actualiza al EMPEZAR cada intento (antes de 'preparar'),
+            # con el número de la corrida que se busca y las válidas de esta tanda: un corte en cualquier punto deja
+            # el número correcto. Las corridas válidas las cuenta `recuperar` desde metricas.csv, no desde aquí.
+            mark_running(folder, comando="capturar", fase="prueba" if args.prueba else phase, flujo=flow_name,
+                         corrida=start + valid + 1, objetivo=target, validas=valid, inicio_corridas=start,
+                         traza=str(out_dir / ("%s_%d.perfetto-trace" % (flow_name, n))),
+                         inicio=datetime.datetime.now().replace(microsecond=0).isoformat(),
+                         registro=None if args.prueba or not valid else build_record(partial=True, quiet=True),
+                         perfetto=None)
         try:
             if not inside_trace:
                 prepare()
@@ -12342,11 +12542,7 @@ def cmd_capturar(args, plan=None):
                 set_aside_orphan(folder, out_dir, phase, flow_name, n, csv_path)
             label = "prueba" if args.prueba else "%s (%s, %s)" % (run_label(), flow_name, phase)
             if args.plan:  # B10: si esto se corta sin terminar (Ctrl+C, la terminal cerrada), `siguiente` lo ve
-                mark_running(folder, comando="capturar", fase="prueba" if args.prueba else phase, flujo=flow_name,
-                             corrida=start + valid + 1, objetivo=target, validas=valid, inicio_corridas=start,
-                             traza=str(local), inicio=datetime.datetime.now().replace(microsecond=0).isoformat(),
-                             registro=None if args.prueba or not valid else build_record(partial=True, quiet=True),
-                             perfetto=None)
+                mark_running(folder, traza=str(local), perfetto=None)
             # Foto de las salidas de la app (exit-info) antes y después de la corrida, fuera de la traza: una salida
             # nueva del proceso medido dentro de la corrida la invalida.
             exits_before = exit_snapshot(adb, package) if sdk >= EXIT_MIN_SDK else None
@@ -12369,7 +12565,8 @@ def cmd_capturar(args, plan=None):
                     reason, extra = record_run(adb, config, recorrido, label, local, startup, package, cutter,
                                                before=prepare if inside_trace else None,
                                                on_start=(lambda pid, remote: mark_running(
-                                                   folder, perfetto={"pid": pid, "remota": remote, "serial": serial}))
+                                                   folder, perfetto={"pid": pid, "remota": remote, "serial": serial}
+                                                   if pid else None))  # A3: al terminar, sin Perfetto (nunca None)
                                                if args.plan else None)
             except Precondicion as error:
                 if not inside_trace:
@@ -12426,6 +12623,9 @@ def cmd_capturar(args, plan=None):
             n += 1
             progress["validas"] = valid
             guide()
+            if args.plan:  # A1: como en las corridas con traza
+                mark_running(folder, corrida=start + valid + 1, validas=valid, traza=None, perfetto=None,
+                             registro=build_record(partial=True, quiet=True))
             continue
         if reason and reason.startswith("la traza terminó antes que el recorrido") and local.is_file():
             reason = cap_reason(flow, local.stat().st_size / 1e6, cap_bytes(config),
@@ -12628,7 +12828,8 @@ def cmd_capturar(args, plan=None):
             if args.plan:
                 save_test_record(folder, flow_name, [mark for mark, _, ok in info.get("marcas_plan") or [] if ok],
                                  [mark for mark, _, ok in info.get("marcas_plan") or [] if not ok],
-                                 prints.get("marcas"), prints.get("plan"), build.get("instalada"))
+                                 prints.get("marcas"), prints.get("plan"), build.get("instalada"), modules_now,
+                                 outdated_map)
                 seen = info.get("http", 0) > 0
                 if seen or gap:  # una prueba que ve la red, o que la esperaba y no la vio, deja el estado al día
                     agents = read_agents(root)
@@ -12676,6 +12877,9 @@ def cmd_capturar(args, plan=None):
         n += 1
         progress["validas"] = valid
         guide()
+        if args.plan:  # A1: la corrida quedó en metricas.csv: el registro lo dice enseguida, no al empezar la siguiente
+            mark_running(folder, corrida=start + valid + 1, validas=valid, traza=None, perfetto=None,
+                         registro=build_record(partial=True, quiet=True))
     GUIA["al_fallar"] = None
     print_invalid_summary()
     if memory_notes:  # C4: por qué no hay `views`, para la sesión 2
@@ -13982,6 +14186,7 @@ def cmd_comparar(args):
     notes += jit_note(rows) + definition_notes(results)
     notes += config_notes(folder, sorted({r["flujo"] for r in rows})) + marks_moved + typing_notes(results)
     notes += identical_segment_notes(rows, read_phases(folder), plan)
+    notes += phase_module_notes(read_phases(folder))  # A4
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -21277,6 +21482,101 @@ def plan_modules(plan):
     return [item for item in (plan or {}).get("modulos") or [] if isinstance(item, dict) and item.get("nombre")]
 
 
+MODULE_PRINT = "modulos_huella"  # A4: en fases.json, por fase (y en la corrida de prueba): qué módulos se compilaron
+MODULE_PRINT_TIMEOUT_S = 300
+
+
+def module_print(root, plan, folder):
+    """A4: la huella de los módulos de la variante medida: la lista de proyectos que resuelve `:app:dependencies` (sin
+    red, `--offline`) o, si Gradle no se puede correr así, la del mapa de módulos del plan. None si no hay ninguna (sin
+    mapa ni Gradle) o si el plan la apaga (`"huella_modulos": false`). Corre fuera de la traza y no cambia nada."""
+    if (plan or {}).get("huella_modulos") is False:
+        return None
+    root = pathlib.Path(root)
+    app, configuration = measured_configuration(plan, None)
+    if configuration and (root / "gradlew").is_file():
+        print("… preguntando a Gradle, sin red, qué módulos compila la variante medida (huella de los módulos, fuera de "
+              "la traza)", flush=True)
+        out, _ = gradle_dependencies(root, app, configuration, pathlib.Path(folder) / "logs" / "huella-modulos.log",
+                                     offline=True, timeout=MODULE_PRINT_TIMEOUT_S)
+        block = dependencies_block(out, configuration)[0] if out is not None else None
+        if block is not None:
+            deps = parse_dependencies(block)
+            return {"fuente": "gradle", "configuracion": configuration, "proyectos": sorted(deps["proyectos"]),
+                    "binarios": sorted(deps["sustituidos"])}
+        print("· Gradle no respondió sin red: la huella de los módulos sale del mapa del plan (la salida queda en %s)"
+              % (pathlib.Path(folder) / "logs" / "huella-modulos.log"))
+    stored = plan_modules(plan)
+    if stored:
+        return {"fuente": "plan", "modulos": sorted("%s=%s" % (item["nombre"], item.get("tipo") or "sin confirmar")
+                                                     for item in stored)}
+    return None
+
+
+def module_print_changes(old, new):
+    """A4: lo que cambió entre dos huellas de módulos, en palabras ([] si son iguales o no se pueden comparar: de otra
+    fuente o sin dato)."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return []
+    if old.get("fuente") != new.get("fuente"):
+        return ["no se puede comparar: una huella salió de Gradle y la otra del mapa del plan (sin red, Gradle no "
+                "respondió)"] if old.get("fuente") and new.get("fuente") else []
+    if old.get("fuente") == "gradle":
+        before, after = set(old.get("proyectos") or []), set(new.get("proyectos") or [])
+        out = ["%s pasó a compilarse desde código" % name for name in sorted(after - before)]
+        out += ["%s dejó de compilarse desde código" % name for name in sorted(before - after)]
+        return out
+    before = dict(item.split("=", 1) for item in old.get("modulos") or [] if "=" in item)
+    after = dict(item.split("=", 1) for item in new.get("modulos") or [] if "=" in item)
+    return ["%s pasó de %s a %s" % (name, MODULE_LABEL.get(before[name], before[name]), MODULE_LABEL.get(after[name],
+                                                                                                         after[name]))
+            for name in sorted(set(before) & set(after)) if before[name] != after[name]]
+
+
+def map_outdated(plan, current):
+    """A4/E4: los módulos del mapa del plan cuyo tipo ya no es el que dice Gradle (con una huella de Gradle): [(nombre,
+    tipo del plan, tipo de ahora)]."""
+    if not isinstance(current, dict) or current.get("fuente") != "gradle":
+        return []
+    projects, replaced = set(current.get("proyectos") or []), set(current.get("binarios") or [])
+    app = ":" + measured_configuration(plan, None)[0].strip(":").replace("/", ":")
+    out = []
+    for item in plan_modules(plan):
+        path = item.get("proyecto") or (item["nombre"] if item["nombre"].startswith(":") else None)
+        if not path or path == app:  # el módulo app no sale en sus propias dependencias
+            continue
+        # lo que no aparece en el classpath queda como estaba: solo Gradle dice si se sustituye por un binario
+        now = "codigo" if path in projects else "binario" if path in replaced else None
+        if now and item.get("tipo") in ("codigo", "binario") and now != item["tipo"]:
+            out.append((item["nombre"], item["tipo"], now))
+    return out
+
+
+def phase_module_notes(phases, current=None, phase=None):
+    """A4: avisos de huella de módulos que cambió entre las fases medidas (o entre ellas y `current`, la de la tanda que
+    empieza en `phase`). Cambiar qué se compila desde código entre fases deja de ser igual contra igual."""
+    measured = [(name, phases[name].get(MODULE_PRINT)) for name in FASES
+                if isinstance(phases.get(name), dict) and phases[name].get(MODULE_PRINT) and name != phase]
+    out = []
+    if current is not None and phase:
+        for name, old in measured:
+            changes = module_print_changes(old, current)
+            if changes and changes[0].startswith("no se puede comparar"):
+                out.append("la huella de los módulos de la fase %s y la de %s %s" % (name, phase, changes[0]))
+            elif changes:
+                out.append("la huella de los módulos cambió desde la fase %s (%s): %s no es igual contra igual con %s" % (
+                    name, "; ".join(changes), phase, name))
+        return out
+    for (first, old), (second, new) in zip(measured, measured[1:]):
+        changes = module_print_changes(old, new)
+        if changes and changes[0].startswith("no se puede comparar"):
+            out.append("la huella de los módulos de %s y la de %s %s" % (first, second, changes[0]))
+        elif changes:
+            out.append("la huella de los módulos cambió entre %s y %s (%s): la comparación deja de ser igual contra "
+                       "igual" % (first, second, "; ".join(changes)))
+    return out
+
+
 def blocked_modules(plan):
     """Los módulos del alcance que no se pueden editar: binarios o sin confirmar."""
     return [item for item in plan_modules(plan) if item.get("tipo") in ("binario", "sin confirmar")]
@@ -21482,16 +21782,17 @@ def improvement_module_gate(folder, plan, files, repo, ident):
                                     ", ".join(changed[:5])))
 
 
-def gradle_dependencies(root, app, configuration, log):
+def gradle_dependencies(root, app, configuration, log, offline=False, timeout=900):
     """(salida de `./gradlew -q :<app>:dependencies --configuration <configuración>`, '') o (None, por qué no se pudo
-    correr). Deja la salida en `log`. No cambia nada del proyecto."""
+    correr). Deja la salida en `log`. No cambia nada del proyecto. Con `offline` (A4), `--offline`: sin red."""
     root = pathlib.Path(root)
     if not (root / "gradlew").is_file():
         return None, "no hay ./gradlew en %s" % root
     task = ":%s:dependencies" % app.strip(":").replace("/", ":") if app.strip(":") else "dependencies"
-    command = ["./gradlew", "-q", task, "--configuration", configuration]
+    command = ["./gradlew", "-q", task, "--configuration", configuration] + (["--offline"] if offline else [])
     try:
-        done = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=900, env=child_env(java=True))
+        done = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=timeout,
+                              env=child_env(java=True))
     except (OSError, subprocess.SubprocessError) as error:
         return None, "Gradle no corrió (%s)" % str(error)[:120]
     try:

@@ -6198,6 +6198,7 @@ class GuidedFailureTest(DeviceBase):
 
     def test_ctrl_c_dice_cuantas_corridas_quedaron_y_como_completar_la_fase(self):
         counter = self.dir / "vueltas.txt"
+        self.update_flow(corridas=5)  # 0.16.0 · A1: lo que falta es lo del plan menos metricas.csv
         # el recorrido interrumpe a perf.py (Ctrl+C) en la tercera corrida
         self.update_flow(recorrido='n=$(cat %s 2>/dev/null || echo 0); echo $((n+1)) > %s; [ "$n" -lt 2 ] || kill -INT $PPID; '
                                    'sleep 0.3' % (counter, counter))
@@ -6254,7 +6255,7 @@ class GuidedFailureTest(DeviceBase):
         folder.mkdir()
         base = {"fecha": "2026-11-09T10:00:00", "corridas": 3}
         perf.write_phase(folder, "antes", dict(base, faltan={"a": 7}), "a")
-        perf.write_phase(folder, "antes", dict(base, corridas=10), "b")  # otro flujo completo: lo de 'a' sigue pendiente
+        perf.write_phase(folder, "antes", dict(base, corridas=5), "b")  # otro flujo, sin faltan: lo de 'a' sigue pendiente
         self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"a": 7})
         perf.write_phase(folder, "antes", dict(base, faltan={"b": 2}), "b")
         self.assertEqual(perf.read_phases(folder)["antes"]["faltan"], {"a": 7, "b": 2})
