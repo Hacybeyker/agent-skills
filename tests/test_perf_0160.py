@@ -59,7 +59,7 @@ class CaptureBase(DeviceBase):
 
 # ── A · Retomar y recuperar ──────────────────────────────────────────────────
 
-class RecoverCountTest(CaptureBase):
+class RecoverCountCase(CaptureBase):
     """A1–A3: tras un corte, `recuperar` cuenta desde metricas.csv y la fase termina con exactamente las del plan."""
 
     def cut_after(self, valid, record_valid, partial=False, perfetto=None):
@@ -98,6 +98,10 @@ class RecoverCountTest(CaptureBase):
         self.assertEqual(record["corridas"], 10)
         self.assertNotIn("faltan", record)
 
+
+class RecoverCountTest(RecoverCountCase):
+    """0.16.0 · K: la primera mitad de los tests, para que la suite se reparta (la otra mitad está en RecoverCountMoreTest)."""
+
     def test_corte_entre_corridas_con_el_registro_atrasado(self):
         self.cut_after(3, 2)
         out = self.ok("siguiente", "--carpeta", self.folder)
@@ -135,6 +139,10 @@ class RecoverCountTest(CaptureBase):
         self.assertIn("corrida 4 de 10", out)
         self.assertEqual(self.csv_runs(), list(range(1, 11)))
 
+
+class RecoverCountMoreTest(RecoverCountCase):
+    """0.16.0 · K: la segunda mitad de los tests, para que la suite se reparta (la otra mitad está en RecoverCountTest)."""
+
     def test_el_registro_se_actualiza_al_empezar_y_al_terminar_cada_corrida(self):
         source = SCRIPT.read_text(encoding="utf-8")
         start = source.index("        attempts += 1\n        failure = None\n")
@@ -143,7 +151,6 @@ class RecoverCountTest(CaptureBase):
                         source.index("                prepare()\n", start))
         self.assertIn("perfetto={\"pid\": pid, \"remota\": remote, \"serial\": serial}\n"
                       "                                                   if pid else None", source)
-
 
     def test_faltan_viejo_con_la_fase_completa_no_mide_de_mas(self):
         self.capture(runs=10)

@@ -713,7 +713,26 @@ def read_rows_from(text):
         return perf.read_rows(path)
 
 
-class CaptureTest(DeviceBase):
+class CaptureCase(DeviceBase):
+    """Lo común de las clases de captura (0.16.0 · K: CaptureTest se dividió por tema para que la suite se reparta)."""
+
+    def startup_plan(self, **extra):
+        flow = {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 0}}
+        flow.update(extra)
+        write(self.plan, json.dumps({"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": flow}}))
+
+    def commands(self):
+        return [" ".join(json.loads(line)[3:]) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()
+                if json.loads(line)[:1] == ["-s"]]
+
+    def read_csv_at(self, path):
+        with Path(path).open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+
+class CaptureTest(CaptureCase):
+    """Captura de corridas válidas, el entorno del dispositivo y 'preparar'."""
+
     def test_captura_corridas_validas_escribe_csv_comprime_y_resume(self):
         self.tp_outputs(GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "2")
@@ -796,6 +815,14 @@ class CaptureTest(DeviceBase):
         self.assertEqual(result.stdout.count("(inválido, buscaba la corrida 1 de 10): 'preparar' terminó con código 1 (se repite)"), 3)
         self.assertIn("3 corridas inválidas seguidas (última: 'preparar' terminó con código 1)", result.stderr)
 
+
+class CaptureInvalidCase(CaptureCase):
+    """Corridas inválidas: el tope de intentos, las que se guardan aparte y cuándo se detiene."""
+
+
+class CaptureInvalidTest(CaptureInvalidCase):
+    """0.16.0 · K: la primera mitad de los tests, para que la suite se reparta (la otra mitad está en CaptureInvalidStopTest)."""
+
     def test_tres_corridas_invalidas_seguidas_detienen_la_captura(self):
         self.tp_outputs(LOGIN, LOGIN, LOGIN, GOOD)
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "10",
@@ -844,6 +871,10 @@ class CaptureTest(DeviceBase):
         self.assertEqual(len({k[2] for k in data}), 2)  # la inválida no entra al CSV
         self.assertEqual(len([k for k in data if k[1] == "detalle_ms"]), 2)
 
+
+class CaptureInvalidStopTest(CaptureInvalidCase):
+    """0.16.0 · K: la segunda mitad de los tests, para que la suite se reparta (la otra mitad está en CaptureInvalidTest)."""
+
     def test_sin_preparar_avisa_y_relanza_la_app_si_no_esta_al_frente(self):
         self.tp_outputs(GOOD)
         out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1")
@@ -871,6 +902,27 @@ class CaptureTest(DeviceBase):
         result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
                            "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+
+    def test_arranque_tibio_invalida_la_corrida(self):
+        self.startup_plan()
+        self.tp_outputs(GOOD)
+        self.env["FAKE_LAUNCH"] = "WARM"
+        result = self.perf("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0",
+                           "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("WARM", result.stdout)
+
+    def test_app_caida_invalida_la_corrida_y_muestra_el_crash(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_DEAD"] = "1"
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("IllegalStateException: boom", result.stdout)
+        self.assertIn("retrace", result.stdout)
+
+
+class CaptureModesTest(CaptureCase):
+    """La prueba, las precondiciones, los modos (comando, manual, arranque en frío), los dispositivos y la salida de cada fase."""
 
     def test_prueba_imprime_metricas_y_no_escribe_csv(self):
         self.tp_outputs(GOOD)
@@ -919,19 +971,6 @@ class CaptureTest(DeviceBase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("falta trace_processor", result.stderr)
         self.assertNotIn("zshrc", result.stderr)  # el mensaje no toca el perfil del shell
-
-    def test_consulta_acota_filas_y_ancho(self):
-        self.tp_outputs('"nombre","ms"\n' + "".join('"%s",%d\n' % ("x" * 100, i) for i in range(30)))
-        trace = self.dir / "t.perfetto-trace"
-        trace.write_bytes(b"x")
-        out = self.ok("consulta", trace, "--sql", "SELECT 1", "--limite", "5", "--ancho", "10")
-        self.assertIn("| xxxxxxxxxx | 0 |", out)
-        self.assertIn("25 filas más", out)
-
-    def startup_plan(self, **extra):
-        flow = {"recorrido": {"tipo": "arranque-frio", "actividad": PKG + "/.MainActivity", "espera_s": 0}}
-        flow.update(extra)
-        write(self.plan, json.dumps({"paquete": PKG, "principales": ["ttid_ms"], "flujos": {"arranque-frio": flow}}))
 
     def test_arranque_en_frio_detiene_la_app_antes_de_grabar_y_valida_el_estado(self):
         self.startup_plan()
@@ -1003,9 +1042,9 @@ class CaptureTest(DeviceBase):
         self.assertIn("Chat nuevo · Modelo: Haiku 5.5 · Esfuerzo: bajo", out)
         self.assertIn('Texto: "Sigue hb-performance con ', out)
 
-    def commands(self):
-        return [" ".join(json.loads(line)[3:]) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()
-                if json.loads(line)[:1] == ["-s"]]
+
+class CaptureBuildTest(CaptureCase):
+    """La compilación de ART, rehacer una fase y el mismo build en antes y después."""
 
     def test_compilacion_completa_por_defecto_y_registrada(self):
         self.tp_outputs(GOOD)
@@ -1053,23 +1092,6 @@ class CaptureTest(DeviceBase):
         phases = json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
         self.assertEqual(phases["antes"]["corridas"], 1)
 
-    def test_arranque_tibio_invalida_la_corrida(self):
-        self.startup_plan()
-        self.tp_outputs(GOOD)
-        self.env["FAKE_LAUNCH"] = "WARM"
-        result = self.perf("capturar", "--plan", self.plan, "--fase", "antes", "--corridas", "1", "--calentamiento", "0",
-                           "--sin-compilar")
-        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
-        self.assertIn("WARM", result.stdout)
-
-    def test_app_caida_invalida_la_corrida_y_muestra_el_crash(self):
-        self.tp_outputs(GOOD)
-        self.env["FAKE_DEAD"] = "1"
-        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--prueba")
-        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
-        self.assertIn("IllegalStateException: boom", result.stdout)
-        self.assertIn("retrace", result.stdout)
-
     def test_despues_con_el_mismo_build_de_antes_se_detiene(self):
         self.tp_outputs(GOOD)
         self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "1",
@@ -1083,6 +1105,18 @@ class CaptureTest(DeviceBase):
                 "--calentamiento", "0", "--sin-compilar")
         self.ok("comparar", self.plan.parent / "metricas.csv")
         self.assertIn("## Builds medidos", (self.plan.parent / "comparacion.md").read_text(encoding="utf-8"))
+
+
+class CaptureQueryTest(CaptureCase):
+    """Las consultas sobre las trazas: SQL propio, trace_processor viejo y el diagnóstico."""
+
+    def test_consulta_acota_filas_y_ancho(self):
+        self.tp_outputs('"nombre","ms"\n' + "".join('"%s",%d\n' % ("x" * 100, i) for i in range(30)))
+        trace = self.dir / "t.perfetto-trace"
+        trace.write_bytes(b"x")
+        out = self.ok("consulta", trace, "--sql", "SELECT 1", "--limite", "5", "--ancho", "10")
+        self.assertIn("| xxxxxxxxxx | 0 |", out)
+        self.assertIn("25 filas más", out)
 
     def test_metricas_propias_desde_sql(self):
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
@@ -1131,10 +1165,6 @@ class CaptureTest(DeviceBase):
         self.assertIn("| Choreographer#doFrame 1 | 12.5 |", md)
         self.assertNotIn("llamadas_solapadas", md)  # sin red no corre el grupo red
         self.assertNotIn("{{", (self.dir / "tp.sql").read_text(encoding="utf-8"))
-
-    def read_csv_at(self, path):
-        with Path(path).open(newline="", encoding="utf-8") as f:
-            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
 
 
 class HarTest(PerfBase):
@@ -4054,7 +4084,7 @@ DEXOPT_SPEED = """Dexopt state:
 """
 
 
-class CaptureFeedbackTest(DeviceBase):
+class CaptureFeedbackCase(DeviceBase):
     """La captura no parece colgada (avisos de progreso), no compila cuando no hace falta y la prueba dice qué falta."""
 
     def capture(self, *extra):
@@ -4068,6 +4098,17 @@ class CaptureFeedbackTest(DeviceBase):
         plan = json.loads(self.plan.read_text(encoding="utf-8"))
         plan["flujos"]["home"].update(fields)
         self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def marks_plan(self):
+        self.update_flow(ventana={"desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}},
+                         metricas_usuario=[{"nombre": "detalle_ms", "desde": {"marca": "NAV detalle"},
+                                            "hasta": {"marca": "MARK detalle"}}],
+                         segmentos=[{"nombre": "pago", "desde": {"marca": "MARK operacion_inicio"},
+                                     "hasta": {"marca": "MARK operacion_fin"}}])
+
+
+class CaptureFeedbackTest(CaptureFeedbackCase):
+    """0.16.0 · K: la primera mitad de los tests, para que la suite se reparta (la otra mitad está en CaptureFeedbackMoreTest)."""
 
     def test_avisa_antes_de_compilar_cuanto_tardo_y_cada_traza_que_procesa(self):
         self.tp_outputs(GOOD)
@@ -4160,12 +4201,9 @@ class CaptureFeedbackTest(DeviceBase):
         self.capture("--fase", "despues", "--rehacer", "--compilacion", "perfil", *common)  # el modo perfil nunca reutiliza
         self.assertEqual((self.dir / "adb.log").read_text(encoding="utf-8").count("compile -f -m speed-profile"), log_before + 1)
 
-    def marks_plan(self):
-        self.update_flow(ventana={"desde": {"marca": "NAV detalle"}, "hasta": {"marca": "MARK detalle"}},
-                         metricas_usuario=[{"nombre": "detalle_ms", "desde": {"marca": "NAV detalle"},
-                                            "hasta": {"marca": "MARK detalle"}}],
-                         segmentos=[{"nombre": "pago", "desde": {"marca": "MARK operacion_inicio"},
-                                     "hasta": {"marca": "MARK operacion_fin"}}])
+
+class CaptureFeedbackMoreTest(CaptureFeedbackCase):
+    """0.16.0 · K: la segunda mitad de los tests, para que la suite se reparta (la otra mitad está en CaptureFeedbackTest)."""
 
     def test_la_prueba_dice_que_marcas_del_plan_salieron_la_ultima_vista_y_cuanto_dura_la_traza(self):
         self.marks_plan()
@@ -6188,7 +6226,7 @@ class ExitInfoTest(DeviceBase):
         self.assertNotIn("inválida", result.stdout)
 
 
-class GuidedFailureTest(DeviceBase):
+class GuidedFailureCase(DeviceBase):
     """Todo fallo termina con qué pasó, qué quedó guardado y el comando para seguir, que empieza con cd."""
 
     def capture(self, *extra, interruptible=False):
@@ -6216,6 +6254,14 @@ class GuidedFailureTest(DeviceBase):
 
     def phases(self):
         return json.loads((self.plan.parent / "fases.json").read_text(encoding="utf-8"))
+
+    def read_csv_at(self, path):
+        with path.open(newline="", encoding="utf-8") as f:
+            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
+
+
+class GuidedFailureTest(GuidedFailureCase):
+    """0.16.0 · K: la primera mitad de los tests, para que la suite se reparta (la otra mitad está en GuidedFailureMoreTest)."""
 
     def test_ctrl_c_dice_cuantas_corridas_quedaron_y_como_completar_la_fase(self):
         counter = self.dir / "vueltas.txt"
@@ -6246,10 +6292,6 @@ class GuidedFailureTest(DeviceBase):
         self.assertNotIn("faltan", self.phases()["antes"])
         self.assertNotIn("completar la fase", self.ok("siguiente", "--carpeta", self.plan.parent))
         self.assertEqual(len({k[2] for k in self.read_csv_at(self.plan.parent / "metricas.csv")}), 5)
-
-    def read_csv_at(self, path):
-        with path.open(newline="", encoding="utf-8") as f:
-            return {(r["fase"], r["metrica"], r["corrida"]): r for r in csv.DictReader(f)}
 
     def test_ctrl_c_sin_corridas_validas_no_guarda_nada_y_da_el_mismo_comando(self):
         self.update_flow(recorrido="kill -INT $PPID; sleep 0.3")
@@ -6360,6 +6402,10 @@ class GuidedFailureTest(DeviceBase):
         self.assertNotIn("a mano", result.stderr.split("Cómo seguir:")[1])
         self.assertEqual(perf.read_notes(self.plan.parent)["invalidas"]["antes"]["home"],
                          {"'preparar' terminó con código 3": 3})
+
+
+class GuidedFailureMoreTest(GuidedFailureCase):
+    """0.16.0 · K: la segunda mitad de los tests, para que la suite se reparta (la otra mitad está en GuidedFailureTest)."""
 
     def test_despues_del_calentamiento_hay_un_respiro_antes_del_primer_preparar(self):
         self.assertGreaterEqual(perf.WARMUP_SETTLE_S, 1)
