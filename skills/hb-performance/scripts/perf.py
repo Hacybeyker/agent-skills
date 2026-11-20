@@ -5378,13 +5378,16 @@ def plan_steps(folder, plan, flow=None):
     if "aprobada" in estados:
         first = next(m for m in mejoras if m.get("estado") == "aprobada")
         missing_dod = dod_notice(root, plan)  # sin `## DoD` en AGENTS.md, la sesión 3 no sabría qué validar
+        # D2: cuándo se aprobó cada una, antes de dar el chat (los avisos se imprimen primero, aunque vayan al final)
         return "sesión 3 · %s" % first["id"], [
             dict(chat("%s: sesión 3, aplica %s" % (resume, first["id"]), "intermedio", "medio",
                  "sesión 3: aplica %s%s con su test y el DoD, propone el commit y marca la mejora aplicada con sus "
                  "archivos (perf.py guarda el diff para el reporte)" % (
                      first["id"], " (a prueba: la medición de después confirma o refuta su hipótesis)"
                      if first.get("a_prueba") else ""), plan), env=flow_env(spec, root / folder))] + (
-            [missing_dod] if missing_dod else [])
+            [missing_dod] if missing_dod else []) + [
+            {"tipo": "avisos", "titulo": "Mejoras aprobadas (lo que el chat va a aplicar)",
+             "lineas": approved_lines(root / folder, plan)}]
     if "despues" in phases and not stale:
         return ("sesión 4 completa · línea base nueva" if rebaseline else "sesión 4 · cierre"), [session4]
     if "aplicada" in estados and "aprobada" not in estados:
@@ -5469,10 +5472,12 @@ def plan_steps(folder, plan, flow=None):
              terminal(command("cerrar", "--carpeta", folder),
                       "quita las marcas y los cambios temporales (con su parche) y, después del DoD, el setup si va en un "
                       "parche", "nada; si algo no revierte limpio, se detiene sin tocar nada"))]
+        regenerate = old_report_step(state.parent, root, folder)  # S3: opcional, el reporte con la estructura de ahora
         return "decisión del usuario (sin chat)", (
             [{"tipo": "archivo", "texto": str(report), "que": "el reporte inicial (diagnóstico y plan de mejoras)"}]
-            if report else []) + [{"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que "
-                                                                    "corresponda)", "opciones": options}]
+            if report else []) + ([regenerate] if regenerate else []) + [
+            {"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que corresponda)",
+             "opciones": options}]
     if mejoras:
         return "sesión 4 · cierre sin mejoras aplicadas", [session4]
     if initial.is_file():
@@ -7151,11 +7156,116 @@ def write_next(folder, title, steps, missing=(), plan=None):
         state.write_text(new, encoding="utf-8")
 
 
+def fresh_plan(folder, plan):
+    """0.18.0 · S1: el plan de ahora, releído del disco. Un comando largo (una captura, un reporte, pausar, reanudar,
+    recuperar) puede terminar después de que otro comando (`decidir`, en otra terminal) cambió plan.json: el paso
+    siguiente se arma con lo que hay en el disco, no con lo que el comando cargó al empezar (fases.json ya se lee del
+    disco en cada paso). Si plan.json no está o no se puede leer, vale el que el comando ya tenía."""
+    path = pathlib.Path(folder) / "plan.json"
+    if not path.is_file():
+        return plan
+    try:
+        return load_plan(path)
+    except (PerfError, OSError, ValueError):
+        return plan
+
+
+def uncut_baseline_lines(folder, plan):
+    """0.18.0 · S2: una línea por cada flujo cuya línea base (antes y control) se midió con una versión anterior a la
+    que corta la traza después de la última marca (0.16.0): como esas fases no tienen `corte_s`, ninguna fase del flujo
+    corta (trace_tail) y el después se compara igual contra igual. Solo lee: sirve para que nadie rehaga la línea base
+    sin necesidad."""
+    folder = pathlib.Path(folder)
+    phases = read_phases(folder)
+    lines = []
+    if plan.get("profundidad") == "triage":
+        return lines  # sin control ni después: no hay comparación que aclarar
+    for name, spec in (plan.get("flujos") or {}).items():
+        if not isinstance(spec, dict) or phase_flow_record(phases, "despues", name).get("corridas"):
+            continue
+        measured = [(phase, phase_flow_record(phases, phase, name)) for phase in ("antes", "control")]
+        measured = [(phase, record) for phase, record in measured if record.get("corridas")]
+        # con las dos fases medidas sin corte, ninguna corta: tampoco una que se complete o se rehaga (trace_tail mira
+        # las demás fases del flujo); con una sola, rehacerla sí podría cortar, y no se afirma nada
+        if len(measured) < 2 or any(isinstance(record.get("corte_s"), (int, float)) and record["corte_s"] > 0
+                                    for _, record in measured):
+            continue
+        versions = [phase_skill(phases.get(phase), name) for phase, _ in measured]
+        if any(version_at_least(version, "0.16.0") for version in versions):
+            continue
+        # solo donde esta versión cortaría si la línea base fuera nueva (las condiciones de trace_tail)
+        tail = spec.get("cola_s", TAIL_DEFAULT_S)
+        prepare = str(spec.get("preparar") or "").strip()
+        if not isinstance(tail, (int, float)) or isinstance(tail, bool) or tail <= 0 or startup_spec(spec) or \
+                (spec.get("recorrido") or "manual") == "manual" or not prepare or spec.get("traza_desde_preparar") or \
+                is_repetition(spec) or has_human_pause(spec, folder):
+            continue
+        shown = sorted({version for version in versions if version})
+        lines.append("Flujo %s: antes y control se midieron con %s, que no cortaba la traza después de la última marca. "
+                     "Por eso ninguna fase de este flujo la corta y el después se compara igual contra igual: no hace "
+                     "falta rehacer la línea base." % (name, "hb-performance %s" % " y ".join(shown) if shown else
+                                                       "una versión anterior de hb-performance"))
+    return lines
+
+
+UNCUT_NOTE = "linea_base_sin_corte"
+
+
+def said_once_lines(folder, plan):
+    """S2: lo que el paso siguiente dice una sola vez por investigación: [(línea, True si quedó en "Decisiones" de
+    estado.md)]. La primera vez lo devuelve y lo anota (en estado.md, con la fecha, y en advertencias.json); después ya
+    no lo repite."""
+    folder = pathlib.Path(folder)
+    data = read_notes(folder)
+    said = note_bucket(data, "dicho")
+    if said.get(UNCUT_NOTE):
+        return []
+    try:
+        lines = uncut_baseline_lines(folder, plan)
+    except (OSError, PerfError, ValueError, TypeError):
+        return []
+    if not lines:
+        return []
+    now = datetime.datetime.now().replace(microsecond=0)
+    kept = False
+    try:
+        kept = append_decision_lines(folder, ["- %s: %s (perf.py)" % (now.strftime("%Y-%m-%d %H:%M"),
+                                                                     line[0].lower() + line[1:]) for line in lines])
+        said[UNCUT_NOTE] = now.isoformat()
+        save_notes(folder, data)
+    except OSError:
+        pass  # una carpeta de solo lectura: se dice igual, y se repetirá
+    return [(line, kept) for line in lines]
+
+
+def append_decision_lines(folder, lines):
+    """Agrega líneas al final de "## Decisiones" de estado.md (quita el ejemplo de la plantilla). False si no hay
+    estado.md o no tiene esa sección."""
+    state = pathlib.Path(folder) / "estado.md"
+    if not state.is_file() or not lines:
+        return False
+    text = state.read_text(encoding="utf-8")
+
+    def append(match):
+        body = re.sub(r"- <AAAA-MM-DD:[^\n]*>\n?", "", match.group(2)).strip("\n")
+        return match.group(1) + (body + "\n" if body else "") + "\n".join(lines) + "\n"
+
+    new, count = re.subn(r"(## Decisiones\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S)
+    if count:
+        state.write_text(new, encoding="utf-8")
+    return bool(count)
+
+
 def print_next(folder, plan, flow=None):
+    plan = fresh_plan(folder, plan)  # S1: el estado de ahora, no el que el comando cargó al empezar
     title, steps = next_steps(pathlib.Path(folder), plan, flow)
     print("Siguiente · %s (también en estado.md):" % title)
     for line in render_steps(steps, markdown=False, root=project_root(pathlib.Path(folder)).resolve(), plan=plan):
         print("  " + line)
+    if not title.startswith(("investigación cerrada", "triage cerrado", "en pausa", "archivada")):
+        for line, kept in said_once_lines(folder, plan):  # S2: una sola vez por investigación
+            print("  · Línea base de una versión anterior (%sno se repite): %s" % (
+                "queda en \"Decisiones\" de estado.md y " if kept else "", line))
     if not title.startswith(("investigación cerrada", "triage cerrado")):
         for line in old_video_lines(folder, plan):  # 0.18.0 · V4: opcional, después de los pasos; no cambia ninguno
             print("  · " + line)
@@ -7736,6 +7846,7 @@ def cmd_reanudar(args):
                             reanudada=datetime.datetime.now().replace(microsecond=0).isoformat(),
                             cambios=[note for note, _ in changed], linea_base=reasons, otras=others))
     redo = any("rehacer" in reason for reason in reasons)
+    plan = fresh_plan(folder, plan)  # S1: lo que otro comando haya decidido mientras este corría
     recalc = [terminal(perf_command(root, "recalcular", "--carpeta", rel),
                        "aplica la regla del borde de ahora a todas las fases, sobre las trazas guardadas (sin medir)",
                        "espera")] if any("recalcular" in reason for reason in reasons) else []
@@ -8426,7 +8537,40 @@ def consumo_from_hook(args):
 
 
 DECISIONS = (("aprobar", "aprobada", "aprobadas"), ("descartar", "descartada", "descartadas"),
-             ("pendiente", "pendiente", "pendientes"), ("aplicada", "aplicada", "aplicadas"))
+             ("pendiente", "pendiente", "pendientes"), ("aplicada", "aplicada", "aplicadas"),
+             ("reabrir", "propuesta", "reabiertas (vuelven a propuesta)"))
+
+
+def command_origin():
+    """0.18.0 · D1: quién corrió el comando, solo si consta; '' si no. "chat de Claude Code" con CLAUDECODE=1 (Claude
+    Code la pone en los shells que abre: comprobado); "chat (<agente>)" con AI_AGENT, la convención que siguen varios
+    agentes. Nunca afirma "terminal": una terminal interactiva no se distingue de un agente que no pone ninguna variable
+    (GitHub Copilot CLI no documenta la suya), así que sin una de esas variables queda solo la hora."""
+    if os.environ.get("CLAUDECODE") == "1":
+        return "chat de Claude Code"
+    agent = re.sub(r"[^\w.-]+", " ", os.environ.get("AI_AGENT") or "").strip()[:40]
+    return "chat (%s)" % agent if agent else ""
+
+
+def decided_text(item):
+    """Cuándo y desde dónde se decidió una mejora: "el 2026-03-02 10:15 (chat de Claude Code)"; sin el dato (una versión anterior no
+    lo guardaba), lo dice."""
+    when = str(item.get("decidida_en") or "")
+    if not fecha_ts(when):
+        return "sin fecha (la registró una versión anterior, que no guardaba la hora)"
+    origin = str(item.get("decidida_desde") or "").strip()
+    return "el %s%s" % (when[:16].replace("T", " "), " (%s)" % origin if origin else "")
+
+
+def approved_lines(folder, plan):
+    """0.18.0 · D2: antes del chat de la sesión 3, cuándo se aprobó cada mejora y cómo volver atrás si no fue una
+    decisión del usuario."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    rel = relative_folder(folder, root)
+    return ["%s aprobada %s; si no fue tu decisión: `%s`" % (
+        item["id"], decided_text(item), perf_command(root, "decidir", "--carpeta", rel, "--reabrir", item["id"]))
+        for item in plan.get("mejoras") or [] if item.get("estado") == "aprobada"]
 
 
 CHANGES_DIR = "cambios"
@@ -8493,13 +8637,45 @@ def cmd_decidir(args):
     if scenario_runs is not None and scenario_runs < MIN_RUNS:
         raise PerfError("--corridas-escenario va de %d en adelante: con menos, el veredicto no es firme" % MIN_RUNS)
     if not choices and not depth and not control and scenario_runs is None:
-        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente o --aplicada (o cambia la "
-                        "profundidad con --profundidad, o lo que se mide de los escenarios con --control-escenarios y "
-                        "--corridas-escenario)")
+        raise PerfError("indica al menos una mejora con --aprobar, --descartar, --pendiente, --reabrir o --aplicada (o "
+                        "cambia la profundidad con --profundidad, o lo que se mide de los escenarios con "
+                        "--control-escenarios y --corridas-escenario)")
     known = [m["id"] for m in plan.get("mejoras", [])]
     unknown = sorted(set(choices) - set(known))
     if unknown:
         raise PerfError("plan.json no tiene las mejoras %s (tiene: %s)" % (", ".join(unknown), ", ".join(known) or "ninguna"))
+    root = project_root(folder).resolve()
+    reopened = [name.strip() for name in (getattr(args, "reabrir", None) or "").split(",")
+                if name.strip() and name.strip() != "-"]
+    if reopened:
+        both = sorted(name for name in reopened for option, _, _ in DECISIONS
+                      if option != "reabrir" and name in [item.strip() for item in (getattr(args, option) or "").split(",")])
+        if both:
+            raise PerfError("%s está en --reabrir y en otra lista a la vez: elige una (--reabrir la vuelve a propuesta; "
+                            "las otras la deciden). No cambié nada" % ", ".join(both)).con(
+                guardado="nada: plan.json y estado.md siguen igual")
+        # D3: `--reabrir` solo cambia el plan (nunca el código). Una mejora aplicada ya está en el árbol: no se reabre.
+        states = {m["id"]: m.get("estado", "propuesta") for m in plan.get("mejoras", [])}
+        applied_now = [name for name in reopened if states.get(name) == "aplicada"]
+        if applied_now:
+            rel = relative_folder(folder, root)
+            raise PerfError("%s ya está%s aplicada%s: su código está en el árbol, y `--reabrir` solo cambia el plan (no toca "
+                            "código). No cambié nada" % (", ".join(applied_now), "" if len(applied_now) == 1 else "n",
+                                                         "" if len(applied_now) == 1 else "s")).con(
+                guardado="nada: plan.json y estado.md siguen igual",
+                seguir=[("para medir de nuevo sin la mejora, quítala del código con su parche (no se pierde: queda "
+                         "guardada, y `--reaplicar-mejoras` la repone)",
+                         perf_command(root, "lineabase", "--carpeta", rel, "--quitar-mejoras")),
+                        ("o deja todo como está y pide el paso siguiente", perf_command(root, "siguiente", "--carpeta",
+                                                                                        rel))])
+        same = [name for name in reopened if states.get(name) == "propuesta" and choices.get(name) == "propuesta"]
+        for name in same:
+            choices.pop(name)
+        if same:
+            print("· %s ya está%s como propuesta: no cambié nada de %s." % (
+                ", ".join(same), "" if len(same) == 1 else "n", "ella" if len(same) == 1 else "ellas"))
+        if not choices and not depth and not control and scenario_runs is None:
+            return print_next(folder, plan)
     files = [name.strip() for name in (getattr(args, "archivos", None) or "").split(",") if name.strip()]
     applied = [key for key, estado in choices.items() if estado == "aplicada"]
     if (files or getattr(args, "repo", None)) and len(applied) != 1:
@@ -8508,9 +8684,16 @@ def cmd_decidir(args):
         raise PerfError("--repo va con --archivos: los archivos de la mejora en ese repo")
     if applied and blocked_modules(plan):
         improvement_module_gate(folder, plan, files, getattr(args, "repo", None), applied[0])
+    now = datetime.datetime.now().replace(microsecond=0)
+    origin = command_origin()
     for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
+            item["decidida_en"] = now.isoformat()  # D1: cuándo y, si se sabe, desde dónde
+            if origin:
+                item["decidida_desde"] = origin
+            else:
+                item.pop("decidida_desde", None)
             if choices[item["id"]] == "aplicada":
                 item["aplicada_en"] = datetime.datetime.now().isoformat(timespec="seconds")
                 if files:
@@ -8569,17 +8752,10 @@ def cmd_decidir(args):
     plan_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     parts += ["%s %s" % (label, ", ".join(k for k in known if choices.get(k) == estado))
               for _, estado, label in DECISIONS if estado in choices.values()]
-    line = "- %s: %s (perf.py decidir)" % (datetime.date.today().isoformat(), "; ".join(parts))
-    state = folder / "estado.md"
-    if state.is_file():
-        text = state.read_text(encoding="utf-8")
-
-        def append(match):
-            body = re.sub(r"- <AAAA-MM-DD:[^\n]*>\n?", "", match.group(2)).strip("\n")
-            return match.group(1) + (body + "\n" if body else "") + line + "\n"
-
-        state.write_text(re.sub(r"(## Decisiones\n\n)(.*?)(?=\n## |\Z)", append, text, count=1, flags=re.S),
-                         encoding="utf-8")
+    # D1: la fecha con la hora y, si consta, el agente que lo corrió desde un chat
+    line = "- %s%s: %s (perf.py decidir)" % (now.strftime("%Y-%m-%d %H:%M"), " (%s)" % origin if origin else "",
+                                            "; ".join(parts))
+    append_decision_lines(folder, [line])
     rows = read_rows(folder / "metricas.csv") if (folder / "metricas.csv").is_file() else []
     update_block(folder, "mejoras", plan_table_md(plan, rows))
     print("✔ %s" % line[2:])
@@ -20947,6 +21123,66 @@ def humanize_html(html_text, names, plan):
     return "".join(out)
 
 
+# 0.18.0 · S3: la estructura de un reporte HTML se reconoce por una marca en la página, no por la versión de la skill
+# (que no va en los HTML). La 2 es la de dos públicos con índice (reporte-<tipo>-dev y -gerencia): la página la declara
+# en <meta name="hb-perf-reporte" content="estructura-2">; las que se generaron antes de que existiera esa marca se
+# reconocen por lo que esa estructura trajo (el <body> con su público y el índice).
+REPORT_STRUCTURE = 2
+REPORT_MARK = re.compile(r'<meta name="hb-perf-reporte" content="estructura-(\d+)">')
+REPORT_OLD_SUFFIX = ".estructura-anterior"
+
+
+def report_structure(path):
+    """La estructura de un reporte HTML (REPORT_STRUCTURE es la de ahora), 1 si es de una anterior a la marca, o None si
+    no es un HTML que se pueda leer."""
+    path = pathlib.Path(path)
+    if path.suffix != ".html":
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    found = REPORT_MARK.search(text)
+    if found:
+        return int(found.group(1))
+    if re.search(r'<body class="(?:dev|gerencia)">', text) and '<nav class="toc">' in text:
+        return REPORT_STRUCTURE  # generado antes de que existiera la marca, ya con esta estructura
+    return 1
+
+
+def old_structure(path):
+    """True si el reporte HTML es de una estructura anterior a la de ahora (una más nueva, de otra versión, no lo es)."""
+    found = report_structure(path)
+    return found is not None and found < REPORT_STRUCTURE
+
+
+def old_report_step(folder, root, rel, kind="inicial"):
+    """S3: si el reporte HTML que hay es de una estructura anterior, el paso opcional que lo genera de nuevo con la de
+    ahora (guardando antes una copia del anterior), como un aviso con su comando: no desplaza los caminos de la
+    decisión. None si no hace falta."""
+    report = report_file(folder, kind)
+    if report is None or not old_structure(report):
+        return None
+    current = report.name == "reporte-%s-dev.html" % kind  # el mismo nombre: se va a sobrescribir, con una copia antes
+    command = perf_command(root, "reporte", "--carpeta", rel, *(["--inicial"] if kind == "inicial" else []), "--html")
+    return {"tipo": "avisos", "titulo": "Opcional, antes de decidir", "lineas": [
+        "El reporte %s que hay (%s) es de una versión anterior, con otra estructura: los datos son los mismos, cambia cómo "
+        "se leen. Para generarlo de nuevo con la de ahora (técnico y gerencia; no mide ni cambia la decisión): `%s`. %s." % (
+            kind, report.name, command, "Guarda antes una copia del anterior (%s%s%s), sin pisar ninguna otra"
+            % (report.stem, REPORT_OLD_SUFFIX, report.suffix) if current else
+            "El anterior queda como está: los de ahora tienen otro nombre (reporte-%s-dev y reporte-%s-gerencia)"
+            % (kind, kind))]}
+
+
+def backup_old_report(path):
+    """S3: antes de sobrescribir un reporte HTML de una estructura anterior, una copia con un sufijo que dice de dónde
+    viene (<nombre>.estructura-anterior.html), sin pisar ninguna otra copia (write_new). Devuelve la copia o None."""
+    path = pathlib.Path(path)
+    if not path.is_file() or not old_structure(path):
+        return None
+    return write_new(path.with_name(path.stem + REPORT_OLD_SUFFIX + path.suffix), path.read_bytes())
+
+
 def report_page(project, title, subtitle, audience, sections, date):
     """R1: la página de un reporte: nombre del proyecto arriba, "Performance · <alcance>", el subtítulo (solo el técnico),
     el índice, las secciones y el pie con la fecha de generación; botón de tema claro y oscuro."""
@@ -20955,7 +21191,8 @@ def report_page(project, title, subtitle, audience, sections, date):
     body = nav + "".join('<section id="%s"%s><h2>%s</h2>%s</section>' % (
         sid, ' class="resultado"' if sid in ("estado", "resultado") and audience == "gerencia" else "", e(name), html_)
                          for sid, name, html_ in sections)
-    page = (ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8")
+    page = (ASSETS / "plantillas" / "reporte.html").read_text(encoding="utf-8").replace("{{STRUCTURE}}",
+                                                                                       str(REPORT_STRUCTURE))
     return (page.replace("{{TITLE}}", e(title)).replace("{{PROJECT}}", e(project)).replace("{{AUDIENCE}}", audience)
             .replace("{{SUBTITLE}}", "<p>%s</p>" % e(subtitle) if subtitle else "").replace("{{DATE}}", e(date))
             .replace("{{BODY}}", body))
@@ -20998,8 +21235,12 @@ def write_report_pair(data, kind, title, html_too):
                                                     encoding="utf-8")
         print("✔ Reporte %s (%s): %s" % (label, audience, data.folder / ("%s.md" % name)))
         if html_too:
-            (data.folder / ("%s.html" % name)).write_text(report_page(project, scope, subtitle, audience, sections, date),
-                                                          encoding="utf-8")
+            page = report_page(project, scope, subtitle, audience, sections, date)
+            kept = backup_old_report(data.folder / ("%s.html" % name))  # S3: nunca se pisa uno de otra estructura
+            if kept:
+                print("· %s.html era de una versión anterior (otra estructura): guardé una copia en %s antes de "
+                      "generarlo de nuevo" % (name, kept))
+            (data.folder / ("%s.html" % name)).write_text(page, encoding="utf-8")
             print("✔ Reporte HTML (%s): %s" % (audience, data.folder / ("%s.html" % name)))
     old = [name for name in ("reporte-%s.html" % kind, "reporte-%s.md" % kind) if (data.folder / name).is_file()]
     if old:
@@ -26095,7 +26336,12 @@ def main(argv=None):
     p.add_argument("--carpeta", required=True)
     p.add_argument("--aprobar", help="ids separados por coma (- es ninguno)")
     p.add_argument("--descartar", help="ids separados por coma (- es ninguno)")
-    p.add_argument("--pendiente", help="ids separados por coma (- es ninguno)")
+    p.add_argument("--pendiente", help="ids separados por coma (- es ninguno): decididas para más adelante (no se aplican "
+                                       "en esta investigación); no es \"sin decidir\": para eso, --reabrir")
+    p.add_argument("--reabrir", help="ids separados por coma: vuelven a \"propuesta\" (sin decidir) las mejoras aprobadas, "
+                                     "pendientes o descartadas, por ejemplo si la decisión no fue tuya; solo cambia el "
+                                     "plan, no toca código. Una aplicada no se reabre: se quita con `lineabase "
+                                     "--quitar-mejoras`")
     p.add_argument("--aplicada", help="ids que la sesión 3 ya aplicó (la usa el agente al terminar la mejora)")
     p.add_argument("--archivos", help="con --aplicada (un solo id): los archivos que cambió la mejora, separados por coma "
                                       "y relativos a --repo; perf.py guarda su diff en <carpeta>/cambios/ para el reporte")

@@ -1,16 +1,22 @@
 """Tests de hb-performance 0.18.0: rótulos del video en tres capas (V), `siguiente` con el estado de ahora (S),
 `decidir` con rastro y vuelta atrás (D), `archivar` y la salida de `pausar` (P) y la línea "Secciones propias" (O). Los
 datos son inventados."""
+import argparse
+import contextlib
+import io
 import json
 import os
 import re
+import shlex
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from helpers import ROOT, write
-from test_perf import GOOD, PerfBase, perf
-from test_perf_0160 import CaptureBase
+from test_perf import AGENT_ENV, perf
+from test_perf_0150 import TriageBase, commands_in
+from test_perf_0160 import CaptureBase, ReportFixtureBase
 
 SKILL = ROOT / "skills" / "hb-performance"
 SCRIPT = SKILL / "scripts" / "perf.py"
@@ -515,6 +521,378 @@ class RebuildWithoutTraceTest(VideoRunBase):
         self.assertEqual(old["fases"][0]["rotulo"], "Preparación · no se mide")
         self.assertEqual(rebuilt["fases"][0]["rotulo"], "Preparación · traza grabando, no se mide")
         self.assertEqual(rebuilt["leyenda"][0], "Video: toda la prueba · Traza: desde la preparación")
+
+
+# ── S · `siguiente` con el estado de ahora y con versiones anteriores ────────
+
+M2 = {"id": "M2", "titulo": "Guardar la lista en memoria", "estado": "propuesta", "metrica": "abrir_ms"}
+DATE_TIME = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
+
+
+def clean_env():
+    """El entorno sin las variables con las que un agente marca sus shells (los tests corren igual en todos lados)."""
+    return {name: value for name, value in os.environ.items() if name not in AGENT_ENV}
+
+
+def quiet(function, *args, **kwargs):
+    """Corre una función de perf.py en este proceso y devuelve lo que imprime."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, clean_env(), clear=True):
+        function(*args, **kwargs)
+    return out.getvalue()
+
+
+class DecisionBase(TriageBase):
+    """Riguroso con antes y control medidos y dos mejoras propuestas: el paso es la decisión del usuario."""
+    skill = None  # la versión que midió antes y control (None: fases.json no la guarda)
+    flow = None  # campos extra del flujo
+
+    def setUp(self):
+        super().setUp()
+        plan = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+        plan.pop("profundidad", None)
+        plan["mejoras"].append(dict(M2))
+        plan["flujos"]["catalogo-lista"].update(self.flow or {})
+        write(self.folder / "plan.json", json.dumps(plan))
+        record = {"corridas": 10}
+        record.update({"skill": self.skill} if self.skill else {})
+        write(self.folder / "fases.json", json.dumps({
+            "antes": dict(record, fecha="2026-03-02T10:00:00", flujos={"catalogo-lista": dict(record)}),
+            "control": dict(record, fecha="2026-03-02T11:00:00", flujos={"catalogo-lista": dict(record)})}))
+
+    def plan_json(self):
+        return json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))
+
+    def state(self):
+        return (self.folder / "estado.md").read_text(encoding="utf-8")
+
+    def decisions(self):
+        return self.state().split("## Decisiones\n\n")[1].split("\n## ")[0]
+
+
+class NextReadsDiskTest(DecisionBase):
+    """S1: el paso siguiente sale del plan.json de ahora, no del que el comando cargó al empezar."""
+
+    def test_print_next_relee_el_plan(self):
+        stale = self.plan()
+        self.ok_in("decidir", "--carpeta", self.rel, "--aprobar", "M1")  # otra terminal, mientras el comando corría
+        out = quiet(perf.print_next, self.folder, stale)
+        self.assertIn("Siguiente · sesión 3 · M1", out)
+        self.assertNotIn("decisión del usuario", out)
+        self.assertIn("**Paso:** sesión 3 · M1", self.state())
+
+    def test_un_reporte_largo_termina_con_el_estado_de_ahora(self):
+        real = perf.write_report_pair
+
+        def slow_report(*args, **kwargs):  # mientras se arma el reporte, alguien corre `decidir` en otra terminal
+            self.ok_in("decidir", "--carpeta", self.rel, "--aprobar", "M1")
+            return real(*args, **kwargs)
+
+        args = argparse.Namespace(carpeta=str(self.folder), inicial=True, html=False, gerencia_unificado=False)
+        with mock.patch.object(perf, "write_report_pair", slow_report):
+            out = quiet(perf.cmd_reporte, args)
+        self.assertIn("Siguiente · sesión 3 · M1", out)
+        self.assertNotIn("Siguiente · decisión del usuario", out)
+
+    def test_pausar_y_recuperar_releen_el_plan(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        body = source[source.index("def print_next(folder, plan, flow=None):"):]
+        self.assertLess(body.index("plan = fresh_plan(folder, plan)"), body.index("next_steps("))  # antes de armar el paso
+        for command in ("cmd_pausar", "cmd_recuperar", "cmd_reporte", "capture_batch", "cmd_reanudar"):
+            start = source.index("def %s(" % command)
+            end = source.index("\ndef ", start + 1)
+            self.assertIn("print_next(folder, plan", source[start:end], command)
+        # sin plan.json en la carpeta (o ilegible), vale el que el comando ya tenía
+        self.assertEqual(perf.fresh_plan(self.dir / "no-existe", {"a": 1}), {"a": 1})
+        write(self.dir / "roto" / "plan.json", "{")
+        self.assertEqual(perf.fresh_plan(self.dir / "roto", {"a": 1}), {"a": 1})
+
+
+class CaptureEndsWithFreshPlanTest(CaptureBase):
+    """S1 de punta a punta: mientras corre la prueba, `decidir --aprobar` cambia plan.json; la prueba termina con la
+    sesión 3, no con la decisión que ya se tomó."""
+
+    def test_la_prueba_termina_con_el_paso_de_ahora(self):
+        decide = "%s -I %s decidir --carpeta %s --aprobar M1 > /dev/null" % tuple(
+            shlex.quote(str(part)) for part in (sys.executable, SCRIPT, self.folder))
+        self.plan_with(flujo={"recorrido": decide}, mejoras=[
+            {"id": "M1", "titulo": "Una sola llamada al abrir la lista", "estado": "propuesta", "metrica": "jank_app_pct"}])
+        record = {"corridas": 10, "skill": perf.VERSION}
+        write(self.folder / "fases.json", json.dumps({
+            "antes": dict(record, fecha="2026-03-02T10:00:00", flujos={"home": dict(record)}),
+            "control": dict(record, fecha="2026-03-02T11:00:00", flujos={"home": dict(record)})}))
+        write(self.folder / "diagnostico.md", "x\n")
+        write(self.folder / "reporte-inicial-dev.md", "# reporte\n")
+        self.assertIn("decisión del usuario", self.ok("siguiente", "--carpeta", self.folder))
+        out = self.ok("capturar", "--plan", self.plan, "--prueba", "--sin-video")
+        self.assertIn("Siguiente · sesión 3 · M1", out)
+        self.assertNotIn("Siguiente · decisión del usuario", out)
+        self.assertRegex(out, r"M1 aprobada el %s; si no fue tu decisión: `cd " % DATE_TIME)
+
+
+class UncutBaselineTest(DecisionBase):
+    """S2: antes y control medidos con una versión que no cortaba la traza (sin `corte_s`): se dice una sola vez."""
+    skill = "0.14.0"
+    flow = {"preparar": "true"}
+
+    def test_lo_dice_una_sola_vez_y_queda_en_estado(self):
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        line = next(line for line in out.splitlines() if "Línea base de una versión anterior" in line)
+        self.assertIn("Flujo catalogo-lista: antes y control se midieron con hb-performance 0.14.0", line)
+        self.assertIn("ninguna fase de este flujo la corta y el después se compara igual contra igual", line)
+        self.assertIn("no hace falta rehacer la línea base", line)
+        self.assertRegex(self.decisions(), r"- %s: flujo catalogo-lista: antes y control se midieron con hb-performance "
+                                           r"0\.14\.0.*\(perf\.py\)" % DATE_TIME)
+        again = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertNotIn("Línea base de una versión anterior", again)
+        self.assertEqual(self.decisions().count("no hace falta rehacer la línea base"), 1)
+        self.assertIn("decisión del usuario", again)  # el paso no cambia
+
+    def test_no_cambia_el_corte_de_ninguna_fase(self):
+        flow = self.plan()["flujos"]["catalogo-lista"]
+        before = perf.trace_tail(self.folder, flow, "catalogo-lista", None, "true", False, "true", "despues")
+        self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertEqual(perf.trace_tail(self.folder, flow, "catalogo-lista", None, "true", False, "true", "despues"),
+                         before)
+        self.assertEqual(before, [])  # ninguna fase del flujo corta
+
+
+class UncutBaselineNotNeededTest(DecisionBase):
+    skill = "0.14.0"
+
+    def lines(self):
+        return perf.uncut_baseline_lines(self.folder, self.plan())
+
+    def set_flow(self, **fields):
+        plan = self.plan_json()
+        plan["flujos"]["catalogo-lista"].update(fields)
+        write(self.folder / "plan.json", json.dumps(plan))
+
+    def set_phases(self, **fields):
+        phases = json.loads((self.folder / "fases.json").read_text(encoding="utf-8"))
+        for phase in ("antes", "control"):
+            phases[phase]["flujos"]["catalogo-lista"].update(fields)
+        write(self.folder / "fases.json", json.dumps(phases))
+        return phases
+
+    def test_solo_donde_esta_version_cortaria(self):
+        self.assertEqual(self.lines(), [])  # sin 'preparar', ninguna versión corta: no hay nada que aclarar
+        self.set_flow(preparar="true")
+        self.assertEqual(len(self.lines()), 1)
+        self.set_flow(cola_s=0)
+        self.assertEqual(self.lines(), [])
+        self.set_flow(cola_s=5, traza_desde_preparar=True)
+        self.assertEqual(self.lines(), [])
+
+    def test_no_con_una_linea_base_de_esta_version_ni_con_el_despues_medido(self):
+        self.set_flow(preparar="true")
+        self.set_phases(skill="0.16.0")
+        self.assertEqual(self.lines(), [])
+        self.set_phases(skill="0.14.0", corte_s=12.5)
+        self.assertEqual(self.lines(), [])
+        phases = self.set_phases(corte_s=None)
+        self.assertEqual(len(self.lines()), 1)
+        phases["despues"] = {"fecha": "2026-03-03T10:00:00", "corridas": 10, "flujos": {"catalogo-lista": {"corridas": 10}}}
+        write(self.folder / "fases.json", json.dumps(phases))
+        self.assertEqual(self.lines(), [])
+
+    def test_con_una_sola_fase_medida_no_afirma_nada(self):
+        self.set_flow(preparar="true")
+        phases = self.set_phases()
+        self.assertEqual(len(self.lines()), 1)
+        phases.pop("control")  # solo antes: completarlo o rehacerlo con esta versión sí podría cortar la traza
+        write(self.folder / "fases.json", json.dumps(phases))
+        self.assertEqual(self.lines(), [])
+        write(self.folder / "advertencias.json", json.dumps({"cola": {"catalogo-lista": {"ultima_marca_s": 4.0,
+                                                                                         "traza_s": 30.0}}}))
+        flow = self.plan()["flujos"]["catalogo-lista"]
+        self.assertNotEqual(perf.trace_tail(self.folder, flow, "catalogo-lista", None, "true", False, "true", "antes"), [])
+
+    def test_no_en_triage_ni_sin_decisiones_en_estado(self):
+        self.set_flow(preparar="true")
+        plan = self.plan_json()
+        plan["profundidad"] = "triage"
+        write(self.folder / "plan.json", json.dumps(plan))
+        self.assertEqual(self.lines(), [])
+        plan.pop("profundidad")
+        write(self.folder / "plan.json", json.dumps(plan))
+        write(self.folder / "estado.md", self.state().replace("## Decisiones", "## Otra cosa"))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        line = next(line for line in out.splitlines() if "Línea base de una versión anterior" in line)
+        self.assertIn("(no se repite)", line)  # sin la sección, no dice que quedó en estado.md
+        self.assertNotIn("Línea base de una versión anterior", self.ok_in("siguiente", "--carpeta", self.rel))
+
+
+OLD_REPORT = "<!doctype html><html><head><title>Reporte</title></head><body><h1>Reporte inicial</h1></body></html>"
+
+
+class OldReportOfferTest(DecisionBase):
+    """S3: un reporte inicial de una estructura anterior: `siguiente` ofrece generarlo de nuevo, como paso opcional."""
+
+    def test_lo_ofrece_dentro_de_la_decision(self):
+        write(self.folder / "reporte-inicial-dev.html", OLD_REPORT)
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("decisión del usuario", out)
+        self.assertIn("Opcional, antes de decidir:", out)
+        self.assertRegex(out, r"`cd \S+ && python3 -I \S+perf\.py reporte --carpeta %s --inicial --html`" % re.escape(self.rel))
+        self.assertIn("reporte-inicial-dev.estructura-anterior.html", out)
+        self.assertLess(out.index("Opcional, antes de decidir:"), out.index("Elige uno"))
+        commands = commands_in(out)
+        self.assertIn(" decidir --carpeta", commands[0])  # el primer comando para pegar sigue siendo la decisión
+        self.assertIn("**Elige uno de los caminos (no van en orden):**", self.state())
+
+    def test_no_lo_ofrece_con_la_estructura_de_ahora(self):
+        page = perf.report_page("App de pedidos", "Performance · Pedidos", "Reporte técnico dev", "dev",
+                                [("resumen", "Resumen", "<p>x</p>")], "2026-11-20")
+        write(self.folder / "reporte-inicial-dev.html", page)
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertNotIn("Opcional, antes de decidir", out)
+        self.assertTrue(commands_in(out)[0].split(" decidir ")[1].startswith("--carpeta"))
+
+    def test_la_estructura_sale_de_la_marca_de_la_pagina(self):
+        page = perf.report_page("App de pedidos", "Performance · Pedidos", "", "gerencia",
+                                [("resumen", "Resumen", "<p>x</p>")], "2026-11-20")
+        self.assertIn('<meta name="hb-perf-reporte" content="estructura-2">', page)
+        self.assertNotIn(perf.VERSION, page)  # la versión de la skill no va en los HTML
+        self.assertNotIn("{{", page)
+        current, old, unmarked = self.dir / "a.html", self.dir / "b.html", self.dir / "c.html"
+        write(current, page)
+        write(old, OLD_REPORT)
+        # generado antes de que existiera la marca, ya con la estructura de ahora (el público en <body> y el índice)
+        write(unmarked, page.replace('<meta name="hb-perf-reporte" content="estructura-2">\n', ""))
+        self.assertEqual([perf.report_structure(path) for path in (current, old, unmarked)], [2, 1, 2])
+        self.assertIsNone(perf.report_structure(self.folder / "reporte-inicial-dev.md"))
+        self.assertIsNone(perf.report_structure(self.dir / "no-existe.html"))
+        newer = self.dir / "d.html"
+        write(newer, page.replace("estructura-2", "estructura-3"))  # de una versión más nueva: no es "anterior"
+        self.assertEqual([perf.old_structure(path) for path in (current, old, unmarked, newer)], [False, True, False, False])
+        self.assertIsNone(perf.backup_old_report(newer))
+
+
+class OldReportBackupTest(ReportFixtureBase):
+    """S3: `reporte` guarda una copia del HTML de una estructura anterior antes de sobrescribirlo, sin pisar otra."""
+
+    def test_respalda_antes_de_sobrescribir(self):
+        target = self.folder / "reporte-inicial-dev.html"
+        write(target, OLD_REPORT)
+        out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        copy = self.folder / "reporte-inicial-dev.estructura-anterior.html"
+        self.assertEqual(copy.read_text(encoding="utf-8"), OLD_REPORT)
+        self.assertIn("guardé una copia en %s" % copy, out)
+        self.assertEqual(perf.report_structure(target), perf.REPORT_STRUCTURE)
+        self.assertIn("Siguiente", out)
+        # generarlo de nuevo no hace otra copia: el que hay ya es de la estructura de ahora
+        again = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertNotIn("guardé una copia", again)
+        self.assertEqual(sorted(path.name for path in self.folder.glob("*estructura-anterior*")),
+                         ["reporte-inicial-dev.estructura-anterior.html"])
+        # otro viejo en el mismo lugar: la copia nueva no pisa la que ya estaba
+        write(target, OLD_REPORT + "<!-- otro -->")
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertEqual(copy.read_text(encoding="utf-8"), OLD_REPORT)
+        self.assertEqual((self.folder / "reporte-inicial-dev.estructura-anterior-2.html").read_text(encoding="utf-8"),
+                         OLD_REPORT + "<!-- otro -->")
+
+
+# ── D · `decidir` con rastro y con vuelta atrás ──────────────────────────────
+
+class DecideTraceTest(DecisionBase):
+    def test_la_linea_lleva_la_fecha_y_la_hora(self):
+        out = self.ok_in("decidir", "--carpeta", self.rel, "--aprobar", "M1", "--descartar", "M2")
+        self.assertRegex(out, r"✔ %s: aprobadas M1; descartadas M2 \(perf\.py decidir\)" % DATE_TIME)
+        self.assertRegex(self.decisions(), r"^- %s: aprobadas M1; descartadas M2 \(perf\.py decidir\)$" % DATE_TIME)
+        self.assertNotIn("<AAAA-MM-DD", self.decisions())
+        for item in self.plan_json()["mejoras"]:
+            self.assertRegex(item["decidida_en"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+            self.assertNotIn("decidida_desde", item)  # sin terminal ni variable de un agente: solo la hora
+
+    def test_el_origen_solo_cuando_consta(self):
+        with mock.patch.dict(os.environ, dict(clean_env(), CLAUDECODE="1"), clear=True):
+            self.assertEqual(perf.command_origin(), "chat de Claude Code")
+        with mock.patch.dict(os.environ, dict(clean_env(), AI_AGENT="otro-agente_1.2\n(x)"), clear=True):
+            self.assertEqual(perf.command_origin(), "chat (otro-agente_1.2 x)")
+        terminal = mock.Mock()
+        terminal.isatty.return_value = True
+        with mock.patch.dict(os.environ, clean_env(), clear=True), mock.patch.object(perf.sys, "stdin", terminal):
+            self.assertEqual(perf.command_origin(), "")  # una terminal no se distingue de un agente sin variable
+
+    def test_el_origen_queda_en_estado_y_en_el_plan(self):
+        self.env["CLAUDECODE"] = "1"
+        out = self.ok_in("decidir", "--carpeta", self.rel, "--aprobar", "M1")
+        self.assertRegex(out, r"✔ %s \(chat de Claude Code\): aprobadas M1 \(perf\.py decidir\)" % DATE_TIME)
+        self.assertRegex(self.decisions(), r"- %s \(chat de Claude Code\): aprobadas M1" % DATE_TIME)
+        self.assertEqual(self.plan_json()["mejoras"][0]["decidida_desde"], "chat de Claude Code")
+        self.assertNotIn("decidida_en", self.plan_json()["mejoras"][1])  # M2 no se decidió
+
+    def test_siguiente_dice_cuando_se_aprobo_antes_de_la_sesion_3(self):
+        self.env["CLAUDECODE"] = "1"
+        self.ok_in("decidir", "--carpeta", self.rel, "--aprobar", "M1,M2")
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("sesión 3 · M1", out)
+        for name in ("M1", "M2"):
+            self.assertRegex(out, r"%s aprobada el %s \(chat de Claude Code\); si no fue tu decisión: `cd \S+ && python3 -I "
+                                  r"\S+perf\.py decidir --carpeta %s --reabrir %s`" % (name, DATE_TIME, re.escape(self.rel),
+                                                                                       name))
+        self.assertLess(out.index("M1 aprobada el"), out.index("Chat nuevo"))  # antes de dar el chat
+        self.assertIn("aprobada el", self.state())  # también en "Siguiente paso" de estado.md
+
+    def test_una_aprobada_con_una_version_anterior_no_tiene_hora(self):
+        plan = self.plan_json()
+        plan["mejoras"][0]["estado"] = "aprobada"  # como la dejaba 0.17.0: sin `decidida_en`
+        write(self.folder / "plan.json", json.dumps(plan))
+        out = self.ok_in("siguiente", "--carpeta", self.rel)
+        self.assertIn("M1 aprobada sin fecha (la registró una versión anterior, que no guardaba la hora); si no fue tu "
+                      "decisión:", out)
+
+
+class ReopenTest(DecisionBase):
+    def test_reabrir_vuelve_a_propuesta_desde_cada_estado(self):
+        for option, state in (("--aprobar", "aprobada"), ("--pendiente", "pendiente"), ("--descartar", "descartada")):
+            self.ok_in("decidir", "--carpeta", self.rel, option, "M1")
+            self.assertEqual(self.plan_json()["mejoras"][0]["estado"], state)
+            code = (self.root / "app" / "Lista.kt").read_text(encoding="utf-8")
+            out = self.ok_in("decidir", "--carpeta", self.rel, "--reabrir", "M1")
+            self.assertRegex(out, r"✔ %s: reabiertas \(vuelven a propuesta\) M1 \(perf\.py decidir\)" % DATE_TIME)
+            self.assertEqual(self.plan_json()["mejoras"][0]["estado"], "propuesta")
+            self.assertEqual((self.root / "app" / "Lista.kt").read_text(encoding="utf-8"), code)  # no toca código
+            self.assertIn("decisión del usuario", out)  # el paso vuelve a ser decidir
+        self.assertEqual(self.decisions().count("reabiertas (vuelven a propuesta) M1"), 3)
+
+    def test_una_aplicada_no_se_reabre_y_dice_que_hacer(self):
+        plan = self.plan_json()
+        plan["mejoras"][0].update(estado="aplicada", aplicada_en="2026-03-03T09:00:00")
+        write(self.folder / "plan.json", json.dumps(plan))
+        before = (self.folder / "plan.json").read_text(encoding="utf-8"), self.state()
+        result = self.run_in("decidir", "--carpeta", self.rel, "--reabrir", "M1")
+        self.assertNotEqual(result.returncode, 0)
+        text = result.stdout + result.stderr
+        self.assertIn("M1 ya está aplicada: su código está en el árbol, y `--reabrir` solo cambia el plan", text)
+        self.assertIn("lineabase --carpeta %s --quitar-mejoras" % self.rel, text)
+        self.assertIn("siguiente --carpeta %s" % self.rel, text)
+        self.assertNotIn("Traceback", text)
+        self.assertEqual(((self.folder / "plan.json").read_text(encoding="utf-8"), self.state()), before)
+
+    def test_reabrir_y_decidir_la_misma_a_la_vez_se_rechaza(self):
+        before = (self.folder / "plan.json").read_text(encoding="utf-8"), self.state()
+        result = self.run_in("decidir", "--carpeta", self.rel, "--reabrir", "M1", "--aprobar", "M1,M2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("M1 está en --reabrir y en otra lista a la vez: elige una", result.stdout + result.stderr)
+        self.assertEqual(((self.folder / "plan.json").read_text(encoding="utf-8"), self.state()), before)
+
+    def test_reabrir_una_propuesta_no_cambia_nada(self):
+        before = self.decisions()
+        out = self.ok_in("decidir", "--carpeta", self.rel, "--reabrir", "M1")
+        self.assertIn("M1 ya está como propuesta: no cambié nada", out)
+        self.assertEqual(self.decisions(), before)
+        self.assertNotIn("decidida_en", self.plan_json()["mejoras"][0])
+
+    def test_la_ayuda_distingue_pendiente_de_reabrir(self):
+        result = self.run_in("decidir", "--help")
+        text = re.sub(r"\s+", " ", result.stdout)
+        self.assertIn("decididas para más adelante", text)
+        self.assertIn("no es \"sin decidir\": para eso, --reabrir", text)
+        self.assertIn("vuelven a \"propuesta\" (sin decidir)", text)
+        self.assertIn("no toca código", text)
 
 
 if __name__ == "__main__":

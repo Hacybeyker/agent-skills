@@ -69,6 +69,9 @@ def without_new(record):
                                                                          "segundos", "reglas", "dispositivo", "corte_s")}
 
 
+AGENT_ENV = ("CLAUDECODE", "AI_AGENT")
+
+
 class PerfBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -77,6 +80,8 @@ class PerfBase(unittest.TestCase):
         # 0.17.0: sin el ffmpeg ni el scrcpy de la máquina (FFMPEG y SCRCPY vacíos): el video de la prueba sale en tramos
         # con su visor; los tests de test_perf_0170.py los usan a propósito
         self.env = dict(os.environ, FFMPEG="", SCRCPY="")
+        for name in AGENT_ENV:  # 0.18.0 · D1: `decidir` anota si lo corrió un agente; los tests, sin esas variables
+            self.env.pop(name, None)
 
     def tearDown(self):
         self.tmp.cleanup()
