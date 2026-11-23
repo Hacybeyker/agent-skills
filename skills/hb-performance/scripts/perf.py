@@ -28,12 +28,14 @@ Códigos de salida: 0 bien · 2 uso o datos inválidos · 3 precondición (dispo
 4 captura fallida · 5 no se juntaron las corridas válidas pedidas.
 """
 import argparse
+import contextlib
 import csv
 import datetime
 import fnmatch
 import gzip
 import hashlib
 import html
+import io
 import json
 import math
 import os
@@ -58,7 +60,7 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
@@ -6906,6 +6908,8 @@ def missing_costs(folder, plan):
         rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
     except OSError:
         return []
+    if any(is_orchestrated(row["sesion"]) for row in rows):
+        return []  # 0.19.0 · O: el total del orquestador (/cost) ya incluye a sus subagentes: una sola fila
     ids = [item["id"] for item in plan.get("mejoras") or []]
     noted = [session_key(row["sesion"], ids) for row in rows]
     applied = [item["id"] for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
@@ -7113,6 +7117,15 @@ def cost_warnings(folder, plan):
     for row in rows:
         kind = cost_type(row["sesion"])
         spent = cost_of(row["costo"])["usd"]
+        if spent is not None and kind is None and is_orchestrated(row["sesion"]):
+            # 0.19.0 · O: el total del orquestador contra la suma de lo esperado para las sesiones hechas
+            low, high, labels = orchestrated_expected(folder, plan, size)
+            if labels and spent > high:
+                out.append("el modo orquestado costó %s USD; lo esperado para %s es %s–%s (proyecto %s: %s): consumió "
+                           "más de lo que debía. No se detuvo nada; suele ser un subagente explorando lo que la skill "
+                           "hace sola o un orquestador que leyó de más (orquestacion.md · Costo)" % (
+                               usd(spent), ", ".join(labels), usd(low), usd(high), size, why))
+            continue
         if kind is None or spent is None:
             continue
         low, high = COST_REFERENCE[kind][size]
@@ -7343,6 +7356,328 @@ def next_hint(folder, what="sigue con el paso que tenías"):
     root = project_root(pathlib.Path(folder)).resolve()
     return "Siguiente: %s; está en \"Siguiente paso\" de estado.md y este comando lo repite:\n    %s" % (
         what, perf_command(root, "siguiente", "--carpeta", relative_folder(pathlib.Path(folder), root)))
+
+
+# ── `siguiente --json`: el paso que sigue, para el modo orquestado (0.19.0 · O) ───────────────────────────────────
+# El orquestador (references/orquestacion.md) decide con esta salida, nunca interpretando el texto de `siguiente`. Los
+# pasos son los mismos de `siguiente` (next_steps): solo cambia la forma. Cada paso dice quién lo hace: "orquestador"
+# (lo corre él, en su terminal), "subagente" (una sesión, con su referencia, su modelo y su esfuerzo), "usuario" (una
+# decisión, una acción humana, una entrada sensible o una captura que recorre una persona) o "nadie" (no queda nada).
+NEXT_JSON_FORMAT = 1
+ORCHESTRATED_LABEL = "orquestado"
+SESSION_REFERENCE = {"0": "references/setup.md", "1": "references/ficha.md", "2": "references/diagnostico.md",
+                     "3": "references/mejoras.md", "4": "references/cierre.md"}
+SUBAGENT_MODELS = ("haiku", "sonnet", "opus", "fable")  # el parámetro de modelo de un subagente de Claude Code
+# Lo que el orquestador corre solo: no decide nada por el usuario ni necesita a una persona. `capturar` solo con
+# recorrido automático (json_terminal); `setup`, solo con estas opciones.
+ORCHESTRATOR_RUNS = frozenset(("capturar", "diagnostico", "instalar", "recuperar", "humo", "reporte", "video", "resumen",
+                               "comparar", "recalcular", "cerrar", "estado", "salidas", "siguiente", "nodos", "consulta",
+                               "har"))
+SETUP_RUNS = ("--reponer", "--estado")
+USER_DECIDES = {"decidir": "mejoras", "aprobar": "aprobacion", "pausar": "pausa", "archivar": "pausa",
+                "reanudar": "pausa", "lineabase": "linea_base", "marcas": "parche"}
+DECISION_WHY = {
+    "mejoras": "la decisión de las mejoras es del usuario: corre `decidir` en su terminal y después escribe "
+               "\"continúa\" en el chat del orquestador",
+    "aprobacion": "la aprobación de la ficha y el plan es del usuario: responde en el chat del orquestador",
+    "profundidad": "pasar a riguroso, pausar o cerrar lo decide el usuario",
+    "pausa": "pausar, reanudar o archivar una investigación lo decide el usuario",
+    "linea_base": "rehacer la línea base quita y repone mejoras en el código: lo decide el usuario",
+    "parche": "qué parche vale lo decide el usuario",
+    "setup": "cómo se guarda o se quita el setup lo decide el usuario",
+    "investigacion": "hay investigaciones abiertas: el usuario elige cuál seguir o si empieza otra",
+    "elige": "son caminos distintos: el usuario elige uno"}
+
+
+def perf_words(text):
+    """(subcomando de perf.py, [palabras que siguen]) de un comando de terminal; (None, [palabras]) si no llama a
+    perf.py."""
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        return None, []
+    for index, word in enumerate(words):
+        if word.endswith("perf.py") and index + 1 < len(words):
+            return words[index + 1], words[index + 2:]
+    return None, words
+
+
+def option_value(words, option):
+    return words[words.index(option) + 1] if option in words and words.index(option) + 1 < len(words) else None
+
+
+def subagent_model(plan, tier):
+    """El alias del modelo del nivel para un subagente de Claude Code (haiku, sonnet, opus o fable), según `modelos`
+    (o `modelos_cli`) del plan; None si el nivel nombra un modelo de otro proveedor."""
+    for text in (cli_model_id(plan, tier, "claude"), model_name(plan, tier)):
+        for word in re.split(r"[\s_.-]+", str(text or "").lower()):
+            if word in SUBAGENT_MODELS:
+                return word
+    return None
+
+
+def json_terminal(step, plan, folder):
+    """Un paso de terminal: lo corre el orquestador, salvo lo que decide el usuario, lo que pide una persona (un
+    recorrido manual o con pausa humana) y lo que carga una variable de entorno (una entrada sensible)."""
+    text = step.get("texto") or ""
+    out = {"tipo": "terminal", "quien": "orquestador", "donde": "terminal", "clase": "perf", "comando": text,
+           "que": step.get("que") or "", "tu": step.get("tu") or ""}
+    if step.get("carpeta"):
+        out["carpeta"] = step["carpeta"]
+
+    def user(kind, clase, why):
+        out.update(tipo=kind, quien="usuario", clase=clase, motivo=why)
+        if clase == "aprobacion":
+            out["donde"] = "chat"
+        return out
+
+    if re.search(r"\bread\s+-r\b", text):
+        out["env"] = re.findall(r"\bexport\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+        return user("humano", "entorno", "entrada sensible: el usuario carga %s en la terminal desde la que abre el "
+                    "orquestador (el agente solo ve las variables de esa terminal)" % ", ".join(out["env"]))
+    sub, words = perf_words(text)
+    if sub is None:
+        if step.get("instala"):
+            out["clase"] = "instalar"
+            return out
+        return user("humano", "comando", "un comando que no es de perf.py: lo corre el usuario")
+    out["subcomando"] = sub
+    if sub == "capturar":
+        flows = plan.get("flujos") or {}
+        name = option_value(words, "--flujo") or next(iter(flows), None)
+        spec = flows.get(name) if isinstance(flows.get(name), dict) else {}
+        out.update(clase="captura", flujo=name, fase=option_value(words, "--fase") or (
+            "prueba" if "--prueba" in words else None))
+        if not startup_spec(spec) and (spec.get("recorrido") or "manual") == "manual":
+            return user("humano", "captura", "recorrido manual: la captura la corre el usuario en su terminal y recorre "
+                                             "el flujo en el dispositivo")
+        if folder is not None and has_human_pause(spec, folder):
+            return user("humano", "captura", "el recorrido tiene un paso humano (`perf.py pausa`): la captura la corre "
+                                             "el usuario en su terminal")
+        return out
+    if sub in USER_DECIDES or (sub == "setup" and not any(option in words for option in SETUP_RUNS)):
+        clase = "profundidad" if sub == "decidir" and "--profundidad" in words else USER_DECIDES.get(sub, "setup")
+        return user("decision", clase, DECISION_WHY[clase])
+    if sub in ORCHESTRATOR_RUNS or sub == "setup":  # setup: solo --reponer o --estado (lo demás decide el usuario)
+        out["clase"] = sub if sub in ("diagnostico", "instalar") else "perf"
+        return out
+    return user("humano", "perf", "un paso de perf.py que el orquestador no corre (%s): lo corre el usuario" % sub)
+
+
+def json_session(step, plan):
+    """Un chat de `siguiente` como una sesión para un subagente: el número, la referencia, el nivel de modelo, el alias
+    del subagente y el texto. Si necesita variables de entorno que el orquestador no tiene, es una entrada sensible."""
+    ids = [str(item.get("id")) for item in plan.get("mejoras") or [] if item.get("id")]
+    number = None
+    for text in (step.get("que") or "", step.get("texto") or ""):
+        found = re.search(r"\bsesi[oó]n\s+(\d)\b", text, re.I)
+        if found:
+            number = found.group(1)
+            break
+    improvement = next((item for item in ids if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(item),
+                                                          step.get("texto") or "")), None) if number == "3" else None
+    label = None
+    if number in SESSIONS:
+        label = SESSIONS[number][0] % (improvement or "mejora") if "%s" in SESSIONS[number][0] else SESSIONS[number][0]
+    tier = step.get("nivel") or "intermedio"
+    effort = step.get("esfuerzo") or "medio"
+    out = {"tipo": "sesion", "quien": "subagente", "donde": None, "clase": "sesion", "sesion": label, "numero": number,
+           "mejora": improvement, "nivel": tier, "modelo": step.get("modelo") or model_name(plan, tier),
+           "esfuerzo": effort, "subagente": {"modelo": subagent_model(plan, tier),
+                                             "esfuerzo": EFFORT_CLI.get(effort, effort)},
+           "referencia": SESSION_REFERENCE.get(number), "texto": step.get("texto") or "", "que": step.get("que") or ""}
+    env = [str(name) for name in step.get("env") or () if ENV_NAME.fullmatch(str(name))]
+    if env:
+        out["env"] = env
+        missing = [name for name in env if not os.environ.get(name)]
+        if missing:
+            out.update(quien="usuario", donde="terminal", clase="entorno", env_faltan=missing, motivo=(
+                "entrada sensible: la sesión necesita %s y el orquestador no la tiene; el usuario la carga en la "
+                "terminal desde la que abre el orquestador" % ", ".join(missing)))
+    return out
+
+
+def json_step(step, plan, folder):
+    kind = step.get("tipo")
+    if kind == "terminal":
+        return json_terminal(step, plan, folder)
+    if kind == "chat":
+        return json_session(step, plan)
+    if kind == "opciones":
+        options = []
+        for name, when, option in step.get("opciones") or []:
+            options.append(dict(json_step(option, plan, folder), nombre=name, cuando=when))
+        classes = [option.get("clase") for option in options]
+        clase = step.get("clase") or next((wanted for wanted in ("mejoras", "aprobacion", "profundidad")
+                                           if wanted in classes), None) or next(
+            (found for found in classes if found in DECISION_WHY), "elige")
+        return {"tipo": "decision", "quien": "usuario", "donde": "chat" if clase == "aprobacion" else "terminal",
+                "clase": clase, "titulo": step.get("titulo") or "", "motivo": DECISION_WHY.get(clase, DECISION_WHY["elige"]),
+                "opciones": options}
+    if kind == "fin":
+        return {"tipo": "fin", "quien": "nadie", "donde": None, "clase": "fin", "texto": step.get("texto") or ""}
+    return {"tipo": "humano", "quien": "usuario", "donde": "terminal", "clase": "accion", "que": step.get("que") or "",
+            "tu": step.get("tu") or "", "motivo": step.get("tu") or step.get("que") or "una acción del usuario"}
+
+
+def steps_payload(title, steps, plan, folder, root):
+    """La salida de `siguiente --json` para unos pasos: el primero arriba (qué es, quién lo hace y, si es una sesión,
+    con qué modelo y qué referencia), todos en `pasos`, y los avisos y los archivos aparte."""
+    folder = pathlib.Path(folder) if folder is not None else None
+    pasos, avisos, archivos = [], [], []
+    for step in steps:
+        if step.get("tipo") == "avisos":
+            avisos.append({"titulo": step.get("titulo") or "", "lineas": [str(line) for line in step.get("lineas") or []]})
+        elif step.get("tipo") == "archivo":
+            archivos.append({"ruta": step.get("texto") or "", "que": step.get("que") or ""})
+        else:
+            pasos.append(json_step(step, plan, folder))
+    first = pasos[0] if pasos else {"tipo": "fin", "quien": "nadie", "clase": "fin"}
+    now = []
+    for paso in pasos:  # lo que el orquestador corre ya, en orden, antes de la primera sesión o parada
+        if paso["quien"] != "orquestador":
+            break
+        now.append(paso["comando"])
+        if paso.get("fase") == "prueba":
+            break  # lo que sigue a una corrida de prueba depende de sus avisos: se vuelve a pedir `siguiente --json`
+    payload = {"formato": NEXT_JSON_FORMAT, "skill": VERSION, "carpeta_skill": str(HERE.parent), "raiz": str(root),
+               "carpeta": str(folder.resolve()) if folder is not None else None, "titulo": title,
+               "tipo": first["tipo"], "quien": first["quien"], "requiere_persona": first["quien"] == "usuario",
+               "motivo": first.get("motivo") or ""}
+    for key in ("clase", "donde", "sesion", "nivel", "modelo", "esfuerzo", "subagente", "referencia", "texto"):
+        payload[key] = first.get(key)
+    payload.update(corre_ahora=now, comandos=[paso["comando"] for paso in pasos if paso.get("comando")], pasos=pasos,
+                   avisos=avisos, archivos=archivos)
+    return payload
+
+
+def is_orchestrated(label):
+    return " ".join(str(label or "").lower().split()).startswith(ORCHESTRATED_LABEL)
+
+
+def orchestrated_expected(folder, plan, size):
+    """(mínimo, máximo, [sesiones]) de lo esperado para las sesiones que hizo la investigación, según su tipo y el
+    tamaño del proyecto (COST_REFERENCE): es lo que se compara con el total del modo orquestado."""
+    labels = [label for label, _, _ in done_sessions(folder, plan)]
+    kinds = [cost_type(label) for label in labels]
+    low = sum(COST_REFERENCE[kind][size][0] for kind in kinds if kind in COST_REFERENCE)
+    high = sum(COST_REFERENCE[kind][size][1] for kind in kinds if kind in COST_REFERENCE)
+    return round(low, 2), round(high, 2), labels
+
+
+def orchestrated_cost(folder, plan, root, model=None):
+    """El costo del modo orquestado: el comando `consumo` con la fila "orquestado" (solo falta lo que muestre /cost en
+    el chat del orquestador, que incluye a sus subagentes), lo esperado para las sesiones hechas y, si ya se anotó, si
+    se pasó."""
+    folder = pathlib.Path(folder)
+    size, why = project_size(root, folder, plan)
+    low, high, labels = orchestrated_expected(folder, plan, size)
+    try:
+        rows = cost_rows((folder / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        rows = []
+    noted = next((row for row in rows if is_orchestrated(row["sesion"])), None)
+    spent = cost_of(noted["costo"])["usd"] if noted else None
+    return {"comando": cost_command(folder, ORCHESTRATED_LABEL, model), "esperado_usd": [low, high], "tamano": size,
+            "tamano_de": why, "sesiones": labels, "anotado": noted["costo"] if noted else None,
+            "se_paso": bool(spent is not None and labels and spent > high)}
+
+
+def next_json(folder, plan, flow=None, model=None):
+    """`siguiente --json` de una investigación: los mismos pasos y lo mismo en estado.md que `siguiente` (salvo los
+    comandos de costo por sesión: en modo orquestado se anota una sola fila), sin imprimir texto."""
+    folder = pathlib.Path(folder)
+    root = project_root(folder).resolve()
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        plan = fresh_plan(folder, plan)
+        title, steps = next_steps(folder, plan, flow)
+        notes = []
+        if not title.startswith(("investigación cerrada", "triage cerrado", "en pausa", "archivada")):
+            notes += [line for line, _ in said_once_lines(folder, plan)] + list(old_video_lines(folder, plan))
+        write_next(folder, title, steps, missing_costs(folder, plan), plan)
+        update_cost_total(folder, plan)
+        update_block(folder, "recorrido", route_block(plan, root, folder))
+        write_route_ficha(folder, plan)
+        update_warnings(folder, plan)
+    payload = steps_payload(title, steps, plan, folder, root)
+    payload["notas"] = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()] + notes
+    payload["costo"] = orchestrated_cost(folder, plan, root, model)
+    return payload
+
+
+def setup_request_session(root):
+    """La sesión 1 con el pedido que guardó la sesión 0 (pedido.json), si todavía no tiene investigación; None si no."""
+    configured = perf_folders(root)["investigaciones"]
+    base = pathlib.Path(configured) if configured else root / DEFAULT_INVESTIGATIONS
+    base = base if base.is_absolute() else root / base
+    path = next((candidate for candidate in (base / "setup" / "pedido.json",
+                                             root / DEFAULT_INVESTIGATIONS / "setup" / "pedido.json")
+                 if candidate.is_file()), None)
+    request = read_request(path) if path is not None else None
+    if not request or request_investigations(root, path):
+        return None
+    if str(request.get("texto") or "").strip():
+        text = session1_prompt(request, "")
+    else:
+        reach = str(request.get("llegar") or "").strip().rstrip(".")
+        text = chat_text("Usa hb-performance: medir %s%s" % (str(request["flujo"]).strip().rstrip("."),
+                                                             ". Para llegar ahí: %s" % reach if reach else ""))
+    step = chat("x", "intermedio", "medio", "sesión 1: arma la ficha y el plan del flujo que pediste en el setup y corre "
+                "la prueba", {})
+    step["texto"] = text
+    env = [str(name) for name in request.get("requiere_env") or [] if ENV_NAME.fullmatch(str(name))]
+    if env:
+        step["env"] = env
+    return step
+
+
+def project_next_json(root):
+    """`siguiente --json` sin --carpeta: lo que sigue en el proyecto antes de una investigación. El setup (reponerlo,
+    elegir el parche o la sesión 0) o, con el setup listo, las investigaciones abiertas (el usuario elige) o la sesión 1
+    (con el pedido de la sesión 0, si lo hay)."""
+    root = pathlib.Path(root)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        case = setup_case(root)
+        steps = reponer_steps(root, case)
+        title = "setup · %s" % setup_label(case)
+        if not steps:
+            opened = []
+            for folder, is_open in project_investigations(root):
+                if is_open and (folder / "plan.json").is_file() and not archived(folder):
+                    shown = shown_path(folder, root)
+                    opened.append(("Seguir %s" % shown, "para retomar esa investigación", dict(
+                        terminal(perf_command(root, "siguiente", "--json", "--carpeta", shown),
+                                 "el paso que sigue de la investigación %s" % shown, "nada"),
+                        carpeta=str(pathlib.Path(folder).resolve()))))
+            session1 = setup_request_session(root) or chat(
+                "Usa hb-performance: quiero medir un flujo de la app; pregúntame cuál", "intermedio", "medio",
+                "sesión 1: arma la ficha y el plan del flujo que le digas y corre la prueba", {})
+            if opened:
+                title = "hay investigaciones abiertas · elige una o empieza otra"
+                steps = [{"tipo": "opciones", "clase": "investigacion", "titulo": "Elige uno",
+                          "opciones": opened[:5] + [("Empezar otra", "para una investigación nueva", session1)]}]
+            else:
+                title = "sesión 1 · ficha (%s)" % setup_label(case)
+                steps = [session1]
+    payload = steps_payload(title, steps, {}, None, root)
+    payload["notas"] = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
+    payload["costo"] = None
+    return payload
+
+
+def error_payload(error):
+    """Un error de perf.py en la forma de `siguiente --json`: qué pasó y los comandos para seguir."""
+    follow = []
+    for item in getattr(error, "seguir", None) or []:
+        if isinstance(item, dict):
+            follow.append({"que": item.get("que") or "", "comando": item.get("texto")})
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            follow.append({"que": str(item[0]), "comando": item[1] if isinstance(item[1], str) else None})
+    return {"formato": NEXT_JSON_FORMAT, "skill": VERSION, "tipo": "error", "quien": "usuario", "requiere_persona": True,
+            "codigo": getattr(error, "code", 2), "motivo": str(error), "guardado": getattr(error, "guardado", None),
+            "seguir": follow, "pasos": []}
 
 
 # ── Pausar, reanudar, todas las investigaciones y lo que quedó a medias (0.15.0 · B6–B10) ──
@@ -8370,8 +8705,42 @@ def marks_in_use(root, exclude=None):
 
 
 def cmd_siguiente(args):
+    if getattr(args, "json", False):
+        return siguiente_json(args)
+    if not args.carpeta:
+        raise PerfError("falta --carpeta: la carpeta de la investigación (sin ella, solo con --json, que da lo que sigue "
+                        "en el proyecto)").con(guardado="nada", seguir=[(
+                            "todas las investigaciones del proyecto, con su carpeta",
+                            perf_command(project_root(pathlib.Path.cwd()).resolve(), "estado"))])
     folder = pathlib.Path(args.carpeta)
     plan = load_plan(folder / "plan.json")
+    next_warnings(folder, plan)
+    print_next(folder, plan, args.flujo)
+
+
+def siguiente_json(args):
+    """0.19.0 · O: `siguiente --json` imprime solo JSON (una línea) en la salida estándar: el paso que sigue en una
+    forma que se lee con código. Con un error, el JSON del error y, como siempre, el texto guiado en stderr."""
+    try:
+        if args.carpeta:
+            folder = pathlib.Path(args.carpeta)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                plan = load_plan(folder / "plan.json")
+                next_warnings(folder, plan)
+            payload = next_json(folder, plan, args.flujo, getattr(args, "modelo", None))
+            payload["notas"] = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()] + \
+                payload["notas"]
+        else:
+            payload = project_next_json(project_root(pathlib.Path.cwd()).resolve())
+    except PerfError as error:
+        print(json.dumps(error_payload(error), ensure_ascii=False))
+        raise
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def next_warnings(folder, plan):
+    """Los avisos de `siguiente` antes de los pasos: filas de la plantilla sin llenar, tramos y variables de entorno."""
     state = folder / "estado.md"
     if state.is_file():
         # La Ficha se completa en la sesión 1; el Resumen y los Hallazgos, desde que la sesión 2 entrega su reporte.
@@ -8386,7 +8755,6 @@ def cmd_siguiente(args):
         undeclared = required_env(flow, (flow.get("preparar") or "").strip(), folder)[1]
         if undeclared:
             print("⚠ " + undeclared_warning(name, undeclared))
-    print_next(folder, plan, args.flujo)
 
 
 # Un costo que el shell mutiló: "$0.40" entre comillas dobles se vuelve "-bash.40" ($0 es el nombre del shell: "-bash" o
@@ -8517,6 +8885,8 @@ def transcript_session(found, folder, plan):
     folder = pathlib.Path(match.group(1)).parent if match and folder is None else folder
     if folder is None or not (pathlib.Path(folder) / "estado.md").is_file():
         return None, None
+    if re.search(r"\bmodo\s+orquestado\b", found["pedido"], re.I):
+        return folder, ORCHESTRATED_LABEL  # 0.19.0 · O: el chat del orquestador, con sus subagentes, es una sola fila
     if not match:
         return folder, None
     rest = found["pedido"][match.end():]
@@ -26388,8 +26758,13 @@ def main(argv=None):
     p.set_defaults(func=cmd_humo)
 
     p = sub.add_parser("siguiente", help="el paso que sigue, con sus comandos completos (también en estado.md)")
-    p.add_argument("--carpeta", required=True)
+    p.add_argument("--carpeta", help="la carpeta de la investigación (obligatoria salvo con --json)")
     p.add_argument("--flujo")
+    p.add_argument("--json", action="store_true",
+                   help="modo orquestado: solo JSON en una línea (tipo: sesion, terminal, decision, humano o fin; quién lo "
+                        "hace; la sesión con su nivel de modelo, su referencia y su texto; los comandos y si necesita a "
+                        "una persona). Sin --carpeta, lo que sigue en el proyecto: el setup o la sesión 1")
+    p.add_argument("--modelo", help="con --json: el modelo del chat del orquestador, para el comando `consumo` del total")
     p.set_defaults(func=cmd_siguiente)
 
     p = sub.add_parser("pausar", help="pausa una investigación: quita las marcas guardándolas en su parche y la deja lista "

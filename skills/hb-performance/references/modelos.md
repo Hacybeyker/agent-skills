@@ -17,6 +17,23 @@ Este es el único lugar donde se definen. `perf.py siguiente` (y `humo`, `decidi
 - **Si tu herramienta usa otros ids**, ponlos una vez en `plan.json`, por herramienta y por nivel: `"modelos_cli": {"copilot": {"intermedio": "claude-sonnet-5.5"}}`. Lo que no esté ahí sale de `modelos`.
 - **Si tu versión usa otro comando** (por ejemplo, una versión anterior de Copilot CLI sin `--effort`), agrega a la sección de rendimiento de `AGENTS.md` una línea `Comando del chat: copilot --model {modelo}`: `perf.py` reemplaza `{modelo}` por el id y, si el comando lleva `{esfuerzo}`, lo reemplaza por `low`, `medium` o `high`; si no lo lleva, el paso pide elegir el esfuerzo con `/model` al abrir el chat.
 
+## Subagentes del modo orquestado
+
+En el modo orquestado ([orquestacion.md](orquestacion.md)) cada sesión es un subagente, y su modelo sale del mismo nivel que el chat del modo guiado: `perf.py siguiente --json` trae, para la sesión que sigue, `nivel`, `modelo` y `subagente` con los valores que acepta la herramienta. En Claude Code, el parámetro de modelo de un subagente es un alias de familia (`haiku`, `sonnet`, `opus` o `fable`), que toma la versión más nueva de esa familia, y el de esfuerzo, `low`, `medium` o `high`.
+
+| Sesión | Nivel (`modelos` de `plan.json`) | Subagente en Claude Code (por defecto) | Esfuerzo |
+| --- | --- | --- | --- |
+| 0 · Setup | `intermedio` | `sonnet` | `medium` |
+| 1 · Ficha y plan | `intermedio` | `sonnet` | `medium` |
+| 2 · Diagnóstico | `diagnostico` (si falta, `intermedio`) | `sonnet` | `high` |
+| 3 · Mejora (un subagente por mejora) | `intermedio` | `sonnet` | `medium` |
+| 4 · Cierre | `economico` (o `intermedio`, cuando `siguiente` lo sube) | `haiku` | `low` |
+| El orquestador (el chat) | `economico` | — (es el chat: `claude --model claude-haiku-5-5 --effort low`) | `low` |
+
+- **El alias sale del nombre:** la familia que nombra `modelos` (o `modelos_cli.claude`) del plan: "Opus 5.5" da `opus`, "claude-haiku-5-5" da `haiku`. Si cambias un nivel en el plan, el subagente cambia con él. Un nombre de otro proveedor ("GPT 5.3 Codex") da `null`: el orquestador usa el equivalente de su herramienta para ese nivel.
+- **Mismo ahorro que un chat por sesión:** un subagente arranca con su propio contexto (la skill, su referencia y `estado.md`), no con el del orquestador, y le devuelve un resumen de 15 líneas como máximo. El orquestador nunca lee trazas, `diagnostico.md` completo ni `perf.py`: su contexto crece poco por vuelta.
+- **El costo** es el total del chat del orquestador (`/cost` en Claude Code incluye lo que gastaron sus subagentes), en una sola fila `orquestado` de "Consumo": `perf.py consumo` lo compara con la suma de lo esperado para las sesiones hechas (abajo, Costo esperado por sesión) y avisa si se pasó, sin detener nada. Esa suma no incluye las vueltas del orquestador, que con el modelo económico deberían ser una parte chica del total.
+
 ## Por qué se encarece
 
 Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grandes rasgos, **pasos × tamaño promedio del contexto × precio del modelo**. Lo que lo dispara:
@@ -32,7 +49,8 @@ Cada paso del agente reenvía todo el chat. El costo de una sesión es, a grande
 | 0 · Pedido ("mejora este pedido", sin código ni dispositivo) | Intermedio | Medio | 5 |
 | 0 · Setup | Intermedio | Medio | 40 |
 | 1 · Ficha y plan (si no hay receta) | Intermedio | Medio | 15 (25 en flujos largos) |
-| Mediciones | Ninguno en modo guiado (las corre el usuario); el más económico en modo autónomo | Bajo | — |
+| Mediciones | Ninguno en modo guiado (las corre el usuario); el más económico en modo autónomo; en modo orquestado, el orquestador | Bajo | — |
+| Orquestador (modo orquestado, un chat para todo) | Económico (el intermedio si se desordena) | Bajo | — |
 | 2 · Diagnóstico | Diagnóstico (por defecto el intermedio); el alto solo si el caso se complica | Alto | 20 (25 en flujos largos; 30 con trazas pesadas o varios flujos) |
 | 3 · Mejora (una por chat) | Intermedio | Medio | 30 |
 | 4 · Cierre | Económico o intermedio | Bajo | 10 |
@@ -98,7 +116,7 @@ Un chat abierto solo para leer `estado.md` cuando el paso era un comando costó 
   - **Claude Code:** subagentes en `.claude/agents/*.md`, con `model` en el frontmatter.
   - **Copilot en VS Code:** archivos `.agent.md`, con `model` y `tools`. Verifica si el traspaso entre agentes conserva la conversación: si la conserva, ahorra menos que un chat nuevo.
   - Para que no entren al repo: en la carpeta de agentes del usuario, o con un enlace excluido en `.git/info/exclude`.
-- **Subagentes:** si la plataforma los tiene, delega el mapeo del alcance a uno económico y pide que devuelva solo un resumen corto.
+- **Subagentes:** si la plataforma los tiene, delega el mapeo del alcance a uno económico y pide que devuelva solo un resumen corto. Para recorrer la investigación entera desde un chat, con un subagente por sesión, está el modo orquestado ([orquestacion.md](orquestacion.md)).
 
 ## Medir el costo
 

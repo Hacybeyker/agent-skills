@@ -88,11 +88,25 @@ Usa hb-performance: mejora este pedido: <el flujo en tus palabras: de dónde a d
 Usa hb-performance en modo triage: diagnostica <flujo> con 3 corridas, sin control ni mejoras. Dispositivo <serial>. No hagas commit ni push.
 ```
 
+**Toda la investigación desde un solo chat** (modo orquestado, con una herramienta que tenga subagentes, como Claude Code). El chat es el orquestador (modelo económico, esfuerzo bajo: `cd <raíz> && claude --model claude-haiku-5-5 --effort low`): lanza cada sesión como un subagente con el modelo de su nivel, corre las capturas con recorrido automático y se detiene solo donde haces falta, diciéndote qué hacer y dónde. Al terminar, te da el comando `perf.py consumo` del total.
+
+```text
+Usa hb-performance en modo orquestado: quiero analizar el rendimiento de <pantalla o flujo, y qué se nota>. Dispositivo <serial>. No hagas commit ni push.
+```
+
+Cuando se detiene en la decisión de las mejoras, corre en tu terminal el `perf.py decidir` que te da y después escribe en el mismo chat:
+
+```text
+Continúa. No hagas commit ni push.
+```
+
 **Retomar** donde quedó, en un chat nuevo:
 
 ```text
 Sigue hb-performance con <ruta absoluta>/estado.md. No hagas commit ni push.
 ```
+
+Para retomar en modo orquestado, el mismo texto con "en modo orquestado" antes del punto.
 
 **Requisitos y setup.** La skill no instala ni configura nada en tu máquina: `perf.py setup --estado` lista en solo lectura las herramientas que hacen falta (Python 3.8 o superior, git, `adb` y `trace_processor`; según el caso, Java 17 o superior; opcionales, `ffmpeg` para unir y rotular el video de la prueba y `scrcpy` para grabarlo sin cortes) y dice cuál falta. El setup de medición lo maneja la skill: detecta si está versionado, guardado en un parche o no existe, lo repone antes de medir (`setup --reponer`, que `siguiente` da como primer paso) y lo quita al cerrar, comprobando antes que el parche es de ese repo; no hace falta aplicar ningún parche a mano. Y nunca edita un módulo que la app consume compilado: le pregunta a Gradle y te dice qué cambiar.
 
