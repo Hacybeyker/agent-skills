@@ -1,0 +1,27 @@
+{
+  "_leeme": "Supuestos de los escenarios de ingresos de {{NOMBRE}}. Los valores de ejemplo son inventados: reemplázalos. Cada supuesto lleva pesimista, base y optimista, y en `fuente` el ID de la fuente que lo respalda (S-…); sin fuente, el escenario queda como estimación. `dau` son los usuarios activos diarios; `dau_mau`, la proporción de los usuarios del mes que entra cada día; `conversion`, la proporción de los usuarios del mes que paga; `comision`, la de la tienda (0.15 o 0.30). Deja solo los mercados, los formatos y las compras que apliquen.",
+  "moneda": "USD",
+  "analogia": false,
+  "mercados": [
+    {
+      "mercado": "Mercado de ejemplo",
+      "dau": {"pesimista": 300, "base": 1000, "optimista": 3000, "fuente": ""},
+      "dau_mau": {"pesimista": 0.1, "base": 0.15, "optimista": 0.2, "fuente": ""},
+      "anuncios": [
+        {
+          "formato": "banner",
+          "impresiones_por_dau": {"pesimista": 3, "base": 5, "optimista": 8, "fuente": ""},
+          "ecpm": {"pesimista": 0.2, "base": 0.4, "optimista": 0.8, "fuente": ""}
+        }
+      ],
+      "compras": [
+        {
+          "nombre": "Sin anuncios",
+          "conversion": {"pesimista": 0.005, "base": 0.01, "optimista": 0.02, "fuente": ""},
+          "precio": 2.99,
+          "comision": 0.15
+        }
+      ]
+    }
+  ]
+}

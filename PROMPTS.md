@@ -64,6 +64,21 @@ El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o Rx
 | Solo el changelog | `Genera la entrada del changelog para los cambios desde el último tag, sin subir la versión.` |
 | Notas de tienda | `Escribe las notas de la versión <1.4.0> para la tienda, en <idiomas>.` |
 
+## hb-product · de la idea al PRD
+
+Tiene varias sesiones, y las de investigación corren en paralelo: su guía completa está en [skills/hb-product/references/prompts.md](skills/hb-product/references/prompts.md). **Después del primer pedido, solo pegas lo que imprime `producto.py siguiente`**: el texto de cada chat (uno por sesión, con el nivel de modelo que conviene) o el comando completo de la terminal. La skill trabaja con evidencia pública: no descarta una idea por tener muchos competidores ni por no tener datos, y en cada puerta decides tú.
+
+| Caso | Prompt |
+| --- | --- |
+| Idea nueva (sesión 0) | `Usa hb-product: tengo una idea de app. <la idea: qué problema resuelve, para quién, plataformas, países, cómo gana dinero, meta de ingresos al mes y semanas disponibles>. No hagas commit ni push.` |
+| Mercado con muchas apps | `Usa hb-product: quiero hacer <tipo de app> aunque ya hay muchas. Quiero saber cómo diferenciarme antes de construirla: <para quién, plataformas, países, meta y semanas>. No hagas commit ni push.` |
+| Idea que no existe todavía | `Usa hb-product: tengo una idea de app que no encontré en ninguna tienda: <la idea y cómo se resuelve hoy el problema>. <plataformas, países, meta y semanas>. No hagas commit ni push.` |
+| Abrir un carril o retomar | `Sigue hb-product con <ruta absoluta>/product/estado.md. No hagas commit ni push.` (para un carril, el texto que imprime `siguiente`, que nombra la sesión) |
+| Los carriles con subagentes | `Sigue hb-product con <ruta absoluta>/product/estado.md como orquestador: lanza un subagente por cada sesión que ofrezca producto.py siguiente y vuelve a correrlo cuando terminen, hasta llegar a la puerta. No investigues tú ni corras decidir. No hagas commit ni push.` |
+| Construir una funcionalidad del PRD | `Implementa F-01 de <ruta absoluta>/product/04-prd.md.` (lo hace `hb-implement`) |
+
+Las puertas se deciden en la terminal con el comando que imprime `producto.py siguiente` (`decidir --puerta <n> --seguir`, `--ajustar <sesión>` o `--descartar "<motivo>"`): el agente nunca lo corre. Descartar archiva la idea con su motivo y `producto.py reabrir` la recupera. La carpeta por defecto es `product/`; para cambiarla, una sección `## Producto` en `AGENTS.md` con la línea `Carpeta: <ruta>`.
+
 ## hb-performance · rendimiento en Android
 
 Tiene varias sesiones y comandos de terminal: su guía completa está en [skills/hb-performance/references/prompts.md](skills/hb-performance/references/prompts.md). Copia solo el bloque de cada caso; la explicación va fuera. El mismo texto sirve la primera vez y las siguientes: la skill elige la sesión según el estado del proyecto (sin setup, lo hace; con setup, arma la ficha y el plan) y el agente lo dice en su primera línea.
