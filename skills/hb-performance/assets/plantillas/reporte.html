@@ -342,7 +342,7 @@
       }
       .charts {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(min(300px,100%),1fr));
         gap: 14px;
         margin-bottom: 14px;
       }
@@ -586,14 +586,14 @@
   }
   section > h2 { display:flex; align-items:center; gap:10px; }
   .sub { color:var(--muted); font-size:14px; margin:-6px 0 14px; }
-  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin:4px 0 8px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr)); gap:12px; margin:4px 0 8px; }
   .kpi { background:var(--soft); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
   .kpi .v { font-size:28px; font-weight:700; line-height:1.1; font-variant-numeric:tabular-nums; }
   .kpi .l { font-size:13px; color:var(--muted); margin-top:2px; }
   .kpi .r { font-size:12.5px; color:var(--muted); margin-top:6px; }
   .kpi.hot { border-color:var(--warn); background:var(--warn-soft); }
   .kpi.hot .v { color:var(--warn); }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); gap:12px; }
   .cards.one { grid-template-columns:1fr; }
   .card { background:var(--soft); border:1px solid var(--border); border-left:4px solid var(--accent); border-radius:12px; padding:14px 16px; }
   .card h3 { margin:0 0 6px; font-size:15.5px; display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
@@ -604,7 +604,7 @@
   .card.t-sin { border-left-color:var(--same); }
   .card.t-descartado { border-left-color:var(--warn); opacity:.92; }
   .card.m { border-left-color:var(--accent); background:var(--surface); }
-  .fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px 14px; margin:10px 0 2px; }
+  .fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr)); gap:8px 14px; margin:10px 0 2px; }
   .field .k { font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; }
   .field .x { font-size:14px; }
   .chip { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; white-space:nowrap; }
@@ -619,13 +619,16 @@
   .evid { font-size:13.5px; color:var(--muted); }
   .files { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
   .files code { font-size:12px; }
+  /* Ningún texto se corta ni ensancha la página: un código largo parte la línea y las cards no se salen de su sección. */
+  p code, li code, .evid code, h3 code, .card code { overflow-wrap:anywhere; }
+  .card, .kpi, .field { min-width:0; overflow-wrap:anywhere; }
   .stack { display:flex; height:34px; border-radius:8px; overflow:hidden; margin:10px 0 6px; font-size:12.5px; font-weight:600; color:#fff; }
-  .stack div { display:flex; align-items:center; justify-content:center; padding:0 6px; white-space:nowrap; }
+  .stack div { display:flex; align-items:center; justify-content:center; padding:0 6px; white-space:nowrap; min-width:0; overflow:hidden; }
   .legend { display:flex; flex-wrap:wrap; gap:14px; font-size:13px; color:var(--muted); }
   .legend i { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
   table.compact td, table.compact th { padding:6px 8px; }
-  .charts { grid-template-columns:repeat(auto-fill,minmax(460px,1fr)); }
-  .charts.three { grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }
+  .charts { grid-template-columns:repeat(auto-fill,minmax(min(460px,100%),1fr)); }
+  .charts.three { grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr)); }
   .files code { overflow-wrap:anywhere; white-space:normal; }
   .flow .step b { font-size:18px; }
   header .inner > p:not(.kicker) { font-size:17px; font-weight:600; opacity:.95; margin-top:4px; }
@@ -676,6 +679,22 @@
     paint();
   });
   paint();
+})();
+// Un texto dentro de un segmento solo si cabe completo: el texto, si no el valor, si no nada (la leyenda lo dice).
+(function () {
+  function fit() {
+    var all = document.querySelectorAll("[data-full]");
+    for (var i = 0; i < all.length; i++) {
+      var seg = all[i], options = [seg.getAttribute("data-full"), seg.getAttribute("data-short"), ""];
+      for (var k = 0; k < options.length; k++) {
+        seg.textContent = options[k];
+        if (!options[k] || seg.scrollWidth <= seg.clientWidth) break;
+      }
+    }
+  }
+  fit();
+  window.addEventListener("resize", fit);
+  window.addEventListener("beforeprint", fit);
 })();
 </script>
 </body>

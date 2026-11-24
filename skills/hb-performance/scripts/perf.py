@@ -22417,9 +22417,11 @@ def where_time_goes(data):
         total = end - start
         segments = [(before, "ok", "la app antes de la llamada"), (wait, "after", "espera del servicio"),
                     (rest, "before", "")]
-        bar = "".join('<div style="width:%.0f%%;background:var(--%s)">%s</div>' % (
-            value * 100.0 / total, color, e("%s s · %s" % (trim(value / 1000.0, 2), text)) if text and value * 100.0 / total
-            > 18 else "") for value, color, text in segments if value > 0)
+        # 0.19.0 · P10: el texto va dentro del segmento solo si cabe completo; si no, solo el valor; si tampoco, nada (lo
+        # cubre la leyenda). Lo decide el script del reporte con el ancho real (fit_labels); sin script, nada.
+        bar = "".join('<div style="width:%.0f%%;background:var(--%s)" data-full="%s" data-short="%s"></div>' % (
+            value * 100.0 / total, color, e("%s s · %s" % (trim(value / 1000.0, 2), text)) if text else "",
+            e("%s s" % trim(value / 1000.0, 2)) if text else "") for value, color, text in segments if value > 0)
         legend = ('<div class="legend"><span><i style="background:var(--ok)"></i>se puede mejorar en la app (%s s)</span>'
                   '<span><i style="background:var(--after)"></i>depende del servidor (%s s)</span><span><i '
                   'style="background:var(--before)"></i>lo demás (%s s)</span></div><br/>' % (
