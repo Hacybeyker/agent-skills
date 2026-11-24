@@ -17837,7 +17837,7 @@ def plain_tradeoffs(items, plan, problems):
     out = []
     for entry in items:
         item = entry["mejora"]
-        title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item["id"], problems)
+        title = management_title(item, problems)
         title = "Un cambio con el título sin completar" if title.startswith("_") else title
         many = len({flow for flow, _ in entry["gana"]}) > 1
         gains = ["%s%s %s: %s" % (plain_metric(r["metrica"], plan), " (%s)" % (
@@ -17849,14 +17849,16 @@ def plain_tradeoffs(items, plan, problems):
                 costs.append("consultar al servidor %s %s cada vez que el usuario hace este recorrido (%s)" % (
                     plain_count(abs(after - before)), "más" if after > before else "menos", service_words(endpoint)))
         text, _ = entry["costo"]
+        text = str(item.get("costo_gerencia") or "").strip() or text
         if text:
-            text = plain_or_unfilled(text, "el costo de %s" % item["id"], problems)
+            text = plain_or_unfilled(text, "costo_gerencia de %s en plan.json" % item["id"], problems)
             if not text.startswith("_"):
                 # lo que escribió la investigación va aparte de lo medido: es la misma decisión, dicha por quien la tomó
                 costs.append("según la investigación, %s" % (text[0].lower() + text[1:]))
         condition, _ = entry["condicion"]
+        condition = str(item.get("condicion_gerencia") or "").strip() or condition
         if condition:
-            condition = plain_or_unfilled(condition, "la condición de %s" % item["id"], problems)
+            condition = plain_or_unfilled(condition, "condicion_gerencia de %s en plan.json" % item["id"], problems)
             condition = "" if condition.startswith("_") else condition[0].lower() + condition[1:]
         ranges = scenario_range(entry["gana"], plan, plain=True)
         when = ". ".join(part.rstrip(".") for part in (condition, (ranges[0].upper() if condition else ranges[0])
@@ -19317,13 +19319,106 @@ def jargon(text):
     return list(dict.fromkeys(found))
 
 
+# 0.19.0 · P1: quien traduce para gerencia es el reporte, nunca la investigación. Antes de publicar un texto en el
+# reporte de gerencia, `perf.py` pasa los tiempos a segundos o a milisegundos escritos completos y cambia cada concepto
+# técnico por su versión en palabras (este glosario), con el artículo que le toca ("del hilo principal" → "de la parte de
+# la app que atiende la pantalla"). Los nombres de librerías y de código (OkHttp, Compose, `cargar()`) no tienen
+# traducción fiel: no se publican, y el aviso nombra el campo de gerencia que hay que completar, nunca la Ficha, el
+# síntoma del usuario ni los campos técnicos del plan, que la investigación no reescribe. Cada entrada: (patrón, en
+# palabras, género y número de lo que reemplaza: m, f, mp o fp). Las frases van antes que sus palabras.
+MANAGEMENT_GLOSSARY = (
+    (r"hilo principal|main thread", "parte de la app que atiende la pantalla", "f"),
+    (r"recomposici[oó]nes", "redibujos de la pantalla", "mp"), (r"recomposici[oó]n", "redibujo de la pantalla", "m"),
+    (r"frames", "cuadros", "mp"), (r"frame", "cuadro", "m"), (r"jank", "tirones", "mp"),
+    (r"TTID", "tiempo hasta ver la primera pantalla", "m"), (r"TTFD", "tiempo hasta ver la pantalla completa", "m"),
+    (r"TTFB", "espera de la respuesta", "f"), (r"ANR", "bloqueo de la app", "m"),
+    (r"GC", "limpieza de memoria", "f"), (r"heap", "memoria", "f"), (r"backend", "servidor", "m"),
+    (r"endpoints", "servicios", "mp"), (r"endpoint", "servicio", "m"),
+    (r"corrutinas|coroutines", "tareas en segundo plano", "fp"), (r"corrutina|coroutine", "tarea en segundo plano", "f"),
+    (r"trazas", "registros de la medición", "mp"), (r"traza", "registro de la medición", "m"),
+    (r"slices", "tramos", "mp"), (r"slice", "tramo", "m"), (r"percentiles", "casos más lentos", "mp"),
+    (r"percentil", "caso más lento", "m"), (r"P50", "caso típico", "m"), (r"P\d{2}", "%d %% más lento", "m"),
+    (r"CV", "variación", "f"), (r"mediana", "valor típico", "m"))
+DETERMINERS = {"el": ("def", ""), "la": ("def", ""), "los": ("def", ""), "las": ("def", ""), "del": ("def", "de "),
+               "al": ("def", "a "), "un": ("ind", ""), "una": ("ind", ""), "unos": ("ind", ""), "unas": ("ind", "")}
+ARTICLES = {("def", "m"): "el", ("def", "f"): "la", ("def", "mp"): "los", ("def", "fp"): "las",
+            ("ind", "m"): "un", ("ind", "f"): "una", ("ind", "mp"): "unos", ("ind", "fp"): "unas"}
+MANAGEMENT_GLOSSARY_RE = tuple((re.compile(r"(?<![\w-])(?:(%s)\s+)?(?:%s)(?![\w-])" % (
+    "|".join(DETERMINERS), pattern), re.I), words, gender) for pattern, words, gender in MANAGEMENT_GLOSSARY)
+MS_IN_TEXT = re.compile(r"(?<![\w.,])(\d+(?:[.,]\d+)?)\s*ms(?![\w-])")
+BARE_MS = re.compile(r"(?<![\w-])ms(?![\w-])")
+
+
+def for_management(text):
+    """0.19.0 · P1: el texto como lo publica gerencia, sin cambiar lo que dice: "unos 90 ms" pasa a "unos 90
+    milisegundos" (1200 ms, a "1.2 s") y cada concepto del glosario, a su versión en palabras, con el artículo que le
+    toca ("pérdida de frames" → "pérdida de cuadros"). No toca los nombres de código: no tienen traducción y los avisa
+    `jargon`."""
+    if not text:
+        return text or ""
+
+    def time_words(match):
+        value = float(match.group(1).replace(",", "."))
+        return plain_time(value, "ms", 0 if value >= 1 else 2)
+
+    out = BARE_MS.sub("milisegundos", MS_IN_TEXT.sub(time_words, str(text)))
+    for pattern, words, gender in MANAGEMENT_GLOSSARY_RE:
+        def swap(match, words=words, gender=gender, source=out):
+            determiner = match.group(1)
+            phrase = words
+            if "%d" in phrase:  # P90: el 10 % más lento
+                phrase = phrase % (100 - int(re.sub(r"\D", "", match.group(0))[-2:]))
+            if determiner:
+                kind, prefix = DETERMINERS[determiner.lower()]
+                phrase = "%s%s %s" % (prefix, ARTICLES[(kind, gender)], phrase)
+            elif match.group(0).isupper():  # una sigla sin artículo ("TTID bajó"): en palabras lleva el suyo
+                phrase = "%s %s" % (ARTICLES[("def", gender)], phrase)
+            before = source[:match.start()].rstrip()
+            at_start = not before or before.endswith((".", ":", "!", "?", "\"", "«", "(", "¿", "¡"))
+            return phrase[:1].upper() + phrase[1:] if at_start and match.group(0)[:1].isupper() else phrase
+        out = pattern.sub(swap, out)
+    return re.sub(r"\ba el\b", "al", re.sub(r"\bde el\b", "del", out))
+
+
 def plain_or_unfilled(text, field, problems):
-    """El texto si no trae términos técnicos; si los trae, "sin completar" y el aviso en `problems`."""
+    """El texto en palabras (for_management) si así no trae términos técnicos; si todavía los trae (un nombre de
+    código), "sin completar" y el aviso en `problems`, que nombra el campo de gerencia que hay que completar."""
+    text = for_management(text)
     found = jargon(text)
     if not found:
         return text
     problems.append((field, found))
     return "_%s_" % UNFILLED
+
+
+def management_override(plan, key, ident=None):
+    """0.19.0 · P1: el texto de un campo de gerencia de plan.json, si la investigación lo completó: `gerencia.sintoma`
+    (el síntoma en palabras; el de la Ficha es del usuario y no se reescribe) o `<campo>_gerencia` de una mejora."""
+    if ident is None:
+        return str(((plan or {}).get("gerencia") or {}).get(key) or "").strip() \
+            if isinstance((plan or {}).get("gerencia"), dict) else ""
+    item = next((m for m in (plan or {}).get("mejoras") or [] if isinstance(m, dict) and m.get("id") == ident), None)
+    return str((item or {}).get(key) or "").strip()
+
+
+def management_title(item, problems):
+    """El título de una mejora para gerencia: `titulo_gerencia` o, sin él, el técnico traducido; si no se puede, "sin
+    completar" y el aviso nombra `titulo_gerencia`."""
+    managed = str(item.get("titulo_gerencia") or "").strip()
+    return plain_or_unfilled(managed or improvement_title(item), "titulo_gerencia de %s en plan.json" % item.get(
+        "id", "una mejora"), problems)
+
+
+GERENCIA_SYMPTOM = "gerencia.sintoma en plan.json (el síntoma en palabras para gerencia; la Ficha no se toca)"
+
+
+def improvement_field_text(item, key):
+    """(texto, campo de gerencia del aviso) de un campo de una mejora: `<key>_gerencia` si lo completaron; si no, el
+    técnico (`key`), que el reporte traduce. El aviso nombra siempre el de gerencia."""
+    managed = "%s_gerencia" % key
+    if str(item.get(managed) or "").strip():
+        return str(item[managed]), "%s de %s en plan.json" % (managed, item.get("id", "una mejora"))
+    return str(item.get(key) or ""), "%s de %s en plan.json" % (managed, item.get("id", "una mejora"))
 
 
 def management_parts(folder, plan, rows, sections, results=None, problems=None):
@@ -19341,8 +19436,7 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
         return next((sections[k] for k in sections for n in names if k.startswith(n)), "")
 
     def title(item):
-        return plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id", "una mejora"),
-                                 problems)
+        return management_title(item, problems)
 
     def named(item):
         """El título para una lista; si no se publica, dice que es una mejora con el título sin completar."""
@@ -19354,9 +19448,9 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
         summary = plain_or_unfilled(summary, "\"Resumen para gerencia\" de estado.md", problems)
         if summary.startswith("_"):
             summary = MANAGEMENT_MISSING.replace("todavía no se escribió", "tiene términos técnicos y no se publica")
-    symptom = ficha_value(pick("ficha"), "síntoma", "sintoma")
+    symptom = management_override(plan, "sintoma") or ficha_value(pick("ficha"), "síntoma", "sintoma")
     if symptom:
-        symptom = plain_or_unfilled(symptom, "el síntoma de la Ficha de estado.md", problems)
+        symptom = plain_or_unfilled(symptom, GERENCIA_SYMPTOM, problems)
     headers, findings = parse_table(pick("hallazgos"))
     lower = [h.lower() for h in headers]
 
@@ -19373,15 +19467,19 @@ def management_parts(folder, plan, rows, sections, results=None, problems=None):
     kinds = [finding_kind(cell(row, tipo_i)) for row in findings]
     confirmed = [row for row, kind in zip(findings, kinds) if kind in ("bug", "mejorable")]
     found = []
+    extra = {item.get("id"): item for item in plan.get("hallazgos") or [] if isinstance(item, dict)}
     for row in confirmed:
-        parts = [plain_or_unfilled(part, "%s de %s en Hallazgos de estado.md" % (what, row[0].strip()), problems)
-                 for what, part in (("el síntoma", cell(row, symptom_i)), ("la causa", cell(row, cause_i))) if part]
+        ident = row[0].strip()
+        mine = extra.get(ident) or {}
+        parts = [plain_or_unfilled(mine.get(managed) or part, "hallazgos[%s].%s en plan.json" % (ident, managed), problems)
+                 for managed, part in (("titulo_gerencia", cell(row, symptom_i)), ("causa_gerencia", cell(row, cause_i)))
+                 if part or mine.get(managed)]
         if parts:  # sin ".:" al unir: el síntoma pierde su punto final
             found.append("- %s" % ": ".join([parts[0].rstrip(" .;:")] + parts[1:]))
     unconfirmed = []
     for row, kind in zip(findings, kinds):
         if kind == "sin confirmar":
-            text = cell(row, symptom_i).rstrip(" .;:")
+            text = for_management(cell(row, symptom_i)).rstrip(" .;:")
             unconfirmed.append(text[0].lower() + text[1:] if text and not jargon(text) else "un punto técnico")
     other = [(one if count == 1 else many % count) for one, many, count in (
         ("1 se investigó y se descartó", "%d se investigaron y se descartaron", kinds.count("descartado")),
@@ -19831,9 +19929,12 @@ def warn_jargon(problems):
             continue
         seen.append((field, terms))
     for field, terms in seen:
-        print("⚠ Gerencia: %s tiene términos técnicos (%s) y no se publicó: el reporte de gerencia lo omite o lo nombra "
-              "sin descripción. Qué hacer: reescribe ese campo en palabras, sin nombres de métricas, de código ni términos "
-              "de la traza (la lista está en cierre.md · Reporte), y genera de nuevo:" % (field, ", ".join(terms[:6])))
+        # 0.19.0 · P1: el aviso nombra el campo de gerencia que hay que completar. Los tiempos y los términos del
+        # glosario ya los traduce el reporte; lo que queda es un nombre de código. Nunca se pide reescribir la Ficha,
+        # el síntoma del usuario ni los campos técnicos del plan.
+        print("⚠ Gerencia: un texto que va a gerencia trae %s, que no tiene traducción, y no se publicó: el reporte lo "
+              "omite o lo nombra sin descripción. Qué hacer: completa en palabras %s y genera de nuevo (la Ficha, el "
+              "síntoma del usuario y los campos técnicos no se tocan):" % (", ".join(terms[:6]), field))
         print("    %s" % same_command())
 
 
@@ -20163,8 +20264,7 @@ def pending_improvements(plan, final, plain=False, problems=None):
         state = item.get("estado", "propuesta")
         if state == "aplicada" or (final is False and state == "descartada"):
             continue
-        title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id"), problems) if plain \
-            else improvement_title(item)
+        title = management_title(item, problems) if plain else improvement_title(item)
         if plain and title.startswith("_"):
             # G4: el título técnico no se publica, pero el cambio existe: decir "nada pendiente" sería falso
             title = "un cambio propuesto (%s), sin descripción en palabras todavía" % item.get("id", "?")
@@ -20349,7 +20449,7 @@ def risk_md(plan, items, problems):
     """G1: el riesgo de hacer cada cambio, con su porqué en palabras."""
     out = []
     for item in items:
-        title = plain_or_unfilled(improvement_title(item), "el título de %s en plan.json" % item.get("id"), problems)
+        title = management_title(item, problems)
         if title.startswith("_"):  # el cambio existe: se nombra sin su título técnico (no se dice "no hay cambios")
             title = "Un cambio (%s), todavía sin descripción en palabras" % item.get("id", "?")
         level, _, why = str(item.get("riesgo") or "").partition(":")
@@ -20357,7 +20457,7 @@ def risk_md(plan, items, problems):
         if not level or level in ("—", "-"):
             out.append("- %s: sin evaluar todavía." % title)
             continue
-        why = why.strip().rstrip(".")
+        why = for_management(str(item.get("riesgo_gerencia") or "").strip() or why.strip()).rstrip(".")
         if why and jargon(why):
             why = ""
         out.append("- %s: %s%s." % (title, "%s: riesgo %s" % (why[0].upper() + why[1:], level) if why else "riesgo %s" % level,
@@ -20385,8 +20485,9 @@ def secondary_changes(plan, results, problems):
     for item in plan.get("mejoras") or []:
         if item.get("estado") != "aplicada" or not str(item.get("costo") or "").strip():
             continue
-        text = plain_or_unfilled(str(item["costo"]), "el costo de %s" % item.get("id"), problems)
-        title = improvement_title(item)
+        text = plain_or_unfilled(str(item.get("costo_gerencia") or item["costo"]), "costo_gerencia de %s en plan.json"
+                                 % item.get("id"), problems)
+        title = for_management(str(item.get("titulo_gerencia") or "").strip() or improvement_title(item))
         if not text.startswith("_") and not jargon(title):
             lines.append("- Costo conocido de %s: %s." % (title.rstrip("."), text.rstrip(".")))
     return "\n".join(lines)
@@ -20621,7 +20722,9 @@ class ReportData:
         return abs(statistics.median(control) - statistics.median(before)) if before and control else None
 
     def plain(self, text, field_name):
-        """Un texto para gerencia: si trae términos técnicos, no se publica y el aviso nombra el campo y la palabra."""
+        """Un texto para gerencia, traducido (for_management): si todavía trae términos técnicos (un nombre de código),
+        no se publica y el aviso nombra el campo de gerencia que hay que completar y la palabra."""
+        text = for_management(text)
         found = jargon(text)
         if found:
             self.problems.append((field_name, found))
@@ -21421,18 +21524,12 @@ def r_cost(data):
 # ── Secciones del reporte de gerencia ────────────────────────────────────────
 
 UNTITLED_CHANGE = "sin descripción en palabras todavía"  # un título técnico o vacío no se publica a gerencia
-IMPROVEMENT_FIELD_WORDS = {"titulo": "el título", "titulo_gerencia": "el título para gerencia (titulo_gerencia)",
-                           "que_cambia": "qué cambia (que_cambia)",
-                           "que_cambia_gerencia": "qué cambia para gerencia (que_cambia_gerencia)",
-                           "que_gana": "qué gana (que_gana)", "riesgo_gerencia": "el riesgo para gerencia (riesgo_gerencia)",
-                           "costo": "el costo conocido (costo)", "condicion": "la condición (condicion)"}
-
 
 def plain_improvement(data, item, key, fallback):
-    """Un campo de una mejora para gerencia; el aviso nombra el campo en palabras ("el título de M1 en plan.json")."""
+    """Un campo de una mejora para gerencia: el de gerencia (`key`) o, sin él, el técnico (`fallback`) traducido. El
+    aviso nombra siempre el campo de gerencia (0.19.0 · P1: los técnicos no se reescriben para gerencia)."""
     text = item.get(key) or (item.get(fallback) if fallback else "")
-    used = key if item.get(key) else fallback
-    return data.plain(str(text or ""), "%s de %s en plan.json" % (IMPROVEMENT_FIELD_WORDS.get(used, used), item.get("id")))
+    return data.plain(str(text or ""), "%s de %s en plan.json" % (key, item.get("id")))
 
 
 def r_summary_biz(data):
@@ -21458,8 +21555,8 @@ def r_summary_biz(data):
 
 
 def r_user_biz(data):
-    symptom = ficha_value(data.pick("ficha"), "síntoma", "sintoma")
-    symptom = data.plain(symptom, "el síntoma de la Ficha de estado.md") if symptom else ""
+    symptom = management_override(data.plan, "sintoma") or ficha_value(data.pick("ficha"), "síntoma", "sintoma")
+    symptom = data.plain(symptom, GERENCIA_SYMPTOM) if symptom else ""
     return "usuario", "Qué notaba el usuario", ('<p>"%s"</p>' % text_html(symptom.strip().strip('"')) if symptom else
                                               "<p>Sin completar todavía: la investigación no lo anotó en la Ficha.</p>")
 
@@ -21471,8 +21568,13 @@ def r_measured_biz(data):
                                         "Sin cambios todavía: se midió el recorrido tal como está hoy y se buscaron "
                                         "las causas.")]
     for flow in data.flows:
-        steps = [data.plain(step, "el paso del recorrido \"%s\" (recorrido.sh)" % step) or "un paso del recorrido"
-                 for step in route_steps(data, flow)]
+        steps = route_steps(data, flow)
+        managed = (data.plan.get("flujos") or {}).get(flow, {}).get("pasos_gerencia") \
+            if isinstance((data.plan.get("flujos") or {}).get(flow), dict) else None
+        if isinstance(managed, list) and len(managed) == len(steps):  # P1: los pasos en palabras, en el mismo orden
+            steps = [str(step or "") or original for step, original in zip(managed, steps)]
+        steps = [data.plain(step, "flujos.%s.pasos_gerencia en plan.json (una frase por paso, en el orden del recorrido)"
+                            % flow) or "un paso del recorrido" for step in steps]
         parts.append(flow_cards(steps))
     total = sum(rec.get("corridas") or 0 for rec in (data.phases.get(p) for p in FASES) if isinstance(rec, dict))
     if total:
@@ -21561,11 +21663,9 @@ def r_found_biz(data):
         extra = data.extra.get(finding["id"]) or {}
         if kind in CONFIRMED_KINDS:
             title = extra.get("titulo_gerencia") or finding.get("sintoma") or ""
-            title = data.plain(title, ("hallazgos[%s].titulo_gerencia en plan.json" if extra.get("titulo_gerencia") else
-                                       "el síntoma de %s en Hallazgos de estado.md") % finding["id"])
+            title = data.plain(title, "hallazgos[%s].titulo_gerencia en plan.json" % finding["id"])
             cause = extra.get("causa_gerencia") or finding.get("causa") or ""
-            cause = data.plain(cause, ("hallazgos[%s].causa_gerencia en plan.json" if extra.get("causa_gerencia") else
-                                       "la causa de %s en Hallazgos de estado.md") % finding["id"])
+            cause = data.plain(cause, "hallazgos[%s].causa_gerencia en plan.json" % finding["id"])
             if title:
                 cards.append('<div class="card %s"><h3>%s %s</h3>%s</div>' % (
                     FINDING_CLASS[kind], e(title.rstrip(".")),  # R8: la etiqueta, del color de la esquina
@@ -21636,7 +21736,7 @@ def r_risks_biz(data):
     for item in items:
         level, why = risk_parts(item)
         why = plain_improvement(data, item, "riesgo_gerencia", None) if item.get("riesgo_gerencia") else \
-            data.plain(why, "el porqué del riesgo de %s en plan.json" % item.get("id"))
+            data.plain(why, "riesgo_gerencia de %s en plan.json" % item.get("id"))
         title = plain_improvement(data, item, "titulo_gerencia", "titulo") or UNTITLED_CHANGE
         rows.append([(e("%s · %s" % (item.get("id"), title)), False),
                      (chip(RISK_WORDS.get(level, level) or "sin evaluar", "c-ko" if level in ("critico", "alto") else

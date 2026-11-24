@@ -1599,7 +1599,8 @@ class ReviewFixesTest(PerfBase):
         self.assertNotIn("despues |", md)
 
     def test_gerencia_no_niega_lo_que_omite(self):
-        plan = {"mejoras": [{"id": "M2", "titulo": "Sacar del hilo principal la lectura", "estado": "pendiente"}]}
+        # 0.19.0 · P1: "hilo principal" tiene traducción; un nombre de código no
+        plan = {"mejoras": [{"id": "M2", "titulo": "Sacar `leerDisco()` de la carga", "estado": "pendiente"}]}
         text = perf.pending_improvements(plan, True, plain=True, problems=[])
         self.assertNotIn("No queda nada pendiente", text)
         self.assertIn("un cambio propuesto (M2), sin descripción en palabras todavía", text)

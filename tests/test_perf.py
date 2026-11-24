@@ -8561,18 +8561,22 @@ class BusinessJargonTest(PerfBase):
     def test_no_publica_lo_tecnico_y_dice_que_campo_reescribir(self):
         self.state("El P90 de `lista_ms` bajó un 40 %.", symptom="Jank al abrir la lista", cause="Llama a cargar() dos veces")
         out = self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
-        self.assertIn('⚠ Gerencia: "Resumen para gerencia" de estado.md tiene términos técnicos (P90, `lista_ms`', out)
-        self.assertIn("⚠ Gerencia: el síntoma de la Ficha de estado.md tiene términos técnicos (Jank)", out)
-        self.assertIn("⚠ Gerencia: la causa de H1 en Hallazgos de estado.md tiene términos técnicos (cargar())", out)
-        self.assertIn("⚠ Gerencia: el título de M1 en plan.json tiene términos técnicos", out)
-        self.assertEqual(out.count("el título de M1 en plan.json"), 1)  # un aviso por campo, aunque salga en varias partes
-        self.assertIn("Qué hacer: reescribe ese campo en palabras", out)
+        # 0.19.0 · P1: el reporte traduce lo que tiene traducción (P90, Jank); lo que no (un nombre de código) no se
+        # publica, y el aviso nombra el campo de gerencia que hay que completar, nunca la Ficha ni la tabla Hallazgos
+        self.assertIn("trae `lista_ms`, que no tiene traducción", out)
+        self.assertIn('completa en palabras "Resumen para gerencia" de estado.md', out)
+        self.assertNotIn("Ficha de estado.md", out)
+        self.assertNotIn("en Hallazgos de estado.md", out)
+        self.assertIn("completa en palabras hallazgos[H1].causa_gerencia en plan.json", out)
+        self.assertIn("completa en palabras titulo_gerencia de M1 en plan.json", out)
+        self.assertEqual(out.count("titulo_gerencia de M1 en plan.json"), 1)  # un aviso por campo, aunque salga en varias partes
+        self.assertIn("la Ficha, el síntoma del usuario y los campos técnicos no se tocan", out)
         self.assertRegex(out, r"\n    cd .+ reporte --carpeta \S+ --inicial --html\n")  # el mismo comando, para generar de nuevo
         text = (self.folder / "reporte-inicial-gerencia.md").read_text(encoding="utf-8")
         for term in ("P90", "lista_ms", "Jank", "cargar()", "cargarClientes"):
             self.assertNotIn(term, text)
-        # 0.12.0 (D5): en palabras, sin los guiones bajos
-        self.assertIn("## Qué notaba el usuario\n\nSin completar todavía: la investigación no lo anotó en la Ficha.", text)
+        # 0.19.0 · P1: el síntoma del usuario se publica traducido, sin pedir que se reescriba
+        self.assertIn('## Qué notaba el usuario\n\n"Tirones al abrir la lista"', text)
         self.assertNotIn("_sin completar_", text)
         self.assertIn("M2 Cargar las imágenes después\n", text)  # 0.16.0 · R5: la card, con su estado
         self.assertIn("[esperando decisión]", text)
