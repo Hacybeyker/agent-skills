@@ -4,8 +4,8 @@ Las puertas existen para **descartar barato**: antes de programar, y solo con mo
 
 ## Cómo funciona una puerta
 
-1. La sesión que la precede termina con `producto.py siguiente`, que imprime los comandos de la puerta.
-2. `producto.py puerta --n <1|2|3>` muestra el veredicto criterio por criterio (✔ o ✖), con el juego de criterios del tipo de idea y los criterios que se cambiaron después de la sesión 0. No escribe nada.
+1. La sesión que la precede termina con `producto.py siguiente`, que ya trae **el veredicto criterio por criterio** (✔ o ✖) con el juego del tipo de idea, los avisos y las propuestas, y debajo los comandos de la decisión. No hace falta correr `puerta` aparte: `producto.py puerta --n <1|2|3>` muestra lo mismo cuando quieras volver a mirarlo, y no escribe nada.
+2. Los avisos no son criterios, pero no se pasan por alto: los criterios cambiados después de la sesión 0, la confianza global baja, los huecos de cobertura, los vacíos por límite de las herramientas y la meta de ingresos como referencia.
 3. El usuario decide en su terminal, con uno de estos:
 
 ```bash
@@ -26,17 +26,21 @@ La cantidad de competidores **no** es un criterio: ni la saturación ni la falta
 | --- | --- |
 | Puntaje de 17/25 o más | Puntaje de 15/25 o más |
 | Demanda con confianza media o alta | El problema o la necesidad de fondo, con 3 fuentes independientes y vigentes de peldaño 4 o 5 |
-| Al menos 1 diferenciador viable | Al menos 2 análogos con tracción (peldaño 2 o 3) en la matriz |
-| Riesgo de políticas distinto de 1, o con una mitigación escrita | Sin evidencia de que se probó y fracasó por falta de demanda (con la búsqueda registrada) |
-| | Riesgo de políticas distinto de 1, o con una mitigación escrita |
+| Al menos 1 diferenciador viable, con sus hallazgos triangulados ([diferenciacion.md](diferenciacion.md)) | Al menos 2 análogos con tracción (peldaño 2 o 3) en la matriz |
+| Los hallazgos del diferenciador principal están triangulados | Sin evidencia de que se probó y fracasó por falta de demanda (con la búsqueda registrada) |
+| Riesgo de políticas distinto de 1, o con una mitigación escrita | Riesgo de políticas distinto de 1, o con una mitigación escrita |
+
+Un diferenciador viable con confianza baja no cumple ninguno de los dos criterios de diferenciación, y si el principal tiene hallazgos sin triangular, la puerta lo dice aunque haya otro viable: elegir otro principal es ajustar 1g. Si la confianza global es baja, la puerta avisa aunque los criterios se cumplan.
 
 ### P2 · Viabilidad (después de las sesiones 2 y 3)
 
 | Idea existente o variante | Idea nueva |
 | --- | --- |
-| El escenario base alcanza la meta de ingresos | El escenario base por analogía alcanza la meta |
+| Al menos un modelo de monetización viable con evidencia | Al menos un modelo de monetización viable con evidencia (por analogía) |
 | Ninguna hipótesis crítica refutada | Ninguna hipótesis crítica refutada |
 | El diferenciador principal sobrevive al abogado del diablo, con confianza media o alta | La hipótesis más riesgosa, identificada y medible después del lanzamiento |
+
+Un modelo es viable con evidencia si genera ingresos en el caso base de `escenarios` y todos sus supuestos citan su fuente ([estrategia.md](estrategia.md)). **La meta de ingresos es opcional y referencial:** si existe, la puerta muestra cuánto da el caso base contra ella, como aviso. Solo si el usuario la marcó como obligatoria (`meta_obligatoria = si`) se suma un criterio: "El escenario base alcanza la meta de ingresos".
 
 ### P3 · Alcance (después de la sesión 4)
 
@@ -60,13 +64,19 @@ La cantidad de competidores **no** es un criterio: ni la saturación ni la falta
 | `fuentes_minimas` | 3 | Fuentes independientes de un hallazgo clave |
 | `analogos_minimos` | 2 | Análogos con tracción que pide la puerta 1 de una idea nueva |
 | `traccion_descargas` | 100000 | Descargas desde las que un competidor o un análogo tiene tracción |
-| `meta_ingresos_mes` | (sesión 0) | Meta de ingresos netos al mes |
+| `meta_ingresos_mes` | 0 (sin meta) | Meta de ingresos netos al mes: opcional y referencial |
+| `meta_obligatoria` | no | `si` la vuelve criterio de la puerta 2 |
 | `moneda` | USD | Moneda de la meta |
 | `presupuesto_semanas` | (sesión 0) | Semanas para construir el MVP |
 
 - **Durante la sesión 0:** `producto.py criterio --clave <clave> --valor <valor>`, las veces que haga falta.
 - **Después de cerrar la sesión 0:** exige `--motivo "<por qué>"`. El cambio queda registrado con su fecha, aparece en `criterios.md` y **cada puerta lo muestra** ("Criterio cambiado después de la sesión 0…"). Los criterios se fijan antes de investigar justamente para que nadie los mueva al ver los resultados.
 - Un criterio lo cambia el usuario, o el agente cuando el usuario se lo pide. Nunca lo cambies para que una puerta se cumpla.
+- El objetivo de mercados, idiomas y tiendas sigue la misma regla: `producto.py objetivo … --motivo "<por qué>"` después de la sesión 0, y la puerta lo muestra como un criterio cambiado.
+
+## Propuestas
+
+Lo que una sesión descubre y cambiaría algo ya cerrado (el diferenciador principal, una línea de investigación) **no se aplica con un comando suelto**: se registra con `producto.py propuesta --texto "<qué y por qué>" [--ajustar <sesión>]`. Queda para la puerta siguiente, que la muestra junto a los comandos de la decisión; con `--ajustar`, el comando de ajustar esa sesión ya viene listo. La decisión del usuario en esa puerta la resuelve (queda anotada en `decisiones.json`).
 
 ## Seguir, ajustar o descartar
 
@@ -74,7 +84,9 @@ La cantidad de competidores **no** es un criterio: ni la saturación ni la falta
 - **Ajustar `<sesión>`** reabre esa sesión y todo lo que depende de ella; las puertas que estaban después vuelven a quedar pendientes. Lo ya escrito se conserva: cada sesión corrige lo suyo y vuelve a cerrar. Por ejemplo, ajustar `1c` en la puerta 1 reabre `1c` y `1f`; ajustar `1a` reabre también `1g`.
 - **Descartar `"<motivo>"`** registra la decisión y **archiva** la idea. El motivo es lo que queda como aprendizaje: qué evidencia en contra hubo o qué camino no existía.
 
-Una idea se descarta con evidencia en contra, cuando ningún peldaño muestra el problema o, con competencia, cuando no aparece ningún diferenciador viable. Si el usuario quiere descartar "porque hay muchos competidores" o "porque no hay datos", dile qué dice la puerta antes de que decida: la decisión sigue siendo suya.
+Una idea se descarta con evidencia en contra, cuando ningún peldaño muestra el problema o, con competencia, cuando no aparece ningún diferenciador viable. Si el usuario quiere descartar "porque hay muchos competidores", "porque no hay datos" o "porque no llega a la meta" (sin haberla marcado como obligatoria), dile qué dice la puerta antes de que decida: la decisión sigue siendo suya.
+
+**Vacíos por límite de las herramientas.** Si a una línea le faltan fuentes porque tus herramientas no leen esas páginas (reseñas dinámicas, foros bloqueados), no sugieras ajustarla: con las mismas herramientas da lo mismo. Sugiere lo que sí lo resuelve (un navegador en el agente o un CSV de reseñas que aporte el usuario) y, con eso, el ajuste. `decidir --ajustar` lo recuerda si la línea tiene vacíos así.
 
 ## Archivo
 

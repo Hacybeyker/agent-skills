@@ -10,7 +10,7 @@
 
 Solo hallazgos registrados, con su ID y la confianza que calcula `producto.py`.
 
-| Línea | Hallazgos clave | Confianza |
+| Línea | Hallazgos clave | Confianza (y si está triangulado) |
 | --- | --- | --- |
 | Competencia | <por completar: H-COM-…> | |
 | Voz del usuario | <por completar: H-VOZ-…> | |
@@ -22,6 +22,10 @@ Solo hallazgos registrados, con su ID y la confianza que calcula `producto.py`.
 ## Triangulación
 
 <por completar: la salida de `producto.py triangulacion`: qué hallazgos clave cumplen y qué le falta a cada uno de los demás>
+
+## Cobertura y vacíos
+
+<por completar: lo que dice `producto.py cobertura`: qué mercados, idiomas y tiendas quedaron sin fuentes y por qué. Un vacío por límite de las herramientas se resuelve con un navegador o un CSV de reseñas, no reabriendo la línea>
 
 ## Evidencia análoga y pura hipótesis
 

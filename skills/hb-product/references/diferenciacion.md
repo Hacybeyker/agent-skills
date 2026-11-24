@@ -12,7 +12,7 @@ Si ya existen apps iguales o parecidas, la demanda está probada y la pregunta c
 4. Recorre los 12 vectores y anota el hueco de cada uno, o "sin hueco".
 5. Arma el cuadro ERRC, la clasificación Kano y el mapa de posicionamiento.
 6. Si a un hueco le falta evidencia, búscala y regístrala en la línea `diferenciacion` (`producto.py fuente` y `hallazgo`).
-7. Registra cada diferenciador con `producto.py diferenciador`: dice si es viable y por qué. El más fuerte va con `--principal`.
+7. Registra cada diferenciador con `producto.py diferenciador`: dice si es viable y por qué. Elige el principal con `--principal` o, después, con `producto.py principal --id D-…`.
 8. Abogado del diablo: por qué los competidores no lo hicieron ya y cuánto tardarían en copiarlo.
 9. Completa `diferenciacion.md` y `producto.py cerrar --sesion 1g`.
 
@@ -57,18 +57,36 @@ python3 -I <skill>/scripts/producto.py diferenciador --vector precio --texto "Pa
   --motivo "Cambiar de modelo les cuesta ingresos recurrentes" --semanas 2 --principal
 ```
 
-El script lo registra (`D-1`) y dice si es viable. Tiene que cumplir los cuatro criterios:
+El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja** o **todavía no viable**. Tiene que cumplir los cuatro criterios:
 
 1. **Evidencia.** Una de dos: un dolor o un pedido **triangulado en 2 competidores o más** (un hallazgo con sus 3 fuentes y `--competidores` con dos filas de la matriz), o un **vector medible comprobado en la matriz** en 2 competidores o más (`precio`, `rendimiento` por el tamaño, `anuncios`, `idioma`, `privacidad` por los permisos, `sin-conexion`, `accesibilidad`, `diseno` por la última actualización y `plataforma`). `usabilidad`, `funcionalidades` y `segmento` no se miden en la matriz: necesitan el dolor triangulado. Es el filtro del *diferenciador imaginario*.
 2. **Se percibe** (`--se-ve`). En la **ficha** de la tienda (precio, idioma, sin anuncios, diseño), que es lo que consigue descargas, o en el **uso** (rendimiento, usabilidad), que es lo que consigue retención y buenas notas. Lo ideal es tener uno viable de cada tipo: el script avisa cuál falta.
 3. **Copiabilidad** (`--copiable baja|media|alta`, con `--motivo`). Uno fácil de copiar sirve para entrar, pero no sostiene la posición.
 4. **Cabe en el presupuesto** (`--semanas`): se construye dentro de las semanas de la sesión 0.
 
-Un diferenciador que no es viable queda registrado igual, con lo que le falta. Si consigues la evidencia, vuelve a registrarlo y anula el anterior (`producto.py anular --id D-1 --motivo "…"`).
+Y además, **sus hallazgos tienen que estar triangulados** (la regla de [evidencia.md](evidencia.md)), todos los que cita:
+
+| Estado | Cuándo | Cuenta para la puerta 1 |
+| --- | --- | --- |
+| Viable | Los cuatro criterios y sus hallazgos triangulados | Sí |
+| Viable con confianza baja | Los cuatro criterios, pero algún hallazgo sin triangular | No: se muestra aparte, y el puntaje de diferenciación llega como máximo a 2 |
+| Todavía no viable | Falta alguno de los cuatro criterios | No |
+
+Un vector medible comprobado en la matriz cumple el criterio de evidencia, pero si el hallazgo que lo sostiene no está triangulado, el diferenciador queda con confianza baja. `producto.py triangulacion` dice qué le falta a cada hallazgo.
+
+Un diferenciador que no es viable queda registrado igual, con lo que le falta. Si consigues la evidencia (por ejemplo, una tercera fuente vigente del mismo hallazgo), el estado se recalcula solo; si cambia el diferenciador, vuelve a registrarlo y anula el anterior (`producto.py anular --id D-1 --motivo "…"`).
 
 ## El diferenciador principal
 
-Es el que sostiene la propuesta de valor (sesión 2), el que la sesión 3 pone a prueba con el abogado del diablo y el que el MVP incluye **siempre** (sesión 4). Elige el viable que mejor combine evidencia, que se vea en la ficha y que sea difícil de copiar. Solo hay uno: marcar otro con `--principal` reemplaza al anterior.
+Es el que sostiene la propuesta de valor (sesión 2), el que la sesión 3 pone a prueba con el abogado del diablo y el que el MVP incluye **siempre** (sesión 4). Elige el viable que mejor combine evidencia, que se vea en la ficha y que sea difícil de copiar. Solo hay uno: `producto.py principal --id D-2` (o un diferenciador nuevo con `--principal`) reemplaza al anterior. La puerta 1 exige que **sus hallazgos estén triangulados**: un principal viable con confianza baja no la cumple, aunque haya otro viable.
+
+**Se elige en la sesión 1g.** Con 1g cerrada, `diferenciador`, `principal` y `anular D-…` se niegan: cambiar el principal después (por ejemplo, porque la sesión 2 o la 3 encontró que no se sostiene) es una decisión del usuario. Regístralo como propuesta para la puerta siguiente, con la sesión que lo aplicaría:
+
+```bash
+python3 -I <skill>/scripts/producto.py propuesta --texto "Cambiar el principal a D-2: D-1 no sobrevive al abogado del diablo" --ajustar 1g
+```
+
+La puerta la muestra junto a los comandos de la decisión, con el `--ajustar 1g` ya listo. Si el usuario ajusta 1g, esa sesión elige el principal nuevo con `principal`.
 
 ## Diferenciarse no es copiar
 

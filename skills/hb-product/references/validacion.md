@@ -56,7 +56,7 @@ Por cada hipótesis, búsquedas pensadas para **perder**: "por qué fallaría <i
 
 Lo que aparece se registra y se enlaza: un hallazgo nuevo en la línea `validacion`, o `--en-contra` en un hallazgo propio. Si no aparece nada, se anota qué se buscó. "No busqué" no es lo mismo que "no hay".
 
-El diferenciador principal **sobrevive** si sus hipótesis quedan sostenidas, con confianza media o alta. Si queda débil o refutado, se dice: el usuario puede ajustar la sesión 1g en la puerta.
+El diferenciador principal **sobrevive** si sus hipótesis quedan sostenidas, con confianza media o alta. Si queda débil o refutado, se dice, y si otro diferenciador lo sostendría mejor, se deja como propuesta, nunca como un comando suelto: `producto.py propuesta --texto "<qué cambiar y por qué>" --ajustar 1g`. La puerta 2 la muestra y el usuario decide si reabre 1g.
 
 ## La hipótesis más riesgosa
 
@@ -70,4 +70,4 @@ En una idea nueva es un criterio de las puertas 2 y 3: sin métrica y umbral, la
 
 ## Lo que esta sesión no hace
 
-No cambia el puntaje ni los escenarios, no decide y no convierte "no encontré nada en contra" en "validado": deja escrito con qué confianza llega cada hipótesis a la construcción.
+No cambia el puntaje, los escenarios ni el diferenciador principal, no decide y no convierte "no encontré nada en contra" en "validado": deja escrito con qué confianza llega cada hipótesis a la construcción.

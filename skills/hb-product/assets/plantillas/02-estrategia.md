@@ -51,8 +51,8 @@ Construida sobre el diferenciador principal.
 
 Los calcula `producto.py escenarios --entrada escenarios.json`. Cada supuesto lleva el ID de su fuente; sin fuente, el escenario queda como *estimación*; con un análogo, *por analogía*. En un mercado saturado, los usuarios del caso base parten del lugar que ocuparía la app según su diferenciador, no del líder.
 
-<por completar: la tabla y los rótulos que imprime `producto.py escenarios`, y cuántos usuarios activos diarios hacen falta para la meta>
+<por completar: la tabla, los rótulos y los modelos de monetización que imprime `producto.py escenarios`: cuál es viable con evidencia (lo que pide la puerta 2) y, si hay meta, cuántos usuarios activos diarios hacen falta para llegar, como referencia>
 
 ## Para la puerta 2
 
-- <por completar: lo que el usuario tiene que saber antes de decidir>
+- <por completar: lo que el usuario tiene que saber antes de decidir; un cambio a una sesión cerrada va con `producto.py propuesta`>

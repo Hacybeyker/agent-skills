@@ -4,7 +4,7 @@
 
 ## Valores
 
-La tabla la escribe `producto.py criterio`: no la edites a mano.
+La tabla la escribe `producto.py criterio`: no la edites a mano. La meta de ingresos (`meta_ingresos_mes`) es opcional y solo una referencia, salvo que `meta_obligatoria` sea `si`.
 
 <!-- producto:criterios -->
 <!-- /producto:criterios -->

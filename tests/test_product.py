@@ -89,10 +89,13 @@ class Base(unittest.TestCase):
         return self.p(*args, ok=False)
 
     def nuevo(self, nombre="Riego en turnos", *extra):
-        return self.p("nuevo", "--nombre", nombre, "--meta", "300", "--semanas", "6", *extra)
+        return self.p("nuevo", "--nombre", nombre, "--meta", "300", "--semanas", "6", "--mercados", "MX",
+                      "--idiomas", "es", "--tiendas", "google-play", *extra)
 
-    def fuente(self, linea, cantidad=1, tipo="terceros", peldano=1, publicada="2026-06", dominio=None, autor=None):
-        """Registra fuentes de dominios distintos (o del mismo, si se pasa) y devuelve sus IDs."""
+    def fuente(self, linea, cantidad=1, tipo="terceros", peldano=1, publicada="2026-06", dominio=None, autor=None,
+               cobertura=True):
+        """Registra fuentes de dominios distintos (o del mismo, si se pasa) y devuelve sus IDs. Con cobertura, cada
+        fuente cubre el objetivo de `nuevo` (MX, es y google-play)."""
         ids = []
         for _ in range(cantidad):
             self.sitio += 1
@@ -101,6 +104,8 @@ class Base(unittest.TestCase):
                 "--peldano", peldano, "--resumen", "Resumen inventado %d" % self.sitio]
             if autor:
                 args += ["--autor", "%s %d" % (autor, self.sitio)]
+            if cobertura:
+                args += ["--mercados", "MX", "--idiomas", "es", "--tiendas", "google-play"]
             ids.append(re.search(r"S-[A-Z]{3}-\d+", self.p(*args)).group(0))
         return ids
 
@@ -201,7 +206,7 @@ class GuionTest(unittest.TestCase):
                 modulos.update(alias.name.split(".")[0] for alias in nodo.names)
             elif isinstance(nodo, ast.ImportFrom):
                 modulos.add(nodo.module.split(".")[0])
-        estandar = {"argparse", "contextlib", "json", "math", "os", "re", "shlex", "shutil", "sys", "time",
+        estandar = {"argparse", "contextlib", "csv", "io", "json", "math", "os", "re", "shlex", "shutil", "sys", "time",
                     "unicodedata", "datetime", "pathlib", "urllib"}
         self.assertEqual(modulos - estandar, set())
 
@@ -213,7 +218,8 @@ class GuionTest(unittest.TestCase):
     def test_cada_comando_tiene_ayuda(self):
         for comando in ("nuevo", "criterio", "tipo", "fuente", "hallazgo", "confianza", "competidor", "matriz",
                         "intento", "diferenciador", "anular", "triangulacion", "puntaje", "escenarios", "validacion",
-                        "trazabilidad", "cerrar", "puerta", "decidir", "siguiente", "estado", "archivar", "reabrir"):
+                        "trazabilidad", "cerrar", "puerta", "decidir", "siguiente", "estado", "archivar", "reabrir",
+                        "objetivo", "vacio", "cobertura", "resenas", "principal", "propuesta", "modelos", "consumo"):
             resultado = subprocess.run([sys.executable, "-I", str(SCRIPT), comando, "--help"], env=ENV,
                                        capture_output=True, text=True, encoding="utf-8")
             self.assertEqual(resultado.returncode, 0, comando)
@@ -355,9 +361,9 @@ class FuenteTest(Base):
 
     def test_sin_fecha_o_vieja_no_cuenta_como_vigente(self):
         argumentos = ["fuente", "--linea", "demanda", "--tipo", "medido", "--peldano", 1, "--resumen", "x"]
-        self.assertIn("no cuenta para triangular", self.p(*argumentos, "--url", "https://a.example", "--publicada",
+        self.assertIn("no cuenta para la confianza ni para triangular", self.p(*argumentos, "--url", "https://a.example", "--publicada",
                                                           "sin-fecha"))
-        self.assertIn("no cuenta para triangular", self.p(*argumentos, "--url", "https://b.example", "--publicada",
+        self.assertIn("no cuenta para la confianza ni para triangular", self.p(*argumentos, "--url", "https://b.example", "--publicada",
                                                           "2025-05-22"))
         self.assertIn("· vigente)", self.p(*argumentos, "--url", "https://c.example", "--publicada", "2025-05-23"))
 
@@ -380,7 +386,7 @@ class ConfianzaTest(Base):
         self.nuevo()
 
     def confianza(self, linea, fuentes, *extra):
-        return re.search(r"confianza ([a-z ]+) \(", self.hallazgo(linea, fuentes, *extra)[1]).group(1)
+        return re.search(r"confianza ([a-z ]+) · ", self.hallazgo(linea, fuentes, *extra)[1]).group(1)
 
     def test_tres_fuentes_independientes_y_vigentes_dan_alta(self):
         self.assertEqual(self.confianza("competencia", self.fuente("competencia", 3)), "alta")
@@ -414,7 +420,7 @@ class ConfianzaTest(Base):
     def test_sumar_una_fuente_de_un_peldano_lejano_no_baja_la_confianza(self):
         fuentes = self.fuente("competencia", 3, peldano=1) + self.fuente("competencia", 1, peldano=6)
         identificador, salida = self.hallazgo("competencia", fuentes)
-        self.assertIn("confianza alta (peldaño 1, directo", salida)
+        self.assertIn("confianza alta · triangulado (peldaño 1, directo", salida)
 
     def test_solo_opiniones_nunca_dan_alta(self):
         self.assertEqual(self.confianza("competencia", self.fuente("competencia", 3, "opinion")), "media")
@@ -709,20 +715,24 @@ class FlujoTest(Base):
         self.assertIn("antes va la sesión 1a", self.falla("cerrar", "--sesion", "1g"))
         self.assertIn("antes va la puerta 1", self.falla("cerrar", "--sesion", "2"))
 
-    def test_sin_meta_ni_presupuesto_la_sesion_0_no_cierra(self):
+    def test_sin_presupuesto_ni_objetivo_la_sesion_0_no_cierra_y_la_meta_es_opcional(self):
         self.p("nuevo", "--nombre", "Riego en turnos")
         self.completar("00-idea.md")
         self.completar("criterios.md")
         salida = self.falla("cerrar", "--sesion", "0")
-        self.assertIn("falta el criterio `meta_ingresos_mes`", salida)
+        self.assertNotIn("meta_ingresos_mes", salida)
         self.assertIn("falta el criterio `presupuesto_semanas`", salida)
+        self.assertIn("falta el objetivo de la sesión 0", salida)
+        self.p("criterio", "--clave", "presupuesto_semanas", "--valor", 6)
+        self.p("objetivo", "--mercados", "MX", "--idiomas", "es", "--tiendas", "ninguna")
+        self.assertIn("✔ Sesión 0 · Idea cerrada", self.p("cerrar", "--sesion", "0"))
 
     def test_las_cinco_lineas_van_en_paralelo_y_1g_se_abre_con_1a_y_1b(self):
         salida = self.sesion0()
         self.assertIn("Puedes abrir estos chats en paralelo", salida)
         for sesion in ("1a · Competencia", "1b · Voz del usuario", "1c · Demanda", "1d · Monetización",
                        "1e · Políticas y riesgos"):
-            self.assertIn("Chat nuevo · Sesión %s · modelo sugerido: intermedio" % sesion, salida)
+            self.assertIn("Chat nuevo · Sesión %s · Modelo: Sonnet 5.5 · Esfuerzo: medio" % sesion, salida)
         self.assertIn("Sigue hb-product con %s: sesión 1a · Competencia. No hagas commit ni push." % (
             self.carpeta / "estado.md"), salida)
         self.assertNotIn("Chat nuevo · Sesión 1g", salida)
@@ -733,14 +743,16 @@ class FlujoTest(Base):
         self.hallazgo("competencia", fuentes)
         self.assertNotIn("Sesión 1g", self.cerrar("1a", "01-investigacion/competencia.md").split("La sesión")[0])
         salida = self.linea("1b", "voz-del-usuario") and self.p("siguiente")
-        self.assertIn("Chat nuevo · Sesión 1g · Diferenciación · modelo sugerido: alto", salida)
+        self.assertIn("Chat nuevo · Sesión 1g · Diferenciación · Modelo: Opus 5.5 · Esfuerzo: alto", salida)
         self.assertIn("Chat nuevo · Sesión 1c · Demanda", salida)  # 1g no espera a 1c–1e
         self.assertIn("idea variante", salida)
         self.assertNotIn("Chat nuevo · Sesión 1f", salida)
 
     def test_de_la_idea_al_prd_con_las_tres_puertas(self):
         salida = self.hasta_puerta1()
-        self.assertIn("Terminal · Puerta 1 · Oportunidad", salida)
+        self.assertIn("Puerta 1 · Oportunidad · idea existente · cumple 5 de 5 criterios", salida)
+        self.assertIn("✔ Los hallazgos del diferenciador principal están triangulados · D-1: H-VOZ-1", salida)
+        self.assertNotIn("puerta --n", salida)  # el veredicto ya viene en siguiente: no hay paso aparte
         self.assertIn("el agente nunca corre este comando", salida)
         self.assertIn("decidir --puerta 1 --seguir --carpeta product", salida)
         self.assertIn("cd %s && python3 -I " % self.tmp, salida)
@@ -749,28 +761,30 @@ class FlujoTest(Base):
         self.assertIn("✔ Puntaje de 17/25 o más · tiene 19/25", salida)
         self.assertIn("✔ Demanda con confianza media o alta · es alta", salida)
         self.assertIn("✔ Al menos 1 diferenciador viable", salida)
-        self.assertIn("Veredicto: cumple 4 de 4 criterios", salida)
+        self.assertIn("Veredicto: cumple 5 de 5 criterios", salida)
         self.assertIn("La cantidad de competidores no es un criterio", salida)
         self.assertIn("Antes hay que decidir seguir en la puerta 1", self.falla("decidir", "--puerta", 2, "--seguir"))
 
         salida = self.p("decidir", "--puerta", 1, "--seguir")
         self.assertIn("Puedes abrir estos chats en paralelo", salida)
-        self.assertIn("Sesión 2 · Estrategia · modelo sugerido: alto", salida)
+        self.assertIn("Sesión 2 · Estrategia · Modelo: Opus 5.5 · Esfuerzo: alto", salida)
         self.assertIn("Sesión 3 · Validación documental", salida)
         self.assertIn("Puerta 1: seguir, decidida el %s" % HOY, salida)
         self.assertIn("decidir --puerta 1 --reabrir", salida)
         self.escenarios()
         self.assertIn("Sesión 3", self.cerrar("2", "02-estrategia.md"))  # la puerta 2 espera a las dos
         write(self.carpeta / "03-validacion.md", HIPOTESIS)
-        self.assertIn("Terminal · Puerta 2 · Viabilidad", self.cerrar("3"))
+        self.assertIn("Puerta 2 · Viabilidad · idea existente · cumple 3 de 3 criterios", self.cerrar("3"))
         salida = self.p("puerta", "--n", 2)
-        self.assertIn("✔ El escenario base alcanza la meta de ingresos · 800 de 300 USD al mes", salida)
+        self.assertIn("✔ Al menos un modelo de monetización viable con evidencia · Anuncios · banner: 120 USD al mes "
+                      "en el caso base; Compra · Pago único: 680 USD al mes en el caso base", salida)
+        self.assertIn("· Meta de ingresos (referencial, no es criterio): el caso base da 800 de 300 USD al mes", salida)
         self.assertIn("✔ Ninguna hipótesis crítica refutada", salida)
         self.assertIn("✔ El diferenciador principal sobrevive al abogado del diablo", salida)
 
         self.assertIn("Sesión 4 · PRD", self.p("decidir", "--puerta", 2, "--seguir"))
         write(self.carpeta / "04-prd.md", PRD)
-        self.assertIn("Terminal · Puerta 3 · Alcance", self.cerrar("4"))
+        self.assertIn("Puerta 3 · Alcance · idea existente · cumple 5 de 5 criterios", self.cerrar("4"))
         salida = self.p("puerta", "--n", 3)
         for criterio in ("El MVP cabe en el presupuesto de semanas · 5 de 6 semana(s)",
                          "El diferenciador principal está en el MVP · D-1 en F-01",
@@ -782,7 +796,7 @@ class FlujoTest(Base):
         self.assertIn("hb-implement", salida)
         guardadas = self.datos("decisiones.json")
         self.assertEqual([(d["puerta"], d["decision"], d["cumple"], d["total"]) for d in guardadas],
-                         [(1, "seguir", 4, 4), (2, "seguir", 3, 3), (3, "seguir", 5, 5)])
+                         [(1, "seguir", 5, 5), (2, "seguir", 3, 3), (3, "seguir", 5, 5)])
         self.assertTrue(all(d["fecha"].startswith(HOY) and d["criterios"] for d in guardadas))
         estado = self.p("estado")
         self.assertIn("| P3 · Alcance | seguir el %s" % HOY, estado)
@@ -795,7 +809,7 @@ class FlujoTest(Base):
         self.assertIn("antes cierra la(s) sesión(es) 1f", self.falla("decidir", "--puerta", 1, "--seguir"))
         self.cerrar("1f", "01-sintesis.md")
         salida = self.p("decidir", "--puerta", 1, "--seguir")
-        self.assertIn("cumplía 3 de 4 criterios", salida)
+        self.assertIn("cumplía 4 de 5 criterios", salida)
         self.assertIn("Sigues con 1 criterio(s) sin cumplir", salida)
 
     def test_la_decision_registra_desde_donde_se_corrio(self):
@@ -812,7 +826,7 @@ class FlujoTest(Base):
         self.p("decidir", "--puerta", 1, "--seguir")
         salida = self.p("decidir", "--puerta", 1, "--reabrir")
         self.assertIn("vuelve a quedar pendiente", salida)
-        self.assertIn("Terminal · Puerta 1", salida)
+        self.assertIn("Puerta 1 · Oportunidad · idea existente", salida)
         self.assertIn("| P1 · Oportunidad | pendiente |", self.p("estado"))
 
     def test_ajustar_reabre_la_sesion_y_lo_que_depende_de_ella(self):
@@ -829,7 +843,7 @@ class FlujoTest(Base):
         self.assertIn("Chat nuevo · Sesión 1c", salida)
         self.assertIn("| P1 · Oportunidad | pendiente |", self.p("estado"))
         self.cerrar("1c")
-        self.assertIn("Terminal · Puerta 1", self.cerrar("1f"))
+        self.assertIn("Puerta 1 · Oportunidad · idea existente", self.cerrar("1f"))
 
     def test_descartar_exige_el_motivo_y_archiva_la_idea(self):
         self.hasta_puerta1()
@@ -846,7 +860,7 @@ class FlujoTest(Base):
         self.assertIn("riego-en-turnos: Los tres líderes ya ofrecen pago único", salida)
         salida = self.p("reabrir")
         self.assertIn("reabierta", salida)
-        self.assertIn("Terminal · Puerta 1", salida)
+        self.assertIn("Puerta 1 · Oportunidad · idea existente", salida)
         self.assertFalse((self.carpeta / "archivo" / "riego-en-turnos").exists())
 
 
@@ -888,9 +902,9 @@ class IdeaNuevaTest(Base):
     def test_el_hallazgo_registra_su_peldano_y_la_confianza_queda_limitada(self):
         self.investigar()
         salida = self.p("triangulacion")
-        self.assertIn("H-DEM-1 · confianza media · peldaño 5 (necesidad de fondo)", salida)
-        self.assertIn("H-VOZ-1 · confianza media · peldaño 4 (sustituto)", salida)
-        self.assertIn("H-POL-1 · confianza alta · peldaño 1 (directo)", salida)
+        self.assertIn("H-DEM-1 · confianza media · triangulado · peldaño 5 (necesidad de fondo)", salida)
+        self.assertIn("H-VOZ-1 · confianza media · triangulado · peldaño 4 (sustituto)", salida)
+        self.assertIn("H-POL-1 · confianza alta · triangulado · peldaño 1 (directo)", salida)
 
     def test_sin_registrar_la_busqueda_de_intentos_la_puerta_no_se_cumple(self):
         self.investigar()
@@ -922,7 +936,8 @@ class IdeaNuevaTest(Base):
             "30 % vuelve a los 30 días", "—"))
         self.cerrar("3")
         salida = self.p("puerta", "--n", 2)
-        self.assertIn("✔ El escenario base por analogía alcanza la meta", salida)
+        self.assertIn("✔ Al menos un modelo de monetización viable con evidencia (por analogía)", salida)
+        self.assertNotIn("alcanza la meta", salida)
         self.assertIn("✖ La hipótesis más riesgosa, identificada y medible después del lanzamiento", salida)
         write(self.carpeta / "03-validacion.md", HIPOTESIS.replace("| D-1 |", "| — |"))
         self.assertIn("✔ La hipótesis más riesgosa, identificada y medible después del lanzamiento · HIP-01",
@@ -948,7 +963,10 @@ class IdeaDebilTest(Base):
         salida = self.p("puerta", "--n", 1)
         self.assertIn("✖ Puntaje de 17/25 o más · tiene 14/25", salida)
         self.assertIn("✔ Demanda con confianza media o alta", salida)
-        self.assertIn("✖ Al menos 1 diferenciador viable · 0 viable(s) de 0 registrado(s)", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 0 viable(s) de 0 "
+                      "registrado(s)", salida)
+        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados · no hay un diferenciador "
+                      "principal registrado", salida)
         self.assertIn("✖ Riesgo de políticas distinto de 1, o con una mitigación escrita · es 1", salida)
         self.assertIn("ni la saturación ni la falta de datos descartan una idea", salida)
         motivo = "Sin diferenciador viable y con riesgo de políticas 1: el sistema ya trae la función"
@@ -957,7 +975,7 @@ class IdeaDebilTest(Base):
         decision = json.loads((archivada / "decisiones.json").read_text(encoding="utf-8"))[-1]
         self.assertEqual((decision["decision"], decision["motivo"], decision["cumple"]), ("descartar", motivo, 1))
         fallidos = [c["texto"] for c in decision["criterios"] if not c["cumple"]]
-        self.assertEqual(len(fallidos), 3)
+        self.assertEqual(len(fallidos), 4)
         self.assertFalse(any("competidores" in texto for texto in fallidos))
 
 
@@ -1000,11 +1018,18 @@ class ValidacionTest(Base):
         write(self.carpeta / "03-validacion.md", HIPOTESIS.replace("| D-1 |", "| — |"))
         self.assertIn("ninguna hipótesis lo pone a prueba", self.p("puerta", "--n", 2))
 
-    def test_el_escenario_base_por_debajo_de_la_meta_no_pasa(self):
+    def test_el_escenario_base_por_debajo_de_la_meta_solo_bloquea_si_es_obligatoria(self):
         self.hasta_puerta2()
         self.escenarios(dau=100)
-        self.assertIn("✖ El escenario base alcanza la meta de ingresos · 40 de 300 USD al mes",
-                      self.p("puerta", "--n", 2))
+        salida = self.p("puerta", "--n", 2)
+        self.assertIn("cumple 3 de 3 criterios", salida)
+        self.assertIn("· Meta de ingresos (referencial, no es criterio): el caso base da 40 de 300 USD al mes",
+                      salida)
+        self.p("criterio", "--clave", "meta_obligatoria", "--valor", "si", "--motivo", "El usuario la exige")
+        salida = self.p("puerta", "--n", 2)
+        self.assertIn("✖ El escenario base alcanza la meta de ingresos (marcada como obligatoria) · 40 de 300 USD al "
+                      "mes", salida)
+        self.assertIn("cumple 3 de 4 criterios", salida)
 
 
 class TrazabilidadTest(Base):

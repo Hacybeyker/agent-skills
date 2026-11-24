@@ -12,7 +12,7 @@ python3 -I <skill>/scripts/producto.py fuente --linea demanda --url https://ejem
 
 Devuelve el ID (`S-DEM-1`). Los códigos por línea: `COM` competencia, `VOZ` voz del usuario, `DEM` demanda, `MON` monetización, `POL` políticas, `DIF` diferenciación, `EST` estrategia y `VAL` validación. Cada sesión registra **solo en su línea**; puede citar fuentes de otra.
 
-- **`--publicada`:** `AAAA-MM-DD`, `AAAA-MM` o `sin-fecha`. Una fuente sin fecha o fuera de la ventana no cuenta para triangular. Para un dato vivo (la ficha de una tienda, un contador), la fecha es la del día en que lo leíste.
+- **`--publicada`:** `AAAA-MM-DD`, `AAAA-MM` o `sin-fecha` (con `--archivo`, también `auto`). Una fuente sin fecha o fuera de la ventana no es vigente: no cuenta para triangular ni para la confianza (abajo). Para un dato vivo (la ficha de una tienda, un contador), la fecha es la del día en que lo leíste; para una reseña, la de la reseña. Buscar la fecha casi siempre vale más que registrar `sin-fecha`.
 - **`--tipo`:**
 
 | Tipo | Qué es | Ejemplos |
@@ -25,8 +25,10 @@ Devuelve el ID (`S-DEM-1`). Los códigos por línea: `COM` competencia, `VOZ` vo
 - **`--peldano`:** de 1 a 6, según la escalera de [analogia.md](analogia.md). En una idea con competencia casi todo es 1.
 - **`--autor`:** la app, la empresa o el medio que publica. **Nunca un nombre de usuario** (el script lo rechaza si empieza con `@` o `u/`).
 - **`--resumen`:** 3 líneas como máximo. Parafrasea; una cita textual va breve y sin quién la escribió.
+- **`--mercados`, `--idiomas`, `--tiendas`:** la cobertura que aporta la fuente, con las etiquetas del objetivo ([investigacion.md](investigacion.md) · Cobertura).
+- **`--archivo` en vez de `--url`:** un CSV de reseñas que aportó el usuario. Lleva `--autor` (la app y la tienda de esas reseñas), que es lo que la hace independiente de otra.
 
-La misma URL no se registra dos veces en una línea. Si un dato lo aporta el usuario desde una herramienta de pago suya, la fuente es la página pública de esa herramienta y el resumen dice que el dato lo aportó el usuario: 0.1.0 trabaja solo con la web pública.
+La misma URL (o el mismo archivo) no se registra dos veces en una línea. Si un dato lo aporta el usuario desde una herramienta de pago suya, la fuente es la página pública de esa herramienta, o el CSV que exportó, y el resumen dice que lo aportó el usuario.
 
 ## Registrar un hallazgo
 
@@ -46,20 +48,20 @@ Si te equivocas, `producto.py anular --id <ID> --motivo "<por qué>"` deja el re
 Un hallazgo clave está triangulado cuando tiene **3 fuentes independientes y vigentes** y, si es de demanda o de monetización, al menos una de tipo `medido`.
 
 - **Independientes:** de autor distinto. Sin `--autor`, cuenta el dominio: tres páginas del mismo sitio son una sola fuente. Dos páginas de un mismo dominio cuentan por separado solo si sus autores son distintos (las fichas de dos apps en la misma tienda, dos medios en la misma plataforma).
-- **Vigentes:** publicadas dentro de la ventana (`vigencia_meses`, 18 por defecto).
+- **Vigentes:** publicadas dentro de la ventana (`vigencia_meses`, 18 por defecto). Una fuente sin fecha o fuera de la ventana no cuenta, y se nombra en lo que le falta al hallazgo.
 - **En una idea nueva** se triangula el peldaño más cercano a lo directo que tenga evidencia: el problema o el análogo, no la solución exacta.
 
-`producto.py triangulacion` lista cada hallazgo clave y lo que le falta. Si no lo consigues dentro del presupuesto, el hallazgo se queda con su confianza real y la síntesis lo dice.
+`producto.py triangulacion` lista cada hallazgo clave: ✔ si cumple esta regla, y lo que le falta si no. La búsqueda de evidencia en contra es otra regla (la del abogado del diablo) y se lista aparte, sin cambiar la marca. Si no lo consigues dentro del presupuesto, el hallazgo se queda con su confianza real y la síntesis lo dice.
 
 ## Confianza
 
-La calcula el script; tú no la escribes.
+La calcula el script; tú no la escribes. **Usa la misma regla de vigencia que la triangulación**: solo cuentan las fuentes vigentes. Una fuente sin fecha o fuera de la ventana tiene un peso menor declarado: no sube la confianza ni ayuda a triangular, y un hallazgo que solo tiene fuentes así queda en baja. Por eso la confianza se escribe siempre con su triangulación, como la imprime el script: "confianza media · sin triangular". Una confianza media nunca se presenta como si el hallazgo estuviera confirmado.
 
 | Confianza | Cuándo |
 | --- | --- |
-| Alta | Triangulado, y al menos 2 de sus fuentes independientes no son `opinion` |
+| Alta | Triangulado, y al menos 2 de sus fuentes independientes no son `opinion`. Sin triangular nunca es alta |
 | Media | 2 fuentes independientes y vigentes (al menos una que no sea `opinion`), o 3 que no alcanzan lo anterior |
-| Baja | 1 fuente, 2 que son solo opinión, o ninguna vigente |
+| Baja | 1 fuente vigente, 2 que son solo opinión, o ninguna vigente |
 | Sin evidencia | Ningún hallazgo sostiene la afirmación |
 
 Después se aplican tres límites:
@@ -81,6 +83,6 @@ Cuando uno aplica, se escribe en el entregable junto al hallazgo.
 
 ## Privacidad y legalidad
 
-- Nada de nombres de usuario, fotos, enlaces a perfiles ni datos personales de quienes opinan, ni en el registro ni en los entregables.
+- Nada de nombres de usuario, fotos, enlaces a perfiles ni datos personales de quienes opinan, ni en el registro ni en los entregables. Un CSV de reseñas se lee con `producto.py resenas`, que nunca muestra las columnas de autor.
 - Solo páginas públicas y dentro de sus términos de uso. Sin scraping masivo, sin saltar muros de pago ni inicios de sesión.
 - De la competencia se registran hechos (precio, tamaño, idiomas, quejas), nunca sus textos, íconos ni capturas.

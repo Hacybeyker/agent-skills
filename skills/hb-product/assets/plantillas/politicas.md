@@ -37,6 +37,12 @@
 | --- | --- | --- | --- | --- |
 | <por completar: H-POL-1> | | | | |
 
+## Cobertura
+
+Fuentes de cada mercado y cada tienda del objetivo, o el vacío registrado con su motivo (`producto.py vacio`). Un vacío por límite de las herramientas se dice así, no como falta de evidencia.
+
+<por completar: la salida de `producto.py cobertura --linea politicas`>
+
 ## ⚠ Sin evidencia
 
 - <por completar: lo que se afirma sin fuente, o "nada">

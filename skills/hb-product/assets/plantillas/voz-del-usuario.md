@@ -30,6 +30,12 @@ Frecuencia **por competidor** (o por sustituto, si la idea es nueva): en cuánta
 
 <por completar: usuarios satisfechos con lo que hay, o qué se buscó y no apareció>
 
+## Cobertura
+
+Fuentes de cada idioma y cada tienda del objetivo, o el vacío registrado con su motivo (`producto.py vacio`). Un vacío por límite de las herramientas se dice así, no como falta de evidencia.
+
+<por completar: la salida de `producto.py cobertura --linea voz-del-usuario`>
+
 ## ⚠ Sin evidencia
 
 - <por completar: lo que se afirma sin fuente, o "nada">

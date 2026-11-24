@@ -9,14 +9,46 @@ Cada línea es una sesión en su propio chat (o en su propio subagente) y pueden
 1. Primera línea: `Sesión 1c · Demanda (<motivo>)`.
 2. Lee `00-idea.md` y `criterios.md`. No leas los archivos de las otras líneas: están a medias.
 3. `producto.py tipo`: el tipo de idea y tu presupuesto. Si todavía no está registrado, investiga como si hubiera competencia y vuelve a consultarlo antes de cerrar.
-4. Busca según la tabla de tu línea, en los mercados y los idiomas de `00-idea.md`.
-5. Por cada página útil, `producto.py fuente`. Nunca copies la página: 3 líneas en `--resumen`.
+4. `producto.py cobertura --linea <tu línea>`: los mercados, idiomas y tiendas que te tocan. Busca según la tabla de tu línea **en cada uno**, no solo en el que más resultados da.
+5. Por cada página útil, `producto.py fuente` con la cobertura que aporta (`--mercados`, `--idiomas`, `--tiendas`). Nunca copies la página: 3 líneas en `--resumen`.
 6. Cuando una afirmación tiene sus fuentes, `producto.py hallazgo`; los que sostienen el puntaje o una puerta llevan `--critico`.
 7. **Abogado del diablo:** por cada hallazgo clave, una búsqueda en contra, registrada con `--en-contra` o `--sin-contra`.
-8. Completa tu `.md` con los IDs y tu lectura. Lo que no tiene fuente va en "⚠ Sin evidencia". Tus notas para las otras sesiones van en "Para la síntesis", no en `estado.md`.
-9. `producto.py cerrar --sesion <id>` y pega la salida.
+8. Lo que quedó sin fuentes, regístralo como vacío con su motivo (`producto.py vacio`, abajo). La línea no cierra con huecos sin registrar.
+9. Completa tu `.md` con los IDs, tu lectura y la salida de `cobertura`. Lo que no tiene fuente va en "⚠ Sin evidencia". Tus notas para las otras sesiones van en "Para la síntesis", no en `estado.md`.
+10. `producto.py cerrar --sesion <id>` y pega la salida.
 
 **No hagas:** escribir en archivos de otra línea, calcular puntajes o tamaños por tu cuenta, recomendar seguir o descartar, ni seguir con otra sesión en el mismo chat.
+
+## Cobertura por mercado, idioma y tienda
+
+La sesión 0 registra el objetivo (`producto.py objetivo --mercados MX,ES --idiomas es,pt --tiendas google-play,app-store`). Cada línea cubre lo que le corresponde:
+
+| Línea | Necesita fuentes de cada |
+| --- | --- |
+| Competencia | Mercado y tienda |
+| Voz del usuario | Idioma y tienda |
+| Demanda | Mercado |
+| Monetización | Mercado |
+| Políticas y riesgos | Mercado y tienda |
+
+- Una fuente cubre lo que dicen sus etiquetas: `fuente … --mercados MX --idiomas es --tiendas google-play`. Usa las mismas etiquetas que el objetivo. Si ya registraste la URL, repetir `fuente` con etiquetas nuevas se las agrega sin duplicarla.
+- Lo que no se pudo cubrir se registra como **vacío**, con un motivo: `producto.py vacio --linea voz-del-usuario --tienda google-play --motivo herramienta --texto "<qué intentaste y qué pasó>"`.
+
+| `--motivo` | Cuándo |
+| --- | --- |
+| `herramienta` | La página existe, pero tus herramientas no la leen: dinámica, bloqueada o con inicio de sesión |
+| `sin-resultados` | Buscaste en ese mercado o idioma y no hay nada sobre el tema. Es evidencia: dilo así en tu archivo |
+| `presupuesto` | Se te acabaron las búsquedas antes de llegar |
+
+- `producto.py cobertura` lista por línea lo cubierto (✔), los vacíos (⚠) y los huecos sin registrar (✖). La síntesis y la puerta 1 los muestran.
+
+## Fuentes difíciles
+
+Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTube son justo las fuentes de la voz del usuario, y casi siempre son páginas dinámicas o bloqueadas para una lectura web simple. En este orden:
+
+1. **Herramientas de navegador.** Si las tienes (Claude in Chrome, el navegador integrado de tu herramienta u otro), úsalas para esas páginas: abrir la ficha, ordenar por recientes, filtrar de 1 a 3★ y leer lo visible. Las mismas reglas: solo lo público, sin iniciar sesión, sin saltar muros, sin automatizar más allá de leer, y cada página cuenta como una lectura del presupuesto. La fuente es la URL de la página.
+2. **Un CSV que aporta el usuario.** Si el usuario exportó reseñas (de una herramienta suya o de su propia recolección), regístralo como fuente: `producto.py fuente --linea voz-del-usuario --archivo <ruta.csv> --autor "<app> · <tienda>" --publicada auto --tipo usuario --peldano 1 --resumen "…" --tiendas <tienda>`. `--publicada auto` toma la fecha de la reseña más reciente; los idiomas salen de su columna, si la tiene. Léelo con `producto.py resenas --archivo <ruta.csv> [--estrellas 1-3] [--idioma es] [--limite 30]`: muestra las recientes primero, cortas y **sin columnas de autor**. Nunca abras el CSV entero en el chat. Dos CSV de la misma app y tienda cuentan como una sola fuente.
+3. **Si nada de eso alcanza**, registra el vacío con `--motivo herramienta`. No es falta de evidencia: es un límite de las herramientas, y la puerta 1 lo muestra así. **No sugieras reabrir la línea** para resolverlo: con las mismas herramientas da lo mismo. Lo que sí lo resuelve es un navegador o un CSV; dilo en "Para la síntesis".
 
 ## 1a · Competencia
 
@@ -37,7 +69,7 @@ Cada línea es una sesión en su propio chat (o en su propio subagente) y pueden
 
 | Qué buscar | Dónde |
 | --- | --- |
-| Dolores, pedidos y quejas de cada competidor | Reseñas de 1 a 3★ visibles en la ficha, ordenadas por recientes |
+| Dolores, pedidos y quejas de cada competidor | Reseñas de 1 a 3★ visibles en la ficha, ordenadas por recientes, en cada idioma y tienda del objetivo (ver "Fuentes difíciles") |
 | Cómo habla del problema quien lo tiene | Foros, Reddit, comentarios de YouTube y TikTok, grupos públicos, blogs |
 | En una idea nueva | Quejas sobre cómo se resuelve hoy (peldaño 4) y conversaciones sobre la necesidad de fondo (peldaño 5) |
 

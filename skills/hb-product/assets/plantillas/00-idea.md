@@ -28,18 +28,22 @@ El "trabajo" del usuario, **sin nombrar la solución**. Es el último peldaño d
 
 <por completar: Android, iOS, web o multiplataforma, y por qué>
 
-## Mercados e idiomas
+## Mercados, idiomas y tiendas
 
-<por completar: países e idiomas del lanzamiento>
+Los mismos que registra `producto.py objetivo`: cada línea de investigación necesita fuentes de cada uno.
+
+- **Mercados:** <por completar: países o regiones del lanzamiento>
+- **Idiomas:** <por completar: idiomas de la app y de sus usuarios>
+- **Tiendas:** <por completar: Google Play, App Store, otra, o "ninguna" si es web>
 
 ## Modelo de negocio
 
 <por completar: anuncios, compra única, suscripción, afiliados o una mezcla; o "por definir en la sesión 1d">
 
-## Meta de ingresos y presupuesto
+## Presupuesto y meta de ingresos
 
-- **Meta de ingresos netos al mes:** <por completar: el mismo valor de `meta_ingresos_mes` en criterios.md, con su moneda y su plazo>
 - **Presupuesto de semanas para el MVP:** <por completar: el mismo valor de `presupuesto_semanas`>
+- **Meta de ingresos netos al mes (opcional):** <por completar: el valor de `meta_ingresos_mes` con su moneda y su plazo, o "sin meta". Es una referencia: solo es criterio de la puerta 2 si el usuario la marcó como obligatoria>
 
 ## Lo que no debe ser
 

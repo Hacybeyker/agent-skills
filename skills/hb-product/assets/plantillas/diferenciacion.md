@@ -49,11 +49,11 @@ Un vector sin hueco se anota igual, con "sin hueco": también es un resultado.
 
 Registrados con `producto.py diferenciador`, que dice si cada uno es viable. Si ninguno lo es, se dice: es un resultado válido y la puerta 1 lo muestra.
 
-| ID | Vector | Diferenciador | Hallazgos | Se ve en | Copiable | Semanas | ¿Viable? |
+| ID | Vector | Diferenciador | Hallazgos | Se ve en | Copiable | Semanas | Estado (viable, confianza baja o no viable) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | <por completar: D-1, o "ninguno"> | | | | | | | |
 
-**Diferenciador principal:** <por completar: el ID y por qué ese, o "ninguno">
+**Diferenciador principal:** <por completar: el ID y por qué ese, o "ninguno". La puerta 1 exige que sus hallazgos estén triangulados>
 
 ## Abogado del diablo
 

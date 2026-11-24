@@ -32,6 +32,12 @@ Dato medido o estimación. Una estimación dice cómo se calculó, con qué supu
 
 <por completar: señales de demanda en caída o inexistente, o qué se buscó y no apareció>
 
+## Cobertura
+
+Fuentes de cada mercado del objetivo, o el vacío registrado con su motivo (`producto.py vacio`). Un vacío por límite de las herramientas se dice así, no como falta de evidencia.
+
+<por completar: la salida de `producto.py cobertura --linea demanda`>
+
 ## ⚠ Sin evidencia
 
 - <por completar: lo que se afirma sin fuente, o "nada">

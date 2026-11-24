@@ -34,6 +34,12 @@ Lo que la sesión 2 pone en `escenarios.json`, cada uno con el ID de su fuente.
 
 <por completar: señales de que nadie paga o de que el modelo no cierra, o qué se buscó y no apareció>
 
+## Cobertura
+
+Fuentes de cada mercado del objetivo, o el vacío registrado con su motivo (`producto.py vacio`). Un vacío por límite de las herramientas se dice así, no como falta de evidencia.
+
+<por completar: la salida de `producto.py cobertura --linea monetizacion`>
+
 ## ⚠ Sin evidencia
 
 - <por completar: lo que se afirma sin fuente, o "nada">

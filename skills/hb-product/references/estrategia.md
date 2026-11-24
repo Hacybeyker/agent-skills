@@ -1,6 +1,6 @@
 # Estrategia (sesión 2)
 
-Convierte la síntesis en una estrategia y en un modelo de negocio con números. Corre en paralelo con la sesión 3; la puerta 2 espera a las dos.
+Convierte la síntesis en una estrategia y en un modelo de negocio con números. Corre en paralelo con la sesión 3; la puerta 2 espera a las dos. Lo que la puerta 2 pide de esta sesión es **al menos un modelo de monetización viable con evidencia**; la meta de ingresos, si la hay, es una referencia.
 
 ## Presupuesto y lista de tareas
 
@@ -15,7 +15,7 @@ Convierte la síntesis en una estrategia y en un modelo de negocio con números.
 7. Completa `02-estrategia.md` con la tabla y los rótulos que imprime el script.
 8. `producto.py cerrar --sesion 2` y pega la salida.
 
-Tus notas van en "Para la puerta 2" de tu archivo, no en `estado.md`: la sesión 3 corre al mismo tiempo.
+Tus notas van en "Para la puerta 2" de tu archivo, no en `estado.md`: la sesión 3 corre al mismo tiempo. Si la propuesta de valor pide otro diferenciador principal, no lo cambies ni des un comando para hacerlo: `producto.py propuesta --texto "…" --ajustar 1g` lo deja para la puerta.
 
 ## Usuario objetivo y Jobs To Be Done
 
@@ -83,6 +83,7 @@ Los calcula el script con los supuestos de `escenarios.json`; la plantilla trae 
 - **Cada supuesto lleva su fuente** (`"fuente": "S-…"`). Sin fuente, el escenario sale rotulado *estimación*, con la lista de los supuestos sin respaldo. Un número suelto en vez del objeto vale igual en los tres casos y cuenta como sin fuente.
 - **Por analogía.** Si la idea es nueva, si pones `"analogia": true` o si una fuente es de los peldaños 3 a 6, el escenario sale rotulado *por analogía* y el rango se abre: pesimista × 0,5 y optimista × 1,5.
 - **Mercado saturado.** Los usuarios del caso base parten del lugar que ocuparía la app según su diferenciador (un competidor de media tabla, con su fuente), no del líder.
-- **La meta.** La salida compara el caso base con `meta_ingresos_mes` y dice cuántos usuarios activos diarios hacen falta para llegar. Ese número va a `02-estrategia.md`: es la pregunta que el usuario tiene que poder responder antes de la puerta 2.
+- **Modelos de monetización.** La salida lista cada modelo (cada formato de anuncio y cada compra o suscripción, sumando los mercados) con lo que da en el caso base. Es **viable con evidencia** si genera ingresos en el caso base y todos sus supuestos citan su fuente (los usuarios, la proporción diaria si es una compra, las impresiones, el eCPM o la conversión; el precio no, porque es una decisión). La puerta 2 pide al menos uno. Si ninguno lo es, se dice qué fuente falta: no se inventa.
+- **La meta.** Es **opcional y referencial**: si existe, la salida compara el caso base con `meta_ingresos_mes` y dice cuántos usuarios activos diarios hacen falta para llegar, solo como referencia. Nunca bloquea la puerta ni cuenta como riesgo, salvo que el usuario la haya marcado como obligatoria (`meta_obligatoria`), y entonces es un criterio más de la puerta 2.
 
-No ajustes los supuestos para que el caso base llegue a la meta: si no llega, se dice, y el usuario decide.
+No ajustes los supuestos para que el caso base llegue a la meta ni para que un modelo parezca viable: si no llega, se dice, y el usuario decide.
