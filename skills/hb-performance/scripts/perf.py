@@ -24266,7 +24266,7 @@ def setup_warning(root):
         agents = ""
     missing = "no encontré la instrumentación en el repo (ni PerfHooks.kt%s, bajo %s)" % (
         "" if perf_set else " ni un source set src/perf", root)
-    if not re.search(r"setup\s+listo", agents, re.I):
+    if not re.search(r"setup\s+listo", agents, re.I) and not agents_setup(root)["en_parche"]:
         return "%s: falta la sesión 0 (setup) antes de medir; sin ella no salen las marcas ni las secciones" % missing
     # La línea que dice cómo reaplicarlo: la de "setup listo" si lo dice ahí; si no, una de la sección de rendimiento.
     hint, section = "", False
@@ -24280,8 +24280,8 @@ def setup_warning(root):
     how = ('AGENTS.md dice: "%s". ' % hint if hint else "") + (
         "`perf.py setup --estado` dice el caso y el comando que la repone (si el setup está en un parche, `setup --reponer` "
         "lo aplica después de comprobarlo); si se perdió, repite la sesión 0 (perf.py instrumentar no pisa lo que exista)")
-    return ('AGENTS.md dice "setup listo" pero %s: las marcas no van a salir y la variante medida puede no compilar. '
-            "Reponla antes de seguir: %s" % (missing, how))
+    return ('AGENTS.md dice %s pero %s: las marcas no van a salir y la variante medida puede no compilar. '
+            "Reponla antes de seguir: %s" % ("\"setup listo\"" if re.search(r"setup\s+listo", agents, re.I) else "que el setup está en un parche", missing, how))
 
 
 def resolve_variant(found, requested):
@@ -24880,6 +24880,74 @@ def old_patch_steps(root, case):
     return steps
 
 
+# 0.19.0 · P9: el bloque `<!-- hb-performance:estado -->` es la única fuente del estado del setup. Fuera del bloque, la
+# sección de rendimiento solo dice lo que es cierto con o sin el parche repuesto, y nunca el serial de un dispositivo (el
+# serial vive en el plan de cada investigación; en AGENTS.md va `ANDROID_SERIAL=<serial>`).
+SERIAL_FORMS = ((re.compile(r"\bANDROID_SERIAL=(?!<)[^\s`'\"]+"), "ANDROID_SERIAL=<serial>"),
+                (re.compile(r"\badb\s+-s\s+(?!<)[^\s`'\"]+"), "adb -s <serial>"),
+                (re.compile(r"--serial(?:\s+|=)(?!<)[^\s`'\"]+"), "--serial <serial>"),
+                (re.compile(r"(?<![\w-])emulator-\d{2,5}(?![\w-])"), "<serial>"))
+SETUP_READY_SENTENCE = re.compile(r"(?:^|(?<=[\s.;:,(]))[*_]*setup\s+listo[*_]*(?:\s*[.,;:]\s*|\s*$)", re.I)
+BUILD_TYPE_LINE = re.compile(r"build\s*type|variante\s+(?:medida|de\s+medici[oó]n|de\s+profiling)", re.I)
+WHEN_PATCHED = " (presente cuando el parche del setup está repuesto)"
+
+
+def tidy_perf_section(root, removed):
+    """P9: deja la sección de rendimiento de AGENTS.md sin seriales de dispositivo y, con el setup quitado
+    (`removed`, el caso del parche fuera del árbol), sin líneas que lo contradigan fuera del bloque: "Setup listo" sale
+    (lo dice el bloque) y una línea del build type medido aclara que existe con el parche repuesto. No toca el bloque ni
+    nada fuera de la sección; guarda antes un respaldo. Devuelve las líneas para el usuario."""
+    path = pathlib.Path(root) / "AGENTS.md"
+    text = read_agents(root)
+    section = performance_section(text) if text is not None else None
+    if section is None:
+        return []
+    start, end = section
+    body = text[start:end]
+    block = re.search(re.escape(AGENTS_BLOCK[0]) + r".*?" + re.escape(AGENTS_BLOCK[1]), body, re.S)
+    head, tail = (body[:block.start()], body[block.end():]) if block else (body, "")
+    changes = []
+
+    def clean(part):
+        out = []
+        for line in part.splitlines(True):
+            new = line
+            for pattern, value in SERIAL_FORMS:
+                new = pattern.sub(value, new)
+            if new != line:
+                changes.append("serial de dispositivo → <serial> (\"%s\")" % new.strip()[:90])
+            if removed and SETUP_READY.search(new) and not SETUP_BLOCK_LINE.match(new) and not REAPPLY_HINT.search(new):
+                stripped = SETUP_READY_SENTENCE.sub(" ", new).rstrip()
+                content = re.sub(r"^[\s*_>-]*", "", stripped)
+                changes.append("\"%s\" (el estado del setup lo dice el bloque)" % new.strip()[:90])
+                if not content:
+                    continue  # la línea solo decía "Setup listo"
+                new = stripped.replace("  ", " ") + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
+            if removed and BUILD_TYPE_LINE.search(new) and not re.search(r"parche", new, re.I):
+                ending = "\r\n" if new.endswith("\r\n") else "\n" if new.endswith("\n") else ""
+                core = new[:len(new) - len(ending)].rstrip()
+                new = core.rstrip(".") + WHEN_PATCHED + ("." if core.endswith(".") else "") + ending
+                changes.append("build type medido%s" % WHEN_PATCHED)
+            out.append(new)
+        return "".join(out)
+
+    new_body = clean(head) + (body[block.start():block.end()] if block else "") + clean(tail)
+    if new_body == body:
+        return []
+    target = pathlib.Path(os.path.realpath(str(path)))
+    stamp_ = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    try:
+        backup = write_new(setup_patches_dir(root) / SETUP_BACKUPS / ("AGENTS.md-%s.bak" % stamp_), text.encode("utf-8"))
+        with open(str(target), "w", encoding="utf-8", newline="") as handle:
+            handle.write(text[:start] + new_body + text[end:])
+    except OSError as error:
+        return ["⚠ La sección de rendimiento de AGENTS.md tiene líneas que contradicen el estado del setup o traen un "
+                "serial (%s), y no pude corregirlas (%s): cámbialas tú" % ("; ".join(changes[:4]),
+                                                                          error.strerror or error)]
+    return ["✔ AGENTS.md (sección de rendimiento, fuera del bloque de estado): %s. Respaldo: %s" % (
+        "; ".join(changes[:6]), backup)]
+
+
 def drop_legacy_agents_line(root):
     """A4: quita de AGENTS.md la línea del setup de una versión anterior ("setup listo, en parche: `git apply …`"),
     después de dejar la nueva en el bloque de estado. Guarda antes un respaldo (sin pisar otro) y escribe en el destino
@@ -25345,6 +25413,7 @@ def register_setup_patch(root, top, patch, app_id, origin, replaced=(), wired=()
     note = update_agents_state(root, setup=patch)
     if note:
         lines.append(note)
+    lines += tidy_perf_section(root, removed=find_hooks(root) is None)  # P9
     said = agents_setup(root)
     if said["antigua"] or not said["en_parche"]:
         lines.append("⚠ No pude dejar en AGENTS.md que el setup está en este parche (falta la sección de rendimiento, o no "
@@ -25696,6 +25765,8 @@ def setup_quitar(root, args, folder=None, explicit=None):
     note = update_agents_state(root)
     if note:
         print(note)
+    for line in tidy_perf_section(root, removed=True):  # P9: nada fuera del bloque dice que el setup está
+        print(line)
     return "quitado"
 
 
@@ -25964,6 +26035,8 @@ def setup_reponer(root, args, folder=None):
         note = update_agents_state(root)
         if note:
             print(note)
+    for line in tidy_perf_section(root, removed=False):  # P9: sin seriales de dispositivo
+        print(line)
     return "repuesto", ficha
 
 

@@ -14,6 +14,7 @@ import unittest
 from helpers import commit_all, init_repo, write
 from test_perf import GOOD, HEADER, PKG, CaptureCase, PerfBase, perf, rows
 from test_perf_0190 import MEASURED, RIGUROSO, JsonBase
+from test_perf_0140 import WIRING, SetupBase
 
 
 def digest(path):
@@ -476,6 +477,49 @@ class OpenedElementCaptureTest(CaptureCase):
                            "--calentamiento", "0", "--sin-compilar")
         self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
         self.assertIn("abrió 'El último faro' y no 'Marea alta' (invalidar_si elemento_distinto)", result.stdout)
+
+
+
+class PerformanceSectionTest(SetupBase):
+    """P9: el bloque de estado es la única fuente del estado del setup. Después de `setup --guardar --quitar`, la sección
+    de rendimiento no dice "Setup listo" fuera del bloque, el build type medido se aclara como presente con el parche
+    repuesto y no queda ningún serial de dispositivo; `setup --reponer` tampoco deja seriales."""
+
+    def agents_with_machine_lines(self):
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8").replace(
+            "- setup listo\n", "- Setup listo.\n- Build type medido: `profiling`.\n"
+            "- Instalar en el emulador: `ANDROID_SERIAL=emulator-5554 ./gradlew :app:installProfiling`\n"
+            "- Ver el dispositivo: `adb -s R58N12ABCDE shell getprop ro.product.model`\n")
+        write(self.root / "AGENTS.md", text)
+        commit_all(self.root, "agents")
+
+    def section(self):
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        start, end = perf.performance_section(text)
+        body = text[start:end]
+        block = re.search(r"<!-- hb-performance:estado -->.*?<!-- /hb-performance:estado -->", body, re.S)
+        return body, (body[:block.start()] + body[block.end():]) if block else body
+
+    def test_despues_de_quitar_no_hay_setup_listo_ni_seriales(self):
+        self.agents_with_machine_lines()
+        self.instrument()
+        out = self.good("setup", "--guardar", "--quitar", *WIRING)
+        body, outside = self.section()
+        self.assertNotRegex(outside, r"(?i)setup\s+listo")
+        self.assertNotIn("emulator-5554", body)
+        self.assertNotIn("R58N12ABCDE", body)
+        self.assertIn("ANDROID_SERIAL=<serial> ./gradlew :app:installProfiling", outside)
+        self.assertIn("adb -s <serial> shell", outside)
+        self.assertIn("Build type medido: `profiling` (presente cuando el parche del setup está repuesto).", outside)
+        self.assertIn("Setup: en parche", body)  # el estado lo dice el bloque
+        self.assertIn("✔ AGENTS.md (sección de rendimiento, fuera del bloque de estado)", out)
+        # el caso se sigue leyendo del bloque, sin "setup listo"
+        self.assertIn("en parche", self.good("setup", "--estado"))
+        # reponer: no vuelve a poner seriales ni "setup listo"
+        self.good("setup", "--reponer")
+        body, outside = self.section()
+        self.assertNotRegex(outside, r"(?i)setup\s+listo")
+        self.assertNotIn("emulator-5554", body)
 
 
 if __name__ == "__main__":
