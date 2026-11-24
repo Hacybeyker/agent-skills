@@ -53,6 +53,7 @@ Los calcula el script con los supuestos de `escenarios.json`; la plantilla trae 
     {
       "mercado": "MX",
       "dau": {"pesimista": 300, "base": 1000, "optimista": 3000, "fuente": "S-DEM-2"},
+      "instalaciones_mes": {"pesimista": 500, "base": 1500, "optimista": 4000, "fuente": "S-DEM-3"},
       "dau_mau": {"pesimista": 0.1, "base": 0.15, "optimista": 0.2, "fuente": "S-MON-4"},
       "anuncios": [
         {"formato": "banner",
@@ -60,9 +61,12 @@ Los calcula el script con los supuestos de `escenarios.json`; la plantilla trae 
          "ecpm": {"pesimista": 0.2, "base": 0.4, "optimista": 0.8, "fuente": "S-MON-1"}}
       ],
       "compras": [
-        {"nombre": "Sin anuncios",
-         "conversion": {"pesimista": 0.005, "base": 0.01, "optimista": 0.02, "fuente": "S-MON-3"},
-         "precio": 2.99, "comision": 0.15}
+        {"nombre": "Sin anuncios", "tipo": "pago-unico",
+         "conversion": {"pesimista": 0.01, "base": 0.02, "optimista": 0.04, "fuente": "S-MON-3"},
+         "precio": 2.99, "comision": 0.15},
+        {"nombre": "Pro", "tipo": "suscripcion", "periodo": "mes",
+         "conversion": {"pesimista": 0.005, "base": 0.01, "optimista": 0.02, "fuente": "S-MON-5"},
+         "precio": 1.99, "comision": 0.15}
       ]
     }
   ]
@@ -71,19 +75,22 @@ Los calcula el script con los supuestos de `escenarios.json`; la plantilla trae 
 
 | Supuesto | Qué es |
 | --- | --- |
-| `dau` | Usuarios activos diarios en ese mercado |
-| `dau_mau` | Proporción de los usuarios del mes que entra cada día (entre 0 y 1). Solo hace falta si hay `compras` |
+| `dau` | Usuarios activos diarios en ese mercado: la base de los anuncios |
+| `instalaciones_mes` | Instalaciones nuevas de cada mes. Solo hace falta si hay un pago único: se cobra una vez, a quien instala, no cada mes a los mismos usuarios |
+| `dau_mau` | Proporción de los usuarios del mes que entra cada día (entre 0 y 1). Solo hace falta si hay una suscripción |
 | `impresiones_por_dau` | Anuncios de ese formato que ve cada usuario activo por día |
 | `ecpm` | Ingreso por cada 1 000 impresiones de ese formato en ese mercado |
-| `conversion` | Proporción de los usuarios del mes que paga ese mes (1 % = `0.01`): suscriptores activos o compradores |
-| `precio` | Lo que paga cada uno ese mes. Es tu decisión: no lleva fuente |
+| `tipo` | De cada compra: `pago-unico` o `suscripcion`. Sin él, `escenarios` no calcula |
+| `conversion` | En un pago único, la proporción de las instalaciones nuevas que compra; en una suscripción, la proporción de los usuarios del mes que paga (1 % = `0.01`) |
+| `precio` | Lo que paga cada uno: una vez en un pago único; por `periodo` (`mes` por defecto, o `anio`) en una suscripción. Es tu decisión: no lleva fuente |
 | `comision` | La comisión de la tienda: `0.15` o `0.30` |
 
-- **Cómo se calcula.** Anuncios: `dau × impresiones_por_dau × 30 × ecpm ÷ 1000`. Compras: `dau ÷ dau_mau × conversion × precio × (1 − comision)`. Cada caso usa los valores de ese caso, y se suman los mercados. Son ingresos netos al mes.
+- **Cómo se calcula.** Anuncios: `dau × impresiones_por_dau × 30 × ecpm ÷ 1000`. Pago único: `instalaciones_mes × conversion × precio × (1 − comision)`. Suscripción: `dau ÷ dau_mau × conversion × precio al mes × (1 − comision)` (un precio anual se divide por 12). Cada caso usa los valores de ese caso, y se suman los mercados. Son ingresos netos al mes.
+- **El pago único no es recurrente.** Calcularlo sobre los usuarios del mes, como si cada mes pagara gente nueva, infla el caso base: lo que cuenta son las instalaciones nuevas. Unos escenarios calculados con esa regla anterior hacen que la puerta 2 pida volver a correr `escenarios`.
 - **Cada supuesto lleva su fuente** (`"fuente": "S-…"`). Sin fuente, el escenario sale rotulado *estimación*, con la lista de los supuestos sin respaldo. Un número suelto en vez del objeto vale igual en los tres casos y cuenta como sin fuente.
 - **Por analogía.** Si la idea es nueva, si pones `"analogia": true` o si una fuente es de los peldaños 3 a 6, el escenario sale rotulado *por analogía* y el rango se abre: pesimista × 0,5 y optimista × 1,5.
 - **Mercado saturado.** Los usuarios del caso base parten del lugar que ocuparía la app según su diferenciador (un competidor de media tabla, con su fuente), no del líder.
-- **Modelos de monetización.** La salida lista cada modelo (cada formato de anuncio y cada compra o suscripción, sumando los mercados) con lo que da en el caso base. Es **viable con evidencia** si genera ingresos en el caso base y todos sus supuestos citan su fuente (los usuarios, la proporción diaria si es una compra, las impresiones, el eCPM o la conversión; el precio no, porque es una decisión). La puerta 2 pide al menos uno. Si ninguno lo es, se dice qué fuente falta: no se inventa.
+- **Modelos de monetización.** La salida lista cada modelo (cada formato de anuncio y cada compra o suscripción, sumando los mercados) con lo que da en el caso base. Es **viable con evidencia** si genera ingresos en el caso base y todos sus supuestos citan su fuente (los usuarios, las instalaciones nuevas si es un pago único, la proporción diaria si es una suscripción, las impresiones, el eCPM o la conversión; el precio no, porque es una decisión). La puerta 2 pide al menos uno. Si ninguno lo es, se dice qué fuente falta: no se inventa.
 - **La meta.** Es **opcional y referencial**: si existe, la salida compara el caso base con `meta_ingresos_mes` y dice cuántos usuarios activos diarios hacen falta para llegar, solo como referencia. Nunca bloquea la puerta ni cuenta como riesgo, salvo que el usuario la haya marcado como obligatoria (`meta_obligatoria`), y entonces es un criterio más de la puerta 2.
 
 No ajustes los supuestos para que el caso base llegue a la meta ni para que un modelo parezca viable: si no llega, se dice, y el usuario decide.

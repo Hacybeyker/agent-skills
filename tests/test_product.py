@@ -155,7 +155,7 @@ class Base(unittest.TestCase):
         self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0], "--descargas", "1M",
                "--precio", "3,99 al mes", "--modelo", "suscripción", "--tamano-mb", "80")
         self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[1], "--descargas",
-               "500k", "--precio", "gratis", "--modelo", "anuncios", "--tamano-mb", "120")
+               "500k", "--precio", "gratis", "--modelo", "anuncios", "--tamano-mb", "120", "--rival")
         self.sustituto(fuentes[2])
         self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "Se buscó y no apareció")
         self.cerrar("1a", "01-investigacion/competencia.md")
@@ -166,6 +166,8 @@ class Base(unittest.TestCase):
             self.p("diferenciador", "--vector", "precio", "--texto", "Pago único en vez de suscripción",
                    "--hallazgos", voz, "--se-ve", "ficha", "--copiable", "media", "--motivo",
                    "Cambiar de modelo les cuesta ingresos recurrentes", "--semanas", 2, "--principal")
+            self.p("frente", "--id", "D-1", "--resultado", "supera", "--hallazgos", voz, "--texto",
+                   "PlantaPlus es gratis, pero con anuncios que sus usuarios piden quitar")
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
 
     def hasta_puerta1(self):
@@ -176,11 +178,11 @@ class Base(unittest.TestCase):
     def escenarios(self, dau=2000, fuente="S-MON-3"):
         entrada = {"mercados": [{
             "mercado": "MX", "dau": {"pesimista": dau / 2, "base": dau, "optimista": dau * 2, "fuente": fuente},
-            "dau_mau": {"pesimista": 0.2, "base": 0.2, "optimista": 0.2, "fuente": fuente},
+            "instalaciones_mes": {"pesimista": dau * 2.5, "base": dau * 5, "optimista": dau * 10, "fuente": fuente},
             "anuncios": [{"formato": "banner",
                           "impresiones_por_dau": {"pesimista": 5, "base": 5, "optimista": 5, "fuente": fuente},
                           "ecpm": {"pesimista": 0.4, "base": 0.4, "optimista": 0.4, "fuente": fuente}}],
-            "compras": [{"nombre": "Pago único", "precio": 4, "comision": 0.15,
+            "compras": [{"nombre": "Premium", "tipo": "pago-unico", "precio": 4, "comision": 0.15,
                          "conversion": {"pesimista": 0.02, "base": 0.02, "optimista": 0.02, "fuente": fuente}}]}]}
         write(self.carpeta / "escenarios.json", json.dumps(entrada))
         return self.p("escenarios", "--entrada", "escenarios.json")
@@ -646,7 +648,7 @@ class EscenariosTest(Base):
     def test_calcula_anuncios_y_compras_y_los_usuarios_para_la_meta(self):
         self.hasta_puerta1()
         salida = self.escenarios(dau=1000)
-        # anuncios: 1000 × 5 × 30 × 0,4 / 1000 = 60; compras: 1000 / 0,2 × 0,02 × 4 × 0,85 = 340
+        # anuncios: 1000 × 5 × 30 × 0,4 / 1000 = 60; pago único: 5000 instalaciones × 0,02 × 4 × 0,85 = 340
         self.assertIn("| MX | 1 000 | 200 | 400 | 800 |", salida)
         self.assertIn("la alcanza (400)", salida)
         self.assertIn("hacen falta 750 usuarios activos diarios; el base supone 1 000", salida)
@@ -684,6 +686,11 @@ class EscenariosTest(Base):
         write(self.carpeta / "mal.json", json.dumps({"mercados": [{"mercado": "MX", "dau": 10}]}))
         self.assertIn("no tiene `anuncios` ni `compras`", self.falla("escenarios", "--entrada", "mal.json"))
         compra = {"nombre": "x", "conversion": 0.01, "precio": 1, "comision": 30}
+        write(self.carpeta / "mal.json", json.dumps({"mercados": [{"mercado": "MX", "dau": 10, "dau_mau": 0.2,
+                                                                  "compras": [compra]}]}))
+        self.assertIn("`MX.compras.x` necesita `tipo`: pago-unico",
+                      self.falla("escenarios", "--entrada", "mal.json"))
+        compra["tipo"] = "suscripcion"
         write(self.carpeta / "mal.json", json.dumps({"mercados": [{"mercado": "MX", "dau": 10, "dau_mau": 0.2,
                                                                   "compras": [compra]}]}))
         self.assertIn("0.15 o 0.30", self.falla("escenarios", "--entrada", "mal.json"))
@@ -747,6 +754,7 @@ class FlujoTest(Base):
         self.p("tipo", "--variante", "--motivo", "Hay directos, pero ninguno reparte turnos")
         self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0])
         self.sustituto(fuentes[1])
+        self.p("competidor", "--sin-rival", "Las apps directas son de pago y el grupo de chat no resuelve")
         self.hallazgo("competencia", fuentes)
         self.assertNotIn("Sesión 1g", self.cerrar("1a", "01-investigacion/competencia.md").split("La sesión")[0])
         salida = self.linea("1b", "voz-del-usuario") and self.p("siguiente")
@@ -758,7 +766,8 @@ class FlujoTest(Base):
     def test_de_la_idea_al_prd_con_las_tres_puertas(self):
         salida = self.hasta_puerta1()
         self.assertIn("Puerta 1 · Oportunidad · idea existente · cumple 5 de 5 criterios", salida)
-        self.assertIn("✔ Los hallazgos del diferenciador principal están triangulados · D-1: H-VOZ-1", salida)
+        self.assertIn("✔ Los hallazgos del diferenciador principal están triangulados y supera a la alternativa "
+                      "gratis más fuerte · D-1: H-VOZ-1", salida)
         self.assertNotIn("puerta --n", salida)  # el veredicto ya viene en siguiente: no hay paso aparte
         self.assertIn("el agente nunca corre este comando", salida)
         self.assertIn("decidir --puerta 1 --seguir --carpeta product", salida)
@@ -784,7 +793,7 @@ class FlujoTest(Base):
         self.assertIn("Puerta 2 · Viabilidad · idea existente · cumple 3 de 3 criterios", self.cerrar("3"))
         salida = self.p("puerta", "--n", 2)
         self.assertIn("✔ Al menos un modelo de monetización viable con evidencia · Anuncios · banner: 120 USD al mes "
-                      "en el caso base; Compra · Pago único: 680 USD al mes en el caso base", salida)
+                      "en el caso base; Pago único · Premium: 680 USD al mes en el caso base", salida)
         self.assertIn("· Meta de ingresos (referencial, no es criterio): el caso base da 800 de 300 USD al mes", salida)
         self.assertIn("✔ Ninguna hipótesis crítica refutada", salida)
         self.assertIn("✔ El diferenciador principal sobrevive al abogado del diablo", salida)
@@ -974,10 +983,10 @@ class IdeaDebilTest(Base):
         salida = self.p("puerta", "--n", 1)
         self.assertIn("✖ Puntaje de 17/25 o más · tiene 14/25", salida)
         self.assertIn("✔ Demanda con confianza media o alta", salida)
-        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 0 viables de 0 "
-                      "registrados", salida)
-        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados · no hay un diferenciador "
-                      "principal registrado", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere a la "
+                      "alternativa gratis más fuerte: C-2 (PlantaPlus) · 0 viables de 0 registrados", salida)
+        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados y supera a la alternativa "
+                      "gratis más fuerte · no hay un diferenciador principal registrado", salida)
         self.assertIn("✖ Riesgo de políticas distinto de 1, o con una mitigación escrita · es 1", salida)
         self.assertIn("ni la saturación ni la falta de datos descartan una idea", salida)
         motivo = "Sin diferenciador viable y con riesgo de políticas 1: el sistema ya trae la función"

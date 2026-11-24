@@ -8,11 +8,15 @@
 | --- | --- | --- | --- |
 | <por completar: fila de la matriz> | | | |
 
-## Frente al sustituto más fuerte
+## Frente al rival
 
-El sustituto de la matriz (peldaño 4) que ya resuelve la necesidad gratis o viene con el sistema, si lo hay, y lo que cada diferenciador hace que ese sustituto no hace, con el hallazgo que lo muestra (`--competidores C-…`).
+El rival es la alternativa gratis más fuerte que marcó 1a (`competidor --rival`), sea otra app o un sustituto, y los sustitutos gratuitos o nativos que ya resuelven la necesidad. Cada diferenciador lo **supera**, lo **iguala** (paridad: básico en Kano, no cuenta como viable) o **no**, registrado con `producto.py frente` y sus hallazgos. Prueba de elección: todos esos hallazgos triangulados y en confianza alta, y ninguna hipótesis sobre el diferenciador débil o refutada.
 
-<por completar: el sustituto más fuerte y cómo lo supera cada diferenciador, o "ningún sustituto gratuito o nativo resuelve la necesidad">
+- **Rival:** <por completar: C-… y por qué es la alternativa gratis más fuerte, o el motivo de `--sin-rival`>
+
+| Diferenciador | Frente al rival (supera, iguala o no) | En qué | Hallazgos | ¿Prueba de elección? |
+| --- | --- | --- | --- | --- |
+| <por completar: D-1> | | | | |
 
 ## Vectores
 
@@ -55,15 +59,19 @@ Un vector sin hueco se anota igual, con "sin hueco": también es un resultado.
 
 Registrados con `producto.py diferenciador`, que dice si cada uno es viable. Si ninguno lo es, se dice: es un resultado válido y la puerta 1 lo muestra.
 
-| ID | Vector | Diferenciador | Hallazgos | Se ve en | Copiable | Semanas | Estado (viable, confianza baja o no viable) |
+| ID | Vector | Diferenciador | Hallazgos | Se ve en | Copiable | Semanas | Estado (viable, confianza baja, paridad o no viable) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | <por completar: D-1, o "ninguno"> | | | | | | | |
 
-**Diferenciador principal:** <por completar: el ID y por qué ese, o "ninguno". La puerta 1 exige que sus hallazgos estén triangulados>
+**Diferenciador principal:** <por completar: el ID y por qué ese, o "ninguno". La puerta 1 exige que sus hallazgos estén triangulados y que supere al rival: uno que solo lo iguala no sirve>
 
 ## Abogado del diablo
 
 <por completar: por qué los competidores no lo hicieron ya y cuánto tardarían en copiarlo>
+
+## Presupuesto usado
+
+<por completar: búsquedas y lecturas de la línea, sumando las pasadas; se anotan al cerrar con `cerrar --sesion 1g --busquedas <n> --lecturas <n>`>
 
 ## Para la síntesis
 

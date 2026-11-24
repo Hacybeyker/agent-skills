@@ -15,7 +15,7 @@ Cada línea es una sesión en su propio chat (o en su propio subagente) y pueden
 7. **Abogado del diablo:** por cada hallazgo clave, una búsqueda en contra, registrada con `--en-contra` o `--sin-contra`.
 8. Lo que quedó sin fuentes, regístralo como vacío con su motivo (`producto.py vacio`, abajo). La línea no cierra con huecos sin registrar.
 9. Completa tu `.md` con los IDs, tu lectura y la salida de `cobertura`. Lo que no tiene fuente va en "⚠ Sin evidencia". Tus notas para las otras sesiones van en "Para la síntesis", no en `estado.md`.
-10. `producto.py cerrar --sesion <id>` y pega la salida.
+10. `producto.py cerrar --sesion <id> --busquedas <n> --lecturas <n>` (lo que usó la línea en total, sumando las pasadas) y pega la salida.
 
 **No hagas:** escribir en archivos de otra línea, calcular puntajes o tamaños por tu cuenta, recomendar seguir o descartar, ni seguir con otra sesión en el mismo chat.
 
@@ -32,7 +32,7 @@ La sesión 0 registra el objetivo (`producto.py objetivo --mercados MX,ES --idio
 | Políticas y riesgos | Mercado y tienda |
 
 - Una fuente cubre lo que dicen sus etiquetas: `fuente … --mercados MX --idiomas es --tiendas google-play`. Usa las mismas etiquetas que el objetivo. Si ya registraste la URL, repetir `fuente` con etiquetas nuevas se las agrega sin duplicarla.
-- Lo que no se pudo cubrir se registra como **vacío**, con un motivo: `producto.py vacio --linea voz-del-usuario --tienda google-play --motivo herramienta --texto "<qué intentaste y qué pasó>"`.
+- Lo que no se pudo cubrir se registra como **vacío**, con un motivo: `producto.py vacio --linea voz-del-usuario --tienda google-play --motivo herramienta --texto "<qué intentaste y qué pasó>"`. **Cualquier línea** registra vacíos de cualquier mercado, idioma o tienda del objetivo, también los que la tabla no le pide (por ejemplo, la monetización sin la ficha de precios de Google Play): `cobertura` y la puerta 1 los muestran junto a los demás.
 
 | `--motivo` | Cuándo |
 | --- | --- |
@@ -61,6 +61,7 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 
 - **Matriz de competidores.** Una fila por competidor con `producto.py competidor --nombre "<app>" --peldano <1-4> --fuentes S-COM-… [--descargas 1M] [--nota 4,2] [--actualizada 2026-03] [--precio "…"] [--modelo "…"] [--anuncios ninguno|pocos|muchos] [--tamano-mb 80] [--idiomas es,en] [--permisos ubicacion,camara] [--sin-conexion si|no|parcial] [--accesibilidad "…"] [--plataformas android,ios] [--funciones "a; b"] [--traccion "…"]`. Una fila se completa por partes: repetir el comando con el mismo nombre agrega columnas. El peldaño de la fila dice qué es: 1 directo, 2 variante, 3 análogo, 4 sustituto. `producto.py matriz` muestra la tabla; pégala en `competencia.md`.
 - **Sustitutos.** Registra siempre cómo se resuelve hoy la necesidad sin una app así (peldaño 4): la función que ya trae el sistema, una hoja de cálculo, un grupo de chat, papel. Cada uno con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin al menos uno evaluado, 1a no cierra. Si uno gratuito o nativo ya resuelve la necesidad, la sesión 1g tendrá que superarlo con evidencia ([diferenciacion.md](diferenciacion.md)), y la voz del usuario lo enlaza con `--competidores` cuando encuentra quejas sobre él.
+- **El rival a superar.** Marca la alternativa gratis más fuerte, sea un sustituto o un competidor directo gratis y completo: `producto.py competidor --nombre "<app>" --peldano 1 --fuentes S-COM-… --rival`. Si ninguna alternativa gratis resuelve la necesidad, dilo con `producto.py competidor --sin-rival "<por qué>"`. En una idea existente o variante, 1a no cierra sin una de las dos: la sesión 1g compara cada diferenciador con ese rival ([diferenciacion.md](diferenciacion.md)).
 - **Tracción.** Un competidor la tiene desde 100 000 descargas (`traccion_descargas`) o con `--traccion "<evidencia>"` cuando no es una app o no publica descargas.
 - **Tipo de idea.** Regístralo apenas lo sepas, porque las otras líneas lo consultan: `producto.py tipo --existente | --variante | --nueva --motivo "<por qué>"`. *Existente:* hay competidores directos con tracción. *Variante:* hay directos, pero la idea cambia algo relevante (otra plataforma, otro país, otro segmento). *Nueva:* no hay directos con tracción. Si no hay directos, sube por la escalera y llena la matriz con análogos y sustitutos.
 - **Intentos anteriores.** Regístralo siempre con `producto.py intento --resultado sin-rastro | fracaso-demanda | fracaso-otra-causa --texto "<qué buscaste y qué apareció>" [--fuentes S-…]`. En una idea nueva es un criterio de la puerta 1.

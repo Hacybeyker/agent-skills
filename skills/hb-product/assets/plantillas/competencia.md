@@ -26,6 +26,12 @@ Cómo se resuelve hoy la necesidad sin una app así (peldaño 4): la función qu
 | --- | --- | --- | --- | --- |
 | <por completar: C-…> | | | | |
 
+## Rival a superar
+
+La alternativa gratis más fuerte, sea un sustituto o un competidor directo gratis y completo: cada diferenciador de la sesión 1g tendrá que superarla, e igualarla no alcanza. Se marca con `competidor --nombre "<…>" … --rival`; si ninguna alternativa gratis resuelve la necesidad, `competidor --sin-rival "<por qué>"`.
+
+- **Rival:** <por completar: C-… y qué da gratis, o el motivo de `--sin-rival`>
+
 ## Hallazgos
 
 | ID | Hallazgo | Fuentes | Peldaño | Confianza |

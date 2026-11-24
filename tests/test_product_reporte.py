@@ -52,7 +52,8 @@ class ReporteTest(Base):
         self.assertIn("Decidir la puerta 1 · Oportunidad", html)
         self.assertIn("19/25", html)
         self.assertIn("Pendiente de tu decisión", html)
-        self.assertIn("Frente al sustituto", html)
+        self.assertIn("Frente al rival: supera a C-2 (PlantaPlus) con H-VOZ-1", html)
+        self.assertIn("Rival a superar:", html)
         self.assertIn('href="https://sitio1.example/pagina-1"', html)  # las fuentes van enlazadas
 
     def test_decidir_lo_regenera_y_al_descartar_queda_en_el_archivo(self):

@@ -95,6 +95,11 @@ PRESUPUESTO = {"busquedas": 15, "lecturas": 10}
 PRESUPUESTO_NUEVA = {"busquedas": 20, "lecturas": 12}
 AMPLITUD_ANALOGIA = 0.5  # un escenario por analogía abre el rango: pesimista × 0,5 y optimista × 1,5
 RICE_CONFIANZA = {3: 100, 2: 80, 1: 50, 0: 0}  # confianza del hallazgo → porcentaje de RICE
+# Compras de los escenarios: un pago único se cobra una vez, a las instalaciones nuevas del mes; una suscripción se
+# cobra cada mes a la base de pagadores (los usuarios del mes que pagan). Los anuncios van sobre los usuarios activos.
+TIPOS_COMPRA = {"pago-unico": "Pago único", "suscripcion": "Suscripción"}
+PERIODOS = {"mes": 1, "anio": 12}  # precio de una suscripción → meses que cubre
+CALCULO_ESCENARIOS = 2  # 2: el pago único sobre las instalaciones nuevas del mes (antes, sobre los usuarios del mes)
 
 # Modelo y esfuerzo de cada nivel (references/modelos.md). Los nombres se cambian con `modelos`.
 MODELOS = {"intermedio": "Sonnet 5.5", "alto": "Opus 5.5"}
@@ -337,8 +342,7 @@ def linea_vacia(linea):
         datos["matriz"] = []
     if linea == "diferenciacion":
         datos["diferenciadores"] = []
-    if linea in COBERTURA_LINEAS:
-        datos["vacios"] = []
+    datos["vacios"] = []  # cualquier línea puede registrar un vacío de cobertura (`vacio`)
     return datos
 
 
@@ -357,6 +361,8 @@ class Registro:
         self.lineas = {linea: cargar_linea(carpeta, linea) for linea in LINEAS}
         self.fuentes, self.hallazgos, self.competidores, self.diferenciadores = {}, {}, {}, {}
         self.vacios = {}
+        # la sesión 1a dijo que no hay una alternativa gratis que resuelva la necesidad (`competidor --sin-rival`)
+        self.sin_rival = self.lineas["competencia"].get("sin_rival")
         for linea, datos in self.lineas.items():
             for campo, destino in (("fuentes", self.fuentes), ("hallazgos", self.hallazgos),
                                    ("matriz", self.competidores), ("diferenciadores", self.diferenciadores),
@@ -518,7 +524,7 @@ class Registro:
                     "la ficha de la tienda" if diferenciador.get("se_ve") == "ficha" else "el uso")),
                 (bool(diferenciador.get("copiable") and diferenciador.get("motivo")),
                  "Copiabilidad: %s (%s)" % (diferenciador.get("copiable"), diferenciador.get("motivo"))),
-                cabe, self.frente_al_sustituto(diferenciador), self.triangulacion_de(diferenciador)]
+                cabe, self.frente_al_rival(diferenciador), self.triangulacion_de(diferenciador)]
 
     def sustitutos(self):
         """Las filas de la matriz que dicen cómo se resuelve hoy la necesidad sin una app de este tipo (peldaño 4)."""
@@ -528,44 +534,104 @@ class Registro:
         """Los sustitutos gratuitos o nativos que ya resuelven la necesidad: cada diferenciador tiene que superarlos."""
         return [c for c in self.sustitutos() if c.get("sustituto") in ("nativo", "gratuito") and c.get("resuelve") == "si"]
 
-    def supera(self, diferenciador, sustituto):
-        """Los hallazgos del diferenciador que nombran al sustituto (`hallazgo --competidores C-…`): la evidencia de lo
-        que el sustituto no resuelve y el diferenciador sí."""
-        resultado = []
-        for identificador in diferenciador.get("hallazgos", []):
-            hallazgo = self.hallazgos.get(identificador)
-            filas = {c["id"] for c in (self.competidor(r) for r in (hallazgo or {}).get("competidores", [])) if c}
-            if sustituto["id"] in filas:
-                resultado.append(identificador)
-        return resultado
+    def rivales(self):
+        """Lo que cada diferenciador tiene que superar: la alternativa gratis más fuerte que marcó la sesión 1a
+        (`competidor --rival`, sea sustituto o competidor directo) y los sustitutos gratuitos o nativos que ya
+        resuelven la necesidad."""
+        marcados = [c for c in self.competidores.values() if c.get("rival")]
+        return marcados + [c for c in self.sustitutos_fuertes() if c not in marcados]
 
-    def frente_al_sustituto(self, diferenciador):
-        """El quinto criterio de viabilidad: si hay un sustituto gratuito o nativo que ya resuelve la necesidad, el
-        diferenciador tiene que superarlo con evidencia: (cumple, texto)."""
-        fuertes = self.sustitutos_fuertes()
+    def rival_pendiente(self):
+        """True si nadie marcó la alternativa gratis más fuerte ni dijo que no la hay (`competidor --sin-rival`)."""
+        return not self.rivales() and not self.sin_rival
+
+    def comparacion(self, diferenciador, rival):
+        """Lo que la sesión 1g registró con `frente`: {resultado, hallazgos, texto} o None."""
+        return (diferenciador.get("frente") or {}).get(rival["id"])
+
+    def hallazgos_de(self, diferenciador):
+        """Los hallazgos de un diferenciador y los de sus comparaciones con el rival, sin repetir."""
+        ids = list(diferenciador.get("hallazgos", []))
+        for comparacion in (diferenciador.get("frente") or {}).values():
+            ids += [i for i in comparacion.get("hallazgos", []) if i not in ids]
+        return ids
+
+    def iguala(self, diferenciador):
+        """Los rivales que el diferenciador solo iguala: paridad (básico en Kano), no una razón para elegir la app."""
+        return [r for r in self.rivales() if (self.comparacion(diferenciador, r) or {}).get("resultado") == "iguala"]
+
+    def frente_al_rival(self, diferenciador):
+        """El quinto criterio de viabilidad: el diferenciador supera a cada rival (la alternativa gratis más fuerte y
+        los sustitutos gratuitos o nativos que ya resuelven la necesidad), según lo registrado con `frente`, con al menos
+        un hallazgo triangulado. Igualar es paridad y no cumple: (cumple, texto)."""
+        rivales = self.rivales()
         sin_evaluar = [c for c in self.sustitutos() if c.get("sustituto") not in SUSTITUTOS
                        or c.get("resuelve") not in RESUELVE]
-        if sin_evaluar and not fuertes:
-            return (False, "Frente al sustituto: %s sin evaluar: no se sabe si es gratuito o nativo ni si ya resuelve "
+        if sin_evaluar and not rivales:
+            return (False, "Frente al rival: %s sin evaluar: no se sabe si es gratuito o nativo ni si ya resuelve "
                            "la necesidad (`competidor … --peldano 4 --sustituto … --resuelve …`)" % "; ".join(
                                nombre_fila(c) for c in sin_evaluar))
-        if not fuertes:
+        if not rivales:
+            if self.sin_rival:
+                return (True, "Frente al rival: no hay una alternativa gratis que resuelva la necesidad (%s)"
+                        % self.sin_rival["motivo"])
             otros = self.sustitutos()
-            return (True, "Frente al sustituto: %s" % ("ninguno gratuito o nativo resuelve la necesidad (%s)" % ", ".join(
+            return (True, "Frente al rival: %s" % ("ninguna alternativa gratis marcada y ningún sustituto gratuito o "
+                                                   "nativo resuelve la necesidad (%s)" % ", ".join(
                 "%s %s" % (c["id"], RESUELVE[c["resuelve"]]) for c in otros) if otros
-                else "la matriz no tiene sustitutos (peldaño 4)"))
+                else "ninguna alternativa gratis marcada y la matriz no tiene sustitutos (peldaño 4)"))
         superados, faltan = [], []
-        for sustituto in fuertes:
-            apoyo = self.supera(diferenciador, sustituto)
-            if apoyo:
-                superados.append("%s con %s" % (nombre_fila(sustituto), ", ".join(apoyo)))
+        for rival in rivales:
+            comparacion = self.comparacion(diferenciador, rival)
+            if not comparacion:
+                nombran = [i for i in self.hallazgos_de(diferenciador) if rival["id"] in self.filas_de(i)]
+                faltan.append("sin comparar con %s (`frente --id %s --rival %s --resultado supera|iguala|no "
+                              "--hallazgos …`%s)" % (nombre_fila(rival), diferenciador["id"], rival["id"],
+                                                     "; lo nombran %s" % ", ".join(nombran) if nombran else ""))
+            elif comparacion["resultado"] == "iguala":
+                faltan.append("iguala a %s: es paridad (básico en Kano), no una razón para elegir la app" % (
+                    nombre_fila(rival)))
+            elif comparacion["resultado"] == "no":
+                faltan.append("no supera a %s" % nombre_fila(rival))
             else:
-                faltan.append(sustituto)
+                firmes = [i for i in comparacion["hallazgos"] if i in self.hallazgos
+                          and self.evaluar(self.hallazgos[i])["triangulado"]]
+                if firmes:
+                    superados.append("%s con %s" % (nombre_fila(rival), ", ".join(comparacion["hallazgos"])))
+                else:
+                    faltan.append("supera a %s, pero ninguno de sus hallazgos (%s) está triangulado" % (
+                        nombre_fila(rival), ", ".join(comparacion["hallazgos"])))
         if faltan:
-            return (False, "Frente al sustituto: no supera a %s; falta un hallazgo que lo nombre (`hallazgo … "
-                           "--competidores %s`) y muestre lo que el sustituto no resuelve" % (
-                               "; ".join(texto_sustituto(c) for c in faltan), ",".join(c["id"] for c in faltan)))
-        return (True, "Frente al sustituto: supera a %s" % "; ".join(superados))
+            return False, "Frente al rival: %s" % "; ".join(faltan)
+        return True, "Frente al rival: supera a %s" % "; ".join(superados)
+
+    def filas_de(self, identificador):
+        """Las filas de la matriz que nombra un hallazgo (`hallazgo --competidores`)."""
+        hallazgo = self.hallazgos.get(identificador) or {}
+        return {c["id"] for c in (self.competidor(r) for r in hallazgo.get("competidores", [])) if c}
+
+    def eleccion(self, diferenciador, filas_hipotesis=None):
+        """La prueba de que superar al rival hace elegir la app: el diferenciador supera a cada rival con todos los
+        hallazgos de la comparación triangulados y en confianza alta, y ninguna hipótesis de 03-validacion.md sobre él
+        quedó débil o refutada: (con_prueba, faltas, hallazgos débiles)."""
+        faltas, debiles = [], []
+        for rival in self.rivales():
+            comparacion = self.comparacion(diferenciador, rival)
+            if not comparacion or comparacion["resultado"] != "supera":
+                return False, ["no supera a %s" % nombre_fila(rival)], []
+            for identificador in comparacion["hallazgos"]:
+                hallazgo = self.hallazgos.get(identificador)
+                evaluacion = self.evaluar(hallazgo) if hallazgo else None
+                if not evaluacion or not evaluacion["triangulado"]:
+                    faltas.append("%s sin triangular" % identificador)
+                    debiles.append(identificador)
+                elif evaluacion["nivel"] < 3:
+                    faltas.append("%s en confianza %s" % (identificador, evaluacion["confianza"]))
+                    debiles.append(identificador)
+        for fila in filas_hipotesis or []:
+            if fila["diferenciador"] == diferenciador["id"] and fila["veredicto"] in ("débil", "refutada"):
+                faltas.append("la hipótesis %s quedó %s" % (fila["id"], fila["veredicto"]))
+        return not faltas, faltas, debiles
 
     def bloqueos(self, objetivo=None):
         """{tienda: [hallazgos]}: las tiendas del objetivo que nombran la categoría o la rechazan (`hallazgo --bloquea`).
@@ -579,9 +645,10 @@ class Registro:
         return resultado
 
     def sin_triangular(self, diferenciador):
-        """Los hallazgos del diferenciador que no cumplen la regla 2: [(id, lo que le falta)]."""
+        """Los hallazgos del diferenciador (y los de sus comparaciones con el rival) que no cumplen la regla 2:
+        [(id, lo que le falta)]."""
         resultado = []
-        for identificador in diferenciador.get("hallazgos", []):
+        for identificador in self.hallazgos_de(diferenciador):
             hallazgo = self.hallazgos.get(identificador)
             if hallazgo is None:
                 resultado.append((identificador, "anulado"))
@@ -594,16 +661,17 @@ class Registro:
     def triangulacion_de(self, diferenciador):
         faltan = self.sin_triangular(diferenciador)
         if not faltan:
-            return (True, "Hallazgos triangulados (regla 2): %s" % ", ".join(diferenciador.get("hallazgos", [])))
+            return (True, "Hallazgos triangulados (regla 2): %s" % ", ".join(self.hallazgos_de(diferenciador)))
         return (False, "Hallazgos triangulados (regla 2): sin triangular %s" % "; ".join(
             "%s (%s)" % par for par in faltan))
 
     def estado(self, diferenciador):
         """'viable' (los cinco criterios y sus hallazgos triangulados), 'baja' (viable con confianza baja: cumple los
-        cinco criterios, pero algún hallazgo no está triangulado) o 'no'."""
+        cinco criterios, pero algún hallazgo no está triangulado), 'paridad' (iguala al rival: básico en Kano, no
+        diferencia) o 'no'."""
         criterios = self.viabilidad(diferenciador)
         if not all(cumple for cumple, _ in criterios[:5]):
-            return "no"
+            return "paridad" if self.iguala(diferenciador) else "no"
         return "viable" if criterios[5][0] else "baja"
 
     def viable(self, diferenciador):
@@ -635,6 +703,11 @@ def texto_sustituto(fila):
                             RESUELVE.get(fila.get("resuelve"), "sin evaluar si resuelve la necesidad"))
 
 
+def texto_rivales(rivales):
+    """'C-2 (PlantaPlus)': los rivales a superar, por nombre."""
+    return "; ".join(nombre_fila(c) for c in rivales)
+
+
 def texto_bloqueos(bloqueos):
     """'app-store nombra o rechaza la categoría (H-POL-2)'."""
     return "; ".join("%s nombra o rechaza la categoría (%s)" % (tienda, ", ".join(ids))
@@ -655,7 +728,8 @@ def presupuesto_de(producto):
     return PRESUPUESTO_NUEVA if tipo_de(producto) == "nueva" else PRESUPUESTO
 
 
-ESTADOS_DIFERENCIADOR = {"viable": "viable", "baja": "viable con confianza baja", "no": "todavía no es viable"}
+ESTADOS_DIFERENCIADOR = {"viable": "viable", "baja": "viable con confianza baja",
+                         "paridad": "paridad: iguala al rival, no diferencia", "no": "todavía no es viable"}
 
 
 def meta_obligatoria(producto):
@@ -709,6 +783,16 @@ def cobertura(producto, registro, solo=None):
                 else:
                     filas.append((dimension, valor, "falta", None))
         resultado[linea] = filas
+    # Un vacío también se registra en una línea o una dimensión que no lo pide (la tienda en monetización, por ejemplo):
+    # queda a la vista junto con la cobertura que sí se pide, salvo que una fuente de esa línea ya lo cubra.
+    for vacio in registro.vacios.values():
+        linea, dimension = vacio["linea"], vacio["dimension"]
+        if (solo and linea != solo) or dimension in COBERTURA_LINEAS.get(linea, ()):
+            continue
+        cubierto = any(f["linea"] == linea and normal(vacio["valor"]) in [normal(v) for v in f.get(dimension, [])]
+                       for f in registro.fuentes.values())
+        if not cubierto:
+            resultado.setdefault(linea, []).append((dimension, vacio["valor"], "vacio", vacio))
     return resultado
 
 
@@ -1002,34 +1086,43 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
                 agregar("intentos", not fracasos, texto,
                         "%s por demanda" % plural(len(fracasos), "intento fallido", "intentos fallidos") if fracasos
                         else plural(len(intentos), "búsqueda registrada", "búsquedas registradas"))
-            fuertes = registro.sustitutos_fuertes()
-            if fuertes:  # un sustituto gratuito o nativo que ya resuelve la necesidad: la idea tiene que superarlo
+            rivales = registro.rivales()
+            if rivales:  # la alternativa gratis más fuerte o un sustituto que ya resuelve: la idea tiene que superarlo
                 viables = registro.viables()
-                agregar("sustituto", viables, "Un diferenciador viable supera al sustituto gratuito o nativo que ya "
-                        "resuelve la necesidad: %s" % "; ".join(nombre_fila(c) for c in fuertes),
-                        ", ".join(d["id"] for d in viables) if viables else detalle_sustituto(registro, fuertes))
+                agregar("rival", viables, "Un diferenciador viable supera a la alternativa gratis más fuerte: %s"
+                        % texto_rivales(rivales),
+                        ", ".join(d["id"] for d in viables) if viables else detalle_rival(registro, rivales))
         else:
             nivel = confianzas(registro)[0]["demanda"]
             agregar("demanda", nivel >= 2, "Demanda con confianza media o alta", "es %s" % NIVELES[nivel])
             viables, bajas = registro.viables(), registro.con_confianza_baja()
-            fuertes = registro.sustitutos_fuertes()
+            rivales, pendiente = registro.rivales(), registro.rival_pendiente()
             detalle = "%s%s de %s" % (
                 plural(len(viables), "viable"), ", %d con confianza baja" % len(bajas) if bajas else "",
                 plural(len(registro.diferenciadores), "registrado"))
-            if fuertes and not viables:
-                detalle += " · " + detalle_sustituto(registro, fuertes)
-            agregar("diferenciador", viables, "Al menos 1 diferenciador viable, con sus hallazgos triangulados%s" % (
-                " y que supere al sustituto gratuito o nativo que ya resuelve la necesidad (%s)" % "; ".join(
-                    nombre_fila(c) for c in fuertes) if fuertes else ""), detalle)
+            if rivales and not viables:
+                detalle += " · " + detalle_rival(registro, rivales)
+            if pendiente:
+                detalle += " · falta marcar la alternativa gratis más fuerte (`competidor … --rival`) o decir que no " \
+                           "la hay (`competidor --sin-rival`)"
+            agregar("diferenciador", viables and not pendiente,
+                    "Al menos 1 diferenciador viable, con sus hallazgos triangulados%s" % (
+                        " y que supere a la alternativa gratis más fuerte: %s" % texto_rivales(rivales) if rivales
+                        else " y que supere a la alternativa gratis más fuerte (sin marcar)" if pendiente else ""),
+                    detalle)
             principal = registro.principal()
-            texto = "Los hallazgos del diferenciador principal están triangulados"
+            texto = "Los hallazgos del diferenciador principal están triangulados%s" % (
+                " y supera a la alternativa gratis más fuerte" if rivales else "")
             if not principal:
                 agregar("principal", False, texto, "no hay un diferenciador principal registrado")
             else:
                 faltan = registro.sin_triangular(principal)
-                agregar("principal", not faltan, texto, "%s: %s" % (principal["id"], "; ".join(
-                    "%s sin triangular (%s)" % par for par in faltan) if faltan else ", ".join(
-                    principal.get("hallazgos", []))))
+                frente = registro.frente_al_rival(principal) if rivales else (True, "")
+                partes = ["%s sin triangular (%s)" % par for par in faltan]
+                if not frente[0]:
+                    partes.insert(0, frente[1].replace("Frente al rival: ", ""))
+                agregar("principal", not faltan and frente[0], texto, "%s: %s" % (
+                    principal["id"], "; ".join(partes) or ", ".join(registro.hallazgos_de(principal))))
         texto = "Riesgo de políticas distinto de 1, o con una mitigación escrita"
         bloqueos = registro.bloqueos(objetivo_de(producto))
         if not puntaje:
@@ -1052,6 +1145,10 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
         elif "modelos" not in escenarios:
             agregar("monetizacion", False, texto,
                     "los escenarios son de una versión anterior: vuelve a correr `escenarios`")
+        elif escenarios_anteriores(escenarios):
+            agregar("monetizacion", False, texto,
+                    "los escenarios son de una versión anterior que cobraba el pago único cada mes a los usuarios del "
+                    "mes: vuelve a correr `escenarios` con `tipo` en cada compra e `instalaciones_mes`")
         else:
             viables = [m for m in escenarios["modelos"] if m["viable"]]
             agregar("monetizacion", viables, texto, "; ".join(
@@ -1135,13 +1232,29 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
     return resultado
 
 
-def detalle_sustituto(registro, fuertes):
-    """Por qué ningún diferenciador supera a los sustitutos fuertes."""
-    candidatos = [d for d in registro.diferenciadores.values()
-                  if all(registro.supera(d, s) for s in fuertes)]
+def detalle_rival(registro, rivales):
+    """Por qué ningún diferenciador viable supera a los rivales: quién lo supera sin ser viable y quién solo lo
+    iguala."""
+    candidatos = [d["id"] for d in registro.diferenciadores.values() if registro.frente_al_rival(d)[0]]
+    paridad = [d["id"] for d in registro.diferenciadores.values() if registro.iguala(d)]
+    partes = []
     if candidatos:
-        return "%s lo(s) supera(n) con evidencia, pero no es (son) viable(s)" % ", ".join(d["id"] for d in candidatos)
-    return "ningún diferenciador supera a %s con evidencia" % "; ".join(texto_sustituto(c) for c in fuertes)
+        partes.append("%s %s con evidencia, pero %s" % (
+            ", ".join(candidatos), "lo supera" if len(candidatos) == 1 else "lo superan",
+            "no es viable" if len(candidatos) == 1 else "no son viables"))
+    else:
+        partes.append("ningún diferenciador supera a %s con un hallazgo triangulado" % texto_rivales(rivales))
+    if paridad:
+        partes.append("%s solo %s: paridad" % (", ".join(paridad), "lo iguala" if len(paridad) == 1
+                                                 else "lo igualan"))
+    return "; ".join(partes)
+
+
+def escenarios_anteriores(escenarios):
+    """True si los escenarios tienen compras calculadas con la regla anterior (el pago único sobre los usuarios del
+    mes, cada mes): inflaba el caso base y hay que recalcularlos."""
+    return int(escenarios.get("calculo") or 1) < CALCULO_ESCENARIOS and any(
+        m["nombre"].startswith("Compra · ") for m in escenarios.get("modelos") or [])
 
 
 def motivo_modelo(modelo):
@@ -1288,6 +1401,29 @@ def sesion_de(registro, ids, defecto):
     return defecto
 
 
+def sesion_ajustable(numero_puerta, sesion, defecto):
+    """La sesión, si se puede ajustar desde esa puerta (es anterior a ella); si no, la de defecto. Un hallazgo de la
+    validación (sesión 3) que cita un diferenciador se completa, en la puerta 1, desde la 1g."""
+    return sesion if sesion in SESION and "P%d" % numero_puerta in dependientes(sesion) else defecto
+
+
+def presupuesto_agotado(producto, registro, sesion="1g"):
+    """Si la sesión ya se reabrió y usó su presupuesto de búsquedas o de lecturas (el 80 %, el punto en el que
+    references/investigacion.md pide cerrar con lo que hay), el texto de lo usado; si no, None. Las búsquedas y las
+    lecturas las anota `cerrar --busquedas --lecturas`; sin ese dato, las lecturas son las fuentes de la línea."""
+    datos = producto["sesiones"].get(sesion) or {}
+    linea = next((nombre for nombre, (_, de_sesion) in LINEAS.items() if de_sesion == sesion), None)
+    if not linea or not (datos.get("reabierta") or datos.get("reaperturas")):
+        return None
+    limites, uso = presupuesto_de(producto), datos.get("uso") or {}
+    busquedas = int(uso.get("busquedas") or 0)
+    lecturas = max(int(uso.get("lecturas") or 0), sum(1 for f in registro.fuentes.values() if f["linea"] == linea))
+    if busquedas >= 0.8 * limites["busquedas"] or lecturas >= 0.8 * limites["lecturas"]:
+        return "%d de %d búsquedas y %d de %d lecturas" % (busquedas, limites["busquedas"], lecturas,
+                                                           limites["lecturas"])
+    return None
+
+
 def nombrados(registro, filas):
     """Los hallazgos que nombran a esas filas de la matriz (por ejemplo, al sustituto que ya resuelve la necesidad)."""
     ids = {fila["id"] for fila in filas}
@@ -1303,7 +1439,7 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
     puntaje = producto.get("puntaje")
     principal = registro.principal()
     viables, bajas = registro.viables(), registro.con_confianza_baja()
-    fuertes = registro.sustitutos_fuertes()
+    rivales = registro.rivales()
     if clave == "puntaje":
         if not puntaje:
             return False, "Falta el puntaje de la síntesis", "Registrar el puntaje en la síntesis (sesión 1f)", "1f", []
@@ -1330,18 +1466,26 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
                     "1a", [])
         return (True, "Alguien ya lo probó y fracasó por falta de demanda (%s)" % detalle,
                 "Evidencia de que el intento anterior fracasó por otra razón que esta idea no repite", None, [])
-    if clave in ("diferenciador", "sustituto"):
-        ids = nombrados(registro, fuertes) + (principal or {}).get("hallazgos", [])
+    if clave in ("diferenciador", "rival"):
+        ids = nombrados(registro, rivales) + (principal or {}).get("hallazgos", [])
         if bajas:
-            baja = bajas[0]
+            baja = principal if principal in bajas else bajas[0]
             faltan = [i for i, _ in registro.sin_triangular(baja)]
             return (False, "%s cumple los criterios de un diferenciador, pero su evidencia no está confirmada (%s)" % (
                 baja["id"], ", ".join(faltan)), "Confirmar los hallazgos de %s con 3 fuentes recientes" % baja["id"],
-                    sesion_de(registro, faltan, "1g"), faltan)
-        if fuertes:
-            nombres = "; ".join(nombre_fila(c) for c in fuertes)
-            return (True, "Ningún diferenciador supera a %s, que ya resuelve la necesidad gratis" % nombres,
-                    "Un diferenciador con evidencia confirmada de algo que %s no resuelve" % nombres, None, ids)
+                    sesion_ajustable(numero_puerta, sesion_de(registro, faltan, "1g"), "1g"), faltan)
+        if viables and registro.rival_pendiente():
+            return (False, "Falta marcar la alternativa gratis más fuerte, el rival que cada diferenciador tiene que "
+                           "superar", "Marcarla en la matriz (`competidor … --rival`) o decir que no la hay (sesión "
+                                      "1a), y comparar cada diferenciador con ella (1g)", "1a", [])
+        if rivales:
+            nombres = texto_rivales(rivales)
+            paridad = [d["id"] for d in registro.diferenciadores.values() if registro.iguala(d)]
+            return (True, "Ningún diferenciador supera a %s, la alternativa gratis más fuerte, con hallazgos "
+                          "triangulados%s" % (nombres, "; %s solo %s: es paridad" % (
+                              ", ".join(paridad), "lo iguala" if len(paridad) == 1 else "lo igualan") if paridad
+                                              else ""),
+                    "Un diferenciador con evidencia confirmada de algo que %s no da" % nombres, None, ids)
         return (True, "No hay ningún diferenciador viable: nada da una razón para elegir esta app",
                 "Un diferenciador con un dolor o un pedido confirmado en 2 competidores o más", None, ids)
     if clave == "principal":
@@ -1350,12 +1494,30 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
                     "1g", [])
         faltan = [i for i, _ in registro.sin_triangular(principal)]
         otros = [d["id"] for d in viables if d["id"] != principal["id"]]
+        frente = registro.frente_al_rival(principal) if rivales else (True, "")
+        if not frente[0]:
+            if registro.iguala(principal):
+                razon = "El principal (%s) iguala a %s: es paridad (básico en Kano), no una razón para elegir la app" % (
+                    principal["id"], texto_rivales(registro.iguala(principal)))
+            else:
+                razon = "El principal (%s) no supera a la alternativa gratis más fuerte (%s)" % (
+                    principal["id"], llano(frente[1].replace("Frente al rival: ", "")))
+            if otros:
+                return (False, razon, "Elegir como principal un diferenciador viable que la supere (%s)" % ", ".join(
+                    otros), "1g", list(principal.get("hallazgos", [])), False)
+            candidatos = [d["id"] for d in registro.diferenciadores.values() if d["id"] != principal["id"]
+                          and registro.frente_al_rival(d)[0]]
+            return (False, razon, "Un principal que supere a %s con hallazgos confirmados%s" % (
+                texto_rivales(rivales), " (%s lo supera%s, sin confirmar)" % (
+                    ", ".join(candidatos), "n" if len(candidatos) > 1 else "") if candidatos else ""), "1g",
+                    list(principal.get("hallazgos", [])))
         if otros:
             return (False, "Los hallazgos del principal (%s) no están confirmados, pero %s sí es viable" % (
                 principal["id"], ", ".join(otros)), "Elegir como principal un diferenciador viable (%s)"
-                % ", ".join(otros), "1g", faltan)
+                % ", ".join(otros), "1g", faltan, False)
         return (False, "Los hallazgos del principal (%s) no están confirmados (%s)" % (principal["id"], ", ".join(
-            faltan)), "Confirmar esos hallazgos con 3 fuentes recientes", sesion_de(registro, faltan, "1g"), faltan)
+            faltan)), "Confirmar esos hallazgos con 3 fuentes recientes",
+                sesion_ajustable(numero_puerta, sesion_de(registro, faltan, "1g"), "1g"), faltan)
     if clave == "riesgo":
         if not puntaje:
             return False, "Falta el puntaje de la síntesis", "Registrar el puntaje en la síntesis (sesión 1f)", "1f", []
@@ -1371,6 +1533,9 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
         return (True, "El riesgo de políticas es 1 y no hay una mitigación escrita",
                 "Una mitigación escrita y creíble del riesgo de políticas", None, sustento(registro)["riesgo"])
     if clave == "monetizacion":
+        if "versión anterior" in detalle:
+            return (False, "Los escenarios se calcularon con una regla anterior (%s)" % detalle,
+                    "Volver a correr los escenarios (sesión 2)", "2", [])
         modelos = (producto.get("escenarios") or {}).get("modelos")
         if modelos and not any(m["base"] > 0 for m in modelos):
             return (True, "Ningún modelo de monetización genera ingresos en el caso base",
@@ -1398,7 +1563,7 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
         ids = list(principal.get("hallazgos", []))
         if otros:
             return (False, "El principal (%s) no sobrevive al abogado del diablo, pero %s sí es viable" % (
-                principal["id"], ", ".join(otros)), "Llevar %s a principal (1g)" % ", ".join(otros), "1g", ids)
+                principal["id"], ", ".join(otros)), "Llevar %s a principal (1g)" % ", ".join(otros), "1g", ids, False)
         return (True, "El diferenciador principal (%s) no sobrevive al abogado del diablo y no hay otro viable (%s)" % (
             principal["id"], detalle.split(": ", 1)[-1]),
                 "Un diferenciador viable que quede sostenido con confianza media o alta", None, ids)
@@ -1412,11 +1577,13 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     """El veredicto de la skill en una puerta, con reglas fijas: No viable (recomienda descartar), Viable con reservas
     (recomienda ajustar una sesión) o Viable (recomienda seguir), con 1 a 3 razones y qué lo cambiaría."""
     evaluados = evaluados if evaluados is not None else evaluar_puerta(numero_puerta, carpeta, producto, registro)
+    # cada motivo: (razón, qué lo cambiaría, sesión que lo completa, si completarlo pide investigar más)
     fatales, ajustes, hallazgos = [], [], []
     for criterio in evaluados:
         if not criterio["cumple"]:
-            fatal, razon, cambiaria, sesion, ids = motivos_criterio(numero_puerta, criterio, producto, registro)
-            (fatales if fatal else ajustes).append((razon, cambiaria, sesion))
+            fatal, razon, cambiaria, sesion, ids, *resto = motivos_criterio(numero_puerta, criterio, producto,
+                                                                            registro)
+            (fatales if fatal else ajustes).append((razon, cambiaria, sesion, resto[0] if resto else True))
             hallazgos += ids
     vigente_ = puntaje_vigente(producto, registro) if numero_puerta == 1 else None
     if vigente_ and vigente_["incoherencias"]:
@@ -1424,10 +1591,24 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
         minimo = int(producto["criterios"]["puntaje_minimo_nueva" if nueva else "puntaje_minimo"])
         registrado = producto["puntaje"]["total"]
         if registrado >= minimo > vigente_["total"]:
-            fatales.insert(0, ("Con las reglas de hoy el puntaje es %d/25 (se registró %d/25), bajo el mínimo de %d"
-                               % (vigente_["total"], registrado, minimo),
+            fatales.insert(0, ("Con las reglas de hoy el puntaje es %d/25 (se registró %d/25), bajo el mínimo de %d: %s"
+                               % (vigente_["total"], registrado, minimo, "; ".join(vigente_["incoherencias"])),
                                "Evidencia nueva que suba el puntaje a %d/25 o más con las reglas de hoy" % minimo,
-                               None))
+                               None, True))
+    rivales = registro.rivales() if numero_puerta == 1 else []
+    if rivales and not fatales:  # superar al rival no alcanza si nada prueba que eso hace elegir la app
+        filas = hipotesis(carpeta, registro) or []
+        candidatos = [d for d in registro.diferenciadores.values() if registro.frente_al_rival(d)[0]]
+        if candidatos and not any(registro.eleccion(d, filas)[0] for d in registro.viables()):
+            principal = registro.principal()
+            elegido = principal if principal in candidatos else candidatos[0]
+            _, faltas, debiles = registro.eleccion(elegido, filas)
+            ajustes.append(("%s supera a %s, pero sin prueba de que eso haga elegir la app (%s)" % (
+                elegido["id"], texto_rivales(rivales), "; ".join(faltas)),
+                "Un hallazgo triangulado y en confianza alta que muestre que la gente elige por %s frente a %s, o "
+                "un vector todavía sin investigar" % (elegido["id"], texto_rivales(rivales)),
+                sesion_ajustable(1, sesion_de(registro, debiles, "1g"), "1g"), True))
+            hallazgos += debiles
     if numero_puerta == 1 and producto.get("puntaje") and not fatales:
         por_criterio, global_ = confianzas(registro)
         if global_ < 2:
@@ -1436,10 +1617,11 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             ids = sustento(registro)[criterio] or []
             sesion = SESION_CRITERIO[criterio]
             if criterio == "diferenciacion" and registro.principal():
-                sesion = sesion_de(registro, [i for i, _ in registro.sin_triangular(registro.principal())], "1g")
+                sesion = sesion_ajustable(1, sesion_de(registro, [i for i, _ in registro.sin_triangular(
+                    registro.principal())], "1g"), "1g")
             ajustes.append(("La confianza global es baja: %s se apoya%s en evidencia sin confirmar" % (
                 ", ".join(NOMBRES_CRITERIO[c] for _, c in debiles), "n" if len(debiles) > 1 else ""),
-                "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion))
+                "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion, True))
             hallazgos += ids
     if not fatales:
         for propuesta in propuestas_de(producto, numero_puerta):
@@ -1447,11 +1629,27 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             lineas_sesion = [linea for linea, (_, de_sesion) in LINEAS.items() if de_sesion == sesion]
             if sesion and not vacios_de_herramienta(producto, registro, lineas_sesion):  # se puede cerrar
                 ajustes.append(("Hay una propuesta pendiente (%s): %s" % (propuesta["id"], llano(propuesta["texto"])),
-                                "Aplicarla al ajustar la sesión %s" % sesion, sesion))
+                                "Aplicarla al ajustar la sesión %s" % sesion, sesion, False))
+    # La 1g que ya se reabrió y usó su presupuesto no se recomienda otra vez para buscar más evidencia: si no queda
+    # ningún otro ajuste que lo resuelva, el veredicto es No viable.
+    agotado = presupuesto_agotado(producto, registro, "1g")
+    sin_salida = [a for a in ajustes if agotado and a[2] == "1g" and a[3]]
+    if not fatales and sin_salida:
+        posibles = [a for a in ajustes if a not in sin_salida]
+        if posibles:
+            ajustes = posibles + sin_salida
+        else:
+            fatales = sin_salida[:MAXIMO_RAZONES - 1] + [(
+                "La sesión 1g ya se reabrió y usó su presupuesto (%s): ajustarla otra vez no traería evidencia nueva"
+                % agotado, "Evidencia que no dependa de más búsquedas en la 1g: un navegador en el agente, un CSV de "
+                           "reseñas que aportes o datos propios", None, True)]
+            ajustes = []
     if fatales:
-        nivel, elegidas, sesion = "no", fatales, None
+        nivel, elegidas, sesion = "no", fatales + ajustes, None
+        cambios = fatales
     elif ajustes:
         nivel, elegidas, sesion = "reservas", ajustes, ajustes[0][2]
+        cambios = ajustes
     else:
         nivel, sesion = "viable", None
         global_ = confianzas(registro)[1]
@@ -1460,16 +1658,19 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                          "baje a baja (pasaría a Viable con reservas)",
                       2: "Que la validación refute una hipótesis crítica (pasaría a No viable)",
                       3: "Que el MVP deje de caber en el presupuesto o pierda la trazabilidad (pasaría a Viable con "
-                         "reservas)"}[numero_puerta], None)]
+                         "reservas)"}[numero_puerta], None, False)]
         if numero_puerta == 1:
-            elegidas.append(("La evidencia que la sostiene tiene confianza %s" % NIVELES[global_], None, None))
+            elegidas.append(("La evidencia que la sostiene tiene confianza %s" % NIVELES[global_], None, None, False))
         principal = registro.principal()
         if principal and numero_puerta in (1, 2):
-            elegidas.append(("El diferenciador principal (%s) es viable" % principal["id"], None, None))
-            hallazgos += principal.get("hallazgos", [])
+            elegidas.append(("El diferenciador principal (%s) es viable%s" % (principal["id"], (
+                " y supera a %s, con prueba de elección" % texto_rivales(rivales)) if rivales else ""),
+                None, None, False))
+            hallazgos += registro.hallazgos_de(principal)
         hallazgos += sustento(registro)["demanda"] or []
-    razones = [r for r, _, _ in elegidas][:MAXIMO_RAZONES]
-    cambiaria = list(dict.fromkeys(c for _, c, _ in elegidas if c))[:MAXIMO_RAZONES]
+        cambios = elegidas
+    razones = [r for r, _, _, _ in elegidas][:MAXIMO_RAZONES]
+    cambiaria = list(dict.fromkeys(c for _, c, _, _ in cambios if c))[:MAXIMO_RAZONES]
     if nivel == "reservas":
         cambiaria.append("Con eso, el veredicto pasaría a Viable")
         lineas_sesion = [linea for linea, (_, de_sesion) in LINEAS.items() if de_sesion == sesion]
@@ -1646,6 +1847,17 @@ def pendientes_de(carpeta, producto, registro, sesion):
             if fila.get("sustituto") not in SUSTITUTOS or fila.get("resuelve") not in RESUELVE:
                 faltan.append("%s es un sustituto: le falta `--sustituto nativo|gratuito|pago` o `--resuelve "
                               "si|parcial|no`" % nombre_fila(fila))
+        if tipo_de(producto) in ("existente", "variante") and registro.rival_pendiente():
+            faltan.append("falta marcar la alternativa gratis más fuerte, el rival que cada diferenciador tiene que "
+                          "superar (sea sustituto o competidor directo): `competidor --nombre <…> … --rival`, o "
+                          "`competidor --sin-rival \"<por qué no hay ninguna gratis que resuelva la necesidad>\"`")
+    if sesion == "1g":
+        for diferenciador in registro.diferenciadores.values():
+            for rival in registro.rivales():
+                if not registro.comparacion(diferenciador, rival):
+                    faltan.append("%s sin comparar con %s, el rival a superar: `frente --id %s --rival %s --resultado "
+                                  "supera|iguala|no --hallazgos H-… --texto \"…\"`" % (
+                                      diferenciador["id"], nombre_fila(rival), diferenciador["id"], rival["id"]))
     if linea and sesion in ("1a", "1b", "1c", "1d", "1e") and not any(
             h["linea"] == linea for h in registro.hallazgos.values()):
         faltan.append("la línea %s no tiene ningún hallazgo registrado" % linea)
@@ -1732,6 +1944,13 @@ def sin_consumo(producto):
     return [s["id"] for s in SESIONES if cerrada(producto, s["id"]) and s["id"] not in anotadas]
 
 
+def texto_sesiones(sesiones):
+    """'la sesión 0' o 'las sesiones 0, 1a y 1b': nunca un número suelto que se confunda con un costo."""
+    if len(sesiones) == 1:
+        return "la sesión %s" % sesiones[0]
+    return "las sesiones %s y %s" % (", ".join(sesiones[:-1]), sesiones[-1])
+
+
 def texto_siguiente(carpeta, producto, registro=None):
     registro = registro or Registro(carpeta, producto["criterios"])
     tipo = tipo_de(producto)
@@ -1747,8 +1966,8 @@ def texto_siguiente(carpeta, producto, registro=None):
                 orden("decidir --puerta %d --reabrir" % numero_puerta, carpeta)))
     pendientes = sin_consumo(producto) if producto.get("consumo") else []  # solo si ya se anotó alguno
     if pendientes:
-        avisos.append("Consumo sin anotar (opcional): %s · al cerrar cada chat, `%s`" % (
-            ", ".join(pendientes), orden("consumo --sesion <id> --costo '<USD>'", carpeta)))
+        avisos.append("Consumo sin anotar (opcional) de %s: al cerrar cada chat, `%s`" % (
+            texto_sesiones(pendientes), orden("consumo --sesion <id> --costo '<USD>'", carpeta)))
     lista_decisiones = decisiones(carpeta)
     sin_sesiones = not any(not cerrada(producto, s["id"]) and disponible(producto, lista_decisiones, s["id"])
                            for s in SESIONES)
@@ -1809,8 +2028,9 @@ def texto_resumen(carpeta, producto, registro):
     consumo = producto.get("consumo", [])
     if consumo:
         lineas.append("- **Consumo anotado:** %s · total %s%s" % (
-            " · ".join("%s %s" % (fila["sesion"], texto_consumo(fila)) for fila in consumo),
-            texto_total(consumo), " (sin anotar: %s)" % ", ".join(sin_consumo(producto))
+            " · ".join("%s: %s" % ("orquestador" if fila["sesion"] == "orquestador" else "sesión %s" % fila["sesion"],
+                                   texto_consumo(fila)) for fila in consumo),
+            texto_total(consumo), " (sin anotar: %s)" % texto_sesiones(sin_consumo(producto))
             if sin_consumo(producto) else ""))
     cambios = producto.get("criterios_cambios", [])
     if cambios:
@@ -2381,6 +2601,26 @@ def cmd_confianza(args):
 
 def cmd_competidor(args):
     carpeta, producto, registro = abrir(args)
+    if args.sin_rival is not None:
+        if args.nombre or args.rival:
+            raise Fallo("--sin-rival va solo: dice que ninguna alternativa gratis resuelve la necesidad")
+        if len(args.sin_rival.strip()) < 10:
+            raise Fallo("--sin-rival lleva el motivo: por qué ninguna alternativa gratis (app o sustituto) resuelve "
+                        "la necesidad")
+        if registro.rivales():
+            raise Fallo("Ya hay un rival a superar (%s): una alternativa gratis marcada o un sustituto gratuito o "
+                        "nativo que resuelve la necesidad" % texto_rivales(registro.rivales()))
+        datos = cargar_linea(carpeta, "competencia")
+        datos["sin_rival"] = {"motivo": args.sin_rival.strip(), "fecha": ahora()}
+        escribir_json(ruta_linea(carpeta, "competencia"), datos)
+        print("✔ Sin rival gratis: %s" % args.sin_rival.strip())
+        print("Siguiente paso: la puerta 1 lo muestra; si después aparece una alternativa gratis, márcala con "
+              "`competidor --nombre … --rival`.")
+        return
+    faltan = [opcion for opcion, valor in (("--nombre", args.nombre), ("--peldano", args.peldano),
+                                           ("--fuentes", args.fuentes)) if not valor]
+    if faltan:
+        raise Fallo("Falta %s: cada fila de la matriz lleva nombre, peldaño y fuentes" % ", ".join(faltan))
     fuentes = ids_existentes(lista(args.fuentes), registro.fuentes, "la(s) fuente(s)")
     if not fuentes:
         raise Fallo("Cada fila de la matriz necesita al menos una fuente (--fuentes S-…)")
@@ -2409,6 +2649,17 @@ def cmd_competidor(args):
     for clave, valor in valores.items():
         if valor not in (None, "", []):
             fila[clave] = valor  # una fila se completa por partes: lo que no se pasa queda como estaba
+    anterior = None
+    if args.rival:
+        if fila.get("peldano") == 4 and fila.get("sustituto") == "pago":
+            raise Fallo("El rival a superar es la alternativa gratis más fuerte: %s es un sustituto de pago"
+                        % nombre_fila(fila))
+        for otra in datos["matriz"]:
+            if otra.get("rival") and otra["id"] != fila["id"] and not otra.get("anulado"):
+                otra["rival"] = False
+                anterior = otra["id"]
+        fila["rival"] = True
+        datos.pop("sin_rival", None)
     escribir_json(ruta_linea(carpeta, "competencia"), datos)
     registro = Registro(carpeta, producto["criterios"])
     vacias = [c for c in COLUMNAS_MATRIZ if c != "traccion" and fila.get(c) in (None, "", [])]
@@ -2417,6 +2668,11 @@ def cmd_competidor(args):
                                              " · con tracción" if registro.con_traccion(fila) else ""))
     if vacias:
         print("· Columnas sin dato: %s" % ", ".join(vacias))
+    if args.rival:
+        print("⚠ Rival a superar: %s, la alternativa gratis más fuerte%s. La sesión 1g registra frente a él si cada "
+              "diferenciador lo supera, lo iguala o no (`frente`); igualarlo es paridad y no hace viable a ninguno, y "
+              "la puerta 1 pide uno que lo supere con prueba de elección." % (
+                  nombre_fila(fila), " (antes: %s)" % anterior if anterior else ""))
     if args.peldano == 4:
         print("· Sustituto: %s" % texto_sustituto(fila))
         if fila.get("sustituto") in ("nativo", "gratuito") and fila.get("resuelve") == "si":
@@ -2456,6 +2712,8 @@ def cmd_matriz(args):
         peldano = str(fila["peldano"])
         if fila["peldano"] == 4:
             peldano += " · %s · %s" % (fila.get("sustituto") or "?", RESUELVE.get(fila.get("resuelve"), "?"))
+        if fila in registro.rivales():
+            peldano += " · rival"
         print("| %s |" % " | ".join([
             fila["id"], fila["nombre"] + (" ★" if registro.con_traccion(fila) else ""), peldano,
             texto(fila.get("descargas")), texto(fila.get("nota")), texto(fila.get("actualizada")), texto(precio),
@@ -2464,12 +2722,17 @@ def cmd_matriz(args):
             texto(fila.get("plataformas")), texto(fila.get("funciones")), texto(quejas.get(fila["id"]))]))
     print("\n★ = con tracción (%s descargas o más, o tracción anotada)." % numero(
         float(producto["criterios"]["traccion_descargas"])))
-    fuertes = registro.sustitutos_fuertes()
-    if fuertes:
-        print("⚠ Sustituto gratuito o nativo que ya resuelve la necesidad: %s. Cada diferenciador tiene que superarlo "
-              "con evidencia (un hallazgo que lo nombre con `--competidores`)." % "; ".join(
-                  nombre_fila(c) for c in fuertes))
-    elif not registro.sustitutos():
+    rivales = registro.rivales()
+    if rivales:
+        print("⚠ Rival a superar (la alternativa gratis más fuerte o un sustituto gratuito o nativo que ya resuelve la "
+              "necesidad): %s. Cada diferenciador registra frente a él si lo supera, lo iguala o no (`frente`)."
+              % texto_rivales(rivales))
+    elif registro.sin_rival:
+        print("· Sin rival gratis: %s" % registro.sin_rival["motivo"])
+    elif tipo_de(producto) in ("existente", "variante"):
+        print("· Falta marcar la alternativa gratis más fuerte (`competidor --nombre … --rival`) o decir que no la "
+              "hay (`competidor --sin-rival \"…\"`): la sesión 1a no cierra sin eso.")
+    if not registro.sustitutos():
         print("· Sin sustitutos (peldaño 4): ¿cómo se resuelve hoy la necesidad sin una app así? La sesión 1a lo "
               "registra antes de cerrar.")
     for clave, ids in quejas.items():
@@ -2529,16 +2792,67 @@ def cmd_diferenciador(args):
                         " registrado" + (" como principal" if args.principal else ""))
 
 
+COMPARACIONES = {"supera": "lo supera", "iguala": "lo iguala (paridad)", "no": "no lo supera"}
+
+
+def cmd_frente(args):
+    carpeta, producto, registro = abrir(args)
+    exigir_1g_abierta(producto, carpeta, "Comparar un diferenciador con el rival")
+    if args.id not in registro.diferenciadores:
+        raise Fallo("No existe el diferenciador %s (o está anulado)" % args.id)
+    rivales = registro.rivales()
+    if args.rival:
+        rival = registro.competidor(args.rival)
+        if rival is None:
+            raise Fallo("%s no tiene fila en la matriz" % args.rival)
+        if rival not in rivales:
+            raise Fallo("%s no es un rival a superar: márcalo como la alternativa gratis más fuerte "
+                        "(`competidor --nombre … --rival`) o regístralo como un sustituto gratuito o nativo que ya "
+                        "resuelve la necesidad" % nombre_fila(rival))
+    elif len(rivales) == 1:
+        rival = rivales[0]
+    elif rivales:
+        raise Fallo("Hay %d rivales (%s): elige uno con --rival C-…" % (len(rivales), texto_rivales(rivales)))
+    else:
+        raise Fallo("No hay un rival a superar: la sesión 1a marca la alternativa gratis más fuerte con `competidor "
+                    "--nombre … --rival`")
+    hallazgos = ids_existentes(lista(args.hallazgos), registro.hallazgos, "el/los hallazgo(s)")
+    if not hallazgos:
+        raise Fallo("La comparación necesita sus hallazgos (--hallazgos H-…): sin evidencia es una opinión")
+    datos = cargar_linea(carpeta, "diferenciacion")
+    item = next(d for d in datos["diferenciadores"] if d["id"] == args.id and not d.get("anulado"))
+    item.setdefault("frente", {})[rival["id"]] = {"resultado": args.resultado, "hallazgos": hallazgos,
+                                                  "texto": args.texto.strip(), "fecha": ahora()}
+    escribir_json(ruta_linea(carpeta, "diferenciacion"), datos)
+    registro = Registro(carpeta, producto["criterios"])
+    diferenciador = registro.diferenciadores[args.id]
+    print("✔ %s frente a %s: %s" % (args.id, nombre_fila(rival), COMPARACIONES[args.resultado]))
+    for identificador in hallazgos:
+        print("  · %s · %s" % (identificador, registro.etiqueta(registro.hallazgos[identificador])))
+    if args.resultado == "iguala":
+        print("· Igualar es paridad (básico en Kano): entra al MVP si hace falta para competir, pero no es una razón "
+              "para elegir la app, no cuenta como viable y no puede ser el principal.")
+    elif args.resultado == "supera":
+        con_prueba, faltas, _ = registro.eleccion(diferenciador, hipotesis(carpeta, registro))
+        print("· %s" % ("Con prueba de elección: todos sus hallazgos están triangulados y en confianza alta." if con_prueba
+                        else "Sin prueba de elección (%s): la puerta 1 queda, como mucho, Viable con reservas."
+                        % "; ".join(faltas)))
+    imprimir_viabilidad(registro, diferenciador)
+
+
 def imprimir_viabilidad(registro, diferenciador, como=""):
     estado = registro.estado(diferenciador)
     identificador = diferenciador["id"]
-    print("%s %s%s: %s" % ({"viable": "✔", "baja": "⚠", "no": "✖"}[estado], identificador, como,
-                                      ESTADOS_DIFERENCIADOR[estado]))
+    print("%s %s%s: %s" % ({"viable": "✔", "baja": "⚠", "paridad": "✖", "no": "✖"}[estado], identificador, como,
+                           ESTADOS_DIFERENCIADOR[estado]))
     for cumple, texto in registro.viabilidad(diferenciador):
         print("  %s %s" % ("✔" if cumple else "✖", texto))
     if estado == "baja":
         print("· Cumple los cinco criterios, pero no todos sus hallazgos están triangulados: no cuenta como viable "
               "para la puerta 1 hasta que lo estén.")
+    if estado == "paridad":
+        print("· Iguala a %s: es paridad (básico en Kano). Sirve para competir, pero no es viable ni puede ser el "
+              "principal." % texto_rivales(registro.iguala(diferenciador)))
     if estado != "no" and diferenciador.get("copiable") == "alta":
         print("· Es fácil de copiar: sirve para entrar, pero no sostiene la posición.")
     en_ficha = any(d.get("se_ve") == "ficha" for d in registro.viables())
@@ -2549,8 +2863,10 @@ def imprimir_viabilidad(registro, diferenciador, como=""):
     print("Siguiente paso: %s" % (
         "regístralo en diferenciacion.md con su ID; el más fuerte es el principal (`principal --id`)."
         if estado == "viable" else "triangula sus hallazgos (`triangulacion` dice qué les falta) o elige otro como "
-        "principal." if estado == "baja" else "consigue lo que falta o descártalo con `anular --id %s --motivo …`."
-        % identificador))
+        "principal." if estado == "baja" else "compáralo con el rival (`frente --id %s --resultado "
+        "supera|iguala|no …`)." % identificador if registro.rivales() and not all(
+            registro.comparacion(diferenciador, r) for r in registro.rivales())
+        else "consigue lo que falta o descártalo con `anular --id %s --motivo …`." % identificador))
 
 
 def cmd_principal(args):
@@ -2627,17 +2943,11 @@ def cmd_objetivo(args):
 
 def cmd_vacio(args):
     carpeta, producto, registro = abrir(args)
-    linea = linea_valida(args.linea)
-    if linea not in COBERTURA_LINEAS:
-        raise Fallo("La línea %s no tiene cobertura por mercado, idioma o tienda. Las que tienen: %s" % (
-            linea, ", ".join(COBERTURA_LINEAS)))
+    linea = linea_valida(args.linea)  # cualquier línea: también la que no pide esa dimensión (la tienda en 1d)
     elegidas = [(d, getattr(args, DIMENSIONES[d])) for d in DIMENSIONES if getattr(args, DIMENSIONES[d])]
     if len(elegidas) != 1:
         raise Fallo("Un vacío es de un solo valor: --mercado, --idioma o --tienda, uno")
     dimension, valor = elegidas[0][0], elegidas[0][1].strip()
-    if dimension not in COBERTURA_LINEAS[linea]:
-        raise Fallo("La línea %s no pide cobertura por %s: pide %s" % (
-            linea, DIMENSIONES[dimension], ", ".join(DIMENSIONES[d] for d in COBERTURA_LINEAS[linea])))
     objetivo = objetivo_de(producto)
     if objetivo and normal(valor) not in [normal(v) for v in objetivo[dimension]]:
         raise Fallo("%s no está en el objetivo (%s): `objetivo` lo muestra" % (valor, ", ".join(objetivo[dimension])))
@@ -2682,7 +2992,8 @@ def cmd_cobertura(args):
                 print("  ✖ %s %s · sin fuentes ni vacío registrado" % (DIMENSIONES[dimension], valor))
         if not filas:
             print("  (sin nada que cubrir en el objetivo)")
-    print("\n%d hueco(s) sin registrar · %d vacío(s) registrado(s)." % (huecos, vacios))
+    print("\n%s sin registrar · %s." % (plural(huecos, "hueco"), plural(vacios, "vacío registrado",
+                                                                       "vacíos registrados")))
     print("Siguiente paso: %s" % (
         "por cada ✖, una fuente con su etiqueta (`fuente … --mercados/--idiomas/--tiendas`) o el vacío con su motivo "
         "(`vacio`). Una línea no cierra con huecos sin registrar." if huecos else
@@ -3067,12 +3378,28 @@ def cmd_escenarios(args):
                 ingresos[c] += propios[c]
             sumar("Anuncios · %s" % anuncio.get("formato", "?"), propios["base"], sin_dau + sin_impresiones + sin_ecpm)
         compras = mercado.get("compras", [])
-        sin_dau_mau = []
-        if compras:
+        for compra in compras:
+            if compra.get("tipo") not in TIPOS_COMPRA:
+                raise Fallo("`%s.compras.%s` necesita `tipo`: pago-unico (se cobra una vez: instalaciones nuevas del "
+                            "mes × conversión × precio × (1 − comisión)) o suscripcion (se cobra cada mes a la base "
+                            "de pagadores: usuarios del mes × conversión × precio al mes × (1 − comisión))"
+                            % (nombre, compra.get("nombre", "?")))
+        tipos = {compra["tipo"] for compra in compras}
+        sin_dau_mau = sin_instalaciones = []
+        if "suscripcion" in tipos:
+            if mercado.get("dau_mau") is None:
+                raise Fallo("`%s.dau_mau` hace falta para una suscripción: la proporción de los usuarios del mes que "
+                            "entra cada día (entre 0 y 1)" % nombre)
             dau_mau, sin_dau_mau = supuestos(mercado.get("dau_mau"), "%s.dau_mau" % nombre)
             if min(dau_mau.values()) <= 0 or max(dau_mau.values()) > 1:
                 raise Fallo("`%s.dau_mau` es la proporción de usuarios del mes que entran cada día: va entre 0 y 1"
                             % nombre)
+        if "pago-unico" in tipos:
+            if mercado.get("instalaciones_mes") is None:
+                raise Fallo("`%s.instalaciones_mes` hace falta para un pago único: las instalaciones nuevas de cada "
+                            "mes (un pago único se cobra una vez, no cada mes a los mismos usuarios)" % nombre)
+            instalaciones, sin_instalaciones = supuestos(mercado.get("instalaciones_mes"),
+                                                         "%s.instalaciones_mes" % nombre)
         for compra in compras:
             ruta_supuesto = "%s.compras.%s" % (nombre, compra.get("nombre", "?"))
             conversion, sin_conversion = supuestos(compra.get("conversion"), ruta_supuesto + ".conversion")
@@ -3082,10 +3409,19 @@ def cmd_escenarios(args):
                 raise Fallo("`%s.comision` es la comisión de la tienda como proporción: 0.15 o 0.30" % ruta_supuesto)
             if max(conversion.values()) > 1:
                 raise Fallo("`%s.conversion` es una proporción entre 0 y 1 (1 % = 0.01)" % ruta_supuesto)
-            propios = dict((c, dau[c] / dau_mau[c] * conversion[c] * precio[c] * (1 - comision)) for c in casos)
+            if compra["tipo"] == "suscripcion":
+                periodo = compra.get("periodo", "mes")
+                if periodo not in PERIODOS:
+                    raise Fallo("`%s.periodo` es mes o anio: lo que cubre el precio de la suscripción" % ruta_supuesto)
+                propios = dict((c, dau[c] / dau_mau[c] * conversion[c] * precio[c] / PERIODOS[periodo]
+                                * (1 - comision)) for c in casos)
+                faltan = sin_dau + sin_dau_mau + sin_conversion
+            else:
+                propios = dict((c, instalaciones[c] * conversion[c] * precio[c] * (1 - comision)) for c in casos)
+                faltan = sin_instalaciones + sin_conversion
             for c in casos:
                 ingresos[c] += propios[c]
-            sumar("Compra · %s" % compra.get("nombre", "?"), propios["base"], sin_dau + sin_dau_mau + sin_conversion)
+            sumar("%s · %s" % (TIPOS_COMPRA[compra["tipo"]], compra.get("nombre", "?")), propios["base"], faltan)
         if not mercado.get("anuncios") and not compras:
             raise Fallo("El mercado %s no tiene `anuncios` ni `compras`" % nombre)
         filas.append((nombre, dau, ingresos))
@@ -3106,7 +3442,7 @@ def cmd_escenarios(args):
     producto["escenarios"] = {"fecha": ahora(), "moneda": moneda, "pesimista": round(totales["pesimista"], 2),
                               "base": round(totales["base"], 2), "optimista": round(totales["optimista"], 2),
                               "rotulos": rotulos, "dau_base": usuarios["base"], "dau_meta": necesarios,
-                              "entrada": str(ruta), "modelos": lista_modelos}
+                              "entrada": str(ruta), "modelos": lista_modelos, "calculo": CALCULO_ESCENARIOS}
     guardar(carpeta, producto)
     actualizar_estado(carpeta, producto)
     print("Escenarios de ingresos netos al mes (%s)%s" % (moneda, " · " + " · ".join(rotulos) if rotulos else ""))
@@ -3123,7 +3459,9 @@ def cmd_escenarios(args):
     if sin_fuente:
         print("⚠ Estimación: supuestos sin fuente: %s" % ", ".join(sin_fuente))
     print("\nModelos de monetización (la puerta 2 pide al menos uno viable con evidencia: genera ingresos en el caso "
-          "base y todos sus supuestos citan su fuente):")
+          "base y todos sus supuestos citan su fuente). Anuncios: usuarios activos diarios × impresiones × 30 × eCPM "
+          "÷ 1000; pago único: instalaciones nuevas del mes × conversión × precio × (1 − comisión); suscripción: "
+          "usuarios del mes × conversión × precio al mes × (1 − comisión):")
     for modelo in lista_modelos:
         print("  %s %s · %s %s al mes en el caso base%s" % (
             "✔" if modelo["viable"] else "✖", modelo["nombre"], numero(modelo["base"]), moneda,
@@ -3200,28 +3538,52 @@ def cmd_cerrar(args):
     carpeta, producto, registro = abrir(args)
     if args.sesion not in SESION:
         raise Fallo("No existe la sesión '%s'. Las que hay: %s" % (args.sesion, ", ".join(SESION)))
+    linea = next((nombre for nombre, (_, de_sesion) in LINEAS.items() if de_sesion == args.sesion), None)
+    uso = {}
+    for clave in ("busquedas", "lecturas"):
+        valor = getattr(args, clave)
+        if valor is not None:
+            if args.sesion not in ("1a", "1b", "1c", "1d", "1e", "1g"):
+                raise Fallo("--busquedas y --lecturas son de una sesión de investigación (1a a 1e y 1g)")
+            if not re.match(r"^\d+$", valor.strip()):
+                raise Fallo("--%s es un número entero: lo usado en total por la línea, sumando las pasadas" % clave)
+            uso[clave] = int(valor)
     faltan = pendientes_de(carpeta, producto, registro, args.sesion)
     if faltan:
         raise Fallo("La sesión %s · %s todavía no se puede cerrar:\n  - %s" % (
             args.sesion, SESION[args.sesion]["nombre"], "\n  - ".join(faltan)))
-    producto["sesiones"].setdefault(args.sesion, {})["cerrada"] = ahora()
+    datos_sesion = producto["sesiones"].setdefault(args.sesion, {})
+    datos_sesion["cerrada"] = ahora()
+    if uso:
+        datos_sesion["uso"] = dict(datos_sesion.get("uso") or {}, **uso)
     guardar(carpeta, producto)
     siguiente = actualizar_estado(carpeta, producto)
     print("✔ Sesión %s · %s cerrada" % (args.sesion, SESION[args.sesion]["nombre"]))
-    if args.sesion == "1g" and tipo_de(producto) != "nueva":
+    if uso:
+        limites = presupuesto_de(producto)
+        print("· Presupuesto usado por la línea %s: %s." % (linea, " y ".join(
+            "%d de %d %s" % (cantidad, limites[clave], "búsquedas" if clave == "busquedas" else "lecturas")
+            for clave, cantidad in datos_sesion["uso"].items())))
+        if args.sesion == "1g" and presupuesto_agotado(producto, registro, "1g"):
+            print("· La 1g ya se reabrió y usó su presupuesto: si la puerta pide más evidencia de diferenciación, la "
+                  "skill no recomendará ajustar la 1g otra vez.")
+    if args.sesion == "1g":
         principal = registro.principal()
-        if not registro.viables():
+        paridad = [d["id"] for d in registro.diferenciadores.values() if registro.estado(d) == "paridad"]
+        if tipo_de(producto) != "nueva" and not registro.viables():
             print("⚠ No hay ningún diferenciador viable%s: la puerta 1 lo va a marcar como criterio sin cumplir." % (
                 " (%s, con confianza baja: sin triangular)" % ", ".join(d["id"] for d in registro.con_confianza_baja())
                 if registro.con_confianza_baja() else ""))
-        if principal and registro.sin_triangular(principal):
+        if paridad:
+            print("⚠ %s solo %s a %s: es paridad (básico en Kano), no cuenta como viable ni puede ser el principal." % (
+                ", ".join(paridad), "iguala" if len(paridad) == 1 else "igualan", texto_rivales(registro.rivales())))
+        if tipo_de(producto) != "nueva" and principal and registro.sin_triangular(principal):
             print("⚠ Los hallazgos del diferenciador principal (%s) no están triangulados: la puerta 1 lo marca." % (
                 principal["id"]))
-    fuertes = registro.sustitutos_fuertes()
-    if args.sesion == "1g" and fuertes and not any(registro.frente_al_sustituto(d)[0]
-                                                   for d in registro.diferenciadores.values()):
-        print("⚠ Ningún diferenciador supera a %s: la puerta 1 lo marca como criterio sin cumplir." % "; ".join(
-            texto_sustituto(c) for c in fuertes))
+        rivales = registro.rivales()
+        if rivales and not any(registro.frente_al_rival(d)[0] for d in registro.diferenciadores.values()):
+            print("⚠ Ningún diferenciador supera a %s con un hallazgo triangulado: la puerta 1 lo marca como criterio "
+                  "sin cumplir." % texto_rivales(rivales))
     print("\n" + siguiente)
 
 
@@ -3344,7 +3706,11 @@ def cmd_decidir(args):
             elif cerrada(producto, otro):
                 reabiertas.append(otro)
         for reabierta in reabiertas:
-            producto["sesiones"][reabierta] = {"reabierta": ahora()}
+            anterior = producto["sesiones"].get(reabierta) or {}
+            producto["sesiones"][reabierta] = {"reabierta": ahora(), "reaperturas": int(anterior.get(
+                "reaperturas") or (1 if anterior.get("reabierta") else 0)) + 1}
+            if anterior.get("uso"):  # el presupuesto es de la línea: las pasadas siguientes lo siguen sumando
+                producto["sesiones"][reabierta]["uso"] = anterior["uso"]
         registro_decision.update(decision="ajustar", sesion=sesion)
         lista_decisiones.append(registro_decision)
         escribir_json(carpeta / "decisiones.json", lista_decisiones)
@@ -3484,6 +3850,8 @@ TIPOS_FUENTE_LLANO = {"medido": "dato medido", "usuario": "opinión de usuarios"
 DIFERENCIADOR_LLANO = {"viable": ("Viable", "bien", "Tiene evidencia sólida y cumple todos los criterios."),
                        "baja": ("Prometedor, sin confirmar", "aviso",
                                 "Cumple los criterios, pero su evidencia no está confirmada por 3 fuentes."),
+                       "paridad": ("Paridad", "mal", "Iguala a la alternativa gratis más fuerte: es lo básico para "
+                                   "competir, no una razón para elegir esta app."),
                        "no": ("Todavía no es viable", "mal", "Le falta al menos un criterio.")}
 COPIABLE_LLANO = {"baja": "Difícil de copiar", "media": "Copiable con esfuerzo", "alta": "Fácil de copiar"}
 TONO_CONFIANZA = {3: "bien", 2: "aviso", 1: "mal", 0: "neutro"}
@@ -3886,16 +4254,18 @@ def seccion_diferenciadores(producto, registro):
     if not registro.diferenciadores:
         return tarjeta("Diferenciadores", '<p class="vacio">Sin diferenciadores registrados (los busca la sesión '
                                           '1g).</p>')
-    fuertes = registro.sustitutos_fuertes()
+    rivales = registro.rivales()
     texto = ('<p class="nota">Un diferenciador es la razón para elegir esta app y no otra. Es viable si tiene '
-             'evidencia confirmada, se percibe, cabe en el presupuesto y supera al sustituto gratuito o nativo, '
-             'si hay uno.</p>')
-    if fuertes:
-        texto += "<p>%s <b>Sustituto que ya resuelve la necesidad:</b> %s.</p>" % (chip("Sustituto fuerte", "aviso", "⚠"),
-                                                                                   escape("; ".join(texto_sustituto(c)
-                                                                                                    for c in fuertes)))
+             'evidencia confirmada, se percibe, cabe en el presupuesto y supera a la alternativa gratis más fuerte '
+             '(otra app o un sustituto). Igualarla no alcanza: es lo básico para competir.</p>')
+    if rivales:
+        texto += "<p>%s <b>Rival a superar:</b> %s.</p>" % (chip("Alternativa gratis más fuerte", "aviso", "⚠"),
+                                                            escape("; ".join(texto_sustituto(c) if c["peldano"] == 4
+                                                                             else nombre_fila(c) for c in rivales)))
+    elif registro.sin_rival:
+        texto += "<p><b>Sin rival gratis:</b> %s.</p>" % escape(registro.sin_rival["motivo"])
     items = []
-    orden_estado = {"viable": 0, "baja": 1, "no": 2}
+    orden_estado = {"viable": 0, "baja": 1, "paridad": 2, "no": 3}
     for diferenciador in sorted(registro.diferenciadores.values(),
                                 key=lambda d: (not d.get("principal"), orden_estado[registro.estado(d)], d["id"])):
         estado = registro.estado(diferenciador)
@@ -3983,6 +4353,8 @@ def seccion_competidores(registro):
         if fila.get("peldano") == 4:
             que += " · %s · %s" % (SUSTITUTOS.get(fila.get("sustituto"), "sin evaluar"),
                                    RESUELVE.get(fila.get("resuelve"), "sin evaluar"))
+        if fila in registro.rivales():
+            que += " · rival a superar"
         precio = " · ".join(str(v) for v in (fila.get("precio"), fila.get("modelo")) if v)
         filas.append("<tr><td>%s%s%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             escape(fila.get("nombre", "")), " ★" if registro.con_traccion(fila) else "", ref(fila["id"]), escape(que),
@@ -4122,6 +4494,10 @@ GLOSARIO = (
     ("Confianza", "Qué tan sólida es la evidencia: alta, media, baja o sin evidencia. La calcula el script."),
     ("Sustituto", "Cómo se resuelve hoy la necesidad sin una app así: una función del sistema, una hoja de cálculo, "
                   "un grupo de chat."),
+    ("Rival a superar", "La alternativa gratis más fuerte, sea otra app o un sustituto: cada diferenciador tiene que "
+                        "superarla, y con prueba de que eso hace elegir la app."),
+    ("Paridad", "Un diferenciador que solo iguala al rival: es lo básico para competir, no una razón para elegir la "
+                "app."),
     ("Dato acumulado", "Descargas o valoraciones desde el lanzamiento: contexto, no la demanda de hoy."),
     ("Vacío", "Un mercado, idioma o tienda sin fuentes, con su motivo (límite de las herramientas, sin resultados o "
               "sin presupuesto)."),
@@ -4229,10 +4605,11 @@ def html_tablero(raiz, filas, fallidas):
         estado, puntaje = fila["estado"], fila["puntaje"]
         ultima = estado["ultima"]
         renglones.append(
-            '<li><div class="fila"><h3><a href="%s">%s</a></h3>%s<span class="nota">%s</span></div>'
+            '<li><div class="fila"><h3><a href="%s">%s</a></h3>%s%s<span class="nota">%s</span></div>'
             '<div class="dato"><div><b>Puntaje:</b> %s<br><span class="nota">mínimo de la puerta 1: %d</span></div>'
             '%s<div class="nota"><b>Última puerta:</b> %s</div></div>%s<p><b>%s</b> %s</p></li>' % (
                 escape(fila["enlace"], quote=True), escape(fila["nombre"]),
+                '<span class="nota">%s</span>' % escape(fila["distingue"]) if fila.get("distingue") else "",
                 chip(estado["etiqueta"], tonos[estado["clave"]], estado["icono"]),
                 escape("idea %s" % fila["tipo"] if fila["tipo"] else "tipo sin registrar"),
                 "%d/25" % puntaje if puntaje is not None else "sin puntaje", fila["minimo"],
@@ -4283,17 +4660,24 @@ def cmd_tablero(args):
             "motivo": estado["motivo"] or paso_corto(carpeta, producto, registro),
             "veredicto": info,
             "enlace": Path(os.path.relpath(str(ruta), str(raiz))).as_posix(),
+            "carpeta": Path(os.path.relpath(str(carpeta), str(raiz))).as_posix(), "creado": producto.get("creado", ""),
             "fecha": max([producto.get("creado", "")] + [d.get("fecha", "") for d in decisiones(carpeta)]
                          + [(estado["archivo"] or {}).get("fecha", "")]),
         })
     filas.sort(key=lambda f: f["fecha"], reverse=True)
     filas.sort(key=lambda f: ORDEN_ESTADOS.index(f["estado"]["clave"]))
+    repetidos = {normal(f["nombre"]) for f in filas if sum(1 for g in filas if normal(g["nombre"]) == normal(
+        f["nombre"])) > 1}
+    for fila in filas:  # dos ideas con el mismo nombre se distinguen por su carpeta y su fecha de creación
+        fila["distingue"] = "carpeta %s%s" % (fila["carpeta"], " · creada el %s" % fila["creado"] if fila["creado"]
+                                              else "") if normal(fila["nombre"]) in repetidos else ""
     destino = raiz / TABLERO
     escribir(destino, html_tablero(raiz, filas, fallidas))
     print("✔ Tablero con %s: %s" % (plural(len(filas), "idea"), destino))
     for fila in filas:
         info = fila["veredicto"]
-        print("  · %s · %s%s · %s" % (fila["nombre"], fila["estado"]["etiqueta"], " · %s %s (puerta %d), recomienda %s"
+        print("  · %s · %s%s · %s" % (fila["nombre"] + (" (%s)" % fila["distingue"] if fila["distingue"] else ""),
+                                      fila["estado"]["etiqueta"], " · %s %s (puerta %d), recomienda %s"
                                       % (VEREDICTOS[info["resultado"]["nivel"]]["marca"], info["resultado"]["titulo"],
                                          info["resultado"]["puerta"], texto_recomendacion(info["resultado"]))
                                       if info else "", fila["enlace"]))
@@ -4385,10 +4769,15 @@ def parser():
     sub.add_argument("--motivo", required=True)
 
     sub = comando("competidor", cmd_competidor, "Registra o completa una fila de la matriz de competidores (C-…)")
-    sub.add_argument("--nombre", required=True)
-    sub.add_argument("--peldano", required=True, type=int, choices=(1, 2, 3, 4),
-                     help="1 directo, 2 variante, 3 análogo, 4 sustituto")
-    sub.add_argument("--fuentes", required=True, help="S-…,S-…")
+    sub.add_argument("--nombre", help="obligatorio, salvo con --sin-rival")
+    sub.add_argument("--peldano", type=int, choices=(1, 2, 3, 4),
+                     help="1 directo, 2 variante, 3 análogo, 4 sustituto (obligatorio, salvo con --sin-rival)")
+    sub.add_argument("--fuentes", help="S-…,S-… (obligatorio, salvo con --sin-rival)")
+    sub.add_argument("--rival", action="store_true",
+                     help="la alternativa gratis más fuerte, sea sustituto o competidor directo: cada diferenciador "
+                          "tiene que superarla (una sola; marcar otra reemplaza a la anterior)")
+    sub.add_argument("--sin-rival", dest="sin_rival", metavar="MOTIVO",
+                     help="en vez de una fila: por qué ninguna alternativa gratis resuelve la necesidad")
     sub.add_argument("--descargas", help="número, 100k o 1M")
     sub.add_argument("--nota")
     sub.add_argument("--actualizada", help="fecha de la última actualización (AAAA-MM)")
@@ -4420,7 +4809,7 @@ def parser():
     sub.add_argument("--motivo", help="obligatorio después de cerrar la sesión 0")
 
     sub = comando("vacio", cmd_vacio, "Registra un mercado, idioma o tienda del objetivo que quedó sin fuentes")
-    sub.add_argument("--linea", required=True, help=", ".join(COBERTURA_LINEAS))
+    sub.add_argument("--linea", required=True, help="cualquier línea: %s" % ", ".join(LINEAS))
     sub.add_argument("--mercado")
     sub.add_argument("--idioma")
     sub.add_argument("--tienda")
@@ -4448,6 +4837,14 @@ def parser():
     sub.add_argument("--semanas", required=True, help="semanas estimadas para construirlo")
     sub.add_argument("--principal", action="store_true")
 
+    sub = comando("frente", cmd_frente, "Registra si un diferenciador supera, iguala o no al rival (sesión 1g)")
+    sub.add_argument("--id", required=True, help="el diferenciador (D-…)")
+    sub.add_argument("--rival", help="C-… (por defecto, el único rival)")
+    sub.add_argument("--resultado", required=True, choices=sorted(COMPARACIONES),
+                     help="supera, iguala (paridad: no cuenta como viable) o no")
+    sub.add_argument("--hallazgos", required=True, help="H-…,H-…: la evidencia de la comparación")
+    sub.add_argument("--texto", required=True, help="en qué lo supera o lo iguala, en una frase")
+
     sub = comando("principal", cmd_principal, "Elige el diferenciador principal (con la sesión 1g abierta)")
     sub.add_argument("--id", required=True)
 
@@ -4474,6 +4871,8 @@ def parser():
 
     sub = comando("cerrar", cmd_cerrar, "Cierra una sesión si su entregable está completo")
     sub.add_argument("--sesion", required=True, help=", ".join(SESION))
+    sub.add_argument("--busquedas", help="sesiones de investigación: búsquedas usadas en total por la línea")
+    sub.add_argument("--lecturas", help="sesiones de investigación: lecturas usadas en total por la línea")
 
     sub = comando("puerta", cmd_puerta, "Veredicto de una puerta, criterio por criterio")
     sub.add_argument("--n", required=True, type=int, choices=(1, 2, 3))

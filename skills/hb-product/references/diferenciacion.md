@@ -9,13 +9,13 @@ Si ya existen apps iguales o parecidas, la demanda está probada y la pregunta c
 1. Primera línea: `Sesión 1g · Diferenciación (<motivo>)`.
 2. `producto.py tipo` y `producto.py matriz`: la matriz de 1a con los hallazgos que 1b enlazó a cada competidor.
 3. Lee `competencia.md` y `voz-del-usuario.md` (solo esos dos).
-4. Mira primero el **sustituto más fuerte** de la matriz (peldaño 4): si es gratuito o nativo y ya resuelve la necesidad, todo diferenciador tiene que superarlo (abajo).
+4. Mira primero **el rival a superar**: la alternativa gratis más fuerte que marcó 1a (`competidor --rival`, sea otra app o un sustituto) y los sustitutos gratuitos o nativos que ya resuelven la necesidad. Todo diferenciador tiene que superarlo (abajo).
 5. Recorre los 12 vectores y anota el hueco de cada uno, o "sin hueco".
 6. Arma el cuadro ERRC, la clasificación Kano y el mapa de posicionamiento.
 7. Si a un hueco le falta evidencia, búscala y regístrala en la línea `diferenciacion` (`producto.py fuente` y `hallazgo`).
-8. Registra cada diferenciador con `producto.py diferenciador`: dice si es viable y por qué. Elige el principal con `--principal` o, después, con `producto.py principal --id D-…`.
+8. Registra cada diferenciador con `producto.py diferenciador` y su comparación con el rival con `producto.py frente` (supera, iguala o no, con sus hallazgos): el script dice si es viable y por qué. Elige el principal con `--principal` o, después, con `producto.py principal --id D-…`.
 9. Abogado del diablo: por qué los competidores no lo hicieron ya y cuánto tardarían en copiarlo.
-10. Completa `diferenciacion.md` y `producto.py cerrar --sesion 1g`.
+10. Completa `diferenciacion.md` y `producto.py cerrar --sesion 1g --busquedas <n> --lecturas <n>` (lo usado en total por la línea, sumando las pasadas). 1g no cierra con un diferenciador sin comparar con el rival.
 
 **Si ningún diferenciador es viable, dilo tal cual.** Es un resultado válido: la puerta 1 lo muestra y el usuario decide. No inventes uno para salvar la idea.
 
@@ -25,14 +25,27 @@ La arma la sesión 1a: una fila por competidor y una columna por vector (descarg
 
 En una idea nueva, las filas son los análogos y los sustitutos: la comparación es contra la hoja de cálculo o el grupo de chat.
 
-## El sustituto más fuerte
+## El rival a superar: la alternativa gratis más fuerte
 
-El rival más difícil muchas veces no es otra app, sino lo que el usuario ya tiene: la linterna que trae el teléfono, el recordatorio del sistema, una hoja de cálculo o el grupo de chat. Ganarle a las otras apps no sirve si ese sustituto ya resuelve la necesidad gratis.
+Ganarle a las apps de pago no sirve si hay una alternativa gratis que ya da lo mismo. Ese rival puede ser **otra app** (una directa, gratis y completa) o **un sustituto**: la linterna que trae el teléfono, el recordatorio del sistema, una hoja de cálculo o el grupo de chat. La lección de dos pruebas: con Linterna, el diferenciador era viable frente a las apps, pero no frente a la linterna nativa; en otra, el principal (gratis y sin topes) solo **igualaba** a una app directa que ya era gratis y sin topes, y la puerta daba verde porque solo miraba los sustitutos.
 
-- La sesión 1a registra siempre al menos un sustituto (peldaño 4) con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin eso, 1a no cierra. Sé honesto con `--resuelve si`: si la mayoría de quienes tienen la necesidad se arreglan con él, la resuelve.
-- **Sustituto fuerte:** nativo o gratuito, y que resuelve la necesidad. `producto.py matriz` lo marca.
-- Con un sustituto fuerte, un diferenciador solo es viable si **lo supera con evidencia**: uno de sus hallazgos nombra al sustituto (`hallazgo … --competidores C-…`) y muestra lo que el sustituto no resuelve (por ejemplo, quejas de quienes lo usan). Esos hallazgos también tienen que estar triangulados.
-- Si nada lo supera, dilo así: con un sustituto gratuito que ya resuelve la necesidad, no hay oportunidad, por más que se le gane a las otras apps. La puerta 1 lo marca.
+- **La sesión 1a marca el rival** con `competidor --nombre "<la alternativa>" … --rival`: la alternativa gratis más fuerte, sea sustituto o competidor directo. Hay uno solo: marcar otro reemplaza al anterior. Si ninguna alternativa gratis resuelve la necesidad, lo dice con `competidor --sin-rival "<por qué>"`. En una idea existente o variante, 1a no cierra sin una de las dos.
+- **Los sustitutos fuertes también son rivales.** La sesión 1a registra siempre al menos un sustituto (peldaño 4) con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin eso, 1a no cierra. Sé honesto con `--resuelve si`: si la mayoría de quienes tienen la necesidad se arreglan con él, la resuelve. Uno nativo o gratuito que la resuelve se suma al rival marcado.
+- **La sesión 1g compara cada diferenciador con cada rival**, con sus hallazgos:
+
+```bash
+python3 -I <skill>/scripts/producto.py frente --id D-1 --rival C-2 --resultado supera|iguala|no \
+  --hallazgos H-VOZ-2,H-DIF-1 --texto "En qué lo supera o lo iguala, en una frase"
+```
+
+| Resultado | Qué significa | Para la viabilidad |
+| --- | --- | --- |
+| `supera` | Hace algo que el rival no da, con evidencia | Cumple si **al menos uno** de esos hallazgos está triangulado; todos entran al criterio de triangulación |
+| `iguala` | Da lo mismo que el rival (por ejemplo, gratis frente a una app que ya es gratis) | **Paridad**: es básico en Kano. Sirve para competir, pero no es viable ni puede ser el principal |
+| `no` | El rival lo hace mejor | No cumple |
+
+- **Prueba de elección.** Superar al rival no alcanza si nada muestra que eso hace **elegir** la app. Hay prueba de elección cuando todos los hallazgos de la comparación están triangulados y en confianza **alta**, y ninguna hipótesis de 03-validacion.md sobre ese diferenciador quedó débil o refutada. Sin ella, la puerta 1 queda como mucho en 🟡 ([puertas.md](puertas.md)).
+- Si nada supera al rival, dilo así: con una alternativa gratis que ya da lo mismo, no hay oportunidad, por más que se le gane a las otras apps. La puerta 1 lo marca como No viable.
 
 ## Vectores de diferenciación
 
@@ -67,20 +80,21 @@ python3 -I <skill>/scripts/producto.py diferenciador --vector precio --texto "Pa
   --motivo "Cambiar de modelo les cuesta ingresos recurrentes" --semanas 2 --principal
 ```
 
-El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja** o **todavía no viable**. Tiene que cumplir los cinco criterios:
+El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja**, **paridad** o **todavía no viable**. Tiene que cumplir los cinco criterios:
 
 1. **Evidencia.** Una de dos: un dolor o un pedido **triangulado en 2 competidores o más** (un hallazgo con sus 3 fuentes y `--competidores` con dos filas de la matriz), o un **vector medible comprobado en la matriz** en 2 competidores o más (`precio`, `rendimiento` por el tamaño, `anuncios`, `idioma`, `privacidad` por los permisos, `sin-conexion`, `accesibilidad`, `diseno` por la última actualización y `plataforma`). `usabilidad`, `funcionalidades` y `segmento` no se miden en la matriz: necesitan el dolor triangulado. Es el filtro del *diferenciador imaginario*.
 2. **Se percibe** (`--se-ve`). En la **ficha** de la tienda (precio, idioma, sin anuncios, diseño), que es lo que consigue descargas, o en el **uso** (rendimiento, usabilidad), que es lo que consigue retención y buenas notas. Lo ideal es tener uno viable de cada tipo: el script avisa cuál falta.
 3. **Copiabilidad** (`--copiable baja|media|alta`, con `--motivo`). Uno fácil de copiar sirve para entrar, pero no sostiene la posición.
 4. **Cabe en el presupuesto** (`--semanas`): se construye dentro de las semanas de la sesión 0.
-5. **Supera al sustituto fuerte**, si lo hay: uno de sus hallazgos nombra al sustituto gratuito o nativo que ya resuelve la necesidad y muestra lo que ese sustituto no resuelve (arriba). Si el sustituto de la matriz no está evaluado, el criterio no se da por cumplido.
+5. **Supera al rival**, si lo hay: `frente … --resultado supera` con al menos un hallazgo triangulado, frente a cada rival (arriba). Igualarlo es paridad y no cumple; un sustituto sin evaluar tampoco da el criterio por cumplido.
 
-Y además, **sus hallazgos tienen que estar triangulados** (la regla de [evidencia.md](evidencia.md)), todos los que cita:
+Y además, **sus hallazgos tienen que estar triangulados** (la regla de [evidencia.md](evidencia.md)), todos los que cita, también los de sus comparaciones con el rival:
 
 | Estado | Cuándo | Cuenta para la puerta 1 |
 | --- | --- | --- |
 | Viable | Los cinco criterios y sus hallazgos triangulados | Sí |
 | Viable con confianza baja | Los cinco criterios, pero algún hallazgo sin triangular | No: se muestra aparte, y el puntaje de diferenciación llega como máximo a 2 |
+| Paridad | Iguala al rival (`frente … --resultado iguala`) | No: es básico en Kano. Entra al MVP si hace falta para competir, pero no puede ser el principal |
 | Todavía no viable | Falta alguno de los cinco criterios | No |
 
 Un vector medible comprobado en la matriz cumple el criterio de evidencia, pero si el hallazgo que lo sostiene no está triangulado, el diferenciador queda con confianza baja. `producto.py triangulacion` dice qué le falta a cada hallazgo.
@@ -89,7 +103,7 @@ Un diferenciador que no es viable queda registrado igual, con lo que le falta. S
 
 ## El diferenciador principal
 
-Es el que sostiene la propuesta de valor (sesión 2), el que la sesión 3 pone a prueba con el abogado del diablo y el que el MVP incluye **siempre** (sesión 4). Elige el viable que mejor combine evidencia, que se vea en la ficha y que sea difícil de copiar. Solo hay uno: `producto.py principal --id D-2` (o un diferenciador nuevo con `--principal`) reemplaza al anterior. La puerta 1 exige que **sus hallazgos estén triangulados**: un principal viable con confianza baja no la cumple, aunque haya otro viable.
+Es el que sostiene la propuesta de valor (sesión 2), el que la sesión 3 pone a prueba con el abogado del diablo y el que el MVP incluye **siempre** (sesión 4). Elige el viable que mejor combine evidencia, que se vea en la ficha y que sea difícil de copiar. Solo hay uno: `producto.py principal --id D-2` (o un diferenciador nuevo con `--principal`) reemplaza al anterior. La puerta 1 exige que **sus hallazgos estén triangulados y que supere al rival**: un principal viable con confianza baja o que solo iguala al rival no la cumple, aunque haya otro viable.
 
 **Se elige en la sesión 1g.** Con 1g cerrada, `diferenciador`, `principal` y `anular D-…` se niegan: cambiar el principal después (por ejemplo, porque la sesión 2 o la 3 encontró que no se sostiene) es una decisión del usuario. Regístralo como propuesta para la puerta siguiente, con la sesión que lo aplicaría:
 

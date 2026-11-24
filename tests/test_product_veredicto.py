@@ -71,7 +71,7 @@ class VeredictoTest(Base):
         salida = self.p("puerta", "--n", 1)
         self.assertIn("🔴  PUERTA 1 · NO VIABLE  →  la skill recomienda: DESCARTAR", salida)
         self.assertIn("  1. El puntaje es 14/25, bajo el mínimo de 17.", salida)
-        self.assertIn("No hay ningún diferenciador viable", salida)
+        self.assertIn("Ningún diferenciador supera a C-2 (PlantaPlus), la alternativa gratis más fuerte", salida)
         razones = re.findall(r"^  \d\. ", salida, re.M)
         self.assertLessEqual(len(razones), 3)
         self.assertIn("Criterios: cumple 1 de 5.", salida)
@@ -280,7 +280,8 @@ class ReporteVeredictoTest(Base):
         self.hasta_puerta1()
         salida = self.p("tablero", "--raiz", raiz)
         self.assertIn("✔ Tablero con 3 ideas", salida)
-        self.assertIn("· Riego en turnos · Descartada · 🔴 No viable (puerta 1), recomienda descartar", salida)
+        self.assertIn("· Riego en turnos (carpeta riego/product/archivo/riego-en-turnos · creada el %s) · Descartada · "
+                      "🔴 No viable (puerta 1), recomienda descartar" % HOY, salida)  # dos ideas con el mismo nombre
         self.assertIn("· Linterna · Pausada · ", salida)
         html = (raiz / "index.html").read_text(encoding="utf-8")
         conteo = dict((etiqueta, int(n)) for n, etiqueta in re.findall(

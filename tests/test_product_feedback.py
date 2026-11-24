@@ -49,6 +49,7 @@ class Base(base.Base):
         self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[1], "--descargas", "500k",
                "--precio", "2,99 al mes")
         self.sustituto(fuentes[2])
+        self.p("competidor", "--sin-rival", "Las apps directas son de pago y el grupo de chat no resuelve")
         self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "Se buscó y no apareció")
         self.cerrar("1a", "01-investigacion/competencia.md")
         self.linea("1b", "voz-del-usuario", "usuario", 1, "--competidores", "RiegoFácil,PlantaPlus")
@@ -166,18 +167,18 @@ class MetaTest(Base):
         self.hasta_puerta2()
         entrada = {"mercados": [{
             "mercado": "MX", "dau": {"pesimista": 500, "base": 1000, "optimista": 2000, "fuente": "S-MON-3"},
-            "dau_mau": {"pesimista": 0.2, "base": 0.2, "optimista": 0.2, "fuente": "S-MON-3"},
+            "instalaciones_mes": {"pesimista": 5000, "base": 5000, "optimista": 5000, "fuente": "S-MON-3"},
             "anuncios": [{"formato": "banner", "impresiones_por_dau": 5,
                           "ecpm": {"pesimista": 0.4, "base": 0.4, "optimista": 0.4, "fuente": "S-MON-3"}}],
-            "compras": [{"nombre": "Pago único", "precio": 4, "comision": 0.15,
+            "compras": [{"nombre": "Premium", "tipo": "pago-unico", "precio": 4, "comision": 0.15,
                          "conversion": {"pesimista": 0.02, "base": 0.02, "optimista": 0.02, "fuente": "S-MON-3"}}]}]}
         write(self.carpeta / "escenarios.json", json.dumps(entrada))
         salida = self.p("escenarios", "--entrada", "escenarios.json")
         self.assertIn("✖ Anuncios · banner · 60 USD al mes en el caso base · estimación: sin fuente en "
                       "MX.anuncios.banner.impresiones_por_dau", salida)
-        self.assertIn("✔ Compra · Pago único · 340 USD al mes en el caso base", salida)
+        self.assertIn("✔ Pago único · Premium · 340 USD al mes en el caso base", salida)
         self.assertIn("Meta (referencial, no es criterio de ninguna puerta): 300 USD al mes", salida)
-        self.assertIn("✔ Al menos un modelo de monetización viable con evidencia · Compra · Pago único: 340 USD",
+        self.assertIn("✔ Al menos un modelo de monetización viable con evidencia · Pago único · Premium: 340 USD",
                       self.p("puerta", "--n", 2))
         entrada["mercados"][0]["compras"] = []
         write(self.carpeta / "escenarios.json", json.dumps(entrada))
@@ -415,13 +416,8 @@ class CoberturaTest(Base):
     def test_el_vacio_se_valida_contra_el_objetivo_y_la_linea(self):
         self.assertIn("no está en el objetivo", self.falla("vacio", "--linea", "demanda", "--mercado", "AR",
                                                            "--motivo", "presupuesto", "--texto", "x"))
-        self.assertIn("no pide cobertura por tienda", self.falla("vacio", "--linea", "demanda", "--tienda",
-                                                                 "app-store", "--motivo", "presupuesto",
-                                                                 "--texto", "x"))
         self.assertIn("un solo valor", self.falla("vacio", "--linea", "demanda", "--mercado", "MX", "--idioma", "es",
                                                   "--motivo", "presupuesto", "--texto", "x"))
-        self.assertIn("no tiene cobertura", self.falla("vacio", "--linea", "diferenciacion", "--mercado", "MX",
-                                                       "--motivo", "presupuesto", "--texto", "x"))
         self.p("vacio", "--linea", "demanda", "--mercado", "MX", "--motivo", "presupuesto", "--texto", "x")
         self.assertIn("V-DEM-1 anulado", self.p("anular", "--id", "V-DEM-1", "--motivo", "Ya hay fuente"))
         self.assertIn("✖ mercado MX", self.p("cobertura", "--linea", "demanda"))
@@ -563,12 +559,12 @@ class ConsumoTest(Base):
         salida = self.p("consumo")
         self.assertIn("Total: 0,53 USD", salida)
         self.assertIn("0,40 USD, 45 000 tokens, 20 pasos", salida)
-        self.assertIn("Consumo anotado:** 0 0,40 USD", (self.carpeta / "estado.md").read_text(encoding="utf-8"))
+        self.assertIn("Consumo anotado:** sesión 0: 0,40 USD", (self.carpeta / "estado.md").read_text(encoding="utf-8"))
 
     def test_el_orquestador_cubre_las_sesiones_de_sus_subagentes(self):
         self.p("consumo", "--sesion", "0", "--costo", "0.20")
         self.investigacion_parcial()
-        self.assertIn("Consumo sin anotar (opcional): 1a, 1b", self.p("siguiente"))
+        self.assertIn("Consumo sin anotar (opcional) de las sesiones 1a y 1b:", self.p("siguiente"))
         self.p("consumo", "--sesion", "orquestador", "--incluye", "1a,1b", "--costo", "1.10", "--tokens", "300k")
         self.assertNotIn("Consumo sin anotar", self.p("siguiente"))
         self.assertIn("--incluye lleva sesiones", self.falla("consumo", "--sesion", "orquestador", "--incluye", "9",
@@ -579,6 +575,7 @@ class ConsumoTest(Base):
         self.p("tipo", "--existente", "--motivo", "Hay dos apps directas")
         self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0])
         self.sustituto(fuentes[1])
+        self.p("competidor", "--sin-rival", "Las apps directas son de pago y el grupo de chat no resuelve")
         self.hallazgo("competencia", fuentes)
         self.cerrar("1a", "01-investigacion/competencia.md")
         self.linea("1b", "voz-del-usuario", "usuario")
@@ -661,6 +658,8 @@ class SustitutoTest(Base):
         self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[1], "--descargas", "500k",
                "--precio", "2,99 al mes")
         salida = self.sustituto(fuentes[2], "Recordatorio del sistema", "nativo", resuelve)
+        if resuelve != "si":  # sin un sustituto que resuelva, 1a dice que no hay alternativa gratis
+            self.p("competidor", "--sin-rival", "Las apps directas son de pago y el recordatorio no alcanza")
         self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "nada")
         self.cerrar("1a", "01-investigacion/competencia.md")
         nombres = "RiegoFácil,PlantaPlus" + (",Recordatorio del sistema" if supera else "")
@@ -675,21 +674,30 @@ class SustitutoTest(Base):
         fila, salida = self.investigar()
         self.assertIn("Es gratuito o nativo y ya resuelve la necesidad", fila)
         self.assertIn("✖ D-1 registrado como principal: todavía no es viable", salida)
-        self.assertIn("✖ Frente al sustituto: no supera a C-3 (Recordatorio del sistema), viene con el sistema y "
-                      "resuelve la necesidad", salida)
-        self.assertIn("Sustituto gratuito o nativo que ya resuelve la necesidad: C-3", self.p("matriz"))
+        self.assertIn("✖ Frente al rival: sin comparar con C-3 (Recordatorio del sistema) (`frente --id D-1 --rival "
+                      "C-3", salida)
+        self.assertIn("Rival a superar (la alternativa gratis más fuerte o un sustituto gratuito o nativo que ya "
+                      "resuelve la necesidad): C-3 (Recordatorio del sistema)", self.p("matriz"))
+        self.assertIn("D-1 sin comparar con C-3", self.falla("cerrar", "--sesion", "1g"))
+        salida = self.p("frente", "--id", "D-1", "--resultado", "no", "--hallazgos", "H-VOZ-1", "--texto",
+                        "El recordatorio del sistema ya avisa gratis")
+        self.assertIn("✔ D-1 frente a C-3 (Recordatorio del sistema): no lo supera", salida)
+        self.assertIn("✖ Frente al rival: no supera a C-3 (Recordatorio del sistema)", salida)
         self.assertIn("Ningún diferenciador supera a C-3", self.cerrar("1g", "01-investigacion/diferenciacion.md"))
         self.assertIn("Diferenciación = 3 no corresponde", self.falla("puntaje", "--valores", "4,4,4,4,3"))
         self.p("puntaje", "--valores", "4,4,4,4,1")
         salida = self.cerrar("1f", "01-sintesis.md")
-        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere al sustituto "
-                      "gratuito o nativo que ya resuelve la necesidad (C-3 (Recordatorio del sistema))", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere a la "
+                      "alternativa gratis más fuerte: C-3 (Recordatorio del sistema)", salida)
         self.assertIn("ningún diferenciador supera a C-3", salida)
 
     def test_lo_supera_con_un_hallazgo_triangulado_que_lo_nombra(self):
-        _, salida = self.investigar(supera=True)
-        self.assertIn("✔ D-1 registrado como principal: viable", salida)
-        self.assertIn("✔ Frente al sustituto: supera a C-3 (Recordatorio del sistema) con H-VOZ-1", salida)
+        self.investigar(supera=True)
+        salida = self.p("frente", "--id", "D-1", "--resultado", "supera", "--hallazgos", "H-VOZ-1", "--texto",
+                        "El recordatorio no reparte turnos entre vecinos")
+        self.assertIn("· Con prueba de elección", salida)
+        self.assertIn("✔ D-1: viable", salida)
+        self.assertIn("✔ Frente al rival: supera a C-3 (Recordatorio del sistema) con H-VOZ-1", salida)
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
         self.p("puntaje", "--valores", "4,4,4,4,3")
         self.assertIn("✔ Al menos 1 diferenciador viable", self.cerrar("1f", "01-sintesis.md"))
@@ -697,7 +705,8 @@ class SustitutoTest(Base):
     def test_un_sustituto_que_resuelve_en_parte_no_obliga(self):
         _, salida = self.investigar(resuelve="parcial")
         self.assertIn("✔ D-1 registrado como principal: viable", salida)
-        self.assertIn("ninguno gratuito o nativo resuelve la necesidad (C-3 la resuelve en parte)", salida)
+        self.assertIn("✔ Frente al rival: no hay una alternativa gratis que resuelva la necesidad (Las apps directas "
+                      "son de pago y el recordatorio no alcanza)", salida)
 
     def test_1a_no_cierra_sin_un_sustituto_evaluado(self):
         self.sesion0()
@@ -714,6 +723,8 @@ class SustitutoTest(Base):
         salida = self.p("competidor", "--nombre", "Lista en papel", "--peldano", 4, "--fuentes", fuentes[1],
                         "--sustituto", "gratuito", "--resuelve", "no")
         self.assertIn("· Sustituto: C-2 (Lista en papel), gratuito y no la resuelve", salida)
+        self.assertIn("falta marcar la alternativa gratis más fuerte", self.falla("cerrar", "--sesion", "1a"))
+        self.p("competidor", "--sin-rival", "Las apps directas son de pago y la lista en papel no resuelve")
         self.assertIn("Sesión 1a · Competencia cerrada", self.p("cerrar", "--sesion", "1a"))
         self.assertIn("4 · gratuito · no la resuelve", self.p("matriz"))
 
@@ -724,7 +735,7 @@ class SustitutoTest(Base):
             fila.pop("resuelve", None)  # como una carpeta anterior a esta regla
         write(self.carpeta / "01-investigacion/competencia.json", json.dumps(datos))
         salida = self.p("principal", "--id", "D-1")
-        self.assertIn("✖ Frente al sustituto: C-3 (Recordatorio del sistema) sin evaluar", salida)
+        self.assertIn("✖ Frente al rival: C-3 (Recordatorio del sistema) sin evaluar", salida)
 
 
 # --- #12 · Una tienda que nombra o rechaza la categoría --------------------------------------------------------------
@@ -863,13 +874,13 @@ class DocumentacionTest(unittest.TestCase):
         self.assertIn("desconocida", leer("evidencia.md"))
         self.assertIn("--acumulado", leer("puntaje.md"))
         self.assertIn("--bloquea", leer("puntaje.md"))
-        self.assertIn("El sustituto más fuerte", leer("diferenciacion.md"))
+        self.assertIn("El rival a superar: la alternativa gratis más fuerte", leer("diferenciacion.md"))
         self.assertIn("--resuelve", leer("investigacion.md"))
         self.assertIn("tablero --raiz", leer("puertas.md"))
         self.assertIn("tablero --raiz", leer("prompts.md"))
         plantillas = SKILL / "assets" / "plantillas"
         self.assertIn("## Sustitutos", (plantillas / "competencia.md").read_text(encoding="utf-8"))
-        self.assertIn("## Frente al sustituto más fuerte", (plantillas / "diferenciacion.md").read_text(encoding="utf-8"))
+        self.assertIn("## Frente al rival", (plantillas / "diferenciacion.md").read_text(encoding="utf-8"))
         self.assertIn("--bloquea", (plantillas / "politicas.md").read_text(encoding="utf-8"))
 
     def test_las_plantillas_traen_la_cobertura_y_la_meta_opcional(self):
