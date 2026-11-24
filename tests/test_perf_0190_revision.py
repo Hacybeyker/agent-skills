@@ -12,7 +12,8 @@ import tempfile
 import unittest
 
 from helpers import commit_all, init_repo, write
-from test_perf import HEADER, PKG, PerfBase, perf, rows
+from test_perf import GOOD, HEADER, PKG, CaptureCase, PerfBase, perf, rows
+from test_perf_0190 import MEASURED, RIGUROSO, JsonBase
 
 
 def digest(path):
@@ -233,6 +234,248 @@ class RunDodTest(unittest.TestCase):
         out, _ = self.run_dod()
         self.assertNotIn("los vuelvo a correr", out)
         self.assertEqual(self.counter.read_text().count("x"), 1)
+
+
+
+class HumoBrokenInstallTest(CaptureCase):
+    """P6: `humo` se recupera de una instalación que terminó bien pero quedó rota (el paquete está instalado y su
+    actividad de inicio no se resuelve): desinstala solo el paquete medido, lo reinstala con --instalar y reintenta, una
+    sola vez."""
+
+    def adb_calls(self):
+        return [json.loads(line) for line in (self.dir / "adb.log").read_text(encoding="utf-8").splitlines()]
+
+    def test_reinstala_una_vez_y_sigue(self):
+        self.tp_outputs(GOOD)
+        self.env["FAKE_INSTALACION_ROTA"] = "1"
+        marker = self.env["FAKE_LOG"] + ".reinstalada"
+        out = self.ok("humo", "--paquete", PKG, "--instalar", "touch '%s'" % marker)
+        self.assertIn("desinstalo solo %s, lo reinstalo con --instalar y reintento, una vez" % PKG, out)
+        self.assertIn("✔ Reinstalé %s y su actividad de inicio ya arranca" % PKG, out)
+        self.assertIn("TTID 456 ms", out)
+        uninstalls = [args for args in self.adb_calls() if "uninstall" in args]
+        self.assertEqual(len(uninstalls), 1)
+        self.assertEqual(uninstalls[0][-2:], ["uninstall", PKG])  # solo el paquete medido
+
+    def test_si_sigue_rota_se_detiene_con_el_diagnostico(self):
+        self.env["FAKE_INSTALACION_ROTA"] = "siempre"
+        result = self.perf("humo", "--paquete", PKG, "--actividad", ".MainActivity", "--instalar", "true")
+        self.assertEqual(result.returncode, perf.Precondicion.code, result.stdout + result.stderr)
+        text = result.stdout + result.stderr
+        self.assertIn("sigue sin arrancar después de desinstalarlo y reinstalarlo", text)
+        self.assertIn("does not exist", text)
+        self.assertIn("actividad .MainActivity", text)
+        self.assertEqual(len([args for args in self.adb_calls() if "uninstall" in args]), 1)
+        self.assertFalse(any(path.suffix == ".apk" for path in self.dir.rglob("*")))  # no abre el APK en reports/
+
+    def test_sin_instalar_dice_como_seguir(self):
+        self.env["FAKE_INSTALACION_ROTA"] = "1"
+        result = self.perf("humo", "--paquete", PKG)
+        self.assertEqual(result.returncode, perf.Precondicion.code)
+        self.assertIn("--instalar '<comando de instalación>'", result.stdout + result.stderr)
+        self.assertFalse([args for args in self.adb_calls() if "uninstall" in args])
+
+
+class OrchestratedTextsTest(JsonBase):
+    """P7 y P8: con la investigación en modo orquestado, las salidas humanas no proponen chats nuevos ni textos para
+    pegar, dicen quién corre el paso, y el costo es un solo total al final. El modo guiado queda igual."""
+
+    def plan_mode(self, plan, mode=None):
+        plan = dict(plan)
+        if mode:
+            plan["modo"] = mode
+        self.plan_as(plan, MEASURED)
+
+    def test_guiado_sigue_proponiendo_chats(self):
+        self.plan_mode(dict(RIGUROSO, mejoras=[dict(RIGUROSO["mejoras"][0], estado="aprobada")]))
+        out = self.run_in("siguiente", "--carpeta", self.rel).stdout
+        self.assertIn("Chat nuevo · Modelo: Sonnet 5.5", out)
+        self.assertIn("Texto: \"", out)
+        self.assertIn("consumo --carpeta", out)  # el costo de cada sesión hecha, como siempre
+
+    def test_orquestado_no_propone_chats_nuevos(self):
+        self.plan_mode(dict(RIGUROSO, mejoras=[dict(RIGUROSO["mejoras"][0], estado="aprobada")]), "orquestado")
+        out = self.run_in("siguiente", "--carpeta", self.rel).stdout
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        for text in (out, state.split("## Siguiente paso", 1)[1].split("\n## ", 1)[0]):
+            self.assertNotIn("Chat nuevo", text)
+            self.assertNotIn("Texto: \"", text)
+            self.assertNotIn("pega el texto", text)
+            self.assertIn("lo lanza el orquestador", text)
+        self.assertNotIn("--sesion", out)  # ningún costo por sesión
+        self.assertIn("una sola vez, al final", state)
+
+    def test_aprobar_en_orquestado(self):
+        self.plan_mode(dict(RIGUROSO, mejoras=[]), "orquestado")
+        for name in ("diagnostico.md", "reporte-inicial-dev.md"):
+            (self.folder / name).unlink()
+        out = self.run_in("aprobar", "--carpeta", self.rel).stdout
+        self.assertIn("Ficha y plan aprobados", out)
+        self.assertNotIn("Chat nuevo", out)
+        self.assertIn("Orquestador · ", out)
+        self.assertIn("lo corre el orquestador", out)
+
+    def test_siguiente_json_marca_el_modo(self):
+        self.plan_mode(dict(RIGUROSO, mejoras=[]))
+        self.next_json()
+        self.assertEqual(json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["modo"], "orquestado")
+
+    def test_un_solo_total_al_final(self):
+        self.plan_mode(dict(RIGUROSO, mejoras=[]), "orquestado")
+        out = self.run_in("consumo", "--carpeta", self.rel, "--total", "3.06 USD", "--modo", "orquestado",
+                          "--desglose", "Haiku 5.5: 0.40 USD, Sonnet 5.5: 2.66 USD")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        consumo = state.split("## Consumo", 1)[1].split("\n## ", 1)[0]
+        rows = [line for line in consumo.splitlines() if line.startswith("| ") and "---" not in line][1:]
+        self.assertEqual(len(rows), 1, consumo)  # una sola fila, sin filas vacías por sesión
+        self.assertIn("| orquestado | orquestador y subagentes | 3.06 USD · desglose: Haiku 5.5: 0.40 USD, Sonnet 5.5: "
+                      "2.66 USD |", consumo)
+        self.assertIn("3.06 USD en 1 sesión anotada", consumo)
+        self.assertNotIn("faltan anotar", consumo)
+        self.assertEqual(perf.cost_of(rows[0].split("|")[3])["usd"], 3.06)  # el desglose no se suma dos veces
+        bad = self.run_in("consumo", "--carpeta", self.rel, "--total", "1 USD", "--sesion", "2 · diagnóstico")
+        self.assertEqual(bad.returncode, 2)
+
+    def test_decidir_desde_el_orquestador_queda_anotado(self):
+        self.plan_mode(dict(RIGUROSO), "orquestado")
+        result = self.run_in("decidir", "--carpeta", self.rel, "--aprobar", "M1", "--descartar", "-", "--pendiente", "-",
+                             "--desde-orquestador")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        item = json.loads((self.folder / "plan.json").read_text(encoding="utf-8"))["mejoras"][0]
+        self.assertEqual(item["estado"], "aprobada")
+        self.assertTrue(item["decidida_desde"].startswith("el usuario, a través del orquestador"))
+
+    def test_el_total_se_pide_solo_al_cerrar(self):
+        plan = dict(RIGUROSO, mejoras=[], modo="orquestado")
+        self.assertEqual(perf.cost_lines(self.folder, plan), [])
+        lines = perf.cost_lines(self.folder, plan, finished=True)
+        self.assertIn("en el chat del orquestador, antes de cerrarlo, corre /cost", lines[0])
+        self.assertIn("--total '<total en USD>' --modo orquestado", lines[1])
+
+
+
+DUMP = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0">
+<node index="0" text="" resource-id="" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+<node index="0" text="" resource-id="com.ejemplo.app:id/carrusel" content-desc="" bounds="[0,300][1080,700]">
+<node index="0" text="" resource-id="com.ejemplo.app:id/poster" content-desc="Marea alta" bounds="[0,300][300,700]" />
+<node index="1" text="" resource-id="com.ejemplo.app:id/poster" content-desc="El último faro" bounds="[300,300][600,700]" />
+</node>
+<node index="1" text="El último faro" resource-id="com.ejemplo.app:id/titulo" bounds="[40,800][1040,900]" />
+</node></hierarchy>"""
+
+
+class OpenedElementTest(PerfBase):
+    """P3: cada corrida anota qué elemento abrió (por su texto o su content-desc, con uiautomator, nunca con una captura
+    de pantalla) y `comparar` avisa si difiere entre fases o entre corridas de una misma fase."""
+
+    def test_lee_el_nodo_por_id_texto_o_posicion(self):
+        nodes = perf.ui_nodes(DUMP)
+        self.assertEqual(perf.opened_in(nodes, {"id": "titulo"}), "El último faro")
+        self.assertEqual(perf.opened_in(nodes, {"en": [450, 500]}), "El último faro")  # el póster tocado en el carrusel
+        self.assertEqual(perf.opened_in(nodes, {"en": [100, 500]}), "Marea alta")
+        self.assertEqual(perf.opened_in(nodes, {"desc": "Marea*"}), "Marea alta")
+        self.assertEqual(perf.opened_in(nodes, {"id": "no-existe"}), "")
+        self.assertEqual(perf.element_moment({"elemento": {"en": [1, 2], "momento": "antes"}}), "antes")
+        self.assertEqual(perf.element_moment({"elemento": {"id": "titulo"}}), "fin")
+        self.assertIsNone(perf.element_moment({}))
+        self.assertEqual(perf.section_invalidators({"invalidar_si": ["SCREEN *Login*", "elemento_distinto"]}),
+                         ["SCREEN *Login*"])
+
+    def summaries(self, phase, flow, elements):
+        for run, element in enumerate(elements, start=1):
+            write(self.dir / phase / ("%s_%d.resumen.json" % (flow, run)), json.dumps({"version": 1, "elemento": element}))
+
+    def test_comparar_avisa_si_el_elemento_difiere_entre_fases(self):
+        write(self.csv, HEADER + rows("antes", "lista", "abrir_ms", [900, 910, 905]) +
+              rows("despues", "lista", "abrir_ms", [600, 610, 605]))
+        self.summaries("antes", "lista", ["El último faro"] * 3)
+        self.summaries("despues", "lista", ["Marea alta"] * 3)
+        out = self.ok("comparar", self.csv)
+        self.assertIn("⚠ lista: el elemento abierto difiere entre fases (antes 'El último faro' (3); despues 'Marea alta' "
+                      "(3))", out)
+
+    def test_comparar_avisa_si_cambia_dentro_de_una_fase(self):
+        write(self.csv, HEADER + rows("antes", "lista", "abrir_ms", [900, 910, 905]) +
+              rows("despues", "lista", "abrir_ms", [600, 610, 605]))
+        self.summaries("antes", "lista", ["El último faro", "Marea alta", "El último faro"])
+        self.summaries("despues", "lista", ["El último faro"] * 3)
+        out = self.ok("comparar", self.csv)
+        self.assertIn("lista, antes: el elemento abierto cambió entre corridas de la misma fase: 'El último faro' (2), "
+                      "'Marea alta' (1)", out)
+        self.assertNotIn("difiere entre fases", out)
+
+    def test_sin_elemento_anotado_no_hay_aviso(self):
+        write(self.csv, HEADER + rows("antes", "lista", "abrir_ms", [900, 910, 905]) +
+              rows("despues", "lista", "abrir_ms", [600, 610, 605]))
+        self.assertNotIn("elemento abierto", self.ok("comparar", self.csv))
+
+
+
+class FramesOnEmulatorTest(ManagementTranslationTest):
+    """P5: con un síntoma de frames, tirones o animaciones medido en un emulador, la parte de la queja que no se puede
+    responder figura desde el principio (advertencias y reporte inicial) y en el final, en el técnico y en gerencia."""
+
+    def on_emulator(self):
+        write(self.folder / "plan.json", json.dumps(dict(self.plan, serial="emulator-5554")))
+
+    def test_en_emulador_queda_sin_respuesta(self):
+        self.on_emulator()
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertIn("sin respuesta: requiere dispositivo físico",
+                      (self.folder / "estado.md").read_text(encoding="utf-8"))  # advertencias para el diagnóstico
+        dev = (self.folder / "reporte-inicial-dev.html").read_text(encoding="utf-8")
+        biz = (self.folder / "reporte-inicial-gerencia.html").read_text(encoding="utf-8")
+        self.assertIn("sin respuesta: requiere dispositivo físico", dev)
+        self.assertIn("requiere un teléfono físico; se midió en un emulador", biz)
+        self.ok("reporte", "--carpeta", self.folder, "--html")
+        self.assertIn("sin respuesta: requiere dispositivo físico",
+                      (self.folder / "reporte-final-dev.html").read_text(encoding="utf-8"))
+
+    def test_en_un_telefono_no_dice_nada(self):
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertNotIn("requiere dispositivo físico", (self.folder / "reporte-inicial-dev.html").read_text(
+            encoding="utf-8"))
+
+    def test_otro_sintoma_en_emulador_no_dice_nada(self):
+        self.on_emulator()
+        state = (self.folder / "estado.md").read_text(encoding="utf-8").replace(
+            "Lentitud y pérdida de frames al abrir la lista", "La lista tarda en abrir")
+        write(self.folder / "estado.md", state)
+        self.ok("reporte", "--carpeta", self.folder, "--inicial", "--html")
+        self.assertNotIn("requiere dispositivo físico", (self.folder / "reporte-inicial-dev.html").read_text(
+            encoding="utf-8"))
+
+
+
+class OpenedElementCaptureTest(CaptureCase):
+    """P3 de punta a punta: la corrida de prueba dice qué elemento abrió (volcado de uiautomator con la traza detenida) y
+    una fase con `invalidar_si: ["elemento_distinto"]` descarta las corridas que abrieron otro."""
+
+    def plan_with(self, **element):
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["elemento"] = dict({"id": "titulo"}, **element)
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        self.env["FAKE_PULL_ELEMENTO"] = DUMP  # lo que baja adb pull del volcado del elemento
+        self.tp_outputs(GOOD)
+
+    def test_la_prueba_muestra_el_elemento_abierto(self):
+        self.plan_with()
+        out = self.ok("capturar", "--plan", self.plan, "--flujo", "home", "--prueba", "--sin-video")
+        self.assertIn("Elemento abierto: 'El último faro'", out)
+        log = (self.dir / "adb.log").read_text(encoding="utf-8")
+        self.assertIn("uiautomator dump %s" % perf.ELEMENT_REMOTE, log)
+        self.assertNotIn("screencap", log)  # nunca una captura de pantalla
+
+    def test_invalidar_si_elemento_distinto(self):
+        self.plan_with(esperado="Marea alta")
+        plan = json.loads(self.plan.read_text(encoding="utf-8"))
+        plan["flujos"]["home"]["invalidar_si"] = ["SCREEN *Login*", "elemento_distinto"]
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+        result = self.perf("capturar", "--plan", self.plan, "--flujo", "home", "--fase", "antes", "--corridas", "3",
+                           "--calentamiento", "0", "--sin-compilar")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("abrió 'El último faro' y no 'Marea alta' (invalidar_si elemento_distinto)", result.stdout)
 
 
 if __name__ == "__main__":

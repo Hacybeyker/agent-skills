@@ -116,7 +116,7 @@ Un chat recorre la investigación entera: lanza cada sesión como un subagente c
 Usa hb-performance en modo orquestado: quiero analizar el rendimiento de <pantalla o flujo: de dónde a dónde y qué debe verse al final; qué se nota>. Dispositivo <serial>. No hagas commit ni push.
 ```
 
-Cuando se detiene, te dice qué hacer y dónde: en la terminal (con el comando completo) o en el mismo chat. Al terminar te da el comando `perf.py consumo` con la fila `orquestado`: solo pones lo que muestra `/cost` en ese chat.
+Cuando se detiene, te pregunta con opciones en el mismo chat (aprobar la ficha, decidir las mejoras, elegir un camino) y corre lo que elijas; solo te manda a la terminal para lo que haces tú (un recorrido manual, cargar una clave). Al terminar te recuerda correr `/cost` en ese chat y te da el comando `perf.py consumo --total '<total en USD>' --modo orquestado`: una sola fila con el total, que incluye a los subagentes.
 
 ## Seguir
 
@@ -230,15 +230,15 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py decidir --carpeta <carpeta> --a
 
 Imprime el chat de la sesión 3. Las mejoras a prueba se aprueban igual. La decisión queda en "Decisiones" de `estado.md` con la fecha y la hora (y, si consta, el agente que la corrió desde un chat: Claude Code marca sus shells; sin esa marca queda solo la hora), y antes del chat de la sesión 3 `siguiente` dice cuándo se aprobó cada mejora. `--pendiente` es "para más adelante", no "sin decidir".
 
-### Seguir en modo orquestado después de decidir
+### Seguir en modo orquestado después de una parada en la terminal
 
-**Dónde:** el mismo chat del orquestador, después de correr `perf.py decidir` en tu terminal (el comando que te dio el orquestador)
+**Dónde:** el mismo chat del orquestador, después de hacer en tu terminal lo que te pidió (una captura con recorrido manual, cargar una clave). Las decisiones (la ficha, las mejoras) no pasan por aquí: el orquestador te las pregunta con opciones y corre lo que elijas
 
 ```text
 Continúa. No hagas commit ni push.
 ```
 
-El orquestador vuelve a pedir el paso a `perf.py` y sigue con la sesión 3 de cada mejora aprobada, la medición después y el cierre. "listo" sirve igual después de una captura que corriste tú (recorrido manual).
+El orquestador vuelve a pedir el paso a `perf.py` y sigue donde quedó. "listo" sirve igual.
 
 ### Retomar en modo orquestado (el chat del orquestador se cerró)
 

@@ -58,10 +58,12 @@ class NextJsonInvestigationTest(JsonBase):
     def test_la_decision_de_mejoras_la_corre_el_usuario_en_su_terminal(self):
         self.plan_as(RIGUROSO, MEASURED)
         data = self.next_json()
-        self.assertEqual((data["tipo"], data["clase"], data["donde"]), ("decision", "mejoras", "terminal"))
-        self.assertIn("continúa", data["motivo"])
+        # 0.19.0 · P4: la puerta se responde en el chat con opciones y el orquestador corre `decidir` con lo elegido
+        self.assertEqual((data["tipo"], data["clase"], data["donde"]), ("decision", "mejoras", "chat"))
+        self.assertIn("corre `decidir` con lo que elige", data["motivo"])
         decide = data["pasos"][0]["opciones"][0]
         self.assertIn(" decidir --carpeta %s --aprobar M1" % self.rel, decide["comando"])
+        self.assertTrue(decide["comando"].endswith(" --desde-orquestador"))
         self.assertEqual(decide["clase"], "mejoras")
 
     def test_una_mejora_aprobada_es_la_sesion_3_con_su_subagente(self):
@@ -114,7 +116,9 @@ class NextJsonInvestigationTest(JsonBase):
     def test_el_costo_del_orquestador_sale_listo_para_anotar(self):
         data = self.next_json("--modelo", "Haiku 5.5")
         cost = data["costo"]
-        self.assertIn("consumo --carpeta %s --sesion orquestado --modelo 'Haiku 5.5'" % self.rel, cost["comando"])
+        # 0.19.0 · P7: un solo total, el de /cost en el chat del orquestador
+        self.assertIn("consumo --carpeta %s --total '<total en USD>' --modo orquestado --modelo 'Haiku 5.5'" % self.rel,
+                      cost["comando"])
         self.assertIn("2 · diagnóstico", cost["sesiones"])
         low, high = cost["esperado_usd"]
         self.assertLess(0, low)

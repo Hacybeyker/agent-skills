@@ -438,6 +438,9 @@ if args[0] == "logcat" and "-g" in args:  # 0.16.0 · B6: el tamaño de los buff
     print(os.environ.get("FAKE_LOGCAT_G", "main: ring buffer is 16 MiB (1 MiB consumed), max entry is 5120 B, max "
                                           "payload is 4068 B"))
     sys.exit(0)
+if args[0] == "pull" and args[1].endswith("hbperf-elemento.xml") and os.environ.get("FAKE_PULL_ELEMENTO"):
+    pathlib.Path(args[2]).write_text(os.environ["FAKE_PULL_ELEMENTO"], encoding="utf-8")  # 0.19.0 · P3: el volcado
+    sys.exit(0)
 if args[0] == "pull":
     if os.environ.get("FAKE_PULL_FALLA"):
         sys.stderr.write("adb: error: failed to stat remote object '%s': No such file or directory\n" % args[1])
@@ -488,6 +491,17 @@ elif cmd.startswith("cmd package compile"):
 elif cmd.startswith("am broadcast"):
     print("Broadcasting: Intent {{ act=androidx.profileinstaller.action.INSTALL_PROFILE }}\nBroadcast completed: result="
           + os.environ.get("FAKE_PROFILE", "1"))
+elif os.environ.get("FAKE_INSTALACION_ROTA") and (cmd.startswith("cmd package resolve-activity") or
+                                                  cmd.startswith("am start")) and (
+        os.environ["FAKE_INSTALACION_ROTA"] == "siempre" or not os.path.exists(os.environ["FAKE_LOG"] + ".reinstalada")):
+    # 0.19.0 · P6: el paquete está instalado, pero el sistema no resuelve su actividad de inicio
+    if cmd.startswith("am start"):
+        print("Starting: Intent {{ cmp=com.ejemplo.app/.MainActivity }}\nError type 3\nError: Activity class "
+              "{{com.ejemplo.app/com.ejemplo.app.MainActivity}} does not exist.")
+    else:
+        print("No activity found")
+elif args[0] == "uninstall":
+    print("Success")
 elif cmd.startswith("cmd package resolve-activity"):
     print("priority=0 preferredOrder=0 match=0x108000\ncom.ejemplo.app/.MainActivity")
 elif cmd.startswith("am start"):

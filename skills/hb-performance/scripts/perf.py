@@ -1401,6 +1401,8 @@ def save_run_summary(out_dir, flow, run, metrics, info, cycles=None):
     data = {"version": 1, "metricas": {name: value for name, value, _, _ in metrics},
             "red_por_tramo": info.get("red_por_tramo") or [], "linea": info.get("linea") or {},
             "frames": info.get("frames"), "hilo_top": info.get("hilo_top") or [], "memoria": cycles or []}
+    if info.get("elemento") is not None:  # 0.19.0 · P3
+        data["elemento"] = info["elemento"]
     try:
         (pathlib.Path(out_dir) / ("%s_%s%s" % (flow, run, SUMMARY_SUFFIX))).write_text(
             json.dumps(data, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
@@ -1705,6 +1707,122 @@ def pause_conflicts(markers, flow_spec):
     return found
 
 
+# 0.19.0 · P3: qué elemento abrió cada corrida. Si el contenido viene de la red, el elemento en una posición fija puede
+# cambiar entre corridas o entre fases (el backend reordena), y se mediría otro contenido. `elemento` del flujo dice cómo
+# leerlo con un volcado de uiautomator (nunca una captura de pantalla), siempre fuera de la traza: al terminar la corrida
+# ("fin", por defecto: la pantalla donde termina el recorrido) o después de 'preparar' ("antes": el elemento que se va a
+# tocar, por su posición o su texto). `comparar` avisa si difiere; `invalidar_si: ["elemento_distinto"]` invalida la
+# corrida que abrió otro (contra `elemento.esperado` o, sin él, el de la primera corrida válida).
+ELEMENT_TOKEN = "elemento_distinto"
+ELEMENT_REMOTE = "/sdcard/hbperf-elemento.xml"
+
+
+def opened_elements(folder, rows):
+    """{(fase, flujo): {elemento: corridas}} de lo que anotó cada corrida (su .resumen.json), solo de las corridas de
+    metricas.csv."""
+    out = {}
+    for phase, flow, run in sorted({(row["fase"], row["flujo"], row["corrida"]) for row in rows}):
+        try:
+            data = json.loads((pathlib.Path(folder) / phase / ("%s_%s%s" % (flow, run, SUMMARY_SUFFIX))).read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("elemento") is not None:
+            bucket = out.setdefault((phase, flow), {})
+            bucket[data["elemento"] or "(nada reconocible)"] = bucket.get(data["elemento"] or "(nada reconocible)", 0) + 1
+    return out
+
+
+def opened_element_notes(folder, rows):
+    """P3: los avisos de `comparar` si el elemento abierto difiere entre corridas de una fase o entre fases: con
+    contenido de la red, se midió otro contenido."""
+    found, notes = opened_elements(folder, rows), []
+
+    def said(counts):
+        return ", ".join("'%s' (%d)" % (name, count) for name, count in sorted(counts.items(), key=lambda kv: -kv[1]))
+
+    for flow in sorted({flow for _, flow in found}):
+        phases = [(phase, found[(phase, flow)]) for phase in FASES if (phase, flow) in found]
+        for phase, counts in phases:
+            if len(counts) > 1:
+                notes.append("%s, %s: el elemento abierto cambió entre corridas de la misma fase: %s. Con contenido de "
+                             "la red, no todas midieron lo mismo (elige el elemento por su texto, ficha.md · Elemento del "
+                             "recorrido, o usa invalidar_si %s)" % (flow, phase, said(counts), ELEMENT_TOKEN))
+        main = {phase: max(counts, key=counts.get) for phase, counts in phases}
+        if len(set(main.values())) > 1:
+            notes.append("%s: el elemento abierto difiere entre fases (%s): se midió otro contenido y la comparación de "
+                         "esos tramos no es igual contra igual" % (flow, "; ".join(
+                             "%s %s" % (phase, said(counts)) for phase, counts in phases)))
+    return notes
+
+
+def section_invalidators(flow_spec):
+    """Los patrones de `invalidar_si` que son nombres de secciones (sin `elemento_distinto`, que no es una sección)."""
+    return [pattern for pattern in (flow_spec or {}).get("invalidar_si") or []
+            if isinstance(pattern, str) and pattern != ELEMENT_TOKEN]
+
+
+def element_spec(flow_spec):
+    spec = (flow_spec or {}).get("elemento")
+    return spec if isinstance(spec, dict) else {}
+
+
+def element_moment(flow_spec):
+    """"fin", "antes" o None (sin `elemento` en el flujo)."""
+    spec = element_spec(flow_spec)
+    if not any(spec.get(key) for key in ("id", "texto", "desc", "en")):
+        return None
+    return "antes" if str(spec.get("momento") or "").strip().lower() == "antes" else "fin"
+
+
+def opened_in(nodes, spec):
+    """El texto (o el content-desc) del nodo que dice `spec`: por `id` (resource-id, también sin el paquete), `texto` o
+    `desc` (patrones con * y ?), o `en` [x, y] (el nodo más profundo con texto que contiene ese punto). '' si no está."""
+    def matches(node):
+        attrs = node["attrs"]
+        rid = attrs.get("resource-id") or ""
+        if spec.get("id") and not (fnmatch.fnmatchcase(rid, str(spec["id"])) or rid.endswith(":id/%s" % spec["id"])):
+            return False
+        if spec.get("texto") and not fnmatch.fnmatchcase(attrs.get("text") or "", str(spec["texto"])):
+            return False
+        if spec.get("desc") and not fnmatch.fnmatchcase(attrs.get("content-desc") or "", str(spec["desc"])):
+            return False
+        if spec.get("en"):
+            box, point = node["bounds"], spec["en"]
+            if not box or not (box[0] <= point[0] <= box[2] and box[1] <= point[1] <= box[3]):
+                return False
+        return True
+
+    field = "content-desc" if str(spec.get("campo") or "").lower() in ("desc", "content-desc") else "text"
+    found = [node for node in nodes if matches(node)]
+    for node in reversed(found):  # el más profundo (el último en orden de documento) que dice algo
+        attrs = node["attrs"]
+        value = attrs.get(field) or attrs.get("text" if field == "content-desc" else "content-desc") or ""
+        if value.strip():
+            return " ".join(value.split())
+        for child in nodes:  # un contenedor sin texto propio: el primer texto de sus hijos
+            if nodes.index(node) in child["ancestros"] and (child["attrs"].get(field) or "").strip():
+                return " ".join(child["attrs"][field].split())
+    return ""
+
+
+def read_opened(adb, flow_spec):
+    """P3: el elemento abierto según `elemento` del flujo, con un volcado de uiautomator (sin capturas de pantalla).
+    '' si no lo encontró; nunca hace fallar la corrida."""
+    spec = element_spec(flow_spec)
+    try:
+        adb.shell("rm -f %s" % ELEMENT_REMOTE, timeout=20)
+        adb.shell("uiautomator dump %s" % ELEMENT_REMOTE, timeout=60)
+        with tempfile.TemporaryDirectory() as tmp:
+            local = pathlib.Path(tmp) / "elemento.xml"
+            pulled = adb.run("pull", ELEMENT_REMOTE, str(local), timeout=60)
+            if pulled.returncode != 0 or not local.is_file():
+                return ""
+            return opened_in(ui_nodes(local.read_text(encoding="utf-8", errors="replace")), spec)
+    except (PerfError, OSError, subprocess.SubprocessError):
+        return ""
+
+
 def plan_marks(flow_spec):
     """[(marca, [dónde la usa el plan])] de las marcas de la ventana, las métricas de usuario, los tramos y las pausas
     del flujo, sin repetir y en el orden del plan."""
@@ -1744,6 +1862,9 @@ def marks_report(info):
         tail.append("la traza dura %s s" % fmt(info["duracion_s"]))
     tail.append("secciones HTTP: %d" % info.get("http", 0))
     lines.append("Recorrido: " + " · ".join(tail))
+    if info.get("elemento") is not None:  # 0.19.0 · P3
+        lines.append("Elemento abierto: %s" % ("'%s'" % info["elemento"] if info["elemento"] else
+                                               "no lo encontré en la pantalla (revisa `elemento` en el plan)"))
     return lines
 
 
@@ -1792,7 +1913,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
     info["marcas_plan"] = [(mark, where, any(fnmatch.fnmatchcase(m[4], mark) for m in markers))
                            for mark, where in plan_marks(flow_spec)]
     info["invalidan"] = [(pattern, next((s[4] for s in sections if fnmatch.fnmatchcase(s[4], pattern)), None))
-                         for pattern in flow_spec.get("invalidar_si", [])]
+                         for pattern in section_invalidators(flow_spec)]
     own = [s for s in sections if s[4].startswith(("SCREEN ", "NAV ", "MARK ", "reportFullyDrawn"))]
     origin = bounds[0][1] if bounds else min((r[1] for r in rows if r[0] in ("seccion", "hilo", "frame")), default=0)
     info["ultima_marca"] = (own[-1][4], (own[-1][1] - origin) / 1e9) if own else None
@@ -1811,7 +1932,7 @@ def trace_metrics(rows, hz, flow_spec, known, sdk):
         main = [r for r in main if window[0] <= r[1] <= window[1]]
     elif flow_spec.get("ventana"):
         info["ventana_faltante"] = True
-    for pattern in flow_spec.get("invalidar_si", []):
+    for pattern in section_invalidators(flow_spec):
         hit = next((s[4] for s in sections if fnmatch.fnmatchcase(s[4], pattern)), None)
         if hit:
             return [], "apareció '%s'" % hit, info
@@ -6643,6 +6764,8 @@ def render_steps(steps, markdown, root=None, plan=None):
     Chat nuevo), el comando completo, qué hace y qué te toca; un chat, con `root` y `plan`, también el comando que lo
     abre con su modelo y su esfuerzo (chat_openers)."""
     code = (lambda s: "`%s`" % s) if markdown else (lambda s: s)
+    if orchestrated(plan):  # 0.19.0 · P8: sin chats nuevos ni textos para pegar: el siguiente paso es del orquestador
+        return render_orchestrated(steps, markdown, code, plan)
     lines, i = [], 0
     # Los avisos van primero aunque estén al final de la lista: es lo que hay que saber antes de dar los pasos.
     for step in sorted(steps, key=lambda item: item["tipo"] != "avisos"):
@@ -6698,6 +6821,57 @@ def render_steps(steps, markdown, root=None, plan=None):
                 lines.append("      Tú: %s." % (option.get("tu") or CHAT_YOU))
         else:
             lines.append("%d. %s: %s" % (i, step["que"][0].upper() + step["que"][1:], step["texto"]))
+    return lines
+
+
+ORCHESTRATOR_RUNS_IT = "lo corre el orquestador"
+ORCHESTRATED_USER = ("lo corres tú en tu terminal (el orquestador te lo da); después escribe \"listo\" o \"continúa\" en "
+                     "el chat del orquestador")
+
+
+def orchestrated_where(step, plan):
+    """(rótulo, qué te toca) de un paso en modo orquestado: lo corre el orquestador, lo lanza como subagente o lo
+    corre (o decide) el usuario, según la misma clasificación de `siguiente --json`."""
+    if step["tipo"] == "chat":
+        return ("Subagente · %s · lo lanza el orquestador · Modelo: %s · Esfuerzo: %s" % (
+            step.get("que") or "sesión", step.get("modelo"), step.get("esfuerzo")),
+                "nada: el orquestador lanza esta sesión como subagente y sigue cuando termina")
+    who = json_terminal(step, plan or {}, None) if step["tipo"] == "terminal" else {"quien": "usuario"}
+    if who["quien"] == "orquestador":
+        return "Orquestador · %s · %s" % (step["que"], ORCHESTRATOR_RUNS_IT), "nada: %s" % ORCHESTRATOR_RUNS_IT
+    return "Tú, en tu terminal · %s" % step["que"], ORCHESTRATED_USER
+
+
+def render_orchestrated(steps, markdown, code, plan=None):
+    """0.19.0 · P8: los pasos en modo orquestado. Ninguno propone abrir un chat nuevo ni pegar un texto: cada uno dice
+    quién lo corre (el orquestador, un subagente que lanza el orquestador, o el usuario en una parada)."""
+    lines, i = [], 0
+    for step in sorted(steps, key=lambda item: item["tipo"] != "avisos"):
+        if step["tipo"] == "avisos":
+            lines.append(("**%s:**" if markdown else "%s:") % step["titulo"])
+            lines += [("%s" if step.get("crudo") else "   - %s") % line for line in step["lineas"]]
+            continue
+        i += 1
+        if step["tipo"] == "fin":
+            lines.append(("%d. **%s**" if markdown else "%d. %s") % (i, step["texto"]))
+            continue
+        if step["tipo"] == "opciones":
+            lines.append(("%d. **%s** (decide el usuario; el orquestador pregunta con opciones y corre la elegida):"
+                          if markdown else "%d. %s (decide el usuario; el orquestador pregunta con opciones y corre la "
+                          "elegida):") % (i, step["titulo"]))
+            for letter, (name, when, option) in zip("ABCDEFG", step["opciones"]):
+                lines.append(("   %s. **%s** · cuándo conviene: %s." if markdown else "   %s. %s · cuándo conviene: %s.")
+                             % (letter, name, when))
+                label, _ = orchestrated_where(option, plan)
+                lines.append("      %s" % label)
+                if option["tipo"] == "terminal":
+                    lines.append("      %s" % code(option["texto"]))
+            continue
+        label, you = orchestrated_where(step, plan)
+        lines.append(("%d. **%s**" if markdown else "%d. %s") % (i, label))
+        if step["tipo"] == "terminal":
+            lines.append("   %s" % code(step["texto"]))
+        lines.append("   Tú: %s." % (you if step["tipo"] != "accion" else step.get("tu") or you))
     return lines
 
 
@@ -6908,8 +7082,8 @@ def missing_costs(folder, plan):
         rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
     except OSError:
         return []
-    if any(is_orchestrated(row["sesion"]) for row in rows):
-        return []  # 0.19.0 · O: el total del orquestador (/cost) ya incluye a sus subagentes: una sola fila
+    if orchestrated(plan) or any(is_orchestrated(row["sesion"]) for row in rows):
+        return []  # 0.19.0 · O y P7: el total del orquestador (/cost) ya incluye a sus subagentes: una sola fila
     ids = [item["id"] for item in plan.get("mejoras") or []]
     noted = [session_key(row["sesion"], ids) for row in rows]
     applied = [item["id"] for item in plan.get("mejoras") or [] if item.get("estado") == "aplicada"]
@@ -7000,7 +7174,8 @@ def cost_total(folder, plan, plain=False):
             len(missing), "sesión hecha" if len(missing) == 1 else "sesiones hechas",
             ", ".join(session_words(label) if plain else label for label, _, _ in missing)))
     if not rows and not missing:
-        return "sin sesiones anotadas"
+        return "modo orquestado: falta anotar el total (/cost en el chat del orquestador, al cerrarlo)" \
+            if orchestrated(plan) else "sin sesiones anotadas"
     return " · ".join(parts)
 
 
@@ -7169,9 +7344,31 @@ def cost_md(folder, plan):
     return "%s%s**Total:** %s%s" % (intro, table, cost_total(folder, plan), warned)
 
 
-def cost_lines(folder, plan):
+def orchestrated_total_command(folder, model=None):
+    """0.19.0 · P7: el comando `consumo` del total del modo orquestado: solo falta lo que muestre /cost."""
+    root = project_root(pathlib.Path(folder)).resolve()
+    return "cd %s && python3 -I %s consumo --carpeta %s --total '<total en USD>' --modo %s%s" % (
+        q(root), q(HERE / "perf.py"), q(relative_folder(pathlib.Path(folder), root)), ORCHESTRATED_LABEL,
+        " --modelo %s" % q(model) if model else "")
+
+
+def orchestrated_noted(folder):
+    try:
+        rows = cost_rows((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    return any(is_orchestrated(row["sesion"]) for row in rows)
+
+
+def cost_lines(folder, plan, finished=False):
     """Las líneas con las que `siguiente` lista las sesiones hechas sin fila en "Consumo": un comando listo por cada
-    una. Es informativo: nada se bloquea si no se anota."""
+    una. Es informativo: nada se bloquea si no se anota. En modo orquestado (P7), una sola línea y solo al final: el
+    /cost del chat del orquestador, antes de cerrarlo."""
+    if orchestrated(plan):
+        if not finished or orchestrated_noted(folder):
+            return []
+        return ["Costo (opcional, al final): en el chat del orquestador, antes de cerrarlo, corre /cost (incluye a los "
+                "subagentes) y anota ese total, una sola vez:", "  %s" % orchestrated_total_command(folder)]
     missing = missing_costs(folder, plan)
     if not missing:
         return []
@@ -7216,7 +7413,10 @@ def write_next(folder, title, steps, missing=(), plan=None):
     body = "\n".join(["- **Paso:** %s" % title, header]
                      + ["  " + line for line in render_steps(steps, markdown=True, root=project_root(
                          pathlib.Path(folder)).resolve(), plan=plan)]
-                     + (["- **Costo (opcional, terminal):** faltan anotar %s. `perf.py siguiente` imprime un comando "
+                     + (["- **Costo (modo orquestado):** una sola vez, al final: `/cost` en el chat del orquestador "
+                         "(incluye a los subagentes), antes de cerrarlo, y `perf.py consumo --total '<USD>' --modo "
+                         "orquestado`."] if orchestrated(plan) else
+                        ["- **Costo (opcional, terminal):** faltan anotar %s. `perf.py siguiente` imprime un comando "
                          "listo por cada una; solo falta el costo." % ", ".join(label for label, _, _ in missing)]
                         if missing else
                         ["- **Costo de cada chat** (opcional, terminal, al cerrarlo): `perf.py siguiente` imprime el "
@@ -7341,7 +7541,7 @@ def print_next(folder, plan, flow=None):
     if not title.startswith(("investigación cerrada", "triage cerrado", "en pausa", "archivada")):
         for line in old_video_lines(folder, plan):  # 0.18.0 · V4: opcional, después de los pasos; no cambia ninguno
             print("  · " + line)
-    for line in cost_lines(folder, plan):
+    for line in cost_lines(folder, plan, finished=title.startswith(("investigación cerrada", "triage cerrado"))):
         print("  " + line)
     write_next(folder, title, steps, missing_costs(folder, plan), plan)
     update_cost_total(folder, plan)
@@ -7377,9 +7577,10 @@ SETUP_RUNS = ("--reponer", "--estado")
 USER_DECIDES = {"decidir": "mejoras", "aprobar": "aprobacion", "pausar": "pausa", "archivar": "pausa",
                 "reanudar": "pausa", "lineabase": "linea_base", "marcas": "parche"}
 DECISION_WHY = {
-    "mejoras": "la decisión de las mejoras es del usuario: corre `decidir` en su terminal y después escribe "
-               "\"continúa\" en el chat del orquestador",
-    "aprobacion": "la aprobación de la ficha y el plan es del usuario: responde en el chat del orquestador",
+    "mejoras": "la decisión de las mejoras es del usuario: el orquestador le pregunta con opciones y corre `decidir` "
+               "con lo que elige",
+    "aprobacion": "la aprobación de la ficha y el plan es del usuario: el orquestador le pregunta con opciones y corre "
+                  "`aprobar` si aprueba",
     "profundidad": "pasar a riguroso, pausar o cerrar lo decide el usuario",
     "pausa": "pausar, reanudar o archivar una investigación lo decide el usuario",
     "linea_base": "rehacer la línea base quita y repone mejoras en el código: lo decide el usuario",
@@ -7427,7 +7628,7 @@ def json_terminal(step, plan, folder):
 
     def user(kind, clase, why):
         out.update(tipo=kind, quien="usuario", clase=clase, motivo=why)
-        if clase == "aprobacion":
+        if kind == "decision":  # P4: toda puerta se responde en el chat del orquestador, con opciones
             out["donde"] = "chat"
         return out
 
@@ -7457,6 +7658,9 @@ def json_terminal(step, plan, folder):
         return out
     if sub in USER_DECIDES or (sub == "setup" and not any(option in words for option in SETUP_RUNS)):
         clase = "profundidad" if sub == "decidir" and "--profundidad" in words else USER_DECIDES.get(sub, "setup")
+        if sub == "decidir" and "--aplicada" not in words and "--desde-orquestador" not in words:
+            # P4: el orquestador lo corre con lo que el usuario eligió en la puerta; queda anotado que vino de él
+            out["comando"] = "%s --desde-orquestador" % text
         return user("decision", clase, DECISION_WHY[clase])
     if sub in ORCHESTRATOR_RUNS or sub == "setup":  # setup: solo --reponer o --estado (lo demás decide el usuario)
         out["clase"] = sub if sub in ("diagnostico", "instalar") else "perf"
@@ -7511,7 +7715,7 @@ def json_step(step, plan, folder):
         clase = step.get("clase") or next((wanted for wanted in ("mejoras", "aprobacion", "profundidad")
                                            if wanted in classes), None) or next(
             (found for found in classes if found in DECISION_WHY), "elige")
-        return {"tipo": "decision", "quien": "usuario", "donde": "chat" if clase == "aprobacion" else "terminal",
+        return {"tipo": "decision", "quien": "usuario", "donde": "chat",
                 "clase": clase, "titulo": step.get("titulo") or "", "motivo": DECISION_WHY.get(clase, DECISION_WHY["elige"]),
                 "opciones": options}
     if kind == "fin":
@@ -7555,6 +7759,26 @@ def is_orchestrated(label):
     return " ".join(str(label or "").lower().split()).startswith(ORCHESTRATED_LABEL)
 
 
+def orchestrated(plan):
+    """0.19.0 · P8: la investigación corre en modo orquestado (`"modo": "orquestado"` en plan.json, que ponen
+    `nuevo --orquestado`, `siguiente --json` y `consumo --total`)."""
+    return str((plan or {}).get("modo") or "").strip().lower() == ORCHESTRATED_LABEL
+
+
+def mark_orchestrated(folder):
+    """Anota `"modo": "orquestado"` en plan.json (una vez; no cambia la huella de ningún flujo). False si no pudo."""
+    path = pathlib.Path(folder) / "plan.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict) or raw.get("modo") == ORCHESTRATED_LABEL:
+        return isinstance(raw, dict)
+    raw["modo"] = ORCHESTRATED_LABEL
+    path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
 def orchestrated_expected(folder, plan, size):
     """(mínimo, máximo, [sesiones]) de lo esperado para las sesiones que hizo la investigación, según su tipo y el
     tamaño del proyecto (COST_REFERENCE): es lo que se compara con el total del modo orquestado."""
@@ -7578,7 +7802,7 @@ def orchestrated_cost(folder, plan, root, model=None):
         rows = []
     noted = next((row for row in rows if is_orchestrated(row["sesion"])), None)
     spent = cost_of(noted["costo"])["usd"] if noted else None
-    return {"comando": cost_command(folder, ORCHESTRATED_LABEL, model), "esperado_usd": [low, high], "tamano": size,
+    return {"comando": orchestrated_total_command(folder, model), "esperado_usd": [low, high], "tamano": size,
             "tamano_de": why, "sesiones": labels, "anotado": noted["costo"] if noted else None,
             "se_paso": bool(spent is not None and labels and spent > high)}
 
@@ -8725,6 +8949,7 @@ def siguiente_json(args):
         if args.carpeta:
             folder = pathlib.Path(args.carpeta)
             buffer = io.StringIO()
+            mark_orchestrated(folder)  # P8: quien pide `siguiente --json` es el orquestador
             with contextlib.redirect_stdout(buffer):
                 plan = load_plan(folder / "plan.json")
                 next_warnings(folder, plan)
@@ -8941,6 +9166,19 @@ def cmd_consumo(args):
     if not state.is_file():
         raise PerfError("no existe %s" % state)
     root = project_root(folder).resolve()
+    if getattr(args, "total", None) or getattr(args, "modo", None) or getattr(args, "desglose", None):
+        # 0.19.0 · P7: en modo orquestado hay un solo /cost, el del chat del orquestador, que incluye a sus subagentes:
+        # una sola fila con el total de la investigación (y, si se da, el desglose por modelo de /cost)
+        if not getattr(args, "total", None):
+            raise PerfError("--modo y --desglose van con --total: el total que muestra /cost en el chat del orquestador")
+        if args.costo or args.sesion not in (None, ORCHESTRATED_LABEL):
+            raise PerfError("--total es el costo de toda la investigación (modo orquestado): no va con --costo ni con "
+                            "--sesion")
+        args.sesion, args.costo = ORCHESTRATED_LABEL, args.total
+        if args.desglose:
+            args.costo = "%s · desglose: %s" % (args.total, " ".join(args.desglose.split()))
+        args.modelo = args.modelo or "orquestador y subagentes"
+        mark_orchestrated(folder)
     if getattr(args, "desde_transcript", None):
         # K4: tokens, pasos y modelo, del transcript local de Claude Code; la sesión, si no se dice, de su primer pedido.
         path = transcript_path(args.desde_transcript, root)
@@ -9245,6 +9483,8 @@ def cmd_decidir(args):
         improvement_module_gate(folder, plan, files, getattr(args, "repo", None), applied[0])
     now = datetime.datetime.now().replace(microsecond=0)
     origin = command_origin()
+    if getattr(args, "desde_orquestador", False):  # 0.19.0 · P4: la elección del usuario en la puerta del orquestador
+        origin = "el usuario, a través del orquestador%s" % (" · %s" % origin if origin else "")
     for item in plan.get("mejoras", []):
         if item["id"] in choices:
             item["estado"] = choices[item["id"]]
@@ -13029,6 +13269,9 @@ def warnings_lines(folder, plan):
     folder = pathlib.Path(folder)
     notes = read_notes(folder)
     lines = []
+    unanswered = frames_unanswered(folder, plan)  # 0.19.0 · P5: se dice desde el principio, no recién al cierre
+    if unanswered:
+        lines.append(unanswered)
 
     def by_flow(kind, phase):
         bucket = (notes.get(kind) or {}).get(phase) if isinstance(notes.get(kind), dict) else None
@@ -14786,7 +15029,7 @@ def flow_config_name(plan, flow_spec, override):
     if override:
         return override
     if is_repetition(flow_spec) and (repetition_trace(flow_spec) == "liviana" or (
-            repetition_trace(flow_spec) == "sin" and flow_spec.get("invalidar_si"))):
+            repetition_trace(flow_spec) == "sin" and section_invalidators(flow_spec))):
         return "liviana"
     return plan.get("config", "base")
 
@@ -14929,7 +15172,7 @@ def cap_reason(flow_spec, size_mb, cap, per_cycle, original=""):
     """C5: el corte por el tope de la traza, en una línea: qué pasó y qué hacer."""
     reached = "%s" % (fmt(round(cap / 1e9, 2)) + " GB" if cap and size_mb >= cap / 1e6 * 0.95 else "su tope de duración")
     # con pantallas protegidas (invalidar_si), "sin" se mide igual con la liviana: no se ofrece
-    no_trace = "" if (flow_spec or {}).get("invalidar_si") else " o usa \"traza\": \"sin\" en el flujo (la memoria se mide " \
+    no_trace = "" if section_invalidators(flow_spec) else " o usa \"traza\": \"sin\" en el flujo (la memoria se mide " \
                                                                   "igual, entre ciclos)"
     if is_repetition(flow_spec) and per_cycle:
         when = max(1, int((size_mb or 0) / per_cycle))
@@ -15441,7 +15684,7 @@ def capture_batch(args, plan=None):
         print("⚠ quedan %.1f GB libres: cada traza puede pesar decenas o cientos de MB" % free_gb)
     config_path = resolve_config(plan, folder, flow_config_name(plan, flow, args.config))
     no_trace = is_repetition(flow) and repetition_trace(flow) == "sin" and not startup  # C5: solo memoria, sin traza
-    if no_trace and flow.get("invalidar_si"):  # sin traza no se ve qué pantalla se abrió: se mide con la liviana
+    if no_trace and section_invalidators(flow):  # sin traza no se ve qué pantalla se abrió: se mide con la liviana
         no_trace = False
         print("· %s protege pantallas (invalidar_si) y sin traza no hay cómo verlas: lo mido con la traza liviana, que "
               "trae las marcas de pantalla y no los cuadros." % flow_name)
@@ -15649,6 +15892,7 @@ def capture_batch(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
+    first_opened = None  # 0.19.0 · P3: el elemento que abrió la primera corrida válida (invalidar_si elemento_distinto)
     video_started = []  # C10 y 0.17.0 · V1: el video de la prueba se lanza una sola vez
     clear_logcat = bool(args.plan) and not startup and plan.get("limpiar_logcat") is not False  # B5
     seen_urls = {}
@@ -15843,9 +16087,12 @@ def capture_batch(args, plan=None):
                 adb.run("logcat", "-b", "main", "-c", timeout=30)
             except (OSError, subprocess.SubprocessError):
                 pass  # si adb no responde, las rutas de esta corrida pueden quedar sin leer, nada más
+        opened = None
         try:
             if not inside_trace:
                 timed_prepare()
+                if element_moment(flow) == "antes":  # P3: el elemento que se va a tocar, fuera de la traza
+                    opened = read_opened(adb, flow)
         except Precondicion as error:
             failure = error
         if failure is None:
@@ -15892,6 +16139,8 @@ def capture_batch(args, plan=None):
                 failure = error
             if is_repetition(flow) and failure is None:
                 memory_snapshot(adb, package, cycles_path, "fin")
+            if failure is None and element_moment(flow) == "fin":  # P3: con la traza ya detenida
+                opened = read_opened(adb, flow)
             if clear_logcat and not args.prueba:  # B5: las rutas de esta corrida, antes de que se limpie el buffer
                 save_service_urls(folder, read_service_log(adb))
         if failure is not None:
@@ -15986,6 +16235,13 @@ def capture_batch(args, plan=None):
                 evidence.clock_rows = [dict(zip(header, row)) for header, body in results.get("reloj") or []
                                        for row in body]
             metrics, invalid, info = trace_metrics(rows_now, hz, flow, known, sdk)
+            if opened is not None:  # P3: qué elemento abrió esta corrida (texto o content-desc)
+                info["elemento"] = opened
+                expected = str(element_spec(flow).get("esperado") or "").strip() or first_opened
+                if not invalid and not args.prueba and ELEMENT_TOKEN in (flow.get("invalidar_si") or []) and \
+                        expected is not None and opened != expected:
+                    invalid = "abrió '%s' y no '%s' (invalidar_si %s): el contenido cambió" % (
+                        opened or "nada reconocible", expected, ELEMENT_TOKEN)
             if info.get("cruzan_pausa"):
                 # No es una corrida mala: es el plan el que mide tiempo de una persona. Repetir no lo arregla.
                 raise PerfError("el plan mide tiempo humano: %s. Lo que pasa entre las dos marcas de una pausa no es de la "
@@ -16134,7 +16390,7 @@ def capture_batch(args, plan=None):
                                                 fmt(round(per_cycle, 3)), fmt(round(cap_bytes(config) / 1e6)), fit))
                     if isinstance(flow.get("ciclos"), int) and flow["ciclos"] > fit:
                         line += "; el plan pide %d: baja `ciclos` a %d%s" % (
-                            flow["ciclos"], fit, "" if flow.get("invalidar_si") else " o usa \"traza\": \"sin\"")
+                            flow["ciclos"], fit, "" if section_invalidators(flow) else " o usa \"traza\": \"sin\"")
                     print(("⚠ " if "baja" in line else "· ") + line[0].upper() + line[1:])
                     informative.append(line)
                 snapshots = read_cycles(cycles_path)
@@ -16234,6 +16490,8 @@ def capture_batch(args, plan=None):
         append_rows(csv_path, [metric_row(phase, flow_name, n, m[0], m[1], m[2], m[3]) for m in metrics])
         save_timeline(out_dir, flow_name, n, info.get("linea"))
         save_run_summary(out_dir, flow_name, n, metrics, info, read_cycles(cycles_path))  # F3
+        if info.get("elemento") is not None and first_opened is None:
+            first_opened = info["elemento"]
         known |= {m[0] for m in metrics}
         print(run_line(run_label()[len("corrida "):], size_mb, metrics))
         if is_repetition(flow) and read_cycles(cycles_path):  # C5: el veredicto de memoria de esta corrida
@@ -17510,7 +17768,7 @@ def cmd_recalcular(args):
             if spec is None:
                 raise PerfError("el flujo '%s' no está en el plan (flujos: %s)" % (flow_name, ", ".join(plan["flujos"])))
             runs = sorted({to_int(r["corrida"]) for r in rows if r["fase"] == phase and r["flujo"] == flow_name})
-            if not runs or (is_repetition(spec) and repetition_trace(spec) == "sin" and not spec.get("invalidar_si")):
+            if not runs or (is_repetition(spec) and repetition_trace(spec) == "sin" and not section_invalidators(spec)):
                 continue  # un flujo de repetición sin traza no tiene trazas a propósito: no hay nada que recalcular
             known = {r["metrica"] for r in rows if r["flujo"] == flow_name}
             hz = plan.get("hz") if isinstance(plan.get("hz"), int) else None  # sin el del plan, la tasa de cada traza
@@ -17658,6 +17916,7 @@ def cmd_comparar(args):
     notes += config_notes(folder, sorted({r["flujo"] for r in rows})) + marks_moved + typing_notes(results)
     notes += identical_segment_notes(rows, read_phases(folder), plan)
     notes += phase_module_notes(read_phases(folder))  # A4
+    notes += opened_element_notes(folder, rows)  # 0.19.0 · P3
     for note in notes:
         print("⚠ " + note)
     text = "# Comparación\n\n" + markdown_table(
@@ -21041,10 +21300,54 @@ def measured_line(data):
     return " · ".join(part for part in (flows, joined, device.get("modelo") or "") if part)
 
 
+# 0.19.0 · P5: una queja de frames, tirones o animaciones no se responde en un emulador (dibuja con la GPU de la
+# computadora, o por software). Si se mide igual en uno, esa parte de la queja queda sin respuesta, y se dice en los
+# reportes inicial y final y en las advertencias desde el principio, no recién al cierre.
+FRAME_SYMPTOM = re.compile(r"(?<![\w-])(?:frames?|jank|lags?|tirones?|trab(?:a|as|ado|ada)|se\s+traba|congela\w*|"
+                           r"animaci[oó]n(?:es)?|fluidez|fluido|parpade\w*|saltos?|stutter\w*|choppy)(?![\w-])", re.I)
+UNANSWERED_FRAMES = "sin respuesta: requiere dispositivo físico"
+
+
+def ficha_of(folder):
+    """La sección Ficha de estado.md ('' si no hay)."""
+    try:
+        sections = state_sections((pathlib.Path(folder) / "estado.md").read_text(encoding="utf-8"))[1]
+    except OSError:
+        return ""
+    return next((body for name, body in sections.items() if name.startswith("ficha")), "")
+
+
+def on_emulator(folder, plan):
+    """True si la investigación mide (o va a medir) en un emulador: lo dicen las fases medidas, el serial del plan o la
+    fila "Dispositivo" de la Ficha."""
+    for data in read_phases(folder).values():
+        if isinstance(data, dict) and (data.get("entorno") or {}).get("emulador"):
+            return True
+    if str((plan or {}).get("serial") or "").startswith("emulator-"):
+        return True
+    device = ficha_value(ficha_of(folder), "dispositivo")
+    return bool(re.search(r"emulador|emulator|sdk_gphone|\bsdk\b", device, re.I))
+
+
+def frames_unanswered(folder, plan, plain=False):
+    """P5: el texto de la parte de la queja que queda sin respuesta (frames en un emulador), o ''."""
+    symptom = " ".join((ficha_value(ficha_of(folder), "síntoma", "sintoma"), management_override(plan, "sintoma")))
+    if not FRAME_SYMPTOM.search(symptom) or not on_emulator(folder, plan):
+        return ""
+    if plain:
+        return ("Sin respuesta: la parte de la queja sobre tirones y fluidez requiere un teléfono físico; se midió en un "
+                "emulador, que no dibuja la pantalla como un teléfono.")
+    return ("La parte de la queja sobre frames, tirones o animaciones queda %s: se mide en un emulador, que dibuja con "
+            "la GPU de la computadora (o por software) y no responde cómo se ve en un teléfono" % UNANSWERED_FRAMES)
+
+
 def r_user(data):
     symptom = ficha_value(data.pick("ficha"), "síntoma", "sintoma")
     text = ('<p>"%s"</p>' % text_html(symptom.strip().strip('"'))) if symptom else \
         "<p>Sin completar todavía: la investigación no lo anotó en la Ficha.</p>"
+    unanswered = frames_unanswered(data.folder, data.plan)
+    if unanswered:
+        text += '<div class="note warn"><b>Sin respuesta</b>%s.</div>' % e(unanswered)
     return "usuario", "Qué notaba el usuario", text
 
 
@@ -21755,8 +22058,10 @@ def r_summary_biz(data):
 def r_user_biz(data):
     symptom = management_override(data.plan, "sintoma") or ficha_value(data.pick("ficha"), "síntoma", "sintoma")
     symptom = data.plain(symptom, GERENCIA_SYMPTOM) if symptom else ""
+    unanswered = frames_unanswered(data.folder, data.plan, plain=True)
     return "usuario", "Qué notaba el usuario", ('<p>"%s"</p>' % text_html(symptom.strip().strip('"')) if symptom else
-                                              "<p>Sin completar todavía: la investigación no lo anotó en la Ficha.</p>")
+                                              "<p>Sin completar todavía: la investigación no lo anotó en la Ficha.</p>") + (
+        '<div class="note warn"><b>Sin respuesta</b>%s</div>' % e(unanswered[len("Sin respuesta: "):]) if unanswered else "")
 
 
 def r_measured_biz(data):
@@ -22781,6 +23086,9 @@ def cmd_humo(args):
     serial = select_device(args.serial)
     adb = Adb(serial)
     activity = args.actividad or launcher_activity(adb, args.paquete)
+    broken = install_broken(adb, args.paquete, activity, bool(args.actividad))
+    if broken:
+        activity = repair_install(adb, serial, args, folder, activity, broken)
     if not activity:
         raise Precondicion("no encontré la actividad de inicio de %s: ¿está instalado el build de profiling? (o pasa "
                            "--actividad)" % args.paquete)
@@ -22887,6 +23195,74 @@ def cmd_humo(args):
               "carga de la red).")
 
 
+# 0.19.0 · P6: una instalación que terminó bien pero quedó rota: el paquete está instalado y el sistema no resuelve su
+# actividad de inicio ("Activity class … does not exist"). Desinstalar y reinstalar solo el paquete medido lo arregla.
+LAUNCH_BROKEN = re.compile(r"does not exist|unable to resolve Intent|Error type 3", re.I)
+
+
+def package_installed(adb, package):
+    return any(line.strip().startswith("package:") for line in adb.shell("pm path %s" % package).stdout.splitlines())
+
+
+def install_broken(adb, package, activity, given):
+    """La salida que muestra que la instalación de `package` está rota, o '' si no lo está (o no está instalado: eso es
+    otro problema). Rota es: instalado y sin actividad de inicio que se resuelva, o, con --actividad, `am start` que dice
+    que no existe."""
+    if not package_installed(adb, package):
+        return ""
+    if not activity:
+        return "cmd package resolve-activity no da la actividad de inicio: %s" % (
+            one_line(adb.shell("cmd package resolve-activity --brief -a android.intent.action.MAIN -c "
+                               "android.intent.category.LAUNCHER %s" % package).stdout) or "sin salida")[:200]
+    if not given:
+        return ""
+    result = adb.shell("am start -W -n %s" % component_of(package, activity), timeout=180)
+    text = (result.stdout + result.stderr).strip()
+    adb.shell("am force-stop %s" % package)
+    return "am start: %s" % one_line(text)[:300] if LAUNCH_BROKEN.search(text) else ""
+
+
+def repair_install(adb, serial, args, folder, activity, broken):
+    """P6: una sola vez, desinstala solo el paquete medido (nunca otra variante de la app), lo reinstala con
+    --instalar y comprueba que la actividad de inicio arranque. Devuelve la actividad; si sigue rota, se detiene con el
+    diagnóstico (paquete, actividad y la salida de am start), sin abrir el APK."""
+    package = args.paquete
+    shown = activity or "(sin resolver)"
+    if not args.instalar:
+        raise Precondicion(
+            "%s está instalado, pero su actividad de inicio no arranca (%s; actividad: %s). Suele ser una instalación "
+            "rota: se arregla desinstalando solo %s y reinstalándolo. Pasa a humo el comando que lo instala con "
+            "--instalar y lo hace solo, una vez" % (package, broken, shown, package)).con(
+            guardado="nada", seguir=[("con el comando que instala el build de profiling",
+                                      same_command() + " --instalar '<comando de instalación>'")])
+    print("· %s está instalado, pero su actividad de inicio no arranca (%s): desinstalo solo %s, lo reinstalo con "
+          "--instalar y reintento, una vez" % (package, broken, package))
+    adb.run("uninstall", package, timeout=180)
+    log = pathlib.Path(folder) / "logs" / "humo-reinstalar.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(child_env(java=True) or os.environ)
+    if serial:
+        env["ANDROID_SERIAL"] = serial
+    with log.open("w", encoding="utf-8") as handle:
+        done = subprocess.run(args.instalar, shell=True, stdout=handle, stderr=subprocess.STDOUT, env=env)
+    if done.returncode != 0:
+        raise PerfError("la reinstalación de %s falló (código %d): la salida está en %s" % (
+            package, done.returncode, log)).con(guardado="%s quedó desinstalado; la salida de la instalación, en %s" % (
+                package, log), seguir=[("corrige la instalación y repite humo", same_command())])
+    activity = args.actividad or launcher_activity(adb, package)
+    still = install_broken(adb, package, activity, bool(args.actividad))
+    if still or not activity:
+        raise Precondicion(
+            "%s sigue sin arrancar después de desinstalarlo y reinstalarlo: paquete %s, actividad %s, %s. No es la "
+            "instalación: revisa que la actividad de inicio esté declarada en el manifiesto del build de profiling "
+            "(no hace falta abrir el APK)" % (package, package, activity or "(sin resolver)",
+                                              still or "sin actividad de inicio")).con(
+            guardado="%s reinstalado; la salida de la instalación, en %s" % (package, log),
+            seguir=[("cuando lo corrijas, repite humo", same_command())])
+    print("✔ Reinstalé %s y su actividad de inicio ya arranca (%s): sigo con la prueba de humo" % (package, activity))
+    return activity
+
+
 def request_investigations(root, request_path):
     """D2: [(carpeta, cerrada)] de las investigaciones del proyecto que se crearon después del pedido del setup (su
     estado.md es más nuevo que pedido.json): el pedido ya tiene investigación."""
@@ -22958,6 +23334,8 @@ def cmd_nuevo(args):
         plan["instalar"] = args.instalar
     if args.triage:
         plan["profundidad"] = "triage"
+    if getattr(args, "orquestado", False):  # 0.19.0 · P8: las salidas no proponen chats nuevos
+        plan["modo"] = ORCHESTRATED_LABEL
     if getattr(args, "pedido_mejorado", False):  # E2: hubo una sesión 0 · pedido: `siguiente` ofrece anotar su costo
         plan["pedido_mejorado"] = True
     no_leer = read_no_leer(project_root(folder), extra=args.no_leer)
@@ -22992,7 +23370,8 @@ def cmd_nuevo(args):
                 ("<variante medida (R8, no depurable, profileable) · backend real o mocks>",
                  "variante medida (R8, no depurable, profileable)%s" % (" · la primera pantalla carga de la red" if args.red else "")),
                 ("<guiado o autónomo · recorrido manual, comando o arranque-frio · riguroso o triage>",
-                 "guiado · recorrido arranque-frio · %s" % ("triage" if args.triage else "riguroso"))):
+                 "%s · recorrido arranque-frio · %s" % (ORCHESTRATED_LABEL if getattr(args, "orquestado", False) else
+                                                         "guiado", "triage" if args.triage else "riguroso"))):
             state = state.replace(marker, value)
     rate = ("%d Hz fijos" % fixed_hz if fixed_hz else "%d Hz (del plan; sin fijar en el dispositivo)" % args.hz if args.hz
             else "tasa de refresco sin fijar: la corrida de prueba dice la que midió")
@@ -27029,6 +27408,9 @@ def main(argv=None):
     p.add_argument("--serial", help="dispositivo de medición; queda en el plan y lo usan todas las capturas")
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (queda en el plan)")
     p.add_argument("--triage", action="store_true", help="profundidad triage: 3 corridas, sin control, termina en el diagnóstico")
+    p.add_argument("--orquestado", action="store_true",
+                   help="modo orquestado (references/orquestacion.md): las salidas dicen que el paso siguiente lo corre el "
+                        "orquestador y no proponen chats nuevos; el costo es un solo total al final")
     p.add_argument("--pedido-mejorado", dest="pedido_mejorado", action="store_true",
                    help="el pedido trae la línea \"(pedido mejorado con la sesión 0 · pedido)\": `siguiente` ofrece el "
                         "comando para anotar el costo de esa sesión")
@@ -27156,6 +27538,12 @@ def main(argv=None):
     p.add_argument("--esfuerzo", help="esfuerzo de razonamiento del chat (bajo, medio, alto)")
     p.add_argument("--pasos", help="pasos del agente; se llena solo con --desde-transcript (la columna no se muestra si "
                                    "ninguna sesión la trae)")
+    p.add_argument("--total", help="modo orquestado: el total de la investigación, lo que muestra /cost en el chat del "
+                                   "orquestador (incluye a sus subagentes), entre comillas simples: '3.06 USD'. Va en una "
+                                   "sola fila, sin filas por sesión")
+    p.add_argument("--modo", choices=(ORCHESTRATED_LABEL,), help="con --total: el modo de la investigación (orquestado)")
+    p.add_argument("--desglose", help="con --total, opcional: el desglose por modelo que muestra /cost, tal cual "
+                                      "('Haiku 5.5: 0.40 USD, Sonnet 5.5: 2.66 USD')")
     p.set_defaults(func=cmd_consumo)
 
     p = sub.add_parser("cerrar", help="quita los cambios temporales de la investigación con un parche por repo, sin perderlos",
@@ -27289,6 +27677,9 @@ def main(argv=None):
     p.add_argument("--profundidad", choices=["riguroso", "triage"],
                    help="cambia la profundidad del plan sin editar plan.json: de triage a riguroso para aplicar una mejora "
                         "(el paso siguiente pide completar antes y medir control)")
+    p.add_argument("--desde-orquestador", dest="desde_orquestador", action="store_true",
+                   help="modo orquestado: el orquestador corre lo que el usuario eligió en la puerta (opciones "
+                        "seleccionables); queda anotado que la decisión vino del usuario a través del orquestador")
     p.set_defaults(func=cmd_decidir)
 
     p = sub.add_parser("capturar", help="calentamiento, compilación y N corridas con traza, consultas y CSV")
