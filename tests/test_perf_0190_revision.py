@@ -522,5 +522,39 @@ class PerformanceSectionTest(SetupBase):
         self.assertNotIn("emulator-5554", body)
 
 
+
+class OrchestratedSimulationTest(JsonBase):
+    """Aceptación: una investigación orquestada simulada, sin dispositivo. La puerta de las mejoras trae opciones y el
+    comando que corre el orquestador con lo elegido; después, la sesión 3 como subagente; los textos no proponen chats
+    nuevos; el reporte de gerencia no toca el plan; el costo es un solo total al final."""
+
+    def test_de_la_decision_al_cierre(self):
+        self.plan_as(dict(RIGUROSO, modo="orquestado"), MEASURED)
+        gate = self.next_json()
+        self.assertEqual((gate["tipo"], gate["clase"], gate["donde"]), ("decision", "mejoras", "chat"))
+        option = gate["pasos"][0]["opciones"][0]
+        self.assertTrue(option["comando"].endswith("--desde-orquestador"))
+        # el orquestador corre lo que el usuario eligió en la puerta (aprobar M1), tal cual lo dio siguiente --json
+        command = option["comando"].split(" && ", 1)[1].replace("python3 -I ", "")
+        words = __import__("shlex").split(command)[1:]
+        done = self.run_in(*words)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("Chat nuevo", done.stdout)
+        session = self.next_json()
+        self.assertEqual((session["tipo"], session["quien"], session["sesion"]), ("sesion", "subagente", "3 · M1"))
+        state = (self.folder / "estado.md").read_text(encoding="utf-8")
+        self.assertNotIn("Chat nuevo", state)
+        self.assertNotIn("pega el texto", state)
+        # gerencia no toca el plan
+        before = digest(self.folder / "plan.json")
+        self.run_in("reporte", "--carpeta", self.rel, "--inicial")
+        self.assertEqual(digest(self.folder / "plan.json"), before)
+        # un solo total, al final
+        self.assertEqual(session["costo"]["comando"].count("--total"), 1)
+        total = self.run_in("consumo", "--carpeta", self.rel, "--total", "3.06 USD", "--modo", "orquestado")
+        self.assertEqual(total.returncode, 0, total.stdout + total.stderr)
+        self.assertNotIn("faltan anotar", (self.folder / "estado.md").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
