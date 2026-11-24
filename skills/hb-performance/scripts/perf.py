@@ -9659,12 +9659,17 @@ DOD_CONDITIONAL = re.compile(r"(?<![\w-])(?:no|nunca|jam[aá]s|evita\w*|prohib\w
 DOD_MORE = re.compile(r"\s*(?:,|;|\by\b|\be\b|\bluego\b|\bdespu[eé]s\b|\band\b|\bthen\b|&&|\+)\s*(?:\*\*)?`([^`]+)`")
 
 
+DOD_INFO_LINE = re.compile(r"^\W*(?:fuera\s+del\s+dod|origen)\s*:", re.I)
+
+
 def dod_loose_line(line, found, skipped, state):
     """Q: una línea del DoD fuera de una lista. Una fila de tabla con un comando entre acentos graves es un paso (el
     primero de la fila) y un párrafo que empieza con uno, también, salvo que la fila o el párrafo lo prohíban o lo
     condicionen ("solo en CI", "no lo hagas") o que los presente un párrafo que lo hace ("Solo en CI:"). Un párrafo que
     cita un comando en medio del texto se cita como no usado, con el motivo, en lugar de ignorarlo."""
     text = line.strip()
+    if DOD_INFO_LINE.match(text):
+        return  # 0.19.0 · S2: "Fuera del DoD: …" y "Origen: …" (las escribe hb-setup) informan, no son pasos
     codes = [code.strip() for code in re.findall(r"`([^`]+)`", text) if DOD_COMMAND_LIKE.match(code.strip())]
     words = re.sub(r"`[^`]*`", " ", text)  # lo que dice la línea fuera del código
     table = text.startswith("|")
