@@ -10,10 +10,15 @@ Tres modos, los mismos que "Contexto de IA" en ## Reglas del proyecto:
 El contenido de AGENTS.md lo escribe el agente: este script deja la estructura y dice dónde escribir. Antes de cambiar
 algo comprueba todo; si hay un conflicto, no toca nada y lo explica.
 
+También deja fuera de git (en .git/info/exclude) los archivos locales de las herramientas de IA que no están
+versionados ni ignorados (.claude/settings.local.json, CLAUDE.local.md, los de aider), y revisa la sección de
+rendimiento de AGENTS.md que mantiene hb-performance sin reescribirla.
+
 Uso:
   python3 -I contexto.py estado [--carpeta contexto] [--repo .]
   python3 -I contexto.py preparar --modo versionado|local|externo [--externa <ruta>] [--carpeta contexto]
                                   [--reportes <ruta>] [--claude auto|si|no] [--repo .]
+  python3 -I contexto.py rendimiento [--repo .]
 """
 import argparse
 import os
@@ -23,6 +28,17 @@ import subprocess
 import sys
 
 MODES = ("versionado", "local", "externo")
+# S4: archivos locales de herramientas de IA (configuración personal, historiales): nunca van al repo
+LOCAL_AI = re.compile(r"^(?:(?:.*/)?CLAUDE\.local\.md|(?:.*/)?(\.aider[^/]*)(?:/.*)?|"
+                      r"(?:.*/)?\.(?:claude|cursor|gemini|codex|junie|windsurf|continue)/(?:.*/)?[^/]*\.local(?:\.[^/]+)?)$")
+# S3: la sección de rendimiento de AGENTS.md y su bloque de estado, que mantiene hb-performance
+PERF_HEADING = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(?:\d+[.)][ \t]*)?(?:rendimiento|performance)\b", re.I)
+ANY_HEADING = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+\S")
+PERF_BLOCK = ("<!-- hb-performance:estado -->", "<!-- /hb-performance:estado -->")
+SERIALS = ((re.compile(r"\bANDROID_SERIAL=(?!<)[^\s`'\"]+"), "ANDROID_SERIAL=<serial>"),
+           (re.compile(r"\badb\s+-s\s+(?!<)[^\s`'\"]+"), "adb -s <serial>"),
+           (re.compile(r"--serial(?:\s+|=)(?!<)[^\s`'\"]+"), "--serial <serial>"),
+           (re.compile(r"(?<![\w-])emulator-\d{2,5}(?![\w-])"), "<serial>"))
 MARKER = re.compile(r"\{(?:fecha|slug)\}")
 SIBLING_REF = re.compile(r"\.\./([A-Za-z0-9._-]+)")
 
@@ -131,6 +147,93 @@ def siblings(repo):
     return found
 
 
+def local_ai_files(repo):
+    """S4: los archivos locales de herramientas de IA sin versionar y sin ignorar, como línea de .git/info/exclude
+    (una carpeta de aider, entera)."""
+    out = []
+    for path in git(repo, "ls-files", "--others", "--exclude-standard").stdout.splitlines():
+        found = LOCAL_AI.match(path)
+        if not found:
+            continue
+        if found.group(1) and path != found.group(1) and not path.endswith(found.group(1)):
+            head = path[:path.index(found.group(1)) + len(found.group(1))]
+            line = "/" + head + "/"
+        else:
+            line = "/" + path
+        if line not in out:
+            out.append(line)
+    return out
+
+
+def exclude_local_ai(repo):
+    """S4: agrega a .git/info/exclude (local, no toca .gitignore) los archivos locales de herramientas de IA."""
+    return [line for line in local_ai_files(repo) if add_exclude(repo, line)]
+
+
+def perf_section(text):
+    """(inicio, fin) de la sección de rendimiento de un AGENTS.md (la primera), o None."""
+    lines = text.splitlines(True)
+    position, start, level = 0, None, None
+    for line in lines:
+        heading = ANY_HEADING.match(line)
+        if start is None:
+            own = PERF_HEADING.match(line)
+            if own:
+                start, level = position + len(line), len(own.group(1))
+        elif heading and len(heading.group(1)) <= level:
+            return start, position
+        position += len(line)
+    return (start, len(text)) if start is not None else None
+
+
+def perf_audit(repo):
+    """S3: lo que hb-setup señala de la sección de rendimiento, sin reescribirla: [(línea, propuesta)] de las líneas
+    fuera del bloque de estado que traen un serial de dispositivo o que contradicen el estado del bloque."""
+    path = repo / "AGENTS.md"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    section = perf_section(text) if text else None
+    if section is None:
+        return None, []
+    body = text[section[0]:section[1]]
+    block = re.search(re.escape(PERF_BLOCK[0]) + r".*?" + re.escape(PERF_BLOCK[1]), body, re.S)
+    in_patch = bool(block and re.search(r"setup\s*:\s*en\s+parche", block.group(0), re.I))
+    outside = body[:block.start()] + body[block.end():] if block else body
+    found = []
+    for line in outside.splitlines():
+        fixed = line
+        for pattern, value in SERIALS:
+            fixed = pattern.sub(value, fixed)
+        if fixed != line:
+            found.append((line.strip(), "sin el serial del dispositivo: «%s» (el serial va en el plan de cada "
+                                        "investigación)" % fixed.strip()))
+        if in_patch and re.search(r"setup\s+listo", line, re.I):
+            found.append((line.strip(), "quitarla: el setup está en un parche y su estado lo dice el bloque de "
+                                        "hb-performance"))
+    return block.group(0) if block else "", found
+
+
+def performance(args):
+    """S3: muestra el bloque de estado de hb-performance (para conservarlo tal cual al regenerar AGENTS.md) y las líneas
+    de la sección de rendimiento que conviene cambiar, con la propuesta. No escribe nada."""
+    repo = toplevel(args.repo)
+    block, found = perf_audit(repo)
+    if block is None:
+        print("AGENTS.md no tiene sección de rendimiento: no hay nada de hb-performance que conservar")
+        return 0
+    if block:
+        print("Bloque de estado de hb-performance (consérvalo tal cual al regenerar AGENTS.md):")
+        print("\n".join("  " + line for line in block.splitlines()))
+    else:
+        print("La sección de rendimiento no tiene el bloque de estado de hb-performance (lo agrega perf.py)")
+    if not found:
+        print("✔ La sección de rendimiento no trae seriales ni líneas que contradigan el bloque")
+        return 0
+    print("Para el resumen (propón el cambio; no reescribas la sección por tu cuenta):")
+    for line, proposal in found:
+        print("  - «%s» → %s" % (line[:120], proposal))
+    return 0
+
+
 def submodules(repo):
     listing = git(repo, "config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$")
     return [line.split(" ", 1)[1] for line in listing.stdout.splitlines() if " " in line]
@@ -153,6 +256,9 @@ def status(args):
     else:
         mode = "sin definir (" + agents + ")"
     print(f"Modo del contexto: {mode}")
+    local = local_ai_files(repo)
+    print("Archivos locales de IA sin versionar ni excluir: " + (", ".join(local) if local else "ninguno")
+          + (" (preparar los deja en .git/info/exclude)" if local else ""))
     subs = submodules(repo)
     print("Submódulos: " + (", ".join(subs) if subs else "ninguno"))
     related = siblings(repo)
@@ -274,6 +380,9 @@ def prepare(args):
         if add_exclude(repo, line):
             done.append(f"{line} agregado a .git/info/exclude")
 
+    for line in exclude_local_ai(repo):  # S4
+        done.append(f"{line} (archivo local de una herramienta de IA) agregado a .git/info/exclude")
+
     docs = "docs/" if mode == "versionado" else f"{folder}/docs/"
     print(f"✔ Contexto de IA en modo {mode}" + (f" ({home(external)})" if external else ""))
     for item in done:
@@ -312,10 +421,15 @@ def main(argv=None):
     prep.add_argument("--claude", default="auto", choices=("auto", "si", "no"),
                       help="crear CLAUDE.md: auto = solo si ya hay CLAUDE.md o .claude/")
     prep.add_argument("--repo", default=".", help="raíz del repositorio")
+    perf = sub.add_parser("rendimiento", help="el bloque de hb-performance que se conserva y lo que conviene cambiar en "
+                                              "la sección de rendimiento (no escribe nada)")
+    perf.add_argument("--repo", default=".", help="raíz del repositorio")
     args = ap.parse_args(argv)
     if args.command == "estado":
         status(args)
         return 0
+    if args.command == "rendimiento":
+        return performance(args)
     return prepare(args)
 
 

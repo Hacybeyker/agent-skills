@@ -6,6 +6,9 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.database.Cursor
 import android.net.Uri
+// hb-perf:red>
+import java.io.File
+// <hb-perf:red
 
 // Registers ScreenTraceCallbacks and points the PerfHooks (main source set, no-ops in release) at the tracing
 // code, without touching the Application: Android creates content providers before Application.onCreate.
@@ -15,8 +18,16 @@ class PerfInstaller : ContentProvider() {
         (context?.applicationContext as? Application)?.registerActivityLifecycleCallbacks(ScreenTraceCallbacks())
         PerfHooks.navigation = NavigationTrace::mark
         PerfHooks.mark = MarkTrace::mark
+        // hb-perf:red>
+        // The folder is resolved on the first call, on an OkHttp thread: nothing extra at startup.
+        val app = context?.applicationContext
+        PerfHooks.networkInterceptor = TestNetworkCapture { app?.getExternalFilesDir(null) }
+        // <hb-perf:red
         // hb-perf:sinhilt>
-        PerfHooks.okHttp = { it.eventListenerFactory(TraceEventListener.FACTORY) }
+        PerfHooks.okHttp = { builder ->
+            builder.eventListenerFactory(TraceEventListener.FACTORY)
+            PerfHooks.networkInterceptor?.let { builder.addNetworkInterceptor(it) }
+        }
         // <hb-perf:sinhilt
         return true
     }

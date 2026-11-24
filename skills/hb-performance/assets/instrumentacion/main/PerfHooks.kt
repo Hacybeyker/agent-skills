@@ -3,6 +3,7 @@ package {{PAQUETE}}
 
 // hb-perf:red>
 import okhttp3.EventListener
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 
 // <hb-perf:red
@@ -14,6 +15,13 @@ object PerfHooks {
 
     // Content visible: call it once when what the user waits for is on screen, e.g. PerfHooks.mark("detalle").
     var mark: (String) -> Unit = {}
+    // hb-perf:red>
+
+    // The capture of the test run of hb-performance (TestNetworkCapture): set by PerfInstaller in debug and profiling,
+    // null in release. The calls below add it; it only writes during `perf.py capturar --prueba`.
+    @JvmField
+    var networkInterceptor: Interceptor? = null
+    // <hb-perf:red
     // hb-perf:sinhilt>
 
     // Call it on every OkHttpClient.Builder before build(): PerfHooks.okHttp(builder).
@@ -34,6 +42,7 @@ object PerfHooks {
         factories: Set<EventListener.Factory>
     ): OkHttpClient.Builder {
         factories.firstOrNull()?.let { builder.eventListenerFactory(it) }
+        networkInterceptor?.let { builder.addNetworkInterceptor(it) }
         return builder
     }
     // <hb-perf:red

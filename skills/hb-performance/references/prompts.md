@@ -104,6 +104,20 @@ Solo lectura. Lista las herramientas de la máquina (obligatorias: Python 3.8 o 
 cd <raíz> && python3 -I <skill>/scripts/perf.py humo --paquete <applicationId> --serial <serial> --instalar "<comando de instalación>"
 ```
 
+### Toda la investigación desde un solo chat (modo orquestado)
+
+Un chat recorre la investigación entera: lanza cada sesión como un subagente con su modelo, corre las capturas con recorrido automático y se detiene solo donde haces falta (la decisión de las mejoras, la aprobación de la ficha, una clave, un recorrido manual, un error). No abres chats ni pegas pasos, y el ahorro de una sesión por chat se mantiene ([orquestacion.md](orquestacion.md)). Necesita una herramienta con subagentes (Claude Code los tiene); sin ellos, la skill lo dice y sigue en modo guiado. Sirve la primera vez en el proyecto (empieza por el setup) y con el setup listo.
+
+**Dónde:** chat nuevo · Económico · bajo (es el orquestador: cada sesión usa el modelo de su nivel)
+
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low` en Claude Code. Si el flujo necesita credenciales, cárgalas antes en esa misma terminal (el caso "Flujo largo"). Después pega el bloque.
+
+```text
+Usa hb-performance en modo orquestado: quiero analizar el rendimiento de <pantalla o flujo: de dónde a dónde y qué debe verse al final; qué se nota>. Dispositivo <serial>. No hagas commit ni push.
+```
+
+Cuando se detiene, te pregunta con opciones en el mismo chat (aprobar la ficha, decidir las mejoras, elegir un camino) y corre lo que elijas; solo te manda a la terminal para lo que haces tú (un recorrido manual, cargar una clave). Al terminar te recuerda correr `/cost` en ese chat y te da el comando `perf.py consumo --total '<total en USD>' --modo orquestado`: una sola fila con el total, que incluye a los subagentes.
+
 ## Seguir
 
 ### Retomar donde quedó (cualquier sesión)
@@ -215,6 +229,26 @@ cd <raíz> && python3 -I <skill>/scripts/perf.py decidir --carpeta <carpeta> --a
 ```
 
 Imprime el chat de la sesión 3. Las mejoras a prueba se aprueban igual. La decisión queda en "Decisiones" de `estado.md` con la fecha y la hora (y, si consta, el agente que la corrió desde un chat: Claude Code marca sus shells; sin esa marca queda solo la hora), y antes del chat de la sesión 3 `siguiente` dice cuándo se aprobó cada mejora. `--pendiente` es "para más adelante", no "sin decidir".
+
+### Seguir en modo orquestado después de una parada en la terminal
+
+**Dónde:** el mismo chat del orquestador, después de hacer en tu terminal lo que te pidió (una captura con recorrido manual, cargar una clave). Las decisiones (la ficha, las mejoras) no pasan por aquí: el orquestador te las pregunta con opciones y corre lo que elijas
+
+```text
+Continúa. No hagas commit ni push.
+```
+
+El orquestador vuelve a pedir el paso a `perf.py` y sigue donde quedó. "listo" sirve igual.
+
+### Retomar en modo orquestado (el chat del orquestador se cerró)
+
+**Dónde:** chat nuevo · Económico · bajo
+
+**Ábrelo** (terminal, desde la raíz del proyecto): `cd <raíz> && claude --model claude-haiku-5-5 --effort low`, o reabre el mismo con `cd <raíz> && claude --resume` eligiéndolo de la lista. Después pega el bloque.
+
+```text
+Sigue hb-performance con <ruta absoluta>/estado.md en modo orquestado. No hagas commit ni push.
+```
 
 ### Reabrir una decisión (no fue tuya, o cambiaste de idea)
 
@@ -475,7 +509,7 @@ Además de las fases, hay capturas que traen otros datos. Las de diagnóstico (`
 
 ## Reglas que te ahorran dinero
 
-- **Un chat por sesión.** Si el agente dice que terminó, abre otro: seguir en el mismo cuesta varias veces más por paso.
+- **Un chat por sesión.** Si el agente dice que terminó, abre otro: seguir en el mismo cuesta varias veces más por paso. La excepción es el modo orquestado: un solo chat, pero cada sesión corre en un subagente con su propio contexto.
 - **Si el paso siguiente es un comando, no abras un chat**: un chat que solo lee `estado.md` para decírtelo cuesta unos 0,2 USD.
 - Las mediciones y la decisión van en tu terminal: cero tokens.
 - Si una corrida se va a otra pantalla, no esperes a que termine: `x` + Enter en la terminal de la captura la corta y sigue con la siguiente.

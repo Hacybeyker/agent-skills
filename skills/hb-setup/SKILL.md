@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git. Para preparar el contexto de IA, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools)."
 metadata:
   author: hacybeyker
-  version: "1.2.0"
+  version: "1.3.0"
   category: flow
 ---
 
@@ -46,12 +46,16 @@ Con eso anota: UI (Compose, Views con ViewBinding, DataBinding o `findViewById`)
 
 **Versiones que no están en el repo.** Si el stack toma sus versiones de una fuente remota (un catálogo o BOM publicado, un plugin de convenciones), léelas de una copia local si la hay (por ejemplo, el repo del catálogo clonado al lado) y anota de dónde salen. Si no hay copia, anota la fuente remota sin inventar valores.
 
-**Comandos y DoD.**
-- Gradle: tareas propias del build (busca `tasks.register` en los `build.gradle.kts`, como `formatAndAnalyze`), o las estándar (`lint`, `test`, `assembleDebug`; `ktlintCheck` y `detekt` si sus plugins están aplicados).
-- Node: los scripts de `package.json` (`lint`, `typecheck`, `test`, `build`) con el gestor que indique el lockfile (`pnpm`, `npm`, `yarn`).
-- Python: `ruff`, `mypy` y `pytest` si están configurados en `pyproject.toml`.
-- JVM: `./mvnw verify` o `./gradlew check build`.
-- Si existe CI (`.github/workflows`), sus pasos de verificación confirman qué comandos usa el proyecto.
+**Comandos y DoD.** El DoD es lo que de verdad hace fallar un PR. Lo arma el script de esta skill, sin inventar herramientas:
+
+```bash
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/dod.py
+```
+
+- **Con CI:** lee los workflows (`.github/workflows/*.yml`), las acciones compuestas locales que invocan (`uses: ./.github/actions/<nombre>`, su `action.yml`) y los workflows reutilizables (`uses: ./.github/workflows/<archivo>`, los de `workflow_call`), y junta todas las tareas de verificación que corren: lint, formato, análisis estático, tests, verificación de cobertura y el build. Cada una que pueda hacer fallar un PR entra en el DoD; las que no (una cobertura con mínimo 0, un análisis que necesita el token de un servicio externo, un reporte) van en la línea "Fuera del DoD" con su motivo.
+- **Sin CI, el DoD nunca se omite ni queda vacío** (`perf.py cerrar --dod` de `hb-performance` y `hb-implement` cuentan con él): sale del build, en este orden: el formateador (si está configurado), los linters y el análisis estático configurados, los tests (si existen) y el build del artefacto principal. Sin nada de eso, compilar (o validar la sintaxis, si no hay build). Lleva una línea de origen ("Origen: DoD derivado del build; el proyecto no tiene CI ni tests"). **No agregues herramientas, tests ni CI para completarlo:** eso se decide en `## Modernización`.
+- **La forma:** el formateador en su propia invocación y, después, **una sola invocación** con todos los checks, los tests y el build (`./gradlew a:check1 a:check2 a:test a:assemble`): así el formateo y los checks nunca corren en paralelo. Todos los comandos empiezan con `cd <ruta del proyecto> && …`. Es la forma que `perf.py cerrar --dod` corre paso por paso.
+- Si el script no reconoce algo (tareas propias registradas con `tasks.register`, como `formatAndAnalyze`, un `Makefile`), complétalo a mano con la misma forma. En otros stacks, la misma idea: Node, los scripts de `package.json` con el gestor del lockfile; Python, `ruff`, `mypy` y `pytest` si están configurados; JVM, `./mvnw verify`.
 
 **Git y versionado.**
 - Rama principal: `git symbolic-ref refs/remotes/origin/HEAD`, o la que exista entre `main` y `master`.
@@ -91,7 +95,7 @@ Imprime dónde escribir `AGENTS.md` (en el modo externo, en la carpeta externa: 
 
 **Proyecto sin `AGENTS.md`:** créalo desde [assets/AGENTS.template.md](assets/AGENTS.template.md). Completa cada sección con lo detectado y las respuestas, quita las que no apliquen (por ejemplo, notas de tienda o `### Repos relacionados`) y no dejes ningún `<placeholder>`: el resultado tiene que quedar completo y usable sin otra pasada. `## Stack` y `## Arquitectura` son una foto del proyecto: ni un patrón ni una librería que no estén en el código; las versiones que vienen de fuera del repo, con su fuente. `## Modernización` arranca en "ninguna decidida".
 
-**Proyecto con `AGENTS.md`:** pásalo al estándar sin perder lo propio.
+**Proyecto con `AGENTS.md`:** pásalo al estándar sin perder lo propio. **Si tiene la sección de rendimiento de `hb-performance`**, corre antes `contexto.py rendimiento` (solo lee): el bloque entre `<!-- hb-performance:estado -->` y `<!-- /hb-performance:estado -->` se conserva **tal cual** (lo mantiene `perf.py`), y las líneas de esa sección que traen un serial de dispositivo o contradicen el bloque ("Setup listo" con el setup en un parche) las señalas en tu resumen con el cambio propuesto: no reescribes esa sección por tu cuenta.
 1. Conserva lo específico del proyecto: descripción del producto, excepciones, reglas de negocio, decisiones y sus motivos.
 2. Reorganízalo en las secciones de la plantilla y agrega las que falten (sobre todo `## Stack` y `## DoD`).
 3. Quita lo genérico que ya cubre el perfil (explicaciones de arquitectura, SOLID, testing o seguridad general). Antes de borrar bloques grandes, muestra qué sale y por qué.
@@ -102,6 +106,8 @@ En los dos casos:
 - **`## Reglas del proyecto`** lleva las líneas `Contexto de IA` y `Carpeta de reportes` que imprimió el script. `hb-implement` lee `Carpeta de reportes` tal cual (con `{fecha}` y `{slug}`, si los tiene).
 - **Repos relacionados:** si los hay, la subsección `### Repos relacionados` de `## Arquitectura`, con la ruta relativa de cada uno, qué contiene, cómo se incluye en local, cómo pasar a su código y volver, y la nota de que el agente necesita acceso a esas carpetas ([repos-relacionados.md](references/repos-relacionados.md)).
 - **La carpeta de reportes queda fuera de git:** el script la deja en `.git/info/exclude` (local). No edites `.gitignore` por tu cuenta: si el equipo lo prefiere ahí, inclúyelo en el diff que muestras para aprobar.
+- **Archivos locales de las herramientas de IA:** si hay alguno sin versionar y sin ignorar (`.claude/settings.local.json`, `CLAUDE.local.md`, los de aider), `contexto.py preparar` lo agrega a `.git/info/exclude` (no toca `.gitignore`) y lo dice: nómbralo en tu resumen.
+- **Nada de la máquina en `AGENTS.md`:** nunca escribas seriales de dispositivo (los comandos llevan `ANDROID_SERIAL=<serial>`) ni rutas de la máquina, salvo la ruta del proyecto en los `cd` de los comandos.
 - Mantén el `AGENTS.md` corto, idealmente por debajo de 150 líneas: los agentes lo cargan en cada sesión. Lo extenso va a la carpeta de docs del modo (`docs/` si el contexto se versiona; `contexto/docs/` si no) y se enlaza desde `AGENTS.md`.
 
 ## 4. Verifica y entrega

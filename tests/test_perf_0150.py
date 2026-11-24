@@ -765,7 +765,8 @@ class MeasurementCaptureTest(DeviceBase):
         self.assertTrue(page.is_file())
         self.assertIn("Video de la prueba: %s" % page, out)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
-        self.assertIn('"screenrecord", "--verbose", "--time-limit", "180", "/sdcard/hbperf-prueba.mp4"', log)
+        # 0.19.0 · V2: el mismo shell imprime el uptime del dispositivo cuando screenrecord arma la pantalla
+        self.assertIn('"screenrecord --verbose --time-limit 180 /sdcard/hbperf-prueba.mp4 | while IFS= read -r l', log)
         # (el screenrecord falso termina solo: VIDEO_STOP lo prueba Fixes0151HelpersTest y en dispositivo se valida)
         self.assertIn("rm -f /sdcard/hbperf-prueba.mp4", log)
         ficha = (self.plan.parent / "ficha.md").read_text(encoding="utf-8")
@@ -1599,7 +1600,8 @@ class ReviewFixesTest(PerfBase):
         self.assertNotIn("despues |", md)
 
     def test_gerencia_no_niega_lo_que_omite(self):
-        plan = {"mejoras": [{"id": "M2", "titulo": "Sacar del hilo principal la lectura", "estado": "pendiente"}]}
+        # 0.19.0 · P1: "hilo principal" tiene traducción; un nombre de código no
+        plan = {"mejoras": [{"id": "M2", "titulo": "Sacar `leerDisco()` de la carga", "estado": "pendiente"}]}
         text = perf.pending_improvements(plan, True, plain=True, problems=[])
         self.assertNotIn("No queda nada pendiente", text)
         self.assertIn("un cambio propuesto (M2), sin descripción en palabras todavía", text)

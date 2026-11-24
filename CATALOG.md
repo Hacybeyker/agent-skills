@@ -8,10 +8,10 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 
 | Skill | Tipo | Versión |
 | --- | --- | --- |
-| `hb-setup` | Flujo | 1.2.0 |
+| `hb-setup` | Flujo | 1.3.0 |
 | `hb-implement` | Flujo | 1.5.0 |
 | `hb-review` | Flujo | 1.1.0 |
-| `hb-performance` | Flujo | 0.18.0 |
+| `hb-performance` | Flujo | 0.19.0 |
 | `hb-commit` | Flujo | 1.0.0 |
 | `hb-release` | Flujo | 1.0.0 |
 | `hb-stack-mobile-kotlin` | Perfil | 1.5.0 |
