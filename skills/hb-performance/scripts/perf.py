@@ -9461,6 +9461,8 @@ def dod_loose_line(line, found, skipped, state):
     elif not DOD_NOT_A_STEP.search(text):
         skipped.append((text, "es un párrafo que cita un comando en medio del texto: si es un paso del DoD, ponlo en una "
                               "lista (- `comando`)"))
+    else:  # 0.19.0 · P2: "Si cambia la API, `…`": una condición que no se corre, pero se dice
+        skipped.append((text, "el párrafo lo prohíbe o lo pone como condición, no es un paso del DoD: no lo corro"))
 
 
 def dod_entries(root):
@@ -9469,9 +9471,28 @@ def dod_entries(root):
     entre acentos graves), o una línea de un bloque de código. Todos van con cd a la raíz (también `cd ../repo && …`, que es relativo
     a ella). Las líneas que no se pueden usar vuelven con su motivo, para citarlas en el aviso: un marcador sin resolver
     (<módulo>), algo que descarta o publica cambios, o una viñeta sin comando. ([], []) sin AGENTS.md o sin la sección."""
+    found, skipped, _ = dod_found(root)
+    commands = []
+    for command, line in found:
+        if not command:
+            continue
+        if DISCARDING.search(command):
+            skipped.append((line, "descarta, integra o publica cambios (git checkout, reset, push, merge, publish…): "
+                                  "un DoD no lo hace"))
+        elif PLACEHOLDER_ARG.search(command):
+            skipped.append((line, "tiene un marcador sin resolver (%s): escribe el valor real"
+                            % PLACEHOLDER_ARG.search(command).group(0)))
+        else:
+            commands.append("cd %s && %s" % (q(root), command))
+    return list(dict.fromkeys(commands)), skipped
+
+
+def dod_found(root):
+    """([(comando, línea de donde sale)], [(línea, motivo)], [líneas de la sección]) de `## DoD`, sin filtrar ni
+    poner el cd a la raíz (dod_entries y dod_plan lo hacen). ([], [], []) sin AGENTS.md o sin la sección."""
     text = read_agents(root)
     if text is None:
-        return [], []
+        return [], [], []
     lines = text.splitlines()
     start, fence = None, None
     for index, line in enumerate(lines):
@@ -9487,8 +9508,9 @@ def dod_entries(root):
             start = index
             break
     if start is None:
-        return [], []
+        return [], [], []
     level = len(re.match(r"^\ufeff?[ \t]{0,3}(#+)", lines[start]).group(1))
+    section = []
     found, skipped, fence, pending, skip_block, loose, in_item = [], [], None, None, None, {}, False
     for line in lines[start + 1:]:
         mark = DOD_FENCE.match(line)  # también un bloque sangrado dentro de un ítem
@@ -9496,6 +9518,8 @@ def dod_entries(root):
             heading = ANY_HEADING.match(line)
             if heading and len(heading.group(1)) <= level:
                 break
+        section.append(line)
+        if fence is None and not mark:
             item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", line)
             if not item:
                 if not line.strip():
@@ -9569,24 +9593,128 @@ def dod_entries(root):
                 found.append((text_, line.strip()))
     if pending:
         skipped.append(pending)
-    commands = []
-    for command, line in found:
-        if not command:
+    return found, skipped, section
+
+
+# 0.19.0 · P2: `cerrar --dod` corre el DoD completo, paso por paso. Un DoD puede decir que en una tarea de rendimiento un
+# paso cambia ("Si la tarea mide rendimiento, el paso 2 es `…`", "en una investigación de hb-performance, usa
+# `assembleProfiling` en lugar de `assembleDebug`"): se aplica, o se avisa que no se pudo resolver; nunca se ignora.
+DOD_PERF_CONTEXT = re.compile(r"rendimiento|hb-performance|\bperformance\b|profiling|perfilad|\bmid(?:e|en|a)\b|"
+                              r"\bmedir\b|medici[oó]n|investigaci[oó]n", re.I)
+DOD_STEP_REF = re.compile(r"\bpaso\s+(?:n[uú]mero\s+)?(\d+)\b|\bstep\s+(\d+)\b", re.I)
+DOD_INSTEAD = re.compile(r"`([^`]+)`\s*,?\s*(?:en\s+(?:lugar|vez)\s+de(?:l)?|instead\s+of)\s*`([^`]+)`", re.I)
+DOD_INSTEAD_BEFORE = re.compile(r"(?:en\s+(?:lugar|vez)\s+de(?:l)?|instead\s+of)\s*`([^`]+)`\s*,?\s*(?:usa|corre|va|"
+                                r"use|run)?\s*`([^`]+)`", re.I)
+DOD_FORMATTER = re.compile(r"(?<![\w-])(?:\S*:)?(?:ktlintFormat|ktfmtFormat|spotlessApply|formatKotlin|format|fmt|"
+                           r"prettier\b[^&|;]*--write|black|swiftformat|gofmt|ruff\s+format|dart\s+format|cargo\s+fmt|"
+                           r"(?:npm|pnpm|yarn)\s+(?:run\s+)?format\w*)(?![\w-])", re.I)
+
+
+def dod_number(line):
+    """El número del ítem de la lista numerada de donde sale un comando ("2. `…`" → 2), o None."""
+    found = re.match(r"^\s*(\d+)[.)]\s", line or "")
+    return int(found.group(1)) if found else None
+
+
+def split_and(command):
+    """Los comandos de `a && b && c` por separado (fuera de comillas), cada uno con el `cd` del principio si lo hay:
+    así el DoD se detiene en el que falla y lo nombra. Un comando sin && queda igual."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="&|;")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return [command]
+    if "&&" not in tokens or any(token in ("||", ";", "|", "&") for token in tokens):
+        return [command]  # otra forma de encadenar: va entera, como la escribió el proyecto
+    parts = [part.strip() for part in re.split(r"\s*&&\s*", command)]
+    if len(parts) != tokens.count("&&") + 1 or not all(parts):
+        return [command]  # un && dentro de comillas: va entera
+    prefix = parts[0] if re.match(r"^cd\s", parts[0]) else None
+    rest = parts[1:] if prefix else parts
+    return ["%s && %s" % (prefix, part) for part in rest] if prefix else rest
+
+
+def replace_task(command, old, new):
+    """`command` con la tarea o la palabra `old` cambiada por `new` (entera: `assembleDebug` no toca
+    `assembleDebugUnitTest`); también `:app:assembleDebug` si `old` no trae el módulo."""
+    return re.sub(r"(?<![\w-])((?:\S*:)?)%s(?![\w-])" % re.escape(old.split(":")[-1] if ":" not in old else old),
+                  lambda match: (match.group(1) if ":" not in new else "") + new, command)
+
+
+def dod_plan(root, perf_task=True):
+    """0.19.0 · P2: el DoD de `## DoD` como pasos en orden: {"comando", "linea", "formato"} con el cd a la raíz, los
+    comandos unidos con && por separado, y los reemplazos condicionales de una tarea de rendimiento aplicados. Devuelve
+    (pasos, [(línea, motivo)] de lo que no se corre, [lo que se aplicó], [condicionales sin resolver])."""
+    found, skipped, section = dod_found(root)
+    conditionals = []
+    for line in section:
+        text = line.strip()
+        words = re.sub(r"`[^`]*`", " ", text)
+        if "`" in text and DOD_PERF_CONTEXT.search(words) and (DOD_CONDITIONAL.search(words) or re.search(
+                r"\ben\s+una\s+investigaci[oó]n\b|\ben\s+una\s+tarea\b", words, re.I)):
+            conditionals.append(text)
+    plain = [re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line) for line in conditionals]
+    skipped = [(line, why) for line, why in skipped if line.strip() not in conditionals]
+    applied, unresolved = [], []
+    for text, body in zip(conditionals, plain):
+        own = [index for index, (_, line) in enumerate(found) if line.strip() == text]  # un paso con su condición
+        if not perf_task:
+            for index in reversed(own):
+                del found[index]
+            skipped.append((text, "vale solo en una tarea de rendimiento: no lo corro"))
             continue
-        if DISCARDING.search(command):
-            skipped.append((line, "descarta, integra o publica cambios (git checkout, reset, push, merge, publish…): "
-                                  "un DoD no lo hace"))
-        elif PLACEHOLDER_ARG.search(command):
-            skipped.append((line, "tiene un marcador sin resolver (%s): escribe el valor real"
-                            % PLACEHOLDER_ARG.search(command).group(0)))
-        else:
-            commands.append("cd %s && %s" % (q(root), command))
-    return list(dict.fromkeys(commands)), skipped
+        instead = DOD_INSTEAD.search(body)
+        before = DOD_INSTEAD_BEFORE.search(body) if not instead else None
+        step = DOD_STEP_REF.search(body)
+        if instead or before:
+            new, old = (instead.group(1), instead.group(2)) if instead else (before.group(2), before.group(1))
+            targets = [index for index, (command, line) in enumerate(found) if replace_task(command, old, new) != command
+                       and (not step or dod_number(line) == int(step.group(1) or step.group(2)))]
+            for index in targets:
+                found[index] = (replace_task(found[index][0], old, new), found[index][1])
+            if targets:
+                applied.append("en una tarea de rendimiento, %s en lugar de %s (\"%s\")" % (new, old, text))
+            else:
+                unresolved.append((text, "no encontré `%s` en %s" % (old, "el paso %s" % (step.group(1) or step.group(2))
+                                                                     if step else "los pasos del DoD")))
+            continue
+        codes = re.findall(r"`([^`]+)`", body)
+        if step and codes:
+            number = int(step.group(1) or step.group(2))
+            targets = [index for index, (_, line) in enumerate(found) if dod_number(line) == number]
+            if targets:
+                found[targets[0]] = (codes[-1].strip(), found[targets[0]][1])
+                for index in reversed(targets[1:]):
+                    del found[index]
+                applied.append("en una tarea de rendimiento, el paso %d es `%s` (\"%s\")" % (number, codes[-1].strip(), text))
+            else:
+                unresolved.append((text, "el DoD no tiene un paso %d numerado" % number))
+            continue
+        if own:  # "`./gradlew assembleProfiling` si la tarea mide rendimiento": un paso que en esta tarea corre
+            applied.append("en una tarea de rendimiento, corre `%s` (\"%s\")" % (found[own[0]][0], text))
+            continue
+        unresolved.append((text, "no dice qué paso cambia ni qué reemplaza"))
+    steps = []
+    for command, line in found:
+        for part in split_and(command) if command else []:
+            if DISCARDING.search(part):
+                skipped.append((line, "descarta, integra o publica cambios (git checkout, reset, push, merge, publish…): "
+                                      "un DoD no lo hace"))
+            elif PLACEHOLDER_ARG.search(part):
+                skipped.append((line, "tiene un marcador sin resolver (%s): escribe el valor real"
+                                % PLACEHOLDER_ARG.search(part).group(0)))
+            else:
+                full = "cd %s && %s" % (q(root), part)
+                if full not in [item["comando"] for item in steps]:
+                    task = re.sub(r"^(?:cd\s+\S+\s*&&\s*)+", "", part)
+                    steps.append({"comando": full, "linea": line, "formato": bool(DOD_FORMATTER.search(task))})
+    return steps, skipped, applied, unresolved
 
 
 def dod_skipped_text(root):
     """P1: las líneas de `## DoD` que no se pueden correr, citadas con su motivo ('' si ninguna)."""
-    skipped = dod_entries(root)[1]
+    skipped = dod_plan(root)[1]
     text = "; ".join("\"%s\" (%s)" % (line if len(line) <= 120 else line[:117] + "…", why) for line, why in skipped[:6])
     return text + ("; y %d más" % (len(skipped) - 6) if len(skipped) > 6 else "")
 
@@ -9607,12 +9735,36 @@ def dod_sets(root, tops=()):
     """[(repo, [comandos])] del DoD que corresponde después de quitar cambios en esos repos: el de AGENTS.md de la raíz
     (con la línea de los módulos de otros repos, si la tiene) y el de cada otro repo tocado que tenga su propio
     AGENTS.md con `## DoD`. Los comandos con marcadores (<módulo>) no se pueden correr: quedan fuera."""
+    return [(top, [step["comando"] for step in plan[0]]) for top, plan in dod_plans(root, tops)]
+
+
+def dod_plans(root, tops=()):
+    """[(repo, dod_plan)] de la raíz y de cada otro repo tocado con su propio `## DoD`, solo los que tienen pasos."""
     out = []
     for top in [pathlib.Path(root)] + [pathlib.Path(t) for t in tops if pathlib.Path(t).resolve() != pathlib.Path(root).resolve()]:
-        commands = dod_commands(top)
-        if commands:
-            out.append((top, commands))
+        plan = dod_plan(top)
+        if plan[0]:
+            out.append((top, plan))
     return out
+
+
+def tree_state(top):
+    """Una huella del árbol de trabajo de un repo (lo modificado y lo nuevo, con su contenido), para saber si un
+    formateador cambió archivos; None si no es un repo de git."""
+    status = run_quiet(["git", "status", "--porcelain", "--untracked-files=all"], top)
+    if status is None:
+        return None
+    diff = run_quiet(["git", "diff"], top) or ""
+    return hashlib.sha256((status + "\0" + diff).encode("utf-8", "replace")).hexdigest()
+
+
+def run_quiet(argv, cwd):
+    try:
+        done = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
 
 
 def read_close(folder):
@@ -9629,14 +9781,16 @@ def save_close(folder, record):
 
 
 def run_dod(folder, root, tops=()):
-    """Corre el DoD después de quitar los cambios temporales (dod_sets), en una sola tanda, con la salida en
-    <carpeta>/logs/dod-cierre.log y al chat solo un ✔ o ✖ por comando (con las últimas líneas del log si falla). Lo deja
-    en cierre.json: `siguiente` no da la investigación por cerrada sin él."""
+    """Corre el DoD después de quitar los cambios temporales, completo y en orden (0.19.0 · P2: todos los pasos de
+    `## DoD`, también los unidos con &&, con los reemplazos de una tarea de rendimiento aplicados), con la salida en
+    <carpeta>/logs/dod-cierre.log y al chat un ✔ o ✖ por paso. Se detiene en el primero que falla y dice cuál y dónde
+    está su log. Si un formateador cambia archivos después de que corrieron checks, los vuelve a correr. Lo deja en
+    cierre.json: `siguiente` no da la investigación por cerrada sin él."""
     folder = pathlib.Path(folder)
     record = read_close(folder)
-    sets = dod_sets(root, tops or record.get("repos") or ())
+    plans = dod_plans(root, tops or record.get("repos") or ())
     stamp = datetime.datetime.now().replace(microsecond=0).isoformat()
-    if not sets:
+    if not plans:
         record.update(dod="sin DoD", dod_fecha=stamp)
         save_close(folder, record)
         skipped = dod_skipped_text(root)
@@ -9648,37 +9802,81 @@ def run_dod(folder, root, tops=()):
                   "`## DoD` de AGENTS.md no tiene comandos (una viñeta con el comando entre acentos graves, o un bloque "
                   "de código)"))
         return True
-    skipped = dod_skipped_text(root)
-    if skipped:
-        print("· No corro estas líneas de `## DoD`: %s." % skipped)
     log = folder / "logs" / DOD_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
-    failed = []
+    total = sum(len(plan[0]) for _, plan in plans)
+    print("DoD de AGENTS.md: %d paso%s, en orden; se detiene en el primero que falle (log: %s)" % (
+        total, "" if total == 1 else "s", log))
+    number = 0
+    for top, (steps, skipped, applied, unresolved) in plans:
+        for step in steps:
+            number += 1
+            print("  %d. %s%s" % (number, step["comando"], " (formato)" if step["formato"] else ""))
+        for text in applied:
+            print("· Apliqué: %s" % text)
+        for line, why in unresolved:
+            print("⚠ No pude resolver una línea condicional del DoD de %s: \"%s\" (%s). Corro el DoD sin ese cambio; "
+                  "si aplica a esta tarea, córrelo a mano o escríbelo como \"en una tarea de rendimiento, el paso <n> es "
+                  "`<comando>`\"." % (shown_path(top, root), line, why))
+        if skipped:
+            print("· No corro estas líneas de `## DoD` de %s: %s." % (shown_path(top, root), "; ".join(
+                "\"%s\" (%s)" % (line if len(line) <= 120 else line[:117] + "…", why) for line, why in skipped[:6])))
+    results, failed = [], None
     with log.open("a", encoding="utf-8") as handle:
         handle.write("\n=== DoD después de cerrar · %s ===\n" % stamp)
-        for _, commands in sets:
-            for command in commands:
-                handle.write("\n$ %s\n" % command)
-                handle.flush()
-                started = time.time()
-                done = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT,
-                                      env=child_env(java=True))
-                handle.flush()
-                if done.returncode == 0:
-                    print("✔ %s (%s)" % (command, elapsed_text(time.time() - started)))
-                else:
-                    failed.append(command)
-                    print("✖ %s: terminó con código %d" % (command, done.returncode))
-    record.update(dod="ok" if not failed else "falló", dod_fecha=stamp, dod_log=str(log))
+
+        def run_step(step, again=False):
+            handle.write("\n$ %s%s\n" % (step["comando"], " (otra vez: el formateo cambió archivos)" if again else ""))
+            handle.flush()
+            started = time.time()
+            done = subprocess.run(step["comando"], shell=True, stdout=handle, stderr=subprocess.STDOUT,
+                                  env=child_env(java=True))
+            handle.flush()
+            ok = done.returncode == 0
+            results.append({"comando": step["comando"], "codigo": done.returncode, "otra_vez": again})
+            print("%s %s%s (%s)" % ("✔" if ok else "✖", step["comando"], " · otra vez" if again else "",
+                                    elapsed_text(time.time() - started) if ok else "código %d" % done.returncode))
+            return ok
+
+        for top, (steps, _, _, _) in plans:
+            ran_checks = []
+            for step in steps:
+                before = tree_state(top) if step["formato"] and ran_checks else None
+                if not run_step(step):
+                    failed = step["comando"]
+                    break
+                if not step["formato"]:
+                    ran_checks.append(step)
+                elif before is not None and tree_state(top) != before:
+                    print("· El formateo cambió archivos después de los checks: los vuelvo a correr")
+                    for check in list(ran_checks):
+                        if not run_step(check, again=True):
+                            failed = check["comando"]
+                            break
+                    if failed:
+                        break
+            if failed:
+                break
+    record.update(dod="ok" if not failed else "falló", dod_fecha=stamp, dod_log=str(log), dod_pasos=results,
+                  dod_condicionales=[text for _, plan in plans for text in plan[2]] + [
+                      "sin resolver: %s" % line for _, plan in plans for line, _ in plan[3]])
+    if failed:
+        record["dod_fallo"] = failed
+    else:
+        record.pop("dod_fallo", None)
     save_close(folder, record)
     if failed:
+        pending = total - len([item for item in results if not item["otra_vez"]])
         tail = [line for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()][-8:]
-        print("Últimas líneas de %s:\n%s" % (log, "\n".join("    " + line[:200] for line in tail)))
-        raise PerfError("el DoD falló después de quitar los cambios temporales (%s): algo del proyecto dependía de ellos o "
-                        "ya fallaba" % "; ".join(failed)).con(
+        print("Falló: %s\nSu salida está en %s; las últimas líneas:\n%s" % (failed, log, "\n".join(
+            "    " + line[:200] for line in tail)))
+        raise PerfError("el DoD falló después de quitar los cambios temporales, en `%s`%s: algo del proyecto dependía de "
+                        "ellos o ya fallaba" % (failed, " (quedaron %d paso%s sin correr)" % (
+                            pending, "" if pending == 1 else "s") if pending > 0 else "")).con(
             guardado="los cambios temporales ya están quitados (con su parche) y la salida completa en %s" % log,
             seguir=[("corrige lo que falla y repite el DoD", same_command())])
-    print("✔ DoD en verde después de quitar los cambios temporales (log: %s)" % log)
+    print("✔ DoD en verde después de quitar los cambios temporales: %d paso%s (log: %s)" % (
+        total, "" if total == 1 else "s", log))
     return True
 
 
