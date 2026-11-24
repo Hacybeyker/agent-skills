@@ -25,26 +25,27 @@ Cada paso del agente reenvía todo el chat. Por eso cada sesión vive en **su pr
 
 ## Reglas
 
-1. **Evidencia o nada.** Cada afirmación clave lleva fuentes registradas con `producto.py fuente` (URL, fecha de publicación, tipo, línea y peldaño). Lo que no tiene fuente va como **⚠ Sin evidencia**.
-2. **Triangulación.** Un hallazgo clave necesita **3 fuentes independientes** publicadas dentro de la **ventana de vigencia** (18 meses); si es de demanda o de monetización, al menos una de tipo *medido*. En una idea nueva se triangula el peldaño más cercano a lo directo que tenga evidencia, no la solución exacta ([evidencia.md](references/evidencia.md)).
+1. **Evidencia o nada.** Cada afirmación clave lleva fuentes registradas con `producto.py fuente` (URL, **fecha de publicación real** o `--publicada desconocida`, tipo, línea y peldaño). La fecha en que leíste una reseña o un artículo no es su fecha de publicación. Lo que no tiene fuente va como **⚠ Sin evidencia**.
+2. **Triangulación.** Un hallazgo clave necesita **3 fuentes independientes** publicadas dentro de la **ventana de vigencia** (18 meses); si es de demanda o de monetización, al menos una de tipo *medido*. En **políticas, una fuente `oficial`** (la política de la tienda o la ley, con su versión o fecha) **basta sola**. En **demanda, las descargas acumuladas son contexto**, no una señal actual (`--acumulado`). En una idea nueva se triangula el peldaño más cercano a lo directo que tenga evidencia, no la solución exacta ([evidencia.md](references/evidencia.md)).
 3. **La confianza la calcula el script** con la cantidad, el tipo, la fecha y el peldaño de las fuentes, con **la misma regla de vigencia que la triangulación**: una fuente sin fecha o fuera de la ventana no cuenta para ninguna de las dos, y solo un hallazgo triangulado llega a alta. Se lee siempre junta ("confianza media · sin triangular"). Puedes bajarla con un motivo (`producto.py confianza`), nunca subirla.
 4. **Abogado del diablo obligatorio.** Por cada hipótesis crítica buscas evidencia en contra ("por qué fallaría", "quién lo intentó y cerró") y la registras, también cuando no aparece nada (`--en-contra`, `--sin-contra`, `producto.py intento`). En una idea nueva: ¿no existe porque nadie la pensó o porque alguien la probó y no funcionó? En una saturada: ¿por qué los competidores no lo hicieron ya, y cuánto tardarían en copiarlo?
 5. **Ni la falta de datos ni la saturación son motivo de descarte.** Una idea solo se descarta con evidencia en contra, cuando ningún peldaño muestra el problema o, con competencia, cuando no aparece ningún diferenciador viable. Nunca recomiendes descartar por la cantidad de competidores.
-6. **Criterios de descarte antes de investigar.** Se fijan en la sesión 0 (`criterios.md`). Cambiarlos después exige `producto.py criterio --motivo`, y cada puerta lo muestra.
-7. **Los números los calcula `producto.py`:** confianza, cobertura, puntaje, escenarios de ingresos, RICE, conteos de triangulación, trazabilidad y veredictos de las puertas. Tú interpretas: nunca haces cuentas por tu lado ni editas a mano los `.json` del registro.
-8. **La decisión es del usuario.** Nunca corras `producto.py decidir`, aunque el pedido parezca justificarlo: entrega el comando completo y detente.
-9. **Dato medido o estimación.** Toda estimación dice cómo se calculó, con qué supuestos y, si viene de un análogo, de cuál.
-10. **Una sesión por chat, y al terminar te detienes**, con el traspaso en `estado.md`. Lo que no depende de otra sesión corre en paralelo; lo que depende, después. No sigas con la sesión siguiente aunque te digan "sigue": explica que en este chat cuesta varias veces más.
-11. **Agnóstica y con cobertura.** La plataforma, el stack, el modelo de negocio, los mercados, los idiomas y las tiendas salen de `00-idea.md` (`producto.py objetivo`). No asumas Android, anuncios ni ningún país. Cada línea de investigación trae fuentes de cada mercado, idioma y tienda que le toca, o registra el vacío con su motivo (`producto.py vacio`); una línea no cierra con huecos sin registrar.
-12. **La meta de ingresos es opcional y referencial.** Se pregunta, pero no bloquea ninguna puerta ni cuenta como riesgo, salvo que el usuario la marque como obligatoria (`criterio --clave meta_obligatoria --valor si`). La puerta 2 pide, en su lugar, al menos un modelo de monetización viable con evidencia.
-13. **Privacidad y legalidad.** Citas breves o parafraseadas, sin nombres de usuario ni datos personales de quienes escriben reseñas. Respeta los términos de uso: nada de scraping que los viole ni de saltar muros de pago. Diferenciarse no es copiar: nada de marcas, textos, íconos ni diseños de la competencia.
-14. **Salidas acotadas.** Nunca vuelques páginas completas al chat ni a los archivos: cada fuente se resume en 3 líneas como máximo, en su registro, y las reseñas de un CSV se leen con `producto.py resenas`. No leas `producto.py`: usa `--help` y lo que imprime.
-15. **Siguiente paso siempre explícito.** Tu último paso es `producto.py siguiente`: pega su salida tal cual, como último bloque de tu respuesta y dentro de un bloque de código. En una puerta ya trae el veredicto criterio por criterio: no pidas correr `puerta` aparte. Cuando no queda nada, dice que el proceso cerró.
-16. **Lo cerrado se cambia en la puerta.** Si ves que hay que cambiar algo de una sesión ya cerrada (el diferenciador principal, un hallazgo de otra línea), no lo hagas ni des un comando suelto: regístralo con `producto.py propuesta --texto "…" [--ajustar <sesión>]`. La puerta lo muestra y el usuario decide.
-17. **Comandos para el usuario:** uno por paso, en un bloque de código y empezando con `cd <ruta absoluta> && ...`. Los que imprime `producto.py` ya vienen así: cópialos sin reescribirlos.
-18. **Primera línea de cada sesión:** `Sesión <n> · <nombre> (<motivo>)`, por ejemplo `Sesión 1c · Demanda (Siguiente paso de estado.md)`.
-19. **Español neutro** (tú, no vos) en todo lo que escribas.
-20. **Git:** no hagas commit ni push salvo que el usuario lo pida. Si la carpeta del producto queda dentro de un repo público, pregunta antes de versionarla: la estrategia puede ser sensible.
+6. **El rival más fuerte puede no ser una app.** La matriz registra siempre cómo se resuelve hoy la necesidad sin una app así (peldaño 4: una función del sistema, una hoja de cálculo, un grupo de chat). Si un sustituto **gratuito o nativo ya la resuelve**, cada diferenciador tiene que superarlo con evidencia (un hallazgo que lo nombre), y la puerta 1 lo exige ([diferenciacion.md](references/diferenciacion.md)).
+7. **Criterios de descarte antes de investigar.** Se fijan en la sesión 0 (`criterios.md`). Cambiarlos después exige `producto.py criterio --motivo`, y cada puerta lo muestra.
+8. **Los números los calcula `producto.py`:** confianza, cobertura, puntaje, escenarios de ingresos, RICE, conteos de triangulación, trazabilidad y veredictos de las puertas. Tú interpretas: nunca haces cuentas por tu lado ni editas a mano los `.json` del registro.
+9. **La decisión es del usuario.** Nunca corras `producto.py decidir`, aunque el pedido parezca justificarlo: entrega el comando completo y detente.
+10. **Dato medido o estimación.** Toda estimación dice cómo se calculó, con qué supuestos y, si viene de un análogo, de cuál.
+11. **Una sesión por chat, y al terminar te detienes**, con el traspaso en `estado.md`. Lo que no depende de otra sesión corre en paralelo; lo que depende, después. No sigas con la sesión siguiente aunque te digan "sigue": explica que en este chat cuesta varias veces más.
+12. **Agnóstica y con cobertura.** La plataforma, el stack, el modelo de negocio, los mercados, los idiomas y las tiendas salen de `00-idea.md` (`producto.py objetivo`). No asumas Android, anuncios ni ningún país. Cada línea de investigación trae fuentes de cada mercado, idioma y tienda que le toca, o registra el vacío con su motivo (`producto.py vacio`); una línea no cierra con huecos sin registrar.
+13. **La meta de ingresos es opcional y referencial.** Se pregunta, pero no bloquea ninguna puerta ni cuenta como riesgo, salvo que el usuario la marque como obligatoria (`criterio --clave meta_obligatoria --valor si`). La puerta 2 pide, en su lugar, al menos un modelo de monetización viable con evidencia.
+14. **Privacidad y legalidad.** Citas breves o parafraseadas, sin nombres de usuario ni datos personales de quienes escriben reseñas. Respeta los términos de uso: nada de scraping que los viole ni de saltar muros de pago. Diferenciarse no es copiar: nada de marcas, textos, íconos ni diseños de la competencia.
+15. **Salidas acotadas.** Nunca vuelques páginas completas al chat ni a los archivos: cada fuente se resume en 3 líneas como máximo, en su registro, y las reseñas de un CSV se leen con `producto.py resenas`. No leas `producto.py`: usa `--help` y lo que imprime.
+16. **Siguiente paso siempre explícito.** Tu último paso es `producto.py siguiente`: pega su salida tal cual, como último bloque de tu respuesta y dentro de un bloque de código. En una puerta ya trae el veredicto criterio por criterio: no pidas correr `puerta` aparte. Cuando no queda nada, dice que el proceso cerró.
+17. **Lo cerrado se cambia en la puerta.** Si ves que hay que cambiar algo de una sesión ya cerrada (el diferenciador principal, un hallazgo de otra línea), no lo hagas ni des un comando suelto: regístralo con `producto.py propuesta --texto "…" [--ajustar <sesión>]`. La puerta lo muestra y el usuario decide.
+18. **Comandos para el usuario:** uno por paso, en un bloque de código y empezando con `cd <ruta absoluta> && ...`. Los que imprime `producto.py` ya vienen así: cópialos sin reescribirlos.
+19. **Primera línea de cada sesión:** `Sesión <n> · <nombre> (<motivo>)`, por ejemplo `Sesión 1c · Demanda (Siguiente paso de estado.md)`.
+20. **Español neutro** (tú, no vos) en todo lo que escribas.
+21. **Git:** no hagas commit ni push salvo que el usuario lo pida. Si la carpeta del producto queda dentro de un repo público, pregunta antes de versionarla: la estrategia puede ser sensible.
 
 ## Sesiones
 
@@ -86,11 +87,13 @@ Cada sesión de investigación consulta primero `producto.py tipo` y lee tambié
 
 | Puerta | Idea existente o variante | Idea nueva |
 | --- | --- | --- |
-| P1 · Oportunidad | Puntaje de 17/25 o más · demanda con confianza media o alta · al menos 1 diferenciador viable (con sus hallazgos triangulados) · **los hallazgos del diferenciador principal triangulados** · riesgo de políticas distinto de 1, o con mitigación escrita | Puntaje de 15/25 o más · el problema documentado con 3 fuentes de peldaño 4 o 5 · al menos 2 análogos con tracción · sin evidencia de que se probó y fracasó por falta de demanda · el mismo criterio de riesgo |
+| P1 · Oportunidad | Puntaje de 17/25 o más · demanda con confianza media o alta · al menos 1 diferenciador viable (con sus hallazgos triangulados y, si hay un sustituto gratuito o nativo que resuelve la necesidad, **que lo supere**) · **los hallazgos del diferenciador principal triangulados** · riesgo de políticas distinto de 1, o con mitigación escrita (**1 si una tienda objetivo nombra o rechaza la categoría**) | Puntaje de 15/25 o más · el problema documentado con 3 fuentes de peldaño 4 o 5 · al menos 2 análogos con tracción · sin evidencia de que se probó y fracasó por falta de demanda · un diferenciador viable que supere al sustituto gratuito o nativo, si lo hay · el mismo criterio de riesgo |
 | P2 · Viabilidad | **Al menos un modelo de monetización viable con evidencia** · ninguna hipótesis crítica refutada · el diferenciador principal sobrevive al abogado del diablo | Al menos un modelo de monetización viable con evidencia (por analogía) · ninguna refutada · la hipótesis más riesgosa, identificada y medible |
 | P3 · Alcance | MVP dentro del presupuesto · el diferenciador principal en el MVP · 100 % de trazabilidad · métricas HEART definidas · checklist de políticas sin bloqueos | Lo mismo, y el MVP pone a prueba la hipótesis más riesgosa con una métrica y un umbral |
 
 La meta de ingresos se muestra en la puerta 2 solo como referencia; si el usuario la marcó como obligatoria, se suma como criterio. Cada puerta muestra además los avisos que no se pueden pasar por alto (confianza global baja, huecos de cobertura, vacíos por límite de las herramientas) y las propuestas de las sesiones. Descartar archiva la idea en `archivo/` con su motivo: queda como aprendizaje y `producto.py reabrir` la recupera.
+
+**Reporte y tablero.** Cada decisión de una puerta y cada archivo regeneran `reporte.html`, el reporte de la idea para leer sin terminal: resumen ejecutivo arriba y tarjetas debajo (puntaje, puertas, diferenciadores, hallazgos, competidores, cobertura, escenarios, hipótesis y costo). `producto.py reporte` lo genera a mano (`--idea <nombre>` para una archivada) y `producto.py tablero --raiz <carpeta>` arma un `index.html` con todas las ideas que encuentre bajo esa carpeta, en curso y archivadas, con su estado y el enlace a su reporte. Al terminar una puerta, nombra la ruta del reporte.
 
 ## Paralelismo
 
@@ -113,6 +116,7 @@ La meta de ingresos se muestra en la puerta 2 solo como referencia; si el usuari
 ├── escenarios.json            supuestos de los escenarios de ingresos (sesión 2)
 ├── producto.json              registro del script: tipo, criterios, objetivo, modelos, sesiones, puntaje, escenarios, propuestas y consumo
 ├── decisiones.json            decisiones de las puertas, con fecha y criterios
+├── reporte.html               el reporte de la idea (lo regenera producto.py; no se edita)
 └── archivo/                   ideas descartadas o archivadas, con su motivo
 ```
 
@@ -129,12 +133,12 @@ Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo,
 | `objetivo` | Muestra o registra los mercados, idiomas y tiendas (después de la sesión 0, con `--motivo`) |
 | `modelos` | El modelo y el esfuerzo de cada sesión; `--intermedio`, `--alto` y `--herramienta` los cambian |
 | `tipo` | Sin opciones, muestra el tipo de idea y el presupuesto; con `--existente`, `--variante` o `--nueva` y `--motivo`, lo registra |
-| `fuente` | Registra una fuente y devuelve su ID (`S-COM-1`): `--linea --url\|--archivo --publicada --tipo --peldano --resumen [--autor] [--mercados] [--idiomas] [--tiendas]` |
+| `fuente` | Registra una fuente y devuelve su ID (`S-COM-1`): `--linea --url\|--archivo --publicada <fecha real\|desconocida> --tipo --peldano --resumen [--autor] [--mercados] [--idiomas] [--tiendas] [--version] [--acumulado]`; avisa si la publicación coincide con la consulta |
 | `resenas` | Muestra las reseñas de un CSV exportado (de 1 a 3★ por defecto, recientes primero, sin columnas de autor) |
 | `vacio` · `cobertura` | Registra un mercado, idioma o tienda que quedó sin fuentes, con su motivo · lista la cobertura de cada línea |
-| `hallazgo` | Registra un hallazgo (`H-DEM-1`) y calcula su confianza: `--linea --texto --fuentes [--en-contra] [--sin-contra] [--critico] [--competidores]` |
+| `hallazgo` | Registra un hallazgo (`H-DEM-1`) y calcula su confianza: `--linea --texto --fuentes [--en-contra] [--sin-contra] [--critico] [--competidores] [--bloquea <tienda>]` |
 | `confianza` | Baja la confianza de un hallazgo, con su motivo |
-| `competidor` · `matriz` | Registra o completa una fila de la matriz (`C-1`) · la muestra con los hallazgos enlazados a cada competidor |
+| `competidor` · `matriz` | Registra o completa una fila de la matriz (`C-1`); un sustituto lleva `--peldano 4 --sustituto nativo\|gratuito\|pago --resuelve si\|parcial\|no` · la muestra con los hallazgos enlazados a cada competidor |
 | `intento` | Registra la búsqueda de intentos anteriores de la misma idea y su resultado |
 | `diferenciador` · `principal` | Registra un diferenciador (`D-1`) y dice si es viable, viable con confianza baja o no viable: `--vector --texto --hallazgos --se-ve --copiable --motivo --semanas [--principal]` · elige el principal. Los dos, solo con la sesión 1g abierta |
 | `propuesta` | Deja un cambio a una sesión cerrada como propuesta para la puerta siguiente: `--texto [--ajustar <sesión>]` |
@@ -148,6 +152,7 @@ Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo,
 | `decidir` | **Solo lo corre el usuario.** Registra la decisión con fecha; `--reabrir` la deshace |
 | `siguiente` · `estado` | El paso siguiente o los carriles, con el texto para cada chat y el modelo sugerido · el resumen |
 | `archivar` · `reabrir` | Mueve la idea a `archivo/` (no borra nada) o la recupera |
+| `reporte` · `tablero` | Genera `reporte.html` de la idea (`--idea` para una archivada) · genera `index.html` con todas las ideas bajo `--raiz <carpeta>` |
 | `consumo` | Anota el costo de una sesión o del orquestador (opcional): `--sesion --costo\|--creditos\|--tokens [--incluye]` |
 
 Otras skills, por intención y sin depender de sus archivos: `hb-setup` (anota `## Producto` en `AGENTS.md`), `hb-implement` (construye cada `F-…`), `hb-review`, `hb-performance` (si el diferenciador es de rendimiento), `hb-commit`, `hb-release`, `play-policy-insights` y `hb-coach` (para aprender un concepto: RICE, Kano o HEART).
@@ -160,7 +165,8 @@ Otras skills, por intención y sin depender de sus archivos: `hb-setup` (anota `
 - [ ] Hallazgos clave triangulados o presentados con su confianza real ("confianza media · sin triangular"); búsqueda de evidencia en contra registrada en cada uno, también cuando no apareció nada.
 - [ ] Cada mercado, idioma y tienda del objetivo con fuentes o con su vacío registrado; ningún vacío de herramienta presentado como falta de evidencia, ni resuelto proponiendo reabrir la línea con las mismas herramientas.
 - [ ] Tipo de idea registrado por 1a y respetado por las demás líneas; en una idea nueva, cada hallazgo con su peldaño y la búsqueda de intentos anteriores hecha.
-- [ ] Con competencia: matriz completa y cada diferenciador con evidencia, dónde se ve, copiabilidad y semanas. Uno viable con confianza baja no se presenta como viable. Si ninguno es viable, se dijo sin maquillarlo.
+- [ ] Con competencia: matriz completa, con el sustituto (peldaño 4) evaluado, y cada diferenciador con evidencia, dónde se ve, copiabilidad, semanas y cómo supera al sustituto gratuito o nativo. Uno viable con confianza baja no se presenta como viable. Si ninguno es viable, se dijo sin maquillarlo.
+- [ ] Políticas leídas en su fuente oficial; si una tienda objetivo nombra o rechaza la categoría, el hallazgo lleva `--bloquea` y el riesgo es 1. Demanda puntuada con señales actuales, no con descargas acumuladas.
 - [ ] La meta de ingresos, si existe, presentada como referencia (salvo que el usuario la marcó como obligatoria); nunca como riesgo ni como motivo de descarte.
 - [ ] Nada de una sesión cerrada cambiado con un comando suelto: va como `propuesta` a la puerta.
 - [ ] Ninguna recomendación de descartar por la cantidad de competidores ni por falta de datos.

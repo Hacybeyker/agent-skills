@@ -12,6 +12,12 @@
 | --- | --- | --- | --- | --- |
 | <por completar: término> | | | | <por completar: S-DEM-1> |
 
+## Señales actuales y contexto
+
+Las anclas de demanda usan señales de los últimos 12 a 18 meses (tendencia, descargas recientes). Las descargas acumuladas de una ficha son contexto: se registran con `fuente --acumulado` y no sostienen la demanda de hoy.
+
+<por completar: qué señales son actuales (con su fecha) y cuáles son solo contexto acumulado>
+
 ## Estacionalidad
 
 <por completar: meses altos y bajos por mercado, o "sin estacionalidad visible", con su fuente>

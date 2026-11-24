@@ -26,11 +26,12 @@ La cantidad de competidores **no** es un criterio: ni la saturación ni la falta
 | --- | --- |
 | Puntaje de 17/25 o más | Puntaje de 15/25 o más |
 | Demanda con confianza media o alta | El problema o la necesidad de fondo, con 3 fuentes independientes y vigentes de peldaño 4 o 5 |
-| Al menos 1 diferenciador viable, con sus hallazgos triangulados ([diferenciacion.md](diferenciacion.md)) | Al menos 2 análogos con tracción (peldaño 2 o 3) en la matriz |
+| Al menos 1 diferenciador viable, con sus hallazgos triangulados y, si hay un sustituto gratuito o nativo que ya resuelve la necesidad, que lo supere ([diferenciacion.md](diferenciacion.md)) | Al menos 2 análogos con tracción (peldaño 2 o 3) en la matriz |
 | Los hallazgos del diferenciador principal están triangulados | Sin evidencia de que se probó y fracasó por falta de demanda (con la búsqueda registrada) |
-| Riesgo de políticas distinto de 1, o con una mitigación escrita | Riesgo de políticas distinto de 1, o con una mitigación escrita |
+| Riesgo de políticas distinto de 1, o con una mitigación escrita | Si hay un sustituto gratuito o nativo que ya resuelve la necesidad, un diferenciador viable que lo supere |
+| | Riesgo de políticas distinto de 1, o con una mitigación escrita |
 
-Un diferenciador viable con confianza baja no cumple ninguno de los dos criterios de diferenciación, y si el principal tiene hallazgos sin triangular, la puerta lo dice aunque haya otro viable: elegir otro principal es ajustar 1g. Si la confianza global es baja, la puerta avisa aunque los criterios se cumplan.
+**El riesgo es 1 si una tienda objetivo nombra la categoría o la rechaza** (un hallazgo de políticas con `--bloquea <tienda>`): la puerta muestra en qué tienda es bloqueante y la mitigación escrita, para que juzgues si es creíble. **El sustituto más fuerte** cuenta aunque no sea una app: si la función que ya trae el sistema resuelve la necesidad gratis, ganarle a las otras apps no alcanza. Un diferenciador viable con confianza baja no cumple ninguno de los dos criterios de diferenciación, y si el principal tiene hallazgos sin triangular, la puerta lo dice aunque haya otro viable: elegir otro principal es ajustar 1g. Si la confianza global es baja, la puerta avisa aunque los criterios se cumplan.
 
 ### P2 · Viabilidad (después de las sesiones 2 y 3)
 
@@ -87,6 +88,12 @@ Lo que una sesión descubre y cambiaría algo ya cerrado (el diferenciador princ
 Una idea se descarta con evidencia en contra, cuando ningún peldaño muestra el problema o, con competencia, cuando no aparece ningún diferenciador viable. Si el usuario quiere descartar "porque hay muchos competidores", "porque no hay datos" o "porque no llega a la meta" (sin haberla marcado como obligatoria), dile qué dice la puerta antes de que decida: la decisión sigue siendo suya.
 
 **Vacíos por límite de las herramientas.** Si a una línea le faltan fuentes porque tus herramientas no leen esas páginas (reseñas dinámicas, foros bloqueados), no sugieras ajustarla: con las mismas herramientas da lo mismo. Sugiere lo que sí lo resuelve (un navegador en el agente o un CSV de reseñas que aporte el usuario) y, con eso, el ajuste. `decidir --ajustar` lo recuerda si la línea tiene vacíos así.
+
+## Reporte y tablero
+
+- **`reporte.html`** vive en la carpeta de la idea y se regenera solo cada vez que el usuario decide una puerta y al archivar (también al descartar: queda dentro de `archivo/<nombre>/`). Es un solo archivo, sin red, en claro y oscuro: arriba el resumen ejecutivo (estado, decisión con su motivo y siguiente paso) y debajo tarjetas con el puntaje, las puertas, los diferenciadores, los hallazgos clave, los competidores, la cobertura, los escenarios (solo referencia), la hipótesis más riesgosa y el costo. Lo técnico va plegado. `producto.py reporte` lo regenera a mano; `--idea <nombre>` para una idea archivada.
+- **`producto.py tablero --raiz <carpeta>`** busca todas las ideas bajo esa carpeta (en curso y archivadas), regenera su reporte y escribe `<carpeta>/index.html`: estado (en curso, seguir, descartada o archivada), puntaje, última puerta, motivo o siguiente paso y el enlace a cada reporte.
+- La confianza del reporte se calcula con la fecha del día en que se genera: puede bajar si las fuentes envejecen. Los criterios de cada puerta ya decidida son los de ese momento.
 
 ## Archivo
 

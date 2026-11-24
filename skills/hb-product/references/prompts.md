@@ -162,6 +162,24 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py archivar --motivo "<motivo>
 cd <raíz> && python3 -I <skill>/scripts/producto.py reabrir --idea <nombre> --carpeta product
 ```
 
+### Ver el reporte de una idea o el tablero de todas
+
+**Dónde:** terminal, sin chat. El reporte (`reporte.html`, en la carpeta de la idea) se regenera solo al decidir cada puerta y al archivar; para regenerarlo a mano, o el de una idea archivada:
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/producto.py reporte --carpeta product
+```
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/producto.py reporte --idea <nombre> --carpeta product
+```
+
+El tablero reúne todas las ideas que encuentre bajo una carpeta (en curso y archivadas) en `<carpeta>/index.html`, con el enlace a cada reporte:
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/producto.py tablero --raiz <carpeta con tus ideas>
+```
+
 ### Construir una funcionalidad del PRD
 
 **Dónde:** chat nuevo, en el repo de la app. Lo hace `hb-implement`, no hb-product.

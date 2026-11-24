@@ -18,6 +18,14 @@ Pega la salida de `producto.py matriz`. Si no hay directos, las filas son los an
 
 <por completar: la tabla de `producto.py matriz`>
 
+## Sustitutos
+
+Cómo se resuelve hoy la necesidad sin una app así (peldaño 4): la función que ya trae el sistema, una hoja de cálculo, un grupo de chat, papel. Cada uno va en la matriz con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`. Si uno gratuito o nativo ya resuelve la necesidad, es el rival que la sesión 1g tiene que superar.
+
+| Sustituto | Nativo, gratuito o de pago | ¿Resuelve la necesidad? | Por qué | Fuentes |
+| --- | --- | --- | --- | --- |
+| <por completar: C-…> | | | | |
+
 ## Hallazgos
 
 | ID | Hallazgo | Fuentes | Peldaño | Confianza |

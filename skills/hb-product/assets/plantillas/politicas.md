@@ -1,6 +1,6 @@
 # 1e · Políticas y riesgos · {{NOMBRE}}
 
-> Línea `politicas`. Las políticas se leen en su fuente oficial y con su fecha: cambian seguido.
+> Línea `politicas`. Las políticas se leen en su fuente oficial (`fuente --tipo oficial --version …`): cambian seguido. Una sola fuente oficial basta para un hallazgo de esta línea.
 
 ## Presupuesto usado
 
@@ -8,9 +8,11 @@
 
 ## Políticas de las tiendas
 
-| Política | Tienda | Qué exige | ¿Aplica? | Fuente |
-| --- | --- | --- | --- | --- |
-| <por completar: política> | | | | <por completar: S-POL-1> |
+| Política | Tienda | Versión o fecha | Qué exige | ¿Aplica? | Fuente |
+| --- | --- | --- | --- | --- | --- |
+| <por completar: política> | | | | | <por completar: S-POL-1> |
+
+**¿Alguna tienda del objetivo nombra la categoría o la rechaza?** <por completar: tienda, regla y hallazgo registrado con `--bloquea <tienda>`, o "ninguna">
 
 ## Leyes y regulación
 
@@ -29,7 +31,7 @@
 ## Riesgo de políticas
 
 - **Ancla propuesta (1 a 5, 5 = bajo):** <por completar: según references/puntaje.md>
-- **Mitigación, si el ancla es 1:** <por completar: cómo se evita el bloqueo, o "no aplica">
+- **Mitigación, si el ancla es 1:** <por completar: cómo se evita el bloqueo, o "no aplica">. Si una tienda nombra o rechaza la categoría, el ancla es 1 en esa tienda.
 
 ## Hallazgos
 

@@ -8,6 +8,12 @@
 | --- | --- | --- | --- |
 | <por completar: fila de la matriz> | | | |
 
+## Frente al sustituto más fuerte
+
+El sustituto de la matriz (peldaño 4) que ya resuelve la necesidad gratis o viene con el sistema, si lo hay, y lo que cada diferenciador hace que ese sustituto no hace, con el hallazgo que lo muestra (`--competidores C-…`).
+
+<por completar: el sustituto más fuerte y cómo lo supera cada diferenciador, o "ningún sustituto gratuito o nativo resuelve la necesidad">
+
 ## Vectores
 
 Un vector sin hueco se anota igual, con "sin hueco": también es un resultado.

@@ -9,12 +9,13 @@ Si ya existen apps iguales o parecidas, la demanda está probada y la pregunta c
 1. Primera línea: `Sesión 1g · Diferenciación (<motivo>)`.
 2. `producto.py tipo` y `producto.py matriz`: la matriz de 1a con los hallazgos que 1b enlazó a cada competidor.
 3. Lee `competencia.md` y `voz-del-usuario.md` (solo esos dos).
-4. Recorre los 12 vectores y anota el hueco de cada uno, o "sin hueco".
-5. Arma el cuadro ERRC, la clasificación Kano y el mapa de posicionamiento.
-6. Si a un hueco le falta evidencia, búscala y regístrala en la línea `diferenciacion` (`producto.py fuente` y `hallazgo`).
-7. Registra cada diferenciador con `producto.py diferenciador`: dice si es viable y por qué. Elige el principal con `--principal` o, después, con `producto.py principal --id D-…`.
-8. Abogado del diablo: por qué los competidores no lo hicieron ya y cuánto tardarían en copiarlo.
-9. Completa `diferenciacion.md` y `producto.py cerrar --sesion 1g`.
+4. Mira primero el **sustituto más fuerte** de la matriz (peldaño 4): si es gratuito o nativo y ya resuelve la necesidad, todo diferenciador tiene que superarlo (abajo).
+5. Recorre los 12 vectores y anota el hueco de cada uno, o "sin hueco".
+6. Arma el cuadro ERRC, la clasificación Kano y el mapa de posicionamiento.
+7. Si a un hueco le falta evidencia, búscala y regístrala en la línea `diferenciacion` (`producto.py fuente` y `hallazgo`).
+8. Registra cada diferenciador con `producto.py diferenciador`: dice si es viable y por qué. Elige el principal con `--principal` o, después, con `producto.py principal --id D-…`.
+9. Abogado del diablo: por qué los competidores no lo hicieron ya y cuánto tardarían en copiarlo.
+10. Completa `diferenciacion.md` y `producto.py cerrar --sesion 1g`.
 
 **Si ningún diferenciador es viable, dilo tal cual.** Es un resultado válido: la puerta 1 lo muestra y el usuario decide. No inventes uno para salvar la idea.
 
@@ -23,6 +24,15 @@ Si ya existen apps iguales o parecidas, la demanda está probada y la pregunta c
 La arma la sesión 1a: una fila por competidor y una columna por vector (descargas, nota, última actualización, precio y modelo, intensidad de anuncios, tamaño, idiomas, permisos, sin conexión, accesibilidad, plataformas y funcionalidades clave). `producto.py matriz` le suma a cada fila los hallazgos de 1b que la nombran: ahí está la queja principal de cada competidor.
 
 En una idea nueva, las filas son los análogos y los sustitutos: la comparación es contra la hoja de cálculo o el grupo de chat.
+
+## El sustituto más fuerte
+
+El rival más difícil muchas veces no es otra app, sino lo que el usuario ya tiene: la linterna que trae el teléfono, el recordatorio del sistema, una hoja de cálculo o el grupo de chat. Ganarle a las otras apps no sirve si ese sustituto ya resuelve la necesidad gratis.
+
+- La sesión 1a registra siempre al menos un sustituto (peldaño 4) con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin eso, 1a no cierra. Sé honesto con `--resuelve si`: si la mayoría de quienes tienen la necesidad se arreglan con él, la resuelve.
+- **Sustituto fuerte:** nativo o gratuito, y que resuelve la necesidad. `producto.py matriz` lo marca.
+- Con un sustituto fuerte, un diferenciador solo es viable si **lo supera con evidencia**: uno de sus hallazgos nombra al sustituto (`hallazgo … --competidores C-…`) y muestra lo que el sustituto no resuelve (por ejemplo, quejas de quienes lo usan). Esos hallazgos también tienen que estar triangulados.
+- Si nada lo supera, dilo así: con un sustituto gratuito que ya resuelve la necesidad, no hay oportunidad, por más que se le gane a las otras apps. La puerta 1 lo marca.
 
 ## Vectores de diferenciación
 
@@ -57,20 +67,21 @@ python3 -I <skill>/scripts/producto.py diferenciador --vector precio --texto "Pa
   --motivo "Cambiar de modelo les cuesta ingresos recurrentes" --semanas 2 --principal
 ```
 
-El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja** o **todavía no viable**. Tiene que cumplir los cuatro criterios:
+El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja** o **todavía no viable**. Tiene que cumplir los cinco criterios:
 
 1. **Evidencia.** Una de dos: un dolor o un pedido **triangulado en 2 competidores o más** (un hallazgo con sus 3 fuentes y `--competidores` con dos filas de la matriz), o un **vector medible comprobado en la matriz** en 2 competidores o más (`precio`, `rendimiento` por el tamaño, `anuncios`, `idioma`, `privacidad` por los permisos, `sin-conexion`, `accesibilidad`, `diseno` por la última actualización y `plataforma`). `usabilidad`, `funcionalidades` y `segmento` no se miden en la matriz: necesitan el dolor triangulado. Es el filtro del *diferenciador imaginario*.
 2. **Se percibe** (`--se-ve`). En la **ficha** de la tienda (precio, idioma, sin anuncios, diseño), que es lo que consigue descargas, o en el **uso** (rendimiento, usabilidad), que es lo que consigue retención y buenas notas. Lo ideal es tener uno viable de cada tipo: el script avisa cuál falta.
 3. **Copiabilidad** (`--copiable baja|media|alta`, con `--motivo`). Uno fácil de copiar sirve para entrar, pero no sostiene la posición.
 4. **Cabe en el presupuesto** (`--semanas`): se construye dentro de las semanas de la sesión 0.
+5. **Supera al sustituto fuerte**, si lo hay: uno de sus hallazgos nombra al sustituto gratuito o nativo que ya resuelve la necesidad y muestra lo que ese sustituto no resuelve (arriba). Si el sustituto de la matriz no está evaluado, el criterio no se da por cumplido.
 
 Y además, **sus hallazgos tienen que estar triangulados** (la regla de [evidencia.md](evidencia.md)), todos los que cita:
 
 | Estado | Cuándo | Cuenta para la puerta 1 |
 | --- | --- | --- |
-| Viable | Los cuatro criterios y sus hallazgos triangulados | Sí |
-| Viable con confianza baja | Los cuatro criterios, pero algún hallazgo sin triangular | No: se muestra aparte, y el puntaje de diferenciación llega como máximo a 2 |
-| Todavía no viable | Falta alguno de los cuatro criterios | No |
+| Viable | Los cinco criterios y sus hallazgos triangulados | Sí |
+| Viable con confianza baja | Los cinco criterios, pero algún hallazgo sin triangular | No: se muestra aparte, y el puntaje de diferenciación llega como máximo a 2 |
+| Todavía no viable | Falta alguno de los cinco criterios | No |
 
 Un vector medible comprobado en la matriz cumple el criterio de evidencia, pero si el hallazgo que lo sostiene no está triangulado, el diferenciador queda con confianza baja. `producto.py triangulacion` dice qué le falta a cada hallazgo.
 

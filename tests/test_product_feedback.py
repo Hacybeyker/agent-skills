@@ -1,6 +1,8 @@
 """Tests de las mejoras de hb-product que salieron de la prueba de punta a punta: modelo concreto (#1), meta opcional
 (#2), diferenciador triangulado (#4), cobertura por mercado, idioma y tienda (#5), consumo (#6), fuentes difíciles y
-CSV de reseñas (#7), una sola regla de confianza y triangulación (#8) y la puerta dentro de `siguiente` (#9).
+CSV de reseñas (#7), una sola regla de confianza y triangulación (#8), la puerta dentro de `siguiente` (#9), la fuente
+oficial (#10), el sustituto más fuerte (#11), la tienda que bloquea la categoría (#12), la demanda con señales actuales
+(#13) y la fecha de publicación real (#14). El reporte y el tablero (#15 y #16) están en test_product_reporte.py.
 
 Los datos son inventados: la misma app de turnos de riego de test_product.py, con competidores y reseñas de ejemplo.
 """
@@ -46,6 +48,7 @@ class Base(base.Base):
                "--precio", "3,99 al mes")
         self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[1], "--descargas", "500k",
                "--precio", "2,99 al mes")
+        self.sustituto(fuentes[2])
         self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "Se buscó y no apareció")
         self.cerrar("1a", "01-investigacion/competencia.md")
         self.linea("1b", "voz-del-usuario", "usuario", 1, "--competidores", "RiegoFácil,PlantaPlus")
@@ -573,6 +576,7 @@ class ConsumoTest(Base):
         fuentes = self.fuente("competencia", 3, "medido")
         self.p("tipo", "--existente", "--motivo", "Hay dos apps directas")
         self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0])
+        self.sustituto(fuentes[1])
         self.hallazgo("competencia", fuentes)
         self.cerrar("1a", "01-investigacion/competencia.md")
         self.linea("1b", "voz-del-usuario", "usuario")
@@ -592,6 +596,246 @@ class ConsumoTest(Base):
 
 # --- Documentación ---------------------------------------------------------------------------------------------------
 
+# --- #10 · Fuente oficial ------------------------------------------------------------------------------------------
+
+class FuenteOficialTest(Base):
+    def oficial(self, linea="politicas", *extra):
+        self.sitio += 1
+        salida = self.p("fuente", "--linea", linea, "--url", "https://tienda.example/politicas-%d" % self.sitio,
+                        "--publicada", "2025-03", "--tipo", "oficial", "--peldano", 1, "--autor", "Tienda de ejemplo",
+                        "--resumen", "Política inventada de la tienda", "--mercados", "MX", "--tiendas", "google-play",
+                        *extra)
+        return re.search(r"S-[A-Z]{3}-\d+", salida).group(0), salida
+
+    def test_una_fuente_oficial_basta_para_un_hallazgo_de_politicas(self):
+        self.nuevo()
+        fuente, salida = self.oficial()
+        self.assertIn("basta sola para un hallazgo de la línea politicas", salida)
+        identificador, salida = self.hallazgo("politicas", [fuente], "--critico", "--sin-contra", "nada")
+        self.assertIn("confianza alta · triangulado", salida)
+        self.assertIn("Triangulado por la fuente oficial %s" % fuente, salida)
+        salida = self.p("triangulacion")
+        self.assertIn("✔ %s" % identificador, salida)
+        self.assertIn("triangulado por la fuente oficial", salida)
+
+    def test_rige_mientras_se_consulte_dentro_de_la_ventana(self):
+        self.nuevo()
+        fuente = re.search(r"S-POL-\d+", self.p(
+            "fuente", "--linea", "politicas", "--url", "https://tienda.example/guia", "--publicada", "2019-06",
+            "--tipo", "oficial", "--peldano", 1, "--resumen", "Guía inventada de 2019, todavía vigente")).group(0)
+        self.assertIn("confianza alta · triangulado", self.hallazgo("politicas", [fuente])[1])
+        vieja = re.search(r"S-POL-\d+", self.p(
+            "fuente", "--linea", "politicas", "--url", "https://tienda.example/guia-vieja", "--publicada", "2019-06",
+            "--consultada", "2020-01-10", "--tipo", "oficial", "--peldano", 1, "--resumen", "Leída hace años")).group(0)
+        self.assertIn("sin triangular", self.hallazgo("politicas", [vieja])[1])
+
+    def test_fuera_de_politicas_no_basta_y_lleva_version_o_fecha(self):
+        self.nuevo()
+        fuente, _ = self.oficial("demanda")
+        self.assertIn("sin triangular", self.hallazgo("demanda", [fuente])[1])
+        error = self.falla("fuente", "--linea", "politicas", "--url", "https://tienda.example/x", "--publicada",
+                           "desconocida", "--tipo", "oficial", "--peldano", 1, "--resumen", "Sin versión")
+        self.assertIn("--version", error)
+        salida = self.p("fuente", "--linea", "politicas", "--url", "https://tienda.example/x", "--publicada",
+                        "desconocida", "--version", "versión de junio de 2025", "--tipo", "oficial", "--peldano", 1,
+                        "--resumen", "Con versión")
+        self.assertIn("versión de junio de 2025", salida)
+        self.assertIn("es para una fuente oficial", self.falla(
+            "fuente", "--linea", "politicas", "--url", "https://tienda.example/y", "--publicada", "2025-01",
+            "--version", "1.0", "--tipo", "terceros", "--peldano", 1, "--resumen", "x"))
+
+
+# --- #11 · El sustituto más fuerte ---------------------------------------------------------------------------------
+
+class SustitutoTest(Base):
+    def investigar(self, resuelve="si", supera=False):
+        """Hasta 1g con un sustituto nativo (la función del sistema) y un diferenciador de precio. Con supera=True, el
+        dolor triangulado de la voz del usuario nombra también al sustituto."""
+        self.sesion0()
+        fuentes = self.fuente("competencia", 3, "medido")
+        self.p("tipo", "--existente", "--motivo", "Hay dos apps directas con más de 100k descargas")
+        self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0], "--descargas", "1M",
+               "--precio", "3,99 al mes")
+        self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[1], "--descargas", "500k",
+               "--precio", "2,99 al mes")
+        salida = self.sustituto(fuentes[2], "Recordatorio del sistema", "nativo", resuelve)
+        self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "nada")
+        self.cerrar("1a", "01-investigacion/competencia.md")
+        nombres = "RiegoFácil,PlantaPlus" + (",Recordatorio del sistema" if supera else "")
+        voz = self.linea("1b", "voz-del-usuario", "usuario", 1, "--competidores", nombres)
+        for sesion, nombre in (("1c", "demanda"), ("1d", "monetizacion"), ("1e", "politicas")):
+            self.linea(sesion, nombre)
+        return salida, self.p("diferenciador", "--vector", "precio", "--texto", "Pago único", "--hallazgos", voz,
+                              "--se-ve", "ficha", "--copiable", "media", "--motivo", "Les cuesta el ingreso recurrente",
+                              "--semanas", 2, "--principal")
+
+    def test_un_sustituto_nativo_que_resuelve_deja_al_diferenciador_sin_viabilidad(self):
+        fila, salida = self.investigar()
+        self.assertIn("Es gratuito o nativo y ya resuelve la necesidad", fila)
+        self.assertIn("✖ D-1 registrado como principal: todavía no es viable", salida)
+        self.assertIn("✖ Frente al sustituto: no supera a C-3 (Recordatorio del sistema), viene con el sistema y "
+                      "resuelve la necesidad", salida)
+        self.assertIn("Sustituto gratuito o nativo que ya resuelve la necesidad: C-3", self.p("matriz"))
+        self.assertIn("Ningún diferenciador supera a C-3", self.cerrar("1g", "01-investigacion/diferenciacion.md"))
+        self.assertIn("Diferenciación = 3 no corresponde", self.falla("puntaje", "--valores", "4,4,4,4,3"))
+        self.p("puntaje", "--valores", "4,4,4,4,1")
+        salida = self.cerrar("1f", "01-sintesis.md")
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere al sustituto "
+                      "gratuito o nativo que ya resuelve la necesidad (C-3 (Recordatorio del sistema))", salida)
+        self.assertIn("ningún diferenciador supera a C-3", salida)
+
+    def test_lo_supera_con_un_hallazgo_triangulado_que_lo_nombra(self):
+        _, salida = self.investigar(supera=True)
+        self.assertIn("✔ D-1 registrado como principal: viable", salida)
+        self.assertIn("✔ Frente al sustituto: supera a C-3 (Recordatorio del sistema) con H-VOZ-1", salida)
+        self.cerrar("1g", "01-investigacion/diferenciacion.md")
+        self.p("puntaje", "--valores", "4,4,4,4,3")
+        self.assertIn("✔ Al menos 1 diferenciador viable", self.cerrar("1f", "01-sintesis.md"))
+
+    def test_un_sustituto_que_resuelve_en_parte_no_obliga(self):
+        _, salida = self.investigar(resuelve="parcial")
+        self.assertIn("✔ D-1 registrado como principal: viable", salida)
+        self.assertIn("ninguno gratuito o nativo resuelve la necesidad (C-3 la resuelve en parte)", salida)
+
+    def test_1a_no_cierra_sin_un_sustituto_evaluado(self):
+        self.sesion0()
+        fuentes = self.fuente("competencia", 3, "medido")
+        self.p("tipo", "--existente", "--motivo", "Hay apps directas")
+        self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0])
+        self.hallazgo("competencia", fuentes)
+        self.completar("01-investigacion/competencia.md")
+        self.assertIn("la matriz no tiene ningún sustituto (peldaño 4)", self.falla("cerrar", "--sesion", "1a"))
+        self.assertIn("son de un sustituto (--peldano 4)", self.falla(
+            "competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0], "--sustituto", "nativo"))
+        self.p("competidor", "--nombre", "Lista en papel", "--peldano", 4, "--fuentes", fuentes[1])
+        self.assertIn("C-2 (Lista en papel) es un sustituto: le falta", self.falla("cerrar", "--sesion", "1a"))
+        salida = self.p("competidor", "--nombre", "Lista en papel", "--peldano", 4, "--fuentes", fuentes[1],
+                        "--sustituto", "gratuito", "--resuelve", "no")
+        self.assertIn("· Sustituto: C-2 (Lista en papel), gratuito y no la resuelve", salida)
+        self.assertIn("Sesión 1a · Competencia cerrada", self.p("cerrar", "--sesion", "1a"))
+        self.assertIn("4 · gratuito · no la resuelve", self.p("matriz"))
+
+    def test_un_sustituto_sin_evaluar_no_pasa_en_silencio(self):
+        self.investigar(resuelve="parcial")
+        datos = self.datos("01-investigacion/competencia.json")
+        for fila in datos["matriz"]:
+            fila.pop("resuelve", None)  # como una carpeta anterior a esta regla
+        write(self.carpeta / "01-investigacion/competencia.json", json.dumps(datos))
+        salida = self.p("principal", "--id", "D-1")
+        self.assertIn("✖ Frente al sustituto: C-3 (Recordatorio del sistema) sin evaluar", salida)
+
+
+# --- #12 · Una tienda que nombra o rechaza la categoría --------------------------------------------------------------
+
+class BloqueoTiendaTest(Base):
+    def bloqueo(self):
+        self.investigacion()
+        fuente = re.search(r"S-POL-\d+", self.p(
+            "fuente", "--linea", "politicas", "--url", "https://tienda.example/categorias-saturadas", "--publicada",
+            "2025-06", "--tipo", "oficial", "--peldano", 1, "--resumen", "La tienda inventada nombra la categoría",
+            "--tiendas", "google-play")).group(0)
+        identificador, salida = self.hallazgo("politicas", [fuente], "--critico", "--sin-contra", "nada",
+                                              "--bloquea", "google-play")
+        return identificador, salida
+
+    def test_el_hallazgo_bloqueante_fija_el_riesgo_en_1(self):
+        identificador, salida = self.bloqueo()
+        self.assertIn("⚠ Bloqueante en google-play", salida)
+        self.assertIn("bloqueante en google-play", self.p("triangulacion"))
+        error = self.falla("puntaje", "--valores", "4,4,4,2,3")
+        self.assertIn("Riesgo de políticas = 2 no corresponde: google-play nombra o rechaza la categoría (%s)"
+                      % identificador, error)
+        self.p("puntaje", "--valores", "4,4,4,1,3")
+        salida = self.cerrar("1f", "01-sintesis.md")
+        self.assertIn("✖ Riesgo de políticas distinto de 1, o con una mitigación escrita · es 1 · bloqueante en "
+                      "google-play nombra o rechaza la categoría", salida)
+        self.p("puntaje", "--valores", "4,4,4,1,3", "--mitigacion", "Lanzar solo en la web hasta tener otra propuesta")
+        salida = self.p("puerta", "--n", 1)
+        self.assertIn("✔ Riesgo de políticas distinto de 1", salida)
+        self.assertIn("mitigación: «Lanzar solo en la web hasta tener otra propuesta»", salida)
+
+    def test_un_puntaje_anterior_al_bloqueo_no_pasa_la_puerta(self):
+        self.investigacion()
+        self.p("puntaje", "--valores", "4,4,4,4,3")
+        self.cerrar("1f", "01-sintesis.md")
+        fuente = self.fuente("politicas", 1, "oficial")[0]
+        self.hallazgo("politicas", [fuente], "--bloquea", "google-play")
+        self.assertIn("el puntaje dice 4, pero google-play nombra o rechaza la categoría", self.p("puerta", "--n", 1))
+
+    def test_bloquea_es_de_politicas_y_de_una_tienda_del_objetivo(self):
+        self.nuevo()
+        fuente = self.fuente("politicas")[0]
+        self.assertIn("es de la línea politicas", self.falla(
+            "hallazgo", "--linea", "demanda", "--texto", "x", "--fuentes", fuente, "--bloquea", "google-play"))
+        self.assertIn("app-store no está entre las tiendas del objetivo", self.falla(
+            "hallazgo", "--linea", "politicas", "--texto", "x", "--fuentes", fuente, "--bloquea", "app-store"))
+
+
+# --- #13 · Demanda con señales actuales ------------------------------------------------------------------------------
+
+class DemandaActualTest(Base):
+    def test_un_dato_acumulado_no_triangula_la_demanda(self):
+        self.nuevo()
+        fuentes = self.fuente("demanda", 2, "usuario")
+        salida = self.p("fuente", "--linea", "demanda", "--url", "https://tienda.example/ficha", "--publicada",
+                        "2026-06", "--tipo", "medido", "--acumulado", "--peldano", 1, "--resumen",
+                        "Mil millones de descargas desde 2011", "--mercados", "MX")
+        self.assertIn("Dato acumulado", salida)
+        acumulada = re.search(r"S-DEM-\d+", salida).group(0)
+        identificador, salida = self.hallazgo("demanda", fuentes + [acumulada], "--critico", "--sin-contra", "nada")
+        self.assertIn("sin triangular", salida)
+        salida = self.p("triangulacion")
+        self.assertIn("%s: dato(s) acumulado(s)" % acumulada, salida)
+        self.assertIn("falta una fuente de tipo medido", salida)
+        # en otra línea, el mismo dato acumulado sí cuenta: es contexto de la competencia
+        self.assertIn("triangulado", self.hallazgo("competencia", self.fuente("competencia", 2) + [acumulada])[1])
+
+    def test_las_anclas_altas_de_demanda_piden_un_hallazgo_triangulado(self):
+        self.sesion0()
+        self.p("tipo", "--existente", "--motivo", "Hay apps directas")
+        self.hallazgo("demanda", self.fuente("demanda", 2, "usuario"), "--critico", "--sin-contra", "nada")
+        error = self.falla("puntaje", "--valores", "4,3,3,3,1")
+        self.assertIn("Demanda = 4 no corresponde: las anclas 4 y 5 piden señales actuales", error)
+        self.assertIn("Total: 13/25", self.p("puntaje", "--valores", "3,3,3,3,1"))
+
+    def test_acumulado_es_un_dato_medido(self):
+        self.nuevo()
+        self.assertIn("va con --tipo medido", self.falla(
+            "fuente", "--linea", "demanda", "--url", "https://a.example/x", "--publicada", "2026-06", "--tipo",
+            "terceros", "--acumulado", "--peldano", 1, "--resumen", "x"))
+
+
+# --- #14 · La fecha de publicación real ----------------------------------------------------------------------------
+
+class FechaPublicacionTest(Base):
+    def fuente_con(self, publicada, *extra):
+        self.sitio += 1
+        return self.p("fuente", "--linea", "voz-del-usuario", "--url", "https://foro.example/hilo-%d" % self.sitio,
+                      "--publicada", publicada, "--tipo", "usuario", "--peldano", 1, "--resumen", "Hilo inventado",
+                      *extra)
+
+    def test_avisa_cuando_la_publicacion_coincide_con_la_consulta(self):
+        self.nuevo()
+        salida = self.fuente_con(HOY)
+        self.assertIn("⚠ La fecha de publicación es la misma que la de consulta (%s)" % HOY, salida)
+        self.assertIn("--publicada desconocida", salida)
+        self.assertNotIn("misma que la de consulta", self.fuente_con("2026-06"))
+
+    def test_desconocida_no_cuenta_y_sin_fecha_sigue_valiendo(self):
+        self.nuevo()
+        for valor in ("desconocida", "sin-fecha"):
+            self.assertIn("sin fecha o fuera de la ventana", self.fuente_con(valor))
+        self.assertIn("AAAA-MM-DD, AAAA-MM o desconocida", self.falla(
+            "fuente", "--linea", "demanda", "--url", "https://a.example/z", "--publicada", "ayer", "--tipo",
+            "usuario", "--peldano", 1, "--resumen", "x"))
+
+    def test_no_se_publica_despues_de_leerse(self):
+        self.nuevo()
+        error = self.falla("fuente", "--linea", "demanda", "--url", "https://a.example/y", "--publicada", "2026-11-20",
+                           "--consultada", "2026-11-10", "--tipo", "usuario", "--peldano", 1, "--resumen", "x")
+        self.assertIn("es posterior a la fecha de consulta", error)
+
+
 class DocumentacionTest(unittest.TestCase):
     def test_skill_md_nombra_cada_comando_nuevo(self):
         texto = (SKILL / "SKILL.md").read_text(encoding="utf-8")
@@ -607,6 +851,24 @@ class DocumentacionTest(unittest.TestCase):
         self.assertIn("modelo de monetización viable con evidencia", leer("puertas.md"))
         self.assertIn("propuesta", leer("puertas.md"))
         self.assertIn("consumo", leer("modelos.md"))
+
+    def test_la_documentacion_explica_las_mejoras_10_a_16(self):
+        leer = lambda nombre: (SKILL / "references" / nombre).read_text(encoding="utf-8")
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        for comando in ("reporte", "tablero"):
+            self.assertRegex(skill, r"`%s`" % comando, comando)
+        self.assertIn("`oficial`", leer("evidencia.md"))
+        self.assertIn("desconocida", leer("evidencia.md"))
+        self.assertIn("--acumulado", leer("puntaje.md"))
+        self.assertIn("--bloquea", leer("puntaje.md"))
+        self.assertIn("El sustituto más fuerte", leer("diferenciacion.md"))
+        self.assertIn("--resuelve", leer("investigacion.md"))
+        self.assertIn("tablero --raiz", leer("puertas.md"))
+        self.assertIn("tablero --raiz", leer("prompts.md"))
+        plantillas = SKILL / "assets" / "plantillas"
+        self.assertIn("## Sustitutos", (plantillas / "competencia.md").read_text(encoding="utf-8"))
+        self.assertIn("## Frente al sustituto más fuerte", (plantillas / "diferenciacion.md").read_text(encoding="utf-8"))
+        self.assertIn("--bloquea", (plantillas / "politicas.md").read_text(encoding="utf-8"))
 
     def test_las_plantillas_traen_la_cobertura_y_la_meta_opcional(self):
         plantillas = SKILL / "assets" / "plantillas"

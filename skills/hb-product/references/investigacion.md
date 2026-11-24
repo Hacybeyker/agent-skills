@@ -60,6 +60,7 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 | Intentos anteriores | "<idea> cerró", "post-mortem", lanzamientos abandonados, fichas sin actualizar hace años |
 
 - **Matriz de competidores.** Una fila por competidor con `producto.py competidor --nombre "<app>" --peldano <1-4> --fuentes S-COM-… [--descargas 1M] [--nota 4,2] [--actualizada 2026-03] [--precio "…"] [--modelo "…"] [--anuncios ninguno|pocos|muchos] [--tamano-mb 80] [--idiomas es,en] [--permisos ubicacion,camara] [--sin-conexion si|no|parcial] [--accesibilidad "…"] [--plataformas android,ios] [--funciones "a; b"] [--traccion "…"]`. Una fila se completa por partes: repetir el comando con el mismo nombre agrega columnas. El peldaño de la fila dice qué es: 1 directo, 2 variante, 3 análogo, 4 sustituto. `producto.py matriz` muestra la tabla; pégala en `competencia.md`.
+- **Sustitutos.** Registra siempre cómo se resuelve hoy la necesidad sin una app así (peldaño 4): la función que ya trae el sistema, una hoja de cálculo, un grupo de chat, papel. Cada uno con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin al menos uno evaluado, 1a no cierra. Si uno gratuito o nativo ya resuelve la necesidad, la sesión 1g tendrá que superarlo con evidencia ([diferenciacion.md](diferenciacion.md)), y la voz del usuario lo enlaza con `--competidores` cuando encuentra quejas sobre él.
 - **Tracción.** Un competidor la tiene desde 100 000 descargas (`traccion_descargas`) o con `--traccion "<evidencia>"` cuando no es una app o no publica descargas.
 - **Tipo de idea.** Regístralo apenas lo sepas, porque las otras líneas lo consultan: `producto.py tipo --existente | --variante | --nueva --motivo "<por qué>"`. *Existente:* hay competidores directos con tracción. *Variante:* hay directos, pero la idea cambia algo relevante (otra plataforma, otro país, otro segmento). *Nueva:* no hay directos con tracción. Si no hay directos, sube por la escalera y llena la matriz con análogos y sustitutos.
 - **Intentos anteriores.** Regístralo siempre con `producto.py intento --resultado sin-rastro | fracaso-demanda | fracaso-otra-causa --texto "<qué buscaste y qué apareció>" [--fuentes S-…]`. En una idea nueva es un criterio de la puerta 1.
@@ -83,9 +84,9 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 | --- | --- |
 | Volumen y tendencia de búsqueda | Herramientas públicas de tendencias de búsqueda, autocompletado de buscadores y de tiendas |
 | Estacionalidad por mercado | La serie de tendencias de 12 meses o más |
-| Tamaño de la audiencia | Descargas de los competidores, estadísticas oficiales, reportes del sector |
+| Tamaño de la audiencia | Descargas recientes de los competidores (de los últimos meses), estadísticas oficiales, reportes del sector |
 
-- Un hallazgo clave de demanda necesita **al menos una fuente de tipo `medido`**.
+- Un hallazgo clave de demanda necesita **al menos una fuente de tipo `medido`** y **señales actuales**: tendencia y descargas de los últimos 12 a 18 meses. Las descargas acumuladas de una ficha (cientos de millones desde hace una década) son contexto: regístralas con `fuente --acumulado`, y no sostienen la demanda de hoy ni las anclas altas del puntaje.
 - En una idea nueva se busca **el problema, no la solución**: lo que escribe la gente cuando tiene la necesidad. El tamaño se estima desde arriba con la población que la tiene (peldaño 6) y se dice que es una estimación, con sus supuestos.
 - Si ningún peldaño muestra el problema, dilo tal cual: es el ancla 1 de demanda y un motivo real de descarte.
 
@@ -111,6 +112,7 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 | Requisitos de cuenta y de publicación | La documentación oficial de cada tienda |
 | Riesgos técnicos | Límites de las plataformas, dependencias de terceros, datos que hacen falta |
 
-- Lee la política **en su fuente oficial y con su fecha**; un blog que la resume no alcanza para un hallazgo clave.
+- Lee la política **en su fuente oficial**: regístrala con `--tipo oficial` y su `--version` (o la fecha de su última actualización). Una sola fuente oficial basta para un hallazgo de políticas; un blog que la resume es `terceros` y no alcanza.
+- Si una tienda del objetivo **nombra la categoría o la rechaza** (por ejemplo, la cita como saturada o como funcionalidad mínima), registra el hallazgo con `--bloquea <tienda>`: el riesgo es 1 en esa tienda, salvo una mitigación escrita y creíble ([puntaje.md](puntaje.md)).
 - Propón el ancla de riesgo de políticas según [puntaje.md](puntaje.md) y, si es 1, la mitigación: la puerta 1 la pide escrita.
 - Una categoría que la tienda considera saturada o duplicada es un riesgo de políticas, no un juicio sobre la competencia.

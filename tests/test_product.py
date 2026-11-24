@@ -109,6 +109,11 @@ class Base(unittest.TestCase):
             ids.append(re.search(r"S-[A-Z]{3}-\d+", self.p(*args)).group(0))
         return ids
 
+    def sustituto(self, fuente, nombre="Grupo de chat del edificio", tipo="gratuito", resuelve="parcial"):
+        """La fila de la matriz que dice cómo se resuelve hoy la necesidad sin una app así (la pide el cierre de 1a)."""
+        return self.p("competidor", "--nombre", nombre, "--peldano", 4, "--fuentes", fuente, "--sustituto", tipo,
+                      "--resuelve", resuelve)
+
     def hallazgo(self, linea, fuentes, *extra):
         salida = self.p("hallazgo", "--linea", linea, "--texto", "Hallazgo inventado", "--fuentes",
                         ",".join(fuentes), *extra)
@@ -151,6 +156,7 @@ class Base(unittest.TestCase):
                "--precio", "3,99 al mes", "--modelo", "suscripción", "--tamano-mb", "80")
         self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[1], "--descargas",
                "500k", "--precio", "gratis", "--modelo", "anuncios", "--tamano-mb", "120")
+        self.sustituto(fuentes[2])
         self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "Se buscó y no apareció")
         self.cerrar("1a", "01-investigacion/competencia.md")
         voz = self.linea("1b", "voz-del-usuario", "usuario", 1, "--competidores", "RiegoFácil,PlantaPlus")
@@ -207,7 +213,7 @@ class GuionTest(unittest.TestCase):
             elif isinstance(nodo, ast.ImportFrom):
                 modulos.add(nodo.module.split(".")[0])
         estandar = {"argparse", "contextlib", "csv", "io", "json", "math", "os", "re", "shlex", "shutil", "sys", "time",
-                    "unicodedata", "datetime", "pathlib", "urllib"}
+                    "unicodedata", "datetime", "pathlib", "urllib", "html"}
         self.assertEqual(modulos - estandar, set())
 
     def test_las_plantillas_no_tienen_rutas_locales_ni_correos(self):
@@ -740,6 +746,7 @@ class FlujoTest(Base):
         fuentes = self.fuente("competencia", 3, "medido")
         self.p("tipo", "--variante", "--motivo", "Hay directos, pero ninguno reparte turnos")
         self.p("competidor", "--nombre", "RiegoFácil", "--peldano", 1, "--fuentes", fuentes[0])
+        self.sustituto(fuentes[1])
         self.hallazgo("competencia", fuentes)
         self.assertNotIn("Sesión 1g", self.cerrar("1a", "01-investigacion/competencia.md").split("La sesión")[0])
         salida = self.linea("1b", "voz-del-usuario") and self.p("siguiente")
@@ -872,7 +879,8 @@ class IdeaNuevaTest(Base):
         for indice in range(analogos):
             self.p("competidor", "--nombre", "Turnos de limpieza %d" % indice, "--peldano", 3, "--fuentes",
                    fuentes[indice], "--descargas", "250k")
-        self.p("competidor", "--nombre", "Lista en el ascensor", "--peldano", 4, "--fuentes", fuentes[2])
+        self.p("competidor", "--nombre", "Lista en el ascensor", "--peldano", 4, "--fuentes", fuentes[2],
+               "--sustituto", "gratuito", "--resuelve", "parcial")
         self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "nada")
         extra = ["--fuentes", fuentes[0]] if intento != "sin-rastro" else []
         self.p("intento", "--resultado", intento, "--texto", "Se buscaron apps cerradas y post-mortems", *extra)
@@ -1104,7 +1112,7 @@ class ArchivoTest(Base):
             "reabrir", "--idea", "riego-en-turnos"))
         despues = sorted(str(p.relative_to(self.carpeta)) for p in self.carpeta.rglob("*") if p.is_file()
                          and "archivo" not in p.relative_to(self.carpeta).parts)
-        self.assertEqual(antes, despues)
+        self.assertEqual(sorted(antes + ["reporte.html"]), despues)  # archivar y reabrir regeneran el reporte
         self.assertIsNone(self.datos()["archivo"])
         self.assertEqual(len(self.datos("01-investigacion/demanda.json")["fuentes"]), 2)
 
