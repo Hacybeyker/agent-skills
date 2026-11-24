@@ -438,6 +438,15 @@ if args[0] == "logcat" and "-g" in args:  # 0.16.0 · B6: el tamaño de los buff
     print(os.environ.get("FAKE_LOGCAT_G", "main: ring buffer is 16 MiB (1 MiB consumed), max entry is 5120 B, max "
                                           "payload is 4068 B"))
     sys.exit(0)
+if args[0] == "pull" and "/hbperf-red/" in args[1] and os.environ.get("FAKE_RED_DIR"):
+    # 0.19.0 · V4: los archivos de la captura de red de la prueba
+    import shutil
+    shutil.copyfile(os.path.join(os.environ["FAKE_RED_DIR"], os.path.basename(args[1])), args[2])
+    sys.exit(0)
+if len(args) > 1 and args[0] == "shell" and args[1].startswith("ls ") and "hbperf-red" in args[1]:
+    if os.environ.get("FAKE_RED_DIR"):
+        print("\n".join(sorted(os.listdir(os.environ["FAKE_RED_DIR"]))))
+    sys.exit(0)
 if args[0] == "pull" and args[1].endswith("hbperf-elemento.xml") and os.environ.get("FAKE_PULL_ELEMENTO"):
     pathlib.Path(args[2]).write_text(os.environ["FAKE_PULL_ELEMENTO"], encoding="utf-8")  # 0.19.0 · P3: el volcado
     sys.exit(0)
@@ -538,6 +547,8 @@ elif cmd.startswith("screenrecord"):
     # 0.17.0 · V2: screenrecord --verbose dice cuándo armó la pantalla virtual (y termina enseguida: un solo tramo)
     print("Display is 1080x2400 @60.00fps (orientation=ROTATION_0), layerStack=0")
     print("Content area is 1080x2400 at offset x=0 y=0", flush=True)
+    if os.environ.get("FAKE_UPTIME"):  # 0.19.0 · V2: el uptime del dispositivo que imprime el mismo shell
+        print("%s 1000.00" % os.environ["FAKE_UPTIME"], flush=True)
 elif cmd.startswith("dumpsys meminfo"):
     # 0.15.0: FAKE_MEMINFO cambia la salida; con FAKE_MEMINFO_CRECE, las actividades suben en cada llamada (una fuga)
     if os.environ.get("FAKE_MEMINFO_CRECE"):
@@ -3820,7 +3831,8 @@ class NetworkWiringTest(DeviceBase):
         hooks = (module / "src/main/kotlin/com/ejemplo/perf/PerfHooks.kt").read_text(encoding="utf-8")
         self.assertIn("@JvmStatic\n    fun applyEventListener(", hooks)
         self.assertIn("factories.firstOrNull()?.let { builder.eventListenerFactory(it) }", hooks)
-        self.assertIn("import okhttp3.EventListener\nimport okhttp3.OkHttpClient\n", hooks)
+        # 0.19.0 · V4: también el interceptor de la prueba (null en release)
+        self.assertIn("import okhttp3.EventListener\nimport okhttp3.Interceptor\nimport okhttp3.OkHttpClient\n", hooks)
         self.assertNotIn("applyOkHttp", hooks)  # con Hilt no hay PerfHooks.okHttp
         test = (module / "src/testDebug/kotlin/com/ejemplo/perf/PerfHooksTest.kt").read_text(encoding="utf-8")
         self.assertIn("applyEventListenerLeavesTheBuilderAsIsWithAnEmptySet", test)

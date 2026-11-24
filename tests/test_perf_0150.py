@@ -765,7 +765,8 @@ class MeasurementCaptureTest(DeviceBase):
         self.assertTrue(page.is_file())
         self.assertIn("Video de la prueba: %s" % page, out)
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
-        self.assertIn('"screenrecord", "--verbose", "--time-limit", "180", "/sdcard/hbperf-prueba.mp4"', log)
+        # 0.19.0 · V2: el mismo shell imprime el uptime del dispositivo cuando screenrecord arma la pantalla
+        self.assertIn('"screenrecord --verbose --time-limit 180 /sdcard/hbperf-prueba.mp4 | while IFS= read -r l', log)
         # (el screenrecord falso termina solo: VIDEO_STOP lo prueba Fixes0151HelpersTest y en dispositivo se valida)
         self.assertIn("rm -f /sdcard/hbperf-prueba.mp4", log)
         ficha = (self.plan.parent / "ficha.md").read_text(encoding="utf-8")

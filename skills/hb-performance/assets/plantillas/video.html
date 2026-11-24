@@ -36,11 +36,11 @@
   /* El chip de una marca del plan: su papel (inicio o fin de un tramo) y, en letra menor, su nombre técnico. La
      ocurrencia que el plan no usa va atenuada, para que nunca parezca el borde de un tramo. */
   .marca { min-height:38px; display:flex; align-items:center; gap:8px; padding:4px 12px; visibility:hidden; }
+  /* Ningún texto se corta: el chip y su nombre técnico parten la línea si no caben. */
   .marca span { background:#fff3d6; color:#9a6400; border-radius:4px; padding:2px 8px; font-size:13px;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; min-width:0; }
+    overflow-wrap:anywhere; max-width:100%; min-width:0; }
   .marca.no span { background:#2a2d35; color:#9ca2ad; }
-  .marca small { color:#9ca2ad; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    flex:1 1 0; min-width:0; }
+  .marca small { color:#9ca2ad; font-size:11px; overflow-wrap:anywhere; flex:1 1 0; min-width:0; }
   video { width:100%; display:block; background:#000; max-height:70vh; }
   .pie { position:relative; padding-top:46px; }
   .leyenda { margin:0; padding:0 12px 10px; font-size:12px; line-height:1.5; color:#b3b8c2; }
@@ -54,7 +54,7 @@
   table { width:100%; border-collapse:collapse; font-size:14px; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
   th { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
-  td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+  td { overflow-wrap:anywhere; } td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
   td a { color:var(--accent); text-decoration:none; } td a:hover { text-decoration:underline; }
   tr.no td { color:var(--muted); }
   ul.capas { margin:0 0 12px; padding-left:18px; font-size:14px; }
@@ -63,11 +63,61 @@
     margin:0 0 12px; }
   .sub { color:var(--muted); font-size:14px; margin:0 0 12px; }
   footer { max-width:1080px; margin:0 auto; padding:0 16px 40px; color:var(--muted); font-size:13px; }
+  /* La red de la prueba, sincronizada con el video */
+  :root { --cola:#9aa3b2; --con:#e5a23a; --ttfb:#4a7ee6; --desc:#2fa56b; --curso:#eaf1ff; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  :root[data-theme="dark"] { --curso:#1f2c45; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --curso:#1f2c45; } }
+  .ancho { grid-column:1 / -1; }
+  .credenciales { background:var(--warn-soft); border:1px solid var(--warn); border-radius:10px; padding:10px 14px; font-size:14px; }
+  .ahora { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr)); gap:12px; }
+  .dato { font-size:12px; color:var(--muted); } .valor { font-size:17px; font-weight:600; overflow-wrap:anywhere; }
+  .tiempo { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .encurso { grid-column:1 / -1; } .encurso ul { list-style:none; margin:6px 0 0; padding:0; }
+  .encurso li { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:baseline; padding:6px 8px; border-radius:8px;
+    background:var(--curso); margin-bottom:6px; font-family:var(--mono); font-size:12px; }
+  .encurso li span { overflow-wrap:anywhere; min-width:0; } .encurso .fasered { margin-left:auto; font-family:inherit; color:var(--muted); }
+  #pista { position:relative; height:58px; border-radius:8px; background:var(--soft); cursor:pointer; user-select:none;
+    border:1px solid var(--border); margin-top:6px; touch-action:none; overflow:hidden; }
+  .banda { position:absolute; top:0; bottom:0; border-right:1px dashed var(--border); opacity:.35; }
+  .llam { position:absolute; bottom:4px; width:2px; height:14px; background:var(--ttfb); }
+  .ev { position:absolute; top:4px; width:2px; height:22px; }
+  .ev.TAP { background:#bf3a2f; } .ev.NAV { background:#6b3fd6; } .ev.MARK { background:#9a6400; }
+  #cabezal2 { position:absolute; top:0; bottom:0; width:2px; background:#e5484d; pointer-events:none; }
+  .leyenda2 { display:flex; gap:6px 14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:8px; }
+  .leyenda2 i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  .herr { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .herr input[type=search] { flex:1 1 180px; min-width:0; font:inherit; color:inherit; background:var(--surface);
+    border:1px solid var(--border); border-radius:8px; padding:4px 10px; }
+  button.b.activo { background:var(--accent); color:#fff; }
+  .fila { display:grid; grid-template-columns:34px 58px minmax(0,1.6fr) 64px 72px 48px 70px minmax(min(120px,100%),1fr); gap:8px;
+    align-items:center; padding:7px 8px; border-bottom:1px solid var(--border); cursor:pointer; font-size:12px; }
+  .fila.cabecera { cursor:default; font-size:11px; color:var(--muted); }
+  .fila.futura { opacity:.5; } .fila.curso { background:var(--curso); }
+  .fila .ruta { font-family:var(--mono); overflow-wrap:anywhere; word-break:break-all; min-width:0; }
+  .met, .st { font-family:var(--mono); font-weight:600; } .s2 { color:#2fa56b; } .s3 { color:#4a7ee6; } .s4, .s5, .sx { color:#e5484d; }
+  .num2 { font-family:var(--mono); text-align:right; white-space:nowrap; }
+  .cascada { position:relative; height:14px; background:var(--soft); border-radius:3px; overflow:hidden; }
+  .seg { position:absolute; top:2px; bottom:2px; border-radius:2px; }
+  @media (max-width: 820px) {
+    .fila { grid-template-columns:auto auto minmax(0,1fr); }
+    .fila .ruta { grid-column:1 / -1; } .fila .cascada { grid-column:1 / -1; } .fila.cabecera { display:none; }
+  }
+  .separador { padding:6px 8px; font-size:12px; font-weight:600; color:var(--muted); background:var(--soft);
+    border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+  .detalle { padding:10px 12px 14px; border-bottom:1px solid var(--border); background:var(--surface); }
+  .url { font-family:var(--mono); font-size:12px; word-break:break-all; margin-bottom:8px; }
+  .pest { display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+  table.hdr { font-family:var(--mono); font-size:12px; table-layout:fixed; }
+  table.hdr td { word-break:break-all; padding:2px 8px 2px 0; } table.hdr td:first-child { color:var(--muted); width:30%; }
+  pre.cuerpo { margin:0; padding:10px; background:var(--soft); border-radius:8px; font:12px/1.4 var(--mono);
+    white-space:pre-wrap; word-break:break-all; max-height:420px; overflow-y:auto; }
+  .tiempos { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(110px,100%),1fr)); gap:8px; }
 </style>
 </head>
 <body>
 <header><div class="inner"><button class="theme-btn" id="theme-btn" type="button">Tema</button><p class="kicker">{{PROJECT}}</p><h1>{{TITLE}}</h1><p>La corrida de prueba completa, desde que se abre la app hasta el final. No cuenta como medición: sirve para ver qué se va a medir.</p></div></header>
 <main>
+<div class="credenciales ancho" id="credenciales"><strong>Contiene credenciales y datos reales de la prueba: no compartir fuera del equipo.</strong> Los headers (también <code>Authorization</code> y las cookies) y los cuerpos van tal cual, y el video puede mostrar datos de la cuenta de prueba. Esta página nunca va en los reportes de gerencia.</div>
 <div class="player" id="player">
   <div class="fase" id="fase">—</div>
   <div class="marca" id="chip"><span id="marca"></span><small id="marca-nombre"></small></div>
@@ -88,6 +138,33 @@
   <h2 style="margin-top:16px">Marcas del plan</h2>
   <p class="sub">Cada marca es un instante. Su papel dice qué tramo empieza o termina ahí; «(no usada)» es una vez que la marca salió y el plan no la usa.</p>
   <table><thead><tr><th>Momento</th><th>Marca</th><th>Papel</th></tr></thead><tbody id="marcas"></tbody></table>
+</section>
+<section class="ancho" id="panel-ahora" hidden>
+  <h2>Ahora</h2>
+  <div class="ahora">
+    <div><div class="dato">Tiempo del video</div><div class="valor tiempo" id="tVideo">0.00 s</div><div class="dato tiempo" id="tTraza"></div></div>
+    <div><div class="dato">Parte de la prueba</div><div class="valor" id="tramoAct">—</div><div class="dato" id="tramoRes"></div></div>
+    <div><div class="dato">Último evento</div><div class="valor tiempo" id="evento">—</div></div>
+    <div class="encurso"><div class="dato">Llamadas en curso</div><ul id="enCurso"></ul></div>
+  </div>
+  <div id="pista" aria-label="Línea de tiempo de la prueba: arrastra para moverte"><div id="cabezal2"></div></div>
+  <div class="leyenda2"><span><i style="background:var(--cola)"></i>En cola</span><span><i style="background:var(--con)"></i>Conexión (DNS, TCP, TLS)</span><span><i style="background:var(--ttfb)"></i>Esperando respuesta (TTFB)</span><span><i style="background:var(--desc)"></i>Descarga</span><span><i style="background:#bf3a2f"></i>TAP</span><span><i style="background:#6b3fd6"></i>NAV</span><span><i style="background:#9a6400"></i>MARK</span></div>
+  <p class="sub" id="sincronia" style="margin-top:8px"></p>
+  <p class="sub">Espacio: reproducir o pausar · ← →: ±100 ms</p>
+</section>
+<section class="ancho" id="panel-red" hidden>
+  <h2>Servicios invocados, en orden</h2>
+  <p class="sub" id="redResumen"></p>
+  <div class="herr">
+    <button class="b activo" type="button" data-f="todas">Todas</button>
+    <button class="b" type="button" data-f="curso">En curso</button>
+    <button class="b" type="button" data-f="tramo">Parte actual</button>
+    <input type="search" id="buscar" placeholder="Filtrar por ruta, método o código">
+    <label class="dato"><input type="checkbox" id="seguir" checked> Seguir la reproducción</label>
+  </div>
+  <div class="fila cabecera"><span>#</span><span>Método</span><span>Ruta</span><span class="num2">Inicio</span><span class="num2">Duración</span><span>Código</span><span class="num2">Tamaño</span><span>Cascada</span></div>
+  <div id="lista"></div>
+  <p class="sub" style="margin-top:8px">Clic en una fila: el video salta a ese momento y se abre el detalle con el request y el response completos.</p>
 </section>
 </main>
 <footer>Generado por hb-performance a partir de <code>video/&lt;flujo&gt;/eventos.json</code>. Los tramos de video están en <code>video/&lt;flujo&gt;/</code>, junto a este archivo; si no se ven, abre la página desde la carpeta de la investigación, sin moverla. {{DATE}}.</footer>
@@ -188,7 +265,158 @@
   var q = new URLSearchParams(location.search).get("t");
   if (q !== null && !isNaN(parseFloat(q))) seek(Math.max(0, Math.min(parseFloat(q), D)), false); else load(0, 0, false);
   window.hbVideo = {eventos: EV, ahora: now, saltar: seek};
+  red(EV, v, now, seek);
 })();
+// El panel de red bajo el video. Los tiempos salen de la traza (HTTP, QUEUE, CONN y TTFB) y el request y
+// el response, de la captura de la prueba (red/prueba/NNNN-*.json), tal cual.
+function red(EV, v, now, seek) {
+  var calls = EV.red || [], evs = EV.eventos_traza || [], D = EV.duracion, sync = EV.sincronia || {};
+  if (!EV.red) return;
+  document.getElementById("panel-ahora").hidden = false;
+  document.getElementById("panel-red").hidden = false;
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, txt) { var x = document.createElement(tag); if (cls) x.className = cls; if (txt !== undefined) x.textContent = txt; return x; }
+  function s2(t) { return t === null || t === undefined ? "—" : t.toFixed(2) + " s"; }
+  function pct(t) { return Math.max(0, Math.min(100, t / D * 100)) + "%"; }
+  function kb(b) { return b === null || b === undefined ? "—" : b >= 1024 ? (b / 1024).toFixed(1) + " KB" : b + " B"; }
+  function fin(c) { return c.inicio === null ? null : c.inicio + (c.dur || 0) / 1000; }
+  var r = EV.red_resumen || {};
+  $("redResumen").textContent = calls.length + (calls.length === 1 ? " llamada" : " llamadas") + (r.captura ?
+    " · " + r.con_captura + " de " + r.secciones + " secciones HTTP con su request y su response" + (r.fuera_traza ? " · " + r.fuera_traza + " capturadas fuera de la traza (antes de que arrancara)" : "") :
+    " · sin captura del request y el response (el setup no tiene el interceptor de la prueba): solo los tiempos de la traza");
+  $("sincronia").textContent = "Sincronía traza ↔ video: " + (sync.estado || "sin dato") + (sync.desfase_ms !== undefined ?
+    " · desfase " + sync.desfase_ms + " ms en " + sync.marca + " (tolerancia ±" + sync.tolerancia_ms + " ms)" : "") +
+    (sync.metodo ? " · " + sync.metodo : "") + (sync.detalle ? " · " + sync.detalle : "");
+  var pista = $("pista"), cab = $("cabezal2");
+  (EV.fases || []).forEach(function (f) { var b = el("div", "banda"); b.style.left = pct(f.desde); b.style.width = pct(f.hasta - f.desde); b.style.background = f.tipo === "med" ? "var(--accent)" : "transparent"; b.title = f.rotulo; pista.appendChild(b); });
+  calls.forEach(function (c) { if (c.inicio === null) return; var m = el("div", "llam"); m.style.left = pct(c.inicio); m.title = c.metodo + " " + c.ruta; pista.appendChild(m); });
+  evs.forEach(function (e) { var m = el("div", "ev " + e.tipo); m.style.left = pct(e.t); m.title = e.tipo + (e.nombre ? " " + e.nombre : "") + " · " + s2(e.t); pista.appendChild(m); });
+  pista.appendChild(cab);
+  var drag = false;
+  function fromPista(ev) { var b = pista.getBoundingClientRect(); seek(Math.max(0, Math.min(D, (ev.clientX - b.left) / b.width * D)), false); }
+  pista.addEventListener("pointerdown", function (ev) { drag = true; try { pista.setPointerCapture(ev.pointerId); } catch (x) {} fromPista(ev); });
+  pista.addEventListener("pointermove", function (ev) { if (drag) fromPista(ev); });
+  pista.addEventListener("pointerup", function () { drag = false; });
+  var lista = $("lista"), filas = [], prev = null, filtro = "todas", ultimo = -1;
+  calls.forEach(function (c, i) {
+    var grupo = c.fuera_traza ? "Fuera de la traza" : (c.tramo || "—");
+    if (grupo !== prev) { var sep = el("div", "separador", grupo); sep.dataset.grupo = grupo; lista.appendChild(sep); prev = grupo; }
+    var f = el("div", "fila futura"); f.tabIndex = 0;
+    f.appendChild(el("span", "num2", String(c.n || "·")));
+    f.appendChild(el("span", "met", c.metodo || "—"));
+    var ruta = el("span", "ruta", c.ruta || c.endpoint || "—"); ruta.title = c.url || c.endpoint || ""; f.appendChild(ruta);
+    f.appendChild(el("span", "num2", s2(c.inicio)));
+    f.appendChild(el("span", "num2", c.dur === null || c.dur === undefined ? "—" : Math.round(c.dur) + " ms"));
+    f.appendChild(el("span", "st s" + (c.codigo ? String(c.codigo)[0] : (c.error ? "x" : "")), c.codigo ? String(c.codigo) : (c.error ? "error" : "—")));
+    f.appendChild(el("span", "num2", kb(c.bytes)));
+    var cas = el("div", "cascada"), x = 0, total = Math.max(c.dur || 0, 1);
+    [["cola", c.cola], ["con", c.con], ["ttfb", c.ttfb], ["desc", c.desc]].forEach(function (p) { if (p[1] > 0) { var sg = el("div", "seg"); sg.style.left = (x / total * 100) + "%"; sg.style.width = Math.max(p[1] / total * 100, 2) + "%"; sg.style.background = "var(--" + p[0] + ")"; cas.appendChild(sg); x += p[1]; } });
+    f.appendChild(cas);
+    var d = el("div", "detalle"); d.hidden = true;
+    f.addEventListener("click", function () { if (c.inicio !== null) seek(Math.max(0, c.inicio - 0.15), false); abrir(c, d); });
+    f.addEventListener("keydown", function (ev) { if (ev.key === "Enter") f.click(); });
+    lista.appendChild(f); lista.appendChild(d);
+    filas.push({c: c, f: f, d: d, grupo: grupo, estado: "futura"});
+  });
+  function tabla(pares) {
+    var t = el("table", "hdr"), b = document.createElement("tbody");
+    (pares || []).forEach(function (p) { var tr = document.createElement("tr"); tr.appendChild(el("td", "", p[0])); tr.appendChild(el("td", "", p[1])); b.appendChild(tr); });
+    t.appendChild(b); return t;
+  }
+  var LINEAS = 40;
+  function cuerpo(lado, archivo) {
+    var w = el("div");
+    if (!lado) { w.appendChild(el("p", "sub", "Sin captura de este lado.")); return w; }
+    w.appendChild(tabla(lado.headers));
+    if (lado.binario) { var p = el("p", "sub", "Cuerpo binario (" + kb(lado.bytes) + "): no se muestra en línea; está en "); var a = el("a", "", lado.binario); a.href = lado.binario; p.appendChild(a); w.appendChild(p); return w; }
+    if (lado.cuerpo === undefined || lado.cuerpo === null) { w.appendChild(el("p", "sub", "(sin cuerpo)")); return w; }
+    var texto = lado.cuerpo;
+    try { texto = JSON.stringify(JSON.parse(lado.cuerpo), null, 2); } catch (x) {}
+    var lineas = texto.split("\n"), pre = el("pre", "cuerpo");
+    if (lineas.length <= LINEAS && !lado.truncado) { pre.textContent = texto; w.appendChild(pre); return w; }
+    pre.textContent = lineas.slice(0, LINEAS).join("\n") + "\n… (" + Math.max(lineas.length - LINEAS, 0) + " líneas más)";
+    w.appendChild(pre);
+    var nota = el("p", "sub"), ver = el("button", "b", "Ver todo"); ver.type = "button";
+    ver.addEventListener("click", function () { pre.textContent = texto; ver.remove(); });
+    nota.appendChild(ver); nota.appendChild(document.createTextNode(" · completo en " + archivo + (lado.truncado ? " (aquí, los primeros caracteres)" : "")));
+    w.appendChild(nota);
+    return w;
+  }
+  function curl(c) {
+    var q = function (t) { return "'" + String(t).replace(/'/g, "'\\''") + "'"; };
+    var s = "curl -X " + c.metodo + " " + q(c.url || c.ruta);
+    ((c.req || {}).headers || []).forEach(function (h) { if (!/^(host|content-length)$/i.test(h[0])) s += " \\\n  -H " + q(h[0] + ": " + h[1]); });
+    if (c.req && typeof c.req.cuerpo === "string" && c.req.cuerpo) s += " \\\n  --data-raw " + q(c.req.cuerpo);
+    return s;
+  }
+  function abrir(c, d) {
+    if (!d.hidden) { d.hidden = true; return; }
+    if (!d.dataset.listo) {
+      d.appendChild(el("div", "url", (c.metodo || "") + " " + (c.url || c.ruta || c.endpoint)));
+      var pest = el("div", "pest"), paneles = {};
+      [["req", "Request"], ["res", "Response" + (c.codigo ? " · " + c.codigo : "")], ["tie", "Tiempos"]].forEach(function (p, i) {
+        var b = el("button", "b" + (i === 0 ? " activo" : ""), p[1]); b.type = "button";
+        b.addEventListener("click", function () { Object.keys(paneles).forEach(function (k) { paneles[k].hidden = k !== p[0]; }); pest.querySelectorAll("button[data-p]").forEach(function (x) { x.classList.toggle("activo", x === b); }); });
+        b.dataset.p = p[0]; pest.appendChild(b);
+      });
+      var cp = el("button", "b", "Copiar como cURL"); cp.type = "button";
+      cp.addEventListener("click", function () { var t = curl(c); try { navigator.clipboard.writeText(t).then(function () { cp.textContent = "Copiado ✓"; }, function () { cp.textContent = "No se pudo copiar"; }); } catch (x) { cp.textContent = "No se pudo copiar"; } });
+      pest.appendChild(cp); d.appendChild(pest);
+      paneles.req = cuerpo(c.req, (c.archivo || "red/prueba/") + "-request.json");
+      paneles.res = cuerpo(c.res, (c.archivo || "red/prueba/") + "-response.json");
+      if (c.error) paneles.res.insertBefore(el("p", "sub", "Error: " + c.error), paneles.res.firstChild);
+      paneles.tie = el("div", "tiempos");
+      [["Inicio", s2(c.inicio)], ["En cola", c.cola + " ms"], ["Conexión", c.con + " ms"], ["TTFB", c.ttfb + " ms"], ["Descarga", c.desc + " ms"], ["Total", c.dur === null ? "—" : c.dur + " ms"], ["Parte", c.tramo || "—"], ["Sección", "HTTP " + (c.endpoint || "")]].forEach(function (p) {
+        var x = el("div"); x.appendChild(el("div", "dato", p[0])); x.appendChild(el("div", "tiempo", p[1])); paneles.tie.appendChild(x); });
+      paneles.res.hidden = true; paneles.tie.hidden = true;
+      d.appendChild(paneles.req); d.appendChild(paneles.res); d.appendChild(paneles.tie);
+      d.dataset.listo = "1";
+    }
+    d.hidden = false;
+  }
+  var buscar = $("buscar"), seguir = $("seguir");
+  function pintar() {
+    var t = Math.min(now(), D);
+    cab.style.left = pct(t);
+    $("tVideo").textContent = s2(t);
+    $("tTraza").textContent = sync.uptime_inicio_s ? "Traza (uptime del dispositivo): " + (sync.uptime_inicio_s + t).toFixed(3) + " s" : "";
+    var parte = (EV.fases || []).filter(function (f) { return t >= f.desde && t < f.hasta; })[0] || (EV.fases || [])[EV.fases.length - 1] || {};
+    $("tramoAct").textContent = parte.rotulo || "—";
+    var deParte = calls.filter(function (c) { return c.tramo === parte.rotulo; });
+    $("tramoRes").textContent = deParte.length + (deParte.length === 1 ? " llamada" : " llamadas");
+    var ev = evs.filter(function (e) { return e.t <= t; }).pop();
+    $("evento").textContent = ev ? ev.tipo + (ev.nombre ? " " + ev.nombre : "") + " · " + s2(ev.t) : "—";
+    var ul = $("enCurso"); ul.textContent = "";
+    var enCurso = calls.filter(function (c) { return c.inicio !== null && t >= c.inicio && t < fin(c); });
+    if (!enCurso.length) ul.appendChild(el("li", "", "Ninguna"));
+    enCurso.forEach(function (c) {
+      var ms = (t - c.inicio) * 1000, fase = ms < c.cola ? "en cola" : ms < c.cola + c.con ? "conectando" : ms < c.cola + c.con + c.ttfb ? "esperando respuesta" : "descargando";
+      var li = el("li"); li.appendChild(el("strong", "", c.metodo)); li.appendChild(el("span", "", c.ruta)); li.appendChild(el("span", "fasered", fase + " · " + Math.round(ms) + " / " + Math.round(c.dur) + " ms")); ul.appendChild(li); });
+    var q = buscar.value.trim().toLowerCase(), nuevo = null;
+    filas.forEach(function (o) {
+      var est = o.c.inicio === null ? "hecha" : t < o.c.inicio ? "futura" : t < fin(o.c) ? "curso" : "hecha";
+      if (est !== o.estado) { o.f.classList.toggle("futura", est === "futura"); o.f.classList.toggle("curso", est === "curso"); if (est === "curso" && o.c.inicio > ultimo) nuevo = o; o.estado = est; }
+      var texto = ((o.c.metodo || "") + " " + (o.c.url || o.c.ruta || "") + " " + (o.c.codigo || "")).toLowerCase();
+      var pasa = filtro === "todas" || (filtro === "curso" && est === "curso") || (filtro === "tramo" && o.c.tramo === parte.rotulo);
+      o.f.hidden = !(pasa && (!q || texto.indexOf(q) >= 0));
+      if (o.f.hidden) o.d.hidden = true;
+    });
+    lista.querySelectorAll(".separador").forEach(function (s) { s.hidden = !filas.some(function (o) { return o.grupo === s.dataset.grupo && !o.f.hidden; }); });
+    if (nuevo && !v.paused && seguir.checked) { ultimo = nuevo.c.inicio; nuevo.f.scrollIntoView({block: "nearest"}); }
+  }
+  document.querySelectorAll("[data-f]").forEach(function (b) { b.addEventListener("click", function () { filtro = b.dataset.f; document.querySelectorAll("[data-f]").forEach(function (x) { x.classList.toggle("activo", x === b); }); pintar(); }); });
+  buscar.addEventListener("input", pintar);
+  v.addEventListener("timeupdate", pintar); v.addEventListener("seeked", pintar);
+  (function bucle() { if (!v.paused) pintar(); requestAnimationFrame(bucle); })();
+  document.addEventListener("keydown", function (ev) {
+    if (ev.target.matches && ev.target.matches("input,select,textarea,button")) return;
+    if (ev.code === "Space") { ev.preventDefault(); if (v.paused) v.play(); else v.pause(); }
+    if (ev.key === "ArrowRight") seek(Math.min(D, now() + 0.1), false);
+    if (ev.key === "ArrowLeft") seek(Math.max(0, now() - 0.1), false);
+  });
+  window.hbRed = {llamadas: calls, filas: filas, pintar: pintar};
+  pintar();
+}
 </script>
 </body>
 </html>

@@ -160,6 +160,8 @@ Al final imprime, **con el paquete ya puesto**, los fragmentos que solo puedes p
 
 ## Red: conectar cada builder
 
+**El interceptor de la prueba (0.19.0).** Con red, `instrumentar` genera también `TestNetworkCapture.kt` (en el source set de medición) y lo engancha por el mismo cableado: `PerfHooks.applyEventListener(builder, factories)` y `PerfHooks.okHttp` lo agregan como *network interceptor* desde `PerfInstaller` (en release, `PerfHooks.networkInterceptor` es `null` y no se agrega nada). Solo escribe durante `capturar --prueba` (la red sincronizada con el video, [ficha.md](ficha.md) · Recorrido en palabras y video de la prueba); en las fases medidas pasa cada llamada sin leer nada. Un setup anterior lo suma con `instrumentar --actualizar`, y va en el parche del setup como los demás archivos generados.
+
 1. **Lista dónde se construyen los clientes**, en los módulos de la app y en los que `settings.gradle(.kts)` incluye desde otras carpetas (`instrumentar` ya imprime los que encontró, con `archivo:línea`, en el fragmento de red):
    ```bash
    cd <raíz-del-proyecto> && grep -rnE 'OkHttpClient\.Builder\(|OkHttpClient\(\)|\.newBuilder\(\)' --include='*.kt' --include='*.java' --exclude-dir=build --exclude-dir=test --exclude-dir='test[A-Z]*' --exclude-dir=androidTest --exclude-dir='androidTest[A-Z]*' --exclude-dir=testFixtures . | head -40

@@ -13582,6 +13582,10 @@ VIDEO_REMOTE = "/sdcard/hbperf-prueba.mp4"
 # 0.15.1: SIGINT solo al screenrecord que graba ese archivo (no a una grabación que el usuario tenga abierta). El "[s]"
 # evita que el patrón coincida con la línea de comandos del propio shell que corre pkill.
 VIDEO_STOP = "pkill -INT -f '[s]creenrecord .*%s'" % VIDEO_REMOTE.replace(".", "[.]")
+# 0.19.0 · V2: screenrecord con su salida tal cual y, después de "Content area is …", una línea con /proc/uptime
+VIDEO_UPTIME_PIPE = ("screenrecord --verbose --time-limit %d %s | while IFS= read -r l; do echo \"$l\"; "
+                     "case \"$l\" in *\"ontent area is\"*) cat /proc/uptime;; esac; done")
+UPTIME_LINE = re.compile(r"^(\d+(?:\.\d+)?)\s+\d+(?:\.\d+)?$")
 VIDEO_SEGMENTS_MAX = 10  # C10: hasta 10 segmentos de 180 s (30 minutos) por prueba; más allá, el video se corta y se dice
 
 
@@ -13608,6 +13612,7 @@ class VideoChain:
         self.adb, self.limit = adb, int(limit)
         self.remotes, self.process, self.started, self.stopping, self.cut, self.thread = [], None, 0.0, False, False, None
         self.launched, self.exact, self.ended, self.later = [], [], None, None
+        self.uptimes = []  # 0.19.0 · V2: el uptime del dispositivo (reloj de la traza) al armar cada tramo
         self.lock = threading.Lock()
 
     def remote(self, number):
@@ -13619,21 +13624,26 @@ class VideoChain:
 
     def _begin(self):
         remote = self.remote(len(self.remotes) + 1)
-        self.process = subprocess.Popen(self.adb.base + ["shell", "screenrecord", "--verbose", "--time-limit",
-                                                         str(self.limit), remote],
+        # 0.19.0 · V2: el mismo shell del dispositivo imprime /proc/uptime (CLOCK_BOOTTIME, el reloj de la traza) apenas
+        # screenrecord dice que armó la pantalla virtual: el inicio del tramo en el reloj de la traza, sin la demora de adb
+        self.process = subprocess.Popen(self.adb.base + ["shell", VIDEO_UPTIME_PIPE % (self.limit, remote)],
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.started = time.time()
         self.remotes.append(remote)
         self.launched.append(self.started)
         self.exact.append(None)
+        self.uptimes.append(None)
         threading.Thread(target=self._read, args=(self.process, len(self.exact) - 1), daemon=True).start()
 
     def _read(self, process, index):
         """V2: el momento en que `screenrecord` armó la pantalla virtual (el primer cuadro sale enseguida)."""
         try:
             for raw in iter(process.stdout.readline, b""):
-                if self.exact[index] is None and VIDEO_CONTENT.match(raw.decode("utf-8", "replace").strip()):
+                line = raw.decode("utf-8", "replace").strip()
+                if self.exact[index] is None and VIDEO_CONTENT.match(line):
                     self.exact[index] = time.time()
+                elif self.exact[index] is not None and self.uptimes[index] is None and UPTIME_LINE.match(line):
+                    self.uptimes[index] = float(UPTIME_LINE.match(line).group(1))
         except (OSError, ValueError):
             pass
         finally:
@@ -14602,6 +14612,7 @@ class TestVideo:
         self.collected = self.assembled = False
         self.rows, self.clock_rows, self.note = None, [], ""
         self.starts, self.precise, self.ended = [], False, None
+        self.convert, self.net, self.net_files = None, False, 0  # 0.19.0 · V2 y V4
 
     def start(self):
         """Empieza a grabar (scrcpy si el plan lo pide y arranca; si no, screenrecord). None si no se pudo: la prueba
@@ -14625,6 +14636,16 @@ class TestVideo:
             print("· No pude empezar a grabar el video de la prueba (adb shell screenrecord): la prueba sigue sin video; "
                   "míralo en el dispositivo mientras corre")
             return None
+        package = str(self.plan.get("paquete") or "")
+        if package and net_capture_present(project_root(self.folder).resolve()):
+            try:  # V4: solo en esta corrida; las fases medidas nunca la activan
+                net_capture_on(self.adb, package)
+                self.net = True
+                print("· Red de la prueba: guardo el request y el response completos de cada llamada (solo en esta "
+                      "corrida; quedan en red/prueba/ y en la página del video)")
+            except (OSError, PerfError, subprocess.SubprocessError):
+                print("· No pude activar la captura de red de la prueba: la página del video sale con los tiempos de la "
+                      "traza, sin el request ni el response")
         return self
 
     def mark(self, name):
@@ -14649,6 +14670,12 @@ class TestVideo:
             self.recorder.stop_recording()  # sin carpeta no hay dónde bajarlo, pero no queda grabando en el dispositivo
             return
         pulled = self.recorder.stop(names=lambda number: target / ("parte%d.mp4" % number))
+        if self.net:  # V4: se apaga siempre, y lo capturado se baja a red/prueba/
+            try:
+                net_capture_off(self.adb, str(self.plan.get("paquete")))
+                self.net_files = net_capture_pull(self.adb, str(self.plan.get("paquete")), self.folder)
+            except (OSError, PerfError, subprocess.SubprocessError):
+                pass
         starts, self.precise = self.recorder.starts()
         for part in pulled:
             found = re.match(r"parte(\d+)\.mp4$", part.name)
@@ -14670,6 +14697,7 @@ class TestVideo:
             return [], [], {"marcas": "sin traza", "detalle": "la corrida no llegó a procesar su traza: los rótulos son "
                                                               "los de la computadora (preparación, medición y fin)"}
         convert, state, detail = trace_clock(self.rows, self.clock_rows, self.offset, self.clock.get("traza"))
+        self.convert = convert
         if convert is None:
             return [], [], {"marcas": "falló", "detalle": detail}
         spans, marks = video_trace_events(self.rows, self.flow, self.flow_name, convert)
@@ -14702,6 +14730,7 @@ class TestVideo:
         relative = [part.relative_to(self.folder) for part in self.parts]
         events = video_events(self.flow_name, self.recorder.kind, relative, self.starts, self.ended, self.clock, spans,
                               marks, aligned, flow_words(self.flow, self.flow_name))
+        events.update(test_network_events(self, events))  # 0.19.0 · V: la red de la prueba, sincronizada
         lines = write_test_video(self.folder, self.flow_name, events, self.plan, self.flow, join=not quick)
         if getattr(self.recorder, "cut", False):
             lines.append("· El video se cortó a los %d s: es el tope del video de la prueba (%s); lo que siguió no quedó "
@@ -14709,6 +14738,234 @@ class TestVideo:
                                       if self.recorder.kind == "screenrecord" else "--time-limit de scrcpy"))
         for line in lines:
             print(line)
+
+
+# ── 0.19.0 · V: la red de la prueba, sincronizada con su video ───────────────
+# Solo en la corrida de prueba (la que tiene video). El reloj: el uptime del dispositivo (CLOCK_BOOTTIME, el de la traza)
+# en el instante en que screenrecord arma el primer tramo, así un instante de la traza es un instante del video sin
+# pasar por la computadora; se valida contra el otro camino (la hora del dispositivo y el ClockSnapshot de la traza) en
+# una marca conocida (MARK o NAV). Los tiempos de cada llamada salen de las secciones HTTP, QUEUE, CONN y TTFB de la
+# traza; el request y el response, de lo que escribió TestNetworkCapture (red/prueba/NNNN-*.json), tal cual.
+NET_DIR = "hbperf-red"
+NET_FLAG = "ACTIVA"
+NET_FILE = re.compile(r"^\d{4}-(?:request|response)\.(?:json|bin)$")
+SYNC_TOLERANCE_S = 0.1
+BODY_EMBED_MAX = 200000  # caracteres de un cuerpo que la página lleva incrustados; el resto, en su archivo
+TRACE_EVENTS_MAX = 300
+SYNC_FILE = "sincronia.json"
+
+
+def net_remote(package):
+    """La carpeta de la captura en el dispositivo: la de archivos externos de la app (adb la lee sin root)."""
+    return "/sdcard/Android/data/%s/files/%s" % (package, NET_DIR)
+
+
+def net_capture_present(root):
+    """True si el setup del proyecto trae el interceptor de la prueba (TestNetworkCapture, de 0.19.0)."""
+    return find_generated(root, "TestNetworkCapture.kt")
+
+
+def net_capture_on(adb, package):
+    remote = net_remote(package)
+    adb.shell("mkdir -p %s && rm -f %s/*.json %s/*.bin && touch %s/%s" % (remote, remote, remote, remote, NET_FLAG),
+              timeout=20)
+
+
+def net_capture_off(adb, package):
+    adb.shell("rm -f %s/%s" % (net_remote(package), NET_FLAG), timeout=20)
+
+
+def net_capture_pull(adb, package, folder):
+    """Baja la captura a <carpeta>/red/prueba/ (reemplaza la de una prueba anterior) y la borra del dispositivo."""
+    remote = net_remote(package)
+    names = [name.strip() for name in adb.shell("ls %s" % remote, timeout=20).stdout.splitlines()
+             if NET_FILE.match(name.strip())]
+    local = pathlib.Path(folder) / "red" / "prueba"
+    local.mkdir(parents=True, exist_ok=True)
+    for old in local.iterdir():
+        if NET_FILE.match(old.name):
+            old.unlink()
+    for name in names:
+        adb.run("pull", "%s/%s" % (remote, name), str(local / name), timeout=120)
+    if names:
+        adb.shell("rm -f %s/*.json %s/*.bin" % (remote, remote), timeout=20)
+    return len(names)
+
+
+def test_sync(video):
+    """V2: (función ns de la traza → segundos del video, sincronía). El uptime al armar el primer tramo da el camino
+    directo; el otro (hora del dispositivo y ClockSnapshot) lo valida en la primera marca MARK o NAV de la traza."""
+    origin = video.starts[0] if video.starts else None
+    uptime = (getattr(video.recorder, "uptimes", None) or [None])[0]
+    direct = (lambda ns, u=uptime: ns / 1e9 - u) if uptime is not None else None
+    other = (lambda ns, o=origin: video.convert(ns) - o) if video.convert is not None and origin is not None else None
+    known = next((row for row in sorted(video.rows or [], key=lambda row: row[1])
+                  if row[0] == "seccion" and str(row[4]).startswith(("MARK ", "NAV "))), None)
+    sync = {"tolerancia_ms": int(SYNC_TOLERANCE_S * 1000), "uptime_inicio_s": uptime,
+            "metodo": "uptime del dispositivo al armar el primer tramo de screenrecord" if direct else
+            "hora del dispositivo (date) y ClockSnapshot de la traza" if other else "ninguno"}
+    if direct and other and known:
+        gap = direct(known[1]) - other(known[1])
+        sync.update(desfase_ms=int(round(gap * 1000)), marca=known[4],
+                    estado="validada" if abs(gap) <= SYNC_TOLERANCE_S else "fuera de tolerancia")
+    elif direct or other:
+        sync.update(estado="sin validar", detalle=(
+            "no hay una marca MARK ni NAV en la traza para comprobarla" if not known else
+            "falta el otro reloj para comprobarla (%s)" % ("la hora del dispositivo o el ClockSnapshot de la traza"
+                                                         if direct else "screenrecord no dio el uptime del dispositivo")))
+    else:
+        sync.update(estado="sin sincronía", detalle="ni el uptime del dispositivo ni la hora de la traza: los tiempos "
+                                                     "de la red no se ubican en el video")
+    return direct or other, sync
+
+
+def read_network_records(folder):
+    """{id: {"request": …, "response": …}} de red/prueba/ (lo que escribió TestNetworkCapture)."""
+    out = {}
+    base = pathlib.Path(folder) / "red" / "prueba"
+    for path in sorted(base.glob("*.json")) if base.is_dir() else []:
+        found = re.match(r"^(\d{4})-(request|response)\.json$", path.name)
+        if not found:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out.setdefault(found.group(1), {})[found.group(2)] = data
+    return out
+
+
+def body_view(data, folder_rel):
+    """Lo que la página muestra de un lado (request o response): los headers tal cual y el cuerpo incrustado hasta
+    BODY_EMBED_MAX caracteres; un cuerpo binario, solo el nombre de su archivo."""
+    if not isinstance(data, dict):
+        return None
+    text = data.get("cuerpo")
+    out = {"headers": [list(pair)[:2] for pair in data.get("headers") or [] if isinstance(pair, (list, tuple))],
+           "bytes": data.get("cuerpo_bytes"), "tipo": data.get("cuerpo_tipo")}
+    if data.get("cuerpo_archivo"):
+        out["binario"] = "%s/%s" % (folder_rel, data["cuerpo_archivo"])
+    if isinstance(text, str):
+        out["cuerpo"], out["truncado"] = text[:BODY_EMBED_MAX], len(text) > BODY_EMBED_MAX
+    return out
+
+
+def path_and_query(url):
+    parts = urlsplit(url or "")
+    return (parts.path or "/") + ("?" + parts.query if parts.query else "") if parts.scheme else url or ""
+
+
+def phase_at(events, t):
+    if t is None:
+        return ""
+    return next((phase["rotulo"] for phase in events.get("fases") or [] if phase["desde"] <= t < phase["hasta"]),
+                (events.get("fases") or [{}])[-1].get("rotulo", ""))
+
+
+def network_panel(rows, to_video, records, events):
+    """V3: las llamadas de la prueba en orden, con sus tiempos (cola, conexión, TTFB y descarga, de la traza), su
+    request y su response (de la captura) y la parte de la prueba en que caen; y el resumen del enlace."""
+    sections = sorted([row for row in rows or [] if row[0] == "seccion"], key=lambda row: row[1])
+    https = [row for row in sections if str(row[4]).startswith("HTTP ")]
+    pieces = {prefix: [row for row in sections if str(row[4]).startswith(prefix + " ")] for prefix in ("QUEUE", "CONN",
+                                                                                                       "TTFB")}
+    taken = {prefix: set() for prefix in pieces}
+    linked, calls = set(), []
+    slack = 5 * 10 ** 6
+
+    def ms(value):
+        return round(value / 1e6, 1)
+
+    def video_t(ns):
+        return round(to_video(ns), 3) if to_video is not None and ns is not None else None
+
+    for number, row in enumerate(https, start=1):
+        endpoint, start, end = str(row[4])[5:], row[1], row[1] + max(row[2], 0)
+
+        def piece(prefix):
+            options = [(index, item) for index, item in enumerate(pieces[prefix]) if index not in taken[prefix]
+                       and str(item[4])[len(prefix) + 1:] == endpoint and start <= item[1] <= end]
+            if not options:
+                return None
+            index, item = min(options, key=lambda option: option[1][1] - start)
+            taken[prefix].add(index)
+            return item
+
+        queue, conn, ttfb = piece("QUEUE"), piece("CONN"), piece("TTFB")
+        options = [(key, pair) for key, pair in records.items() if key not in linked
+                   and (pair.get("request") or {}).get("seccion") == row[4]
+                   and start - slack <= int((pair.get("request") or {}).get("inicio_ns") or -1) <= end + slack]
+        key, pair = min(options, key=lambda option: abs(int(option[1]["request"]["inicio_ns"]) - start))             if options else (None, {})
+        if key:
+            linked.add(key)
+        calls.append(network_call(number, key, pair, endpoint, video_t(start), ms(max(row[2], 0)),
+                                  ms(queue[2]) if queue else 0, ms(conn[2]) if conn else 0, ms(ttfb[2]) if ttfb else 0,
+                                  ms(max(end - (ttfb[1] + ttfb[2]), 0)) if ttfb else 0, events))
+    for key, pair in sorted(records.items()):  # lo capturado fuera de la traza (en 'preparar', antes de que arranque)
+        if key in linked:
+            continue
+        request = pair.get("request") or {}
+        response = pair.get("response") or {}
+        begin, finish = request.get("inicio_ns"), response.get("fin_ns")
+        duration = ms(int(finish) - int(begin)) if isinstance(begin, int) and isinstance(finish, int) else None
+        call = network_call(None, key, pair, str(request.get("seccion") or "")[5:], video_t(begin), duration, 0, 0, 0, 0,
+                            events)
+        call["fuera_traza"] = True
+        calls.append(call)
+    calls.sort(key=lambda call: (call["inicio"] is None, call["inicio"] or 0, call["n"] or 10 ** 6))
+    summary = {"secciones": len(https), "con_captura": len(linked), "captura": bool(records),
+               "sin_captura": len(https) - len(linked) if records else None,
+               "fuera_traza": len([call for call in calls if call.get("fuera_traza")])}
+    return calls, summary
+
+
+def network_call(number, key, pair, endpoint, start, duration, queue, conn, ttfb, download, events):
+    request, response = pair.get("request") or {}, pair.get("response") or {}
+    rel = "red/prueba"
+    url = request.get("url") or ""
+    return {"n": number, "id": key, "metodo": request.get("metodo") or endpoint.split(" ", 1)[0],
+            "url": url or None, "ruta": path_and_query(url) if url else endpoint.split(" ", 1)[-1], "endpoint": endpoint,
+            "inicio": start, "dur": duration, "cola": queue, "con": conn, "ttfb": ttfb, "desc": download,
+            "codigo": response.get("codigo"), "bytes": response.get("bytes_red", response.get("cuerpo_bytes")),
+            "error": response.get("error"), "tramo": phase_at(events, start),
+            "archivo": "%s/%s" % (rel, key) if key else None, "req": body_view(request, rel),
+            "res": body_view(response, rel)}
+
+
+def trace_events(rows, to_video, duration):
+    """V3: los toques (TAP) y las marcas propias (NAV y MARK) de la traza, en el reloj del video."""
+    if to_video is None:
+        return []
+    out = []
+    for row in sorted(rows or [], key=lambda row: row[1]):
+        kind, name = None, ""
+        if row[0] == "input":
+            kind = "TAP"
+        elif row[0] == "seccion" and str(row[4]).startswith(("NAV ", "MARK ")):
+            kind, name = str(row[4]).split(" ", 1)
+        if kind:
+            t = round(to_video(row[1]), 3)
+            if 0 <= t <= duration:
+                out.append({"t": t, "tipo": kind, "nombre": name})
+    return out[:TRACE_EVENTS_MAX]
+
+
+def test_network_events(video, events):
+    """V: lo que eventos.json suma para el panel de la página: la sincronía, los toques y marcas de la traza y la red.
+    También deja sincronia.json en la carpeta del video. Nunca hace fallar la prueba."""
+    try:
+        to_video, sync = test_sync(video)
+        records = read_network_records(video.folder)
+        calls, summary = network_panel(video.rows, to_video, records, events)
+        work = video_folder(video.folder, video.flow_name)
+        work.mkdir(parents=True, exist_ok=True)
+        (work / SYNC_FILE).write_text(json.dumps(sync, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        return {"sincronia": sync, "eventos_traza": trace_events(video.rows, to_video, events["duracion"]),
+                "red": calls, "red_resumen": summary}
+    except Exception as error:  # noqa: BLE001 · el panel es evidencia, no parte de la medición
+        print("· No pude armar el panel de red de la prueba (%s): el video sale igual" % one_line(str(error))[:160])
+        return {}
 
 
 def save_test_video(folder, flow_name, events):
@@ -15897,6 +16154,11 @@ def capture_batch(args, plan=None):
 
     valid, attempts, run_hz = 0, 0, []
     consecutive, last_invalid = 0, ""
+    if not args.prueba and package and net_capture_present(project_root(folder).resolve()):
+        try:  # 0.19.0 · V1: una fase medida nunca captura la red (por si una prueba cortada dejó la marca)
+            net_capture_off(adb, package)
+        except (OSError, PerfError, subprocess.SubprocessError):
+            pass
     first_opened = None  # 0.19.0 · P3: el elemento que abrió la primera corrida válida (invalidar_si elemento_distinto)
     video_started = []  # C10 y 0.17.0 · V1: el video de la prueba se lanza una sola vez
     clear_logcat = bool(args.plan) and not startup and plan.get("limpiar_logcat") is not False  # B5
@@ -21523,13 +21785,16 @@ def video_evidence_html(folder):
     """0.17.0 · V5: el enlace al video de evidencia de cada prueba (ruta relativa: los reportes están en la misma
     carpeta), con una línea de qué muestra. Nunca lo incrusta: puede mostrar datos de la cuenta de prueba y se queda en
     la carpeta de la investigación, fuera de git. '' si no hay ninguno."""
-    links = test_videos(folder)
+    # 0.19.0 · V1: la página de la prueba (el video con la red sincronizada), no el .mp4 suelto
+    links = [path.with_suffix(".html") if path.with_suffix(".html").is_file() else path for path in test_videos(folder)]
     if not links:
         return ""
     return ('<p class="evid">Video de la prueba: la corrida de prueba completa, desde que se abre la app hasta el final, '
-            'con un rótulo por parte (preparación, que no se mide; cada tramo medido; las marcas del plan y el fin). Sirve '
-            'para ver qué se midió; queda en la carpeta de la investigación: %s.</p>' % ", ".join(
-                '<a href="%s">%s</a>' % (e(path.name), e(path.name)) for path in links))
+            'con un rótulo por parte (preparación, que no se mide; cada tramo medido; las marcas del plan y el fin) y, '
+            'debajo, las llamadas de red sincronizadas con el video, con su request y su response. Sirve para ver qué se '
+            'midió; queda en la carpeta de la investigación y contiene credenciales y datos reales de la prueba (no se '
+            'comparte fuera del equipo): %s.</p>' % ", ".join('<a href="%s">%s</a>' % (e(path.name), e(path.name))
+                                                            for path in links))
 
 
 def md_inline_block(text):
@@ -24388,7 +24653,8 @@ def cmd_instrumentar(args):
     mains = [("PerfHooks.kt", "PerfHooks.kt")]
     if network:
         files += [("HttpSectionName.retrofit.kt" if retrofit else "HttpSectionName.okhttp.kt", "HttpSectionName.kt"),
-                  ("TraceEventListener.kt", "TraceEventListener.kt")]
+                  ("TraceEventListener.kt", "TraceEventListener.kt"),
+                  ("TestNetworkCapture.kt", "TestNetworkCapture.kt")]  # 0.19.0 · V4: solo escribe en la prueba
         tests += [("TraceEventListenerTest.kt", "TraceEventListenerTest.kt"), ("PerfHooksTest.kt", "PerfHooksTest.kt")]
         if hilt:
             files.append(("PerfNetworkModule.kt", "PerfNetworkModule.kt"))
