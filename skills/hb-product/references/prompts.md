@@ -82,7 +82,7 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py estado --carpeta product
 
 ## Decidir en una puerta
 
-**Dónde:** terminal, sin chat. `producto.py siguiente` (y la última respuesta de la sesión anterior) ya trae el veredicto criterio por criterio y los comandos completos; el agente nunca los corre. Uno de estos:
+**Dónde:** terminal, sin chat. `producto.py siguiente` (y la última respuesta de la sesión anterior) ya trae el banner con el veredicto y la recomendación de la skill, los criterios uno por uno y los comandos completos, **el recomendado primero**; el agente nunca los corre. Uno de estos:
 
 ```bash
 cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --seguir --carpeta product
@@ -94,6 +94,12 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --ajusta
 
 ```bash
 cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --descartar "<motivo>" --carpeta product
+```
+
+Si decides distinto de lo que recomienda la skill, agrega por qué; queda registrado como decisión contra la recomendación:
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --seguir --motivo "<por qué decides distinto>" --carpeta product
 ```
 
 Si una sesión dejó una propuesta (por ejemplo, cambiar el diferenciador principal), la puerta la muestra con su `--ajustar` ya listo. Para volver a mirar el veredicto sin decidir:
@@ -148,7 +154,7 @@ Con `--intermedio "<modelo>"` y `--alto "<modelo>"` cambias los nombres ([modelo
 cd <raíz> && python3 -I <skill>/scripts/producto.py consumo --sesion <id> --costo '<USD>' --carpeta product
 ```
 
-Con un orquestador: `--sesion orquestador --incluye 1a,1b,1c,1d,1e,1g` y el total del chat. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`.
+Con un orquestador: `--sesion orquestador --incluye 1a,1b,1c,1d,1e,1g` y el total del chat (lo que muestre `/cost`); `siguiente` te lo recuerda, con el comando completo, al llegar a la puerta. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
 
 ### Guardar una idea para después, o recuperarla
 

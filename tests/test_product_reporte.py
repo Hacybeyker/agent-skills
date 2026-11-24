@@ -64,7 +64,8 @@ class ReporteTest(Base):
         self.cerrar("2", "02-estrategia.md")
         write(self.carpeta / "03-validacion.md", base.HIPOTESIS)
         self.cerrar("3")
-        salida = self.p("decidir", "--puerta", 2, "--descartar", "Los vecinos ya se organizan bien por chat")
+        salida = self.p("decidir", "--puerta", 2, "--descartar", "Los vecinos ya se organizan bien por chat",
+                        "--motivo", "Un vecino me dijo que no la usaría")
         destino = self.carpeta / "archivo" / "riego-en-turnos"
         self.assertIn("· Reporte actualizado: %s" % (destino / "reporte.html"), salida)
         html = self.reporte(destino)
@@ -84,7 +85,7 @@ class ReporteTest(Base):
         destino = self.carpeta / "archivo" / "riego-en-turnos"
         self.assertIn("· Reporte actualizado: %s" % (destino / "reporte.html"), salida)
         html = self.reporte(destino)
-        self.assertIn("Archivada", html)
+        self.assertIn("Pausada", html)
         self.assertIn("La retomo después", html)
         self.assertIn("Todavía sin puntaje", html)
 
@@ -121,7 +122,7 @@ class TableroTest(Base):
                                                                           "criterios": {}}))
         write(raiz / "rota" / "producto.json", "{no es json")
         salida = self.p("tablero", "--raiz", raiz)
-        self.assertIn("✔ Tablero con 2 idea(s): %s" % (raiz / "index.html"), salida)
+        self.assertIn("✔ Tablero con 2 ideas: %s" % (raiz / "index.html"), salida)
         self.assertIn("⚠ No se pudo leer %s" % (raiz / "rota"), salida)
         html = (raiz / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("Oculta", html)  # las carpetas ocultas no se recorren
@@ -136,18 +137,26 @@ class TableroTest(Base):
         self.assertIn("No se pudieron leer", html)
         self.assertIn("No existe la carpeta", self.falla("tablero", "--raiz", raiz / "nada"))
 
-    def test_estado_seguir_con_su_ultima_puerta(self):
+    def test_seguir_en_una_puerta_sigue_en_curso_y_la_puerta_3_la_deja_lista(self):
         raiz = self.tmp
         self.hasta_puerta1()
         self.p("decidir", "--puerta", 1, "--seguir")
         self.p("tablero", "--raiz", raiz)
         html = (raiz / "index.html").read_text(encoding="utf-8")
-        self.assertIn("Seguir", html)
+        self.assertIn("En curso", html)
         self.assertIn("puerta 1 · seguir · %s" % HOY, html)
-        self.assertIn("Puerta 1: seguir, con 5 de 5 criterios cumplidos.", html)
+        self.assertIn("Tocan estas sesiones, en paralelo", html)
+        self.p("decidir", "--puerta", 1, "--reabrir")
+        self.carpeta = raiz / "otra" / "product"
+        self.hasta_puerta3()
+        self.p("decidir", "--puerta", 3, "--seguir")
+        self.p("tablero", "--raiz", raiz)
+        html = (raiz / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Lista para construir", html)
+        self.assertIn("Puerta 3: seguir, con 5 de 5 criterios cumplidos.", html)
 
     def test_sin_ideas_lo_dice(self):
-        self.assertIn("Tablero con 0 idea(s)", self.p("tablero", "--raiz", self.tmp))
+        self.assertIn("Tablero con 0 ideas", self.p("tablero", "--raiz", self.tmp))
         self.assertIn("No se encontró ninguna idea", (self.tmp / "index.html").read_text(encoding="utf-8"))
 
 

@@ -1,10 +1,10 @@
 # Puertas: criterios, decisiones y archivo
 
-Las puertas existen para **descartar barato**: antes de programar, y solo con motivo. El script evalúa cada criterio; **la decisión es del usuario**.
+Las puertas existen para **descartar barato**: antes de programar, y solo con motivo. El script evalúa cada criterio y **la skill recomienda; la decisión es del usuario**.
 
 ## Cómo funciona una puerta
 
-1. La sesión que la precede termina con `producto.py siguiente`, que ya trae **el veredicto criterio por criterio** (✔ o ✖) con el juego del tipo de idea, los avisos y las propuestas, y debajo los comandos de la decisión. No hace falta correr `puerta` aparte: `producto.py puerta --n <1|2|3>` muestra lo mismo cuando quieras volver a mirarlo, y no escribe nada.
+1. La sesión que la precede termina con `producto.py siguiente`, que empieza con **el banner del veredicto y la recomendación** (más abajo, cómo se calculan), sigue con **los criterios uno por uno** (✔ o ✖) con el juego del tipo de idea, los avisos y las propuestas, y termina con los comandos de la decisión, **el recomendado primero**. No hace falta correr `puerta` aparte: `producto.py puerta --n <1|2|3>` muestra lo mismo cuando quieras volver a mirarlo, y no escribe nada.
 2. Los avisos no son criterios, pero no se pasan por alto: los criterios cambiados después de la sesión 0, la confianza global baja, los huecos de cobertura, los vacíos por límite de las herramientas y la meta de ingresos como referencia.
 3. El usuario decide en su terminal, con uno de estos:
 
@@ -14,7 +14,21 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --ajusta
 cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --descartar "<motivo>" --carpeta product
 ```
 
-El agente **nunca corre `decidir`**: entrega los comandos tal como los imprime el script y se detiene. Cada decisión queda en `decisiones.json` con la fecha, la hora, los criterios evaluados en ese momento y, si consta, desde dónde se corrió. Si una decisión no fue del usuario, `decidir --puerta <n> --reabrir` la deshace.
+Los que van en contra de la recomendación llevan `--motivo "<por qué decides distinto>"`: sin él, `decidir` no registra nada. El agente **nunca corre `decidir`**: entrega los comandos tal como los imprime el script y se detiene. Cada decisión queda en `decisiones.json` con la fecha, la hora, los criterios evaluados en ese momento, la recomendación de la skill, si fue en contra (con el motivo) y, si consta, desde dónde se corrió. Si una decisión no fue del usuario, `decidir --puerta <n> --reabrir` la deshace.
+
+## Veredicto y recomendación
+
+En cada puerta, `producto.py` calcula un veredicto con **reglas fijas** sobre los criterios y la confianza, y lo muestra en un banner grande y con color: al inicio de la puerta en `siguiente` y en `puerta`, arriba del reporte y en el tablero. El banner trae 1 a 3 razones y **qué cambiaría el veredicto**. No lo cambies ni des otra recomendación por tu lado: la skill recomienda y el usuario decide.
+
+| Veredicto | Recomienda | Cuándo |
+| --- | --- | --- |
+| 🔴 No viable | Descartar (el comando trae el motivo listo, con las razones) | Falla algo que ajustar una sesión no arregla. **P1:** el puntaje bajo el mínimo (también el recalculado con las reglas de hoy), la demanda con confianza baja (en una idea nueva, el problema sin documentar), ningún diferenciador viable (o ninguno que supere al sustituto gratuito o nativo), un bloqueo de políticas sin mitigación escrita o un intento anterior que fracasó por demanda. **P2:** ningún modelo genera ingresos en el caso base, una hipótesis crítica refutada, el principal no sobrevive y no hay otro viable, o el caso base no llega a la meta obligatoria. **P3:** el checklist de políticas con bloqueos |
+| 🟡 Viable con reservas | Ajustar `<sesión>` (la primera que lo completa) | No hay nada de lo anterior, pero falta algo que una sesión completa (un diferenciador viable con confianza baja, el principal sin triangular, los análogos o la búsqueda de intentos, los escenarios, la hipótesis más riesgosa, el PRD), **la confianza global es baja** (ajusta la línea más débil) o hay **propuestas pendientes que se pueden cerrar con las herramientas disponibles** (una propuesta para una línea con vacíos por límite de las herramientas no cuenta) |
+| 🟢 Viable | Seguir | Cumple todos los criterios y, en la puerta 1, con confianza global media o alta |
+
+- **Decidir en contra** es legítimo: el usuario puede saber algo que la evidencia pública no muestra. `decidir` pide `--motivo` (10 caracteres o más) cuando la decisión es de otro tipo que la recomendada (ajustar otra sesión no cuenta como en contra), y la puerta queda como "decisión contra la recomendación", con ese motivo, en `decisiones.json`, en `estado.md` y en el reporte.
+- **El puntaje registrado con reglas anteriores** se compara con las de hoy: si ya no cabe (por ejemplo, diferenciación 4 sin ningún diferenciador viable), la puerta y el reporte lo avisan y el veredicto usa el total ajustado ([puntaje.md](puntaje.md)).
+- La cantidad de competidores nunca entra en el veredicto.
 
 ## Criterios por defecto
 
@@ -91,8 +105,8 @@ Una idea se descarta con evidencia en contra, cuando ningún peldaño muestra el
 
 ## Reporte y tablero
 
-- **`reporte.html`** vive en la carpeta de la idea y se regenera solo cada vez que el usuario decide una puerta y al archivar (también al descartar: queda dentro de `archivo/<nombre>/`). Es un solo archivo, sin red, en claro y oscuro: arriba el resumen ejecutivo (estado, decisión con su motivo y siguiente paso) y debajo tarjetas con el puntaje, las puertas, los diferenciadores, los hallazgos clave, los competidores, la cobertura, los escenarios (solo referencia), la hipótesis más riesgosa y el costo. Lo técnico va plegado. `producto.py reporte` lo regenera a mano; `--idea <nombre>` para una idea archivada.
-- **`producto.py tablero --raiz <carpeta>`** busca todas las ideas bajo esa carpeta (en curso y archivadas), regenera su reporte y escribe `<carpeta>/index.html`: estado (en curso, seguir, descartada o archivada), puntaje, última puerta, motivo o siguiente paso y el enlace a cada reporte.
+- **`reporte.html`** vive en la carpeta de la idea y se regenera solo cada vez que el usuario decide una puerta y al archivar (también al descartar: queda dentro de `archivo/<nombre>/`). Es un solo archivo, sin red, en claro y oscuro: arriba el banner del veredicto (el de la puerta pendiente o, si no hay, el de la última decidida, recalculado con las reglas de hoy), luego el resumen ejecutivo (estado, decisión con su motivo, siguiente paso y los 3 a 5 hallazgos que decidieron, abiertos y con sus fuentes) y debajo tarjetas con el puntaje, las puertas, los diferenciadores, los hallazgos clave, los competidores, la cobertura, los escenarios (solo referencia), la hipótesis más riesgosa y el costo. Lo técnico va plegado. `producto.py reporte` lo regenera a mano; `--idea <nombre>` para una idea archivada.
+- **`producto.py tablero --raiz <carpeta>`** busca todas las ideas bajo esa carpeta (en curso y archivadas), regenera su reporte y escribe `<carpeta>/index.html`: el veredicto de cada una (en color), su estado, puntaje, última puerta, motivo o siguiente paso y el enlace a cada reporte. Cada idea está en **un solo estado**: en curso, lista para construir (la puerta 3 aprobó el PRD), descartada (en una puerta) o pausada (archivada a mano). Las descartadas y las pausadas viven en `archivo/`.
 - La confianza del reporte se calcula con la fecha del día en que se genera: puede bajar si las fuentes envejecen. Los criterios de cada puerta ya decidida son los de ese momento.
 
 ## Archivo

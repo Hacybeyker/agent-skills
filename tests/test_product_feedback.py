@@ -223,7 +223,7 @@ class ReglaUnicaTest(Base):
                       "triangular" % fuentes[2], salida)
         salida = self.p("triangulacion")
         self.assertIn("✖ %s · confianza media · sin triangular" % hallazgo, salida)
-        self.assertIn("→ %s sin fecha o fuera de la ventana de 18 meses: no cuenta(n)" % fuentes[2], salida)
+        self.assertIn("→ %s sin fecha o fuera de la ventana de 18 meses: no cuenta" % fuentes[2], salida)
         self.assertIn("0 de 1 hallazgos clave triangulados (regla 2)", salida)
 
     def test_con_tres_vigentes_una_sin_fecha_no_impide_triangular(self):
@@ -285,10 +285,10 @@ class DiferenciadorTrianguladoTest(Base):
         self.assertIn("Diferenciación = 3 no corresponde", self.falla("puntaje", "--valores", "4,4,4,4,3"))
         self.p("puntaje", "--valores", "4,4,4,4,2")
         salida = self.cerrar("1f", "01-sintesis.md")
-        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 0 viable(s), 1 con "
-                      "confianza baja de 1 registrado(s)", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 0 viables, 1 con "
+                      "confianza baja de 1 registrado", salida)
         self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados · D-1: %s sin triangular "
-                      "(faltan 1 fuente(s) independiente(s) y vigente(s) (tiene 2 de 3))" % debil, salida)
+                      "(falta 1 fuente independiente y vigente (tiene 2 de 3))" % debil, salida)
 
     def test_otro_viable_no_reemplaza_al_principal_sin_triangular(self):
         self.principal_baja()
@@ -298,8 +298,8 @@ class DiferenciadorTrianguladoTest(Base):
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
         self.p("puntaje", "--valores", "4,4,4,4,3")
         salida = self.p("puerta", "--n", 1)
-        self.assertIn("✔ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 1 viable(s), 1 con "
-                      "confianza baja de 2 registrado(s)", salida)
+        self.assertIn("✔ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 1 viable, 1 con "
+                      "confianza baja de 2 registrados", salida)
         self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados · D-1", salida)
 
     def test_la_puerta_1_avisa_la_confianza_global_baja(self):
@@ -318,7 +318,8 @@ class PuertaYPropuestaTest(Base):
         salida = self.p("siguiente")
         self.assertIn("Puerta 1 · Oportunidad · idea existente · cumple 5 de 5 criterios", salida)
         self.assertIn("  ✔ Puntaje de 17/25 o más · tiene 19/25", salida)
-        self.assertIn("Terminal · La decisión es tuya (el agente nunca corre este comando). Elige uno:", salida)
+        self.assertIn("Terminal · La skill recomienda; la decisión es tuya (el agente nunca corre este comando). Elige "
+                      "uno:", salida)
         self.assertNotIn("puerta --n", salida)
         estado = (self.carpeta / "estado.md").read_text(encoding="utf-8")
         self.assertIn("cumple 5 de 5 criterios", estado)
@@ -344,7 +345,7 @@ class PuertaYPropuestaTest(Base):
         salida = self.p("siguiente")
         self.assertIn("· Propuesta PR-1 (sesión 2): Cambiar el principal a uno de privacidad → se aplica con "
                       "Ajustar 1g", salida)
-        self.assertIn("   Ajustar 1g: cd %s && python3 -I" % self.tmp, salida)
+        self.assertIn("   ★ Recomendado · Ajustar 1g: cd %s && python3 -I" % self.tmp, salida)
         self.assertIn("decidir --puerta 2 --ajustar 1g --carpeta product", salida)
         self.p("decidir", "--puerta", 2, "--ajustar", "1g")
         propuesta = self.datos()["propuestas"][0]
@@ -455,10 +456,11 @@ class AjusteConVacioTest(Base):
             self.p("anular", "--id", fuente["id"], "--motivo", "Prueba sin la tienda")
         self.p("vacio", "--linea", "voz-del-usuario", "--tienda", "google-play", "--motivo", "herramienta",
                "--texto", "Página dinámica")
-        salida = self.p("decidir", "--puerta", 1, "--ajustar", "1b")
+        salida = self.p("decidir", "--puerta", 1, "--ajustar", "1b", "--motivo", "Antes de descartar, otra fuente")
         self.assertIn("⚠ voz-del-usuario tiene vacíos por límite de las herramientas (tienda google-play)", salida)
         self.assertIn("dale al agente un navegador o consigue un CSV de reseñas", salida)
-        self.assertNotIn("vacíos por límite", self.p("decidir", "--puerta", 1, "--ajustar", "1c"))
+        self.assertNotIn("vacíos por límite", self.p("decidir", "--puerta", 1, "--ajustar", "1c", "--motivo",
+                                                      "Antes de descartar, más demanda"))
         self.fuente("voz-del-usuario", 1, "usuario")  # una fuente de google-play lo cubre: el vacío ya no cuenta
         self.assertNotIn("Vacíos por límite", self.p("puerta", "--n", 1))
 
@@ -785,7 +787,7 @@ class DemandaActualTest(Base):
         identificador, salida = self.hallazgo("demanda", fuentes + [acumulada], "--critico", "--sin-contra", "nada")
         self.assertIn("sin triangular", salida)
         salida = self.p("triangulacion")
-        self.assertIn("%s: dato(s) acumulado(s)" % acumulada, salida)
+        self.assertIn("%s: dato acumulado" % acumulada, salida)
         self.assertIn("falta una fuente de tipo medido", salida)
         # en otra línea, el mismo dato acumulado sí cuenta: es contexto de la competencia
         self.assertIn("triangulado", self.hallazgo("competencia", self.fuente("competencia", 2) + [acumulada])[1])

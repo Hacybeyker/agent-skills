@@ -15,7 +15,7 @@ La síntesis une las seis líneas y termina en la puerta 1. El puntaje tiene anc
 7. Completa `01-sintesis.md`. En una idea nueva, separa la evidencia análoga de la pura hipótesis; en una con competencia, presenta el diferenciador principal.
 8. `producto.py cerrar --sesion 1f` y pega la salida: es la puerta 1.
 
-**No recomiendes la decisión.** La "Lectura" dice qué muestra la evidencia; seguir, ajustar o descartar lo decide el usuario.
+**La recomendación la calcula el script.** La "Lectura" dice qué muestra la evidencia; el veredicto y la recomendación de la puerta 1 los da `producto.py` con reglas fijas ([puertas.md](puertas.md#veredicto-y-recomendación)): no des otra por tu lado. Seguir, ajustar o descartar lo decide el usuario.
 
 ## Anclas
 
@@ -33,6 +33,7 @@ Cinco criterios de 1 a 5. Los valores 2 y 4 son los intermedios entre dos anclas
 - **Una tienda que nombra o rechaza la categoría** (por ejemplo, una guía de revisión que la cita como saturada) se registra en un hallazgo de políticas con `--bloquea <tienda>`. En esa tienda el riesgo es 1: el script no acepta otro valor, y la puerta 1 pide una mitigación escrita y creíble (`--mitigacion`, por ejemplo, no lanzar en esa tienda), que muestra para que el usuario la juzgue. Cambiar las tiendas del objetivo para evitarlo es un cambio de criterio, con su motivo.
 - **La cantidad de competidores no baja ningún criterio.** Muchos competidores con tracción suben la demanda; lo que puede bajar es la diferenciación, y solo si no aparece un diferenciador viable.
 - **Diferenciación** está atada al registro (y un diferenciador que no supera al sustituto gratuito o nativo que ya resuelve la necesidad no es viable): sin ningún diferenciador viable, el script solo acepta 1; si solo hay viables con confianza baja (sus hallazgos sin triangular), acepta 1 o 2; con alguno viable, no acepta 1.
+- **Un puntaje registrado con reglas anteriores** (o con evidencia que cambió después: una fuente que envejeció, un hallazgo anulado) puede quedar por encima de lo que las reglas de hoy aceptan. La puerta 1 y el reporte lo avisan ("con las reglas de hoy serían N/25") y el veredicto usa ese total ajustado; se corrige volviendo a correr `puntaje` en la sesión 1f.
 - **Facilidad** es una estimación tuya, sin fuentes: di con qué supuestos (stack, backend, integraciones).
 - **Riesgo de políticas = 1** pide una mitigación escrita (`--mitigacion`); sin ella, la puerta 1 no se cumple en ese criterio.
 

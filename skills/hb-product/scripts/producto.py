@@ -217,6 +217,14 @@ def numero(valor):
     return "{:,.2f}".format(valor).replace(",", " ").replace(".", ",")
 
 
+def plural(cantidad, singular, plural_=None):
+    """'1 hallazgo', '3 hallazgos', '0 semanas': la cantidad con la palabra en singular o en plural."""
+    if plural_ is None:
+        plural_ = singular + ("s" if singular[-1] in "aeiouáéíóú" else "es")
+    valor = numero(cantidad) if isinstance(cantidad, float) else str(cantidad)
+    return "%s %s" % (valor, singular if cantidad == 1 else plural_)
+
+
 def lista(texto):
     return [parte.strip() for parte in str(texto or "").split(",") if parte.strip()]
 
@@ -428,16 +436,22 @@ class Registro:
         faltan = []  # lo que le falta para triangular (regla 2)
         if not mejor["triangulado"]:
             if mejor["independientes"] < minimo:
-                faltan.append("faltan %d fuente(s) independiente(s) y vigente(s) (tiene %d de %d)"
-                              % (minimo - mejor["independientes"], mejor["independientes"], minimo))
+                faltante = minimo - mejor["independientes"]
+                faltan.append("%s %s (tiene %d de %d)" % (
+                    "falta" if faltante == 1 else "faltan", plural(faltante, "fuente independiente y vigente",
+                                                                  "fuentes independientes y vigentes"),
+                    mejor["independientes"], minimo))
             if exige and not mejor["medido"]:
                 faltan.append("falta una fuente de tipo medido (línea %s)" % hallazgo["linea"])
             if no_vigentes:
-                faltan.append("%s sin fecha o fuera de la ventana de %s meses: no cuenta(n)" % (
-                    ", ".join(no_vigentes), self.criterios["vigencia_meses"]))
+                faltan.append("%s sin fecha o fuera de la ventana de %s meses: no %s" % (
+                    ", ".join(no_vigentes), self.criterios["vigencia_meses"],
+                    "cuenta" if len(no_vigentes) == 1 else "cuentan"))
             if acumuladas:
-                faltan.append("%s: dato(s) acumulado(s) (descargas o valoraciones desde el lanzamiento), contexto y no "
-                              "señal actual de demanda: no cuenta(n)" % ", ".join(acumuladas))
+                faltan.append("%s: %s (descargas o valoraciones desde el lanzamiento), contexto y no señal actual de "
+                              "demanda: no %s" % (", ".join(acumuladas), "dato acumulado" if len(acumuladas) == 1
+                                                  else "datos acumulados",
+                                                  "cuenta" if len(acumuladas) == 1 else "cuentan"))
             if basta_oficial:
                 faltan.append("o una sola fuente oficial y vigente (la política o la ley misma, `--tipo oficial`)")
         sin_busqueda = not hallazgo.get("en_contra") and not hallazgo.get("sin_contra")
@@ -497,8 +511,8 @@ class Registro:
         if not presupuesto:
             cabe = (False, "Presupuesto: falta `presupuesto_semanas` en los criterios (sesión 0)")
         else:
-            cabe = (0 < semanas <= presupuesto, "Presupuesto: %s semana(s) de %s" % (numero(semanas),
-                                                                                    numero(presupuesto)))
+            cabe = (0 < semanas <= presupuesto, "Presupuesto: %s de %s" % (numero(semanas),
+                                                                          plural(presupuesto, "semana")))
         return [evidencia,
                 (diferenciador.get("se_ve") in ("ficha", "uso"), "Se percibe: en %s" % (
                     "la ficha de la tienda" if diferenciador.get("se_ve") == "ficha" else "el uso")),
@@ -937,20 +951,29 @@ def confianzas(registro):
 
 def criterios_puerta(numero_puerta, carpeta, producto, registro):
     """Los criterios de una puerta para el tipo de idea: [(cumple, texto, detalle)]."""
+    return [(c["cumple"], c["texto"], c["detalle"]) for c in evaluar_puerta(numero_puerta, carpeta, producto, registro)]
+
+
+def evaluar_puerta(numero_puerta, carpeta, producto, registro):
+    """Los criterios de una puerta con su clave (la usa el veredicto): [{clave, cumple, texto, detalle}]."""
     criterios = producto["criterios"]
     nueva = tipo_de(producto) == "nueva"
     resultado = []
 
-    def agregar(cumple, texto, detalle=""):
-        resultado.append((bool(cumple), texto, detalle))
+    def agregar(clave, cumple, texto, detalle=""):
+        resultado.append({"clave": clave, "cumple": bool(cumple), "texto": texto, "detalle": detalle})
 
     if numero_puerta == 1:
         puntaje = producto.get("puntaje")
         minimo = int(criterios["puntaje_minimo_nueva" if nueva else "puntaje_minimo"])
+        texto = "Puntaje de %d/25 o más" % minimo
         if puntaje:
-            agregar(puntaje["total"] >= minimo, "Puntaje de %d/25 o más" % minimo, "tiene %d/25" % puntaje["total"])
+            vigente_ = puntaje_vigente(producto, registro)
+            agregar("puntaje", puntaje["total"] >= minimo, texto, "tiene %d/25%s" % (
+                puntaje["total"], " · ⚠ con las reglas de hoy serían %d/25" % vigente_["total"]
+                if vigente_["incoherencias"] else ""))
         else:
-            agregar(False, "Puntaje de %d/25 o más" % minimo, "sin registrar: corre `puntaje` en la sesión 1f")
+            agregar("puntaje", False, texto, "sin registrar: corre `puntaje` en la sesión 1f")
         if nueva:
             minimas = int(criterios["fuentes_minimas"])
             documentado = None
@@ -960,61 +983,64 @@ def criterios_puerta(numero_puerta, carpeta, producto, registro):
                 if len(grupos) >= minimas:
                     documentado = hallazgo["id"]
                     break
-            agregar(documentado, "El problema o la necesidad de fondo, con %d fuentes de peldaño 4 o 5" % minimas,
+            agregar("problema", documentado,
+                    "El problema o la necesidad de fondo, con %d fuentes de peldaño 4 o 5" % minimas,
                     documentado or "ningún hallazgo reúne %d fuentes independientes y vigentes de esos peldaños"
                     % minimas)
             analogos = [c["id"] for c in registro.competidores.values()
                         if c["peldano"] in (2, 3) and registro.con_traccion(c)]
             pedidos = int(criterios["analogos_minimos"])
-            agregar(len(analogos) >= pedidos, "Al menos %d análogos con tracción (peldaño 2 o 3)" % pedidos,
+            agregar("analogos", len(analogos) >= pedidos,
+                    "Al menos %d análogos con tracción (peldaño 2 o 3)" % pedidos,
                     "%d en la matriz%s" % (len(analogos), (": " + ", ".join(analogos)) if analogos else ""))
             intentos = producto.get("intentos", [])
             fracasos = [i for i in intentos if i["resultado"] == "fracaso-demanda"]
+            texto = "Sin evidencia de que se probó y fracasó por falta de demanda"
             if not intentos:
-                agregar(False, "Sin evidencia de que se probó y fracasó por falta de demanda",
-                        "la búsqueda no está registrada: corre `intento`")
+                agregar("intentos", False, texto, "la búsqueda no está registrada: corre `intento`")
             else:
-                agregar(not fracasos, "Sin evidencia de que se probó y fracasó por falta de demanda",
-                        "%d intento(s) fallido(s) por demanda" % len(fracasos) if fracasos
-                        else "%d búsqueda(s) registrada(s)" % len(intentos))
+                agregar("intentos", not fracasos, texto,
+                        "%s por demanda" % plural(len(fracasos), "intento fallido", "intentos fallidos") if fracasos
+                        else plural(len(intentos), "búsqueda registrada", "búsquedas registradas"))
             fuertes = registro.sustitutos_fuertes()
             if fuertes:  # un sustituto gratuito o nativo que ya resuelve la necesidad: la idea tiene que superarlo
                 viables = registro.viables()
-                agregar(viables, "Un diferenciador viable supera al sustituto gratuito o nativo que ya resuelve la "
-                        "necesidad: %s" % "; ".join(nombre_fila(c) for c in fuertes),
+                agregar("sustituto", viables, "Un diferenciador viable supera al sustituto gratuito o nativo que ya "
+                        "resuelve la necesidad: %s" % "; ".join(nombre_fila(c) for c in fuertes),
                         ", ".join(d["id"] for d in viables) if viables else detalle_sustituto(registro, fuertes))
         else:
             nivel = confianzas(registro)[0]["demanda"]
-            agregar(nivel >= 2, "Demanda con confianza media o alta", "es %s" % NIVELES[nivel])
+            agregar("demanda", nivel >= 2, "Demanda con confianza media o alta", "es %s" % NIVELES[nivel])
             viables, bajas = registro.viables(), registro.con_confianza_baja()
             fuertes = registro.sustitutos_fuertes()
-            detalle = "%d viable(s)%s de %d registrado(s)" % (
-                len(viables), ", %d con confianza baja" % len(bajas) if bajas else "", len(registro.diferenciadores))
+            detalle = "%s%s de %s" % (
+                plural(len(viables), "viable"), ", %d con confianza baja" % len(bajas) if bajas else "",
+                plural(len(registro.diferenciadores), "registrado"))
             if fuertes and not viables:
                 detalle += " · " + detalle_sustituto(registro, fuertes)
-            agregar(viables, "Al menos 1 diferenciador viable, con sus hallazgos triangulados%s" % (
+            agregar("diferenciador", viables, "Al menos 1 diferenciador viable, con sus hallazgos triangulados%s" % (
                 " y que supere al sustituto gratuito o nativo que ya resuelve la necesidad (%s)" % "; ".join(
                     nombre_fila(c) for c in fuertes) if fuertes else ""), detalle)
             principal = registro.principal()
             texto = "Los hallazgos del diferenciador principal están triangulados"
             if not principal:
-                agregar(False, texto, "no hay un diferenciador principal registrado")
+                agregar("principal", False, texto, "no hay un diferenciador principal registrado")
             else:
                 faltan = registro.sin_triangular(principal)
-                agregar(not faltan, texto, "%s: %s" % (principal["id"], "; ".join(
+                agregar("principal", not faltan, texto, "%s: %s" % (principal["id"], "; ".join(
                     "%s sin triangular (%s)" % par for par in faltan) if faltan else ", ".join(
                     principal.get("hallazgos", []))))
         texto = "Riesgo de políticas distinto de 1, o con una mitigación escrita"
         bloqueos = registro.bloqueos(objetivo_de(producto))
         if not puntaje:
-            agregar(False, texto, "sin puntaje")
+            agregar("riesgo", False, texto, "sin puntaje")
         else:
             riesgo, mitigacion = puntaje["valores"]["riesgo"], puntaje.get("mitigacion")
             if bloqueos and riesgo != 1:
-                agregar(False, texto, "el puntaje dice %d, pero %s: en esa tienda el riesgo es 1; vuelve a correr "
-                        "`puntaje`" % (riesgo, texto_bloqueos(bloqueos)))
+                agregar("riesgo", False, texto, "el puntaje dice %d, pero %s: en esa tienda el riesgo es 1; vuelve a "
+                        "correr `puntaje`" % (riesgo, texto_bloqueos(bloqueos)))
             else:
-                agregar(riesgo != 1 or mitigacion, texto, "es %d%s%s" % (
+                agregar("riesgo", riesgo != 1 or mitigacion, texto, "es %d%s%s" % (
                     riesgo, " · bloqueante en %s" % texto_bloqueos(bloqueos) if bloqueos else "",
                     " · mitigación: «%s»" % mitigacion if mitigacion else ""))
 
@@ -1022,12 +1048,13 @@ def criterios_puerta(numero_puerta, carpeta, producto, registro):
         escenarios = producto.get("escenarios")
         texto = "Al menos un modelo de monetización viable con evidencia%s" % (" (por analogía)" if nueva else "")
         if not escenarios:
-            agregar(False, texto, "sin calcular: corre `escenarios` en la sesión 2")
+            agregar("monetizacion", False, texto, "sin calcular: corre `escenarios` en la sesión 2")
         elif "modelos" not in escenarios:
-            agregar(False, texto, "los escenarios son de una versión anterior: vuelve a correr `escenarios`")
+            agregar("monetizacion", False, texto,
+                    "los escenarios son de una versión anterior: vuelve a correr `escenarios`")
         else:
             viables = [m for m in escenarios["modelos"] if m["viable"]]
-            agregar(viables, texto, "; ".join(
+            agregar("monetizacion", viables, texto, "; ".join(
                 "%s: %s %s al mes en el caso base" % (m["nombre"], numero(m["base"]), escenarios["moneda"])
                 for m in viables) if viables else "ninguno: " + "; ".join(
                 "%s (%s)" % (m["nombre"], motivo_modelo(m)) for m in escenarios["modelos"]))
@@ -1036,34 +1063,35 @@ def criterios_puerta(numero_puerta, carpeta, producto, registro):
             texto = "El escenario base%s alcanza la meta de ingresos (marcada como obligatoria)" % (
                 " por analogía" if nueva else "")
             if not escenarios:
-                agregar(False, texto, "sin calcular: corre `escenarios` en la sesión 2")
+                agregar("meta", False, texto, "sin calcular: corre `escenarios` en la sesión 2")
             elif not meta:
-                agregar(False, texto, "falta `meta_ingresos_mes` en los criterios")
+                agregar("meta", False, texto, "falta `meta_ingresos_mes` en los criterios")
             else:
-                agregar(escenarios["base"] >= meta, texto, "%s de %s %s al mes" % (
+                agregar("meta", escenarios["base"] >= meta, texto, "%s de %s %s al mes" % (
                     numero(escenarios["base"]), numero(meta), criterios["moneda"]))
         filas = hipotesis(carpeta, registro)
+        texto = "Ninguna hipótesis crítica refutada"
         if not filas:
-            agregar(False, "Ninguna hipótesis crítica refutada", "03-validacion.md no tiene la tabla de hipótesis")
+            agregar("hipotesis", False, texto, "03-validacion.md no tiene la tabla de hipótesis")
         else:
             refutadas = [fila["id"] for fila in filas if fila["veredicto"] == "refutada"]
-            agregar(not refutadas, "Ninguna hipótesis crítica refutada",
+            agregar("hipotesis", not refutadas, texto,
                     "refutadas: %s" % ", ".join(refutadas) if refutadas else "%d hipótesis" % len(filas))
         if nueva:
             riesgosas = [fila for fila in filas or [] if fila["riesgosa"]]
             medible = len(riesgosas) == 1 and riesgosas[0]["metrica"]
-            agregar(medible, "La hipótesis más riesgosa, identificada y medible después del lanzamiento",
+            agregar("riesgosa", medible, "La hipótesis más riesgosa, identificada y medible después del lanzamiento",
                     "%s, con métrica y umbral" % riesgosas[0]["id"] if medible
                     else "falta marcar una sola hipótesis como la más riesgosa, con su métrica y su umbral")
         else:
             principal = registro.principal()
             texto = "El diferenciador principal sobrevive al abogado del diablo, con confianza media o alta"
             if not principal:
-                agregar(False, texto, "no hay un diferenciador principal registrado")
+                agregar("sobrevive", False, texto, "no hay un diferenciador principal registrado")
             else:
                 suyas = [fila for fila in filas or [] if fila["diferenciador"] == principal["id"]]
                 sobrevive = suyas and all(f["veredicto"] == "sostenida" and f["nivel"] >= 2 for f in suyas)
-                agregar(sobrevive, texto, "%s: %s" % (principal["id"], ", ".join(
+                agregar("sobrevive", sobrevive, texto, "%s: %s" % (principal["id"], ", ".join(
                     "%s %s (confianza %s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]])
                     for f in suyas) or "ninguna hipótesis lo pone a prueba en 03-validacion.md"))
 
@@ -1073,32 +1101,34 @@ def criterios_puerta(numero_puerta, carpeta, producto, registro):
         presupuesto = float(criterios.get("presupuesto_semanas") or 0)
         semanas = sum(f["semanas"] for f in mvp)
         sin_semanas = [f["id"] for f in mvp if not f["semanas"]]
-        agregar(mvp and presupuesto and not sin_semanas and semanas <= presupuesto,
+        agregar("presupuesto", mvp and presupuesto and not sin_semanas and semanas <= presupuesto,
                 "El MVP cabe en el presupuesto de semanas",
                 "sin estimación: %s" % ", ".join(sin_semanas) if sin_semanas
-                else "%s de %s semana(s)" % (numero(semanas), numero(presupuesto)) if mvp
+                else "%s de %s" % (numero(semanas), plural(presupuesto, "semana")) if mvp
                 else "04-prd.md no tiene funcionalidades marcadas como MVP")
         principal = registro.principal()
         dentro = principal and [f["id"] for f in mvp if principal["id"] in f["diferenciadores"]]
-        agregar(dentro, "El diferenciador principal está en el MVP",
+        agregar("principal_mvp", dentro, "El diferenciador principal está en el MVP",
                 "%s en %s" % (principal["id"], ", ".join(dentro)) if dentro
                 else "ninguna funcionalidad del MVP lo cita" if principal
                 else "no hay un diferenciador principal registrado")
         trazadas = [f for f in mvp if not f["faltas"]]
-        agregar(mvp and len(trazadas) == len(mvp), "100 % de las funcionalidades del MVP con trazabilidad",
-                "%d de %d" % (len(trazadas), len(mvp)))
+        agregar("trazabilidad", mvp and len(trazadas) == len(mvp),
+                "100 % de las funcionalidades del MVP con trazabilidad", "%d de %d" % (len(trazadas), len(mvp)))
         definidas = datos["metricas"] and all(datos["metricas"].values())
-        agregar(definidas, "Métricas HEART definidas", "%d métrica(s), %d incompleta(s)" % (
-            len(datos["metricas"]), sum(1 for completa in datos["metricas"].values() if not completa)))
+        agregar("heart", definidas, "Métricas HEART definidas", "%s, %s" % (
+            plural(len(datos["metricas"]), "métrica"),
+            plural(sum(1 for completa in datos["metricas"].values() if not completa), "incompleta")))
         bloqueos = [requisito for requisito, estado in datos["politicas"] if estado == "bloqueo"]
-        agregar(datos["politicas"] and not bloqueos, "Checklist de políticas sin bloqueos",
+        agregar("checklist", datos["politicas"] and not bloqueos, "Checklist de políticas sin bloqueos",
                 "bloqueos: %s" % "; ".join(bloqueos) if bloqueos
-                else "%d requisito(s)" % len(datos["politicas"]) if datos["politicas"] else "el checklist está vacío")
+                else plural(len(datos["politicas"]), "requisito") if datos["politicas"] else "el checklist está vacío")
         if nueva:
             riesgosas = [fila for fila in hipotesis(carpeta, registro) or [] if fila["riesgosa"]]
             riesgosa = riesgosas[0] if len(riesgosas) == 1 else None
             prueba = riesgosa and riesgosa["metrica"] and [f["id"] for f in mvp if riesgosa["id"] in f["hipotesis"]]
-            agregar(prueba, "El MVP pone a prueba la hipótesis más riesgosa, con una métrica y un umbral",
+            agregar("riesgosa_mvp", prueba,
+                    "El MVP pone a prueba la hipótesis más riesgosa, con una métrica y un umbral",
                     "%s en %s" % (riesgosa["id"], ", ".join(prueba)) if prueba
                     else "ninguna funcionalidad del MVP cita la hipótesis más riesgosa (columna Hipótesis), o le "
                          "falta su métrica y su umbral en 03-validacion.md")
@@ -1174,29 +1204,355 @@ def propuestas_de(producto, numero_puerta):
     return [p for p in producto.get("propuestas", []) if p["puerta"] == numero_puerta and p["estado"] == "pendiente"]
 
 
-def bloque_puerta(numero_puerta, carpeta, producto, registro):
-    """El veredicto de una puerta, criterio por criterio, con sus avisos: (líneas, cumplidos, total)."""
-    criterios = criterios_puerta(numero_puerta, carpeta, producto, registro)
-    cumplidos = sum(1 for cumple, _, _ in criterios if cumple)
-    lineas = ["Puerta %d · %s · idea %s · cumple %d de %d criterios" % (
-        numero_puerta, PUERTAS[numero_puerta], tipo_de(producto), cumplidos, len(criterios))]
-    abiertas = [s for s in DEPENDE["P%d" % numero_puerta] if not cerrada(producto, s)]
-    if abiertas:
-        lineas.append("⚠ Veredicto provisional: falta cerrar la(s) sesión(es) %s." % ", ".join(abiertas))
-    for cumple, texto, detalle in criterios:
-        lineas.append("  %s %s%s" % ("✔" if cumple else "✖", texto, " · " + detalle if detalle else ""))
+def bloque_puerta(numero_puerta, carpeta, producto, registro, resultado=None):
+    """La puerta completa: el banner con el veredicto y la recomendación, y debajo los criterios uno por uno, con sus
+    avisos: (líneas, cumplidos, total)."""
+    evaluados = evaluar_puerta(numero_puerta, carpeta, producto, registro)
+    resultado = resultado or veredicto(numero_puerta, carpeta, producto, registro, evaluados)
+    cumplidos = sum(1 for c in evaluados if c["cumple"])
+    lineas = lineas_banner(resultado) + ["", "Puerta %d · %s · idea %s · cumple %d de %d criterios" % (
+        numero_puerta, PUERTAS[numero_puerta], tipo_de(producto), cumplidos, len(evaluados))]
+    if resultado["provisional"]:
+        lineas.append("⚠ Veredicto provisional: falta cerrar %s." % ", ".join(
+            "la sesión %s" % s for s in resultado["provisional"]))
+    for c in evaluados:
+        lineas.append("  %s %s%s" % ("✔" if c["cumple"] else "✖", c["texto"], " · " + c["detalle"] if c["detalle"]
+                                    else ""))
     lineas += ["  " + aviso for aviso in avisos_puerta(numero_puerta, carpeta, producto, registro)]
-    return lineas, cumplidos, len(criterios)
+    return lineas, cumplidos, len(evaluados)
 
 
-def comandos_decision(numero_puerta, carpeta, producto):
-    """Los comandos de la decisión, para la terminal del usuario; una propuesta con sesión trae su Ajustar listo."""
-    lineas = ["   Seguir:    " + orden("decidir --puerta %d --seguir" % numero_puerta, carpeta)]
-    for sesion in dict.fromkeys(p["ajustar"] for p in propuestas_de(producto, numero_puerta) if p.get("ajustar")):
-        lineas.append("   Ajustar %s: " % sesion + orden("decidir --puerta %d --ajustar %s" % (numero_puerta, sesion),
-                                                        carpeta))
-    lineas += ["   Ajustar:   " + orden("decidir --puerta %d --ajustar <sesión>" % numero_puerta, carpeta),
-               "   Descartar: " + orden("decidir --puerta %d --descartar \"<motivo>\"" % numero_puerta, carpeta)]
+# ---------------------------------------------------------------------------------------------------------------
+# Veredicto y recomendación de cada puerta: reglas fijas sobre los criterios y la confianza. La skill recomienda; la
+# decisión es del usuario, y decidir en contra pide un motivo.
+
+VEREDICTOS = {
+    "no": {"titulo": "No viable", "recomienda": "descartar", "tono": "mal", "marca": "🔴", "color": "31"},
+    "reservas": {"titulo": "Viable con reservas", "recomienda": "ajustar", "tono": "aviso", "marca": "🟡",
+                 "color": "33"},
+    "viable": {"titulo": "Viable", "recomienda": "seguir", "tono": "bien", "marca": "🟢", "color": "32"},
+}
+MAXIMO_RAZONES = 3
+NOMBRES_CRITERIO = {"demanda": "demanda", "monetizacion": "monetización", "facilidad": "facilidad",
+                    "riesgo": "riesgo de políticas", "diferenciacion": "diferenciación"}
+SESION_CRITERIO = {"demanda": "1c", "monetizacion": "1d", "riesgo": "1e", "diferenciacion": "1g"}
+
+
+def limites_puntaje(producto, registro):
+    """Los topes que las reglas y la evidencia de hoy ponen al puntaje (los mismos que aplica `puntaje` al
+    registrarlo): {criterio: (mínimo, máximo, motivo)}."""
+    limites = {}
+    viables, bajas = registro.viables(), registro.con_confianza_baja()
+    if not viables and not bajas:
+        limites["diferenciacion"] = (1, 1, "ningún diferenciador es viable")
+    elif not viables:
+        limites["diferenciacion"] = (1, 2, "solo hay diferenciadores viables con confianza baja")
+    else:
+        limites["diferenciacion"] = (2, 5, "hay %s" % plural(len(viables), "diferenciador viable",
+                                                             "diferenciadores viables"))
+    actuales = [h for h in registro.hallazgos.values() if h["linea"] == "demanda" and h.get("critico")
+                and registro.evaluar(h)["triangulado"]]
+    if not actuales:
+        limites["demanda"] = (1, 3, "ningún hallazgo clave de demanda está triangulado con señales actuales")
+    bloqueos = registro.bloqueos(objetivo_de(producto))
+    if bloqueos:
+        limites["riesgo"] = (1, 1, texto_bloqueos(bloqueos))
+    return limites
+
+
+def puntaje_vigente(producto, registro):
+    """El puntaje registrado contra las reglas y la evidencia de hoy: {total, valores, incoherencias}. Una incoherencia
+    aparece cuando el puntaje se registró con reglas anteriores o cuando la evidencia cambió después (una fuente que
+    envejeció, un hallazgo anulado); el total ajustado lleva cada valor a su tope."""
+    puntaje = producto.get("puntaje")
+    if not puntaje:
+        return None
+    valores, incoherencias = dict(puntaje["valores"]), []
+    for criterio, (minimo, maximo, motivo) in limites_puntaje(producto, registro).items():
+        valor = valores[criterio]
+        if not minimo <= valor <= maximo:
+            ajustado = min(max(valor, minimo), maximo)
+            incoherencias.append("%s %d, pero con las reglas de hoy %s %d (%s)" % (
+                NOMBRES_CRITERIO[criterio], valor, "el máximo es" if valor > maximo else "el mínimo es", ajustado,
+                motivo))
+            valores[criterio] = ajustado
+    return {"total": sum(valores.values()), "valores": valores, "incoherencias": incoherencias}
+
+
+def sesion_de(registro, ids, defecto):
+    """La sesión que escribió el primero de esos hallazgos: la que hay que ajustar para completarlo."""
+    for identificador in ids:
+        hallazgo = registro.hallazgos.get(identificador)
+        if hallazgo and hallazgo["linea"] in LINEAS:
+            return LINEAS[hallazgo["linea"]][1]
+    return defecto
+
+
+def nombrados(registro, filas):
+    """Los hallazgos que nombran a esas filas de la matriz (por ejemplo, al sustituto que ya resuelve la necesidad)."""
+    ids = {fila["id"] for fila in filas}
+    return [h["id"] for h in registro.hallazgos.values() if ids & {
+        c["id"] for c in (registro.competidor(r) for r in h.get("competidores", [])) if c}]
+
+
+def motivos_criterio(numero_puerta, criterio, producto, registro):
+    """Lo que un criterio que no se cumple dice del veredicto: (fatal, razón, qué lo cambiaría, sesión, hallazgos).
+    Fatal es lo que lleva a No viable; lo demás se puede completar ajustando una sesión."""
+    clave, detalle = criterio["clave"], llano(criterio["detalle"])
+    criterios = producto["criterios"]
+    puntaje = producto.get("puntaje")
+    principal = registro.principal()
+    viables, bajas = registro.viables(), registro.con_confianza_baja()
+    fuertes = registro.sustitutos_fuertes()
+    if clave == "puntaje":
+        if not puntaje:
+            return False, "Falta el puntaje de la síntesis", "Registrar el puntaje en la síntesis (sesión 1f)", "1f", []
+        minimo = int(criterios["puntaje_minimo_nueva" if tipo_de(producto) == "nueva" else "puntaje_minimo"])
+        return (True, "El puntaje es %d/25, bajo el mínimo de %d" % (puntaje["total"], minimo),
+                "Evidencia nueva que suba el puntaje a %d/25 o más" % minimo, None, [])
+    if clave == "demanda":
+        ids = sustento(registro)["demanda"]
+        return (True, "La demanda actual tiene confianza %s: ningún hallazgo de demanda está confirmado con señales "
+                      "recientes" % NIVELES[confianzas(registro)[0]["demanda"]],
+                "Un hallazgo de demanda confirmado con 3 fuentes recientes, una de ellas medida (confianza media o "
+                "alta)", None, ids)
+    if clave == "problema":
+        return (True, "Ningún peldaño documenta el problema con %s fuentes independientes y recientes"
+                % criterios["fuentes_minimas"],
+                "El problema documentado con %s fuentes independientes y recientes de peldaño 4 o 5"
+                % criterios["fuentes_minimas"], None, [])
+    if clave == "analogos":
+        return (False, "Faltan análogos con tracción (%s)" % detalle,
+                "Análogos con tracción registrados en la matriz (sesión 1a)", "1a", [])
+    if clave == "intentos":
+        if not producto.get("intentos"):
+            return (False, "Falta buscar si alguien ya lo intentó", "La búsqueda de intentos anteriores registrada",
+                    "1a", [])
+        return (True, "Alguien ya lo probó y fracasó por falta de demanda (%s)" % detalle,
+                "Evidencia de que el intento anterior fracasó por otra razón que esta idea no repite", None, [])
+    if clave in ("diferenciador", "sustituto"):
+        ids = nombrados(registro, fuertes) + (principal or {}).get("hallazgos", [])
+        if bajas:
+            baja = bajas[0]
+            faltan = [i for i, _ in registro.sin_triangular(baja)]
+            return (False, "%s cumple los criterios de un diferenciador, pero su evidencia no está confirmada (%s)" % (
+                baja["id"], ", ".join(faltan)), "Confirmar los hallazgos de %s con 3 fuentes recientes" % baja["id"],
+                    sesion_de(registro, faltan, "1g"), faltan)
+        if fuertes:
+            nombres = "; ".join(nombre_fila(c) for c in fuertes)
+            return (True, "Ningún diferenciador supera a %s, que ya resuelve la necesidad gratis" % nombres,
+                    "Un diferenciador con evidencia confirmada de algo que %s no resuelve" % nombres, None, ids)
+        return (True, "No hay ningún diferenciador viable: nada da una razón para elegir esta app",
+                "Un diferenciador con un dolor o un pedido confirmado en 2 competidores o más", None, ids)
+    if clave == "principal":
+        if not principal:
+            return (False, "No hay un diferenciador principal elegido", "Elegir el principal entre los viables (1g)",
+                    "1g", [])
+        faltan = [i for i, _ in registro.sin_triangular(principal)]
+        otros = [d["id"] for d in viables if d["id"] != principal["id"]]
+        if otros:
+            return (False, "Los hallazgos del principal (%s) no están confirmados, pero %s sí es viable" % (
+                principal["id"], ", ".join(otros)), "Elegir como principal un diferenciador viable (%s)"
+                % ", ".join(otros), "1g", faltan)
+        return (False, "Los hallazgos del principal (%s) no están confirmados (%s)" % (principal["id"], ", ".join(
+            faltan)), "Confirmar esos hallazgos con 3 fuentes recientes", sesion_de(registro, faltan, "1g"), faltan)
+    if clave == "riesgo":
+        if not puntaje:
+            return False, "Falta el puntaje de la síntesis", "Registrar el puntaje en la síntesis (sesión 1f)", "1f", []
+        bloqueos = registro.bloqueos(objetivo_de(producto))
+        ids = [i for lista_ids in bloqueos.values() for i in lista_ids]
+        tiendas = ", ".join(sorted(bloqueos))
+        if puntaje.get("mitigacion"):
+            return (False, "El puntaje no refleja que %s nombra o rechaza la categoría" % tiendas,
+                    "Volver a registrar el puntaje con riesgo 1 y la mitigación (1f)", "1f", ids)
+        if bloqueos:
+            return (True, "%s nombra o rechaza la categoría y no hay una mitigación escrita" % tiendas,
+                    "Una mitigación escrita y creíble (por ejemplo, no lanzar en %s)" % tiendas, None, ids)
+        return (True, "El riesgo de políticas es 1 y no hay una mitigación escrita",
+                "Una mitigación escrita y creíble del riesgo de políticas", None, sustento(registro)["riesgo"])
+    if clave == "monetizacion":
+        modelos = (producto.get("escenarios") or {}).get("modelos")
+        if modelos and not any(m["base"] > 0 for m in modelos):
+            return (True, "Ningún modelo de monetización genera ingresos en el caso base",
+                    "Un modelo de monetización que genere ingresos con supuestos con fuente", None, [])
+        return (False, "Ningún modelo de monetización tiene todos sus supuestos con fuente (%s)" % detalle,
+                "Las fuentes que faltan en los supuestos de los escenarios (sesión 2)", "2", [])
+    if clave == "meta":
+        if producto.get("escenarios") and float(criterios.get("meta_ingresos_mes") or 0):
+            return (True, "El caso base no alcanza la meta de ingresos que marcaste como obligatoria (%s)" % detalle,
+                    "Un caso base que llegue a la meta, o que la meta deje de ser obligatoria", None, [])
+        return False, "Falta comparar el caso base con la meta obligatoria", "Los escenarios (sesión 2)", "2", []
+    if clave == "hipotesis":
+        if "refutadas" in detalle:
+            return (True, "Hay hipótesis críticas refutadas (%s)" % detalle.replace("refutadas: ", ""),
+                    "Evidencia nueva que las sostenga, o una idea que no dependa de ellas", None, [])
+        return False, "Falta la tabla de hipótesis", "La validación documental (sesión 3)", "3", []
+    if clave == "riesgosa":
+        return (False, "Falta la hipótesis más riesgosa, con su métrica y su umbral",
+                "Marcarla en la validación documental (sesión 3)", "3", [])
+    if clave == "sobrevive":
+        if not principal:
+            return (False, "No hay un diferenciador principal elegido", "Elegir el principal entre los viables (1g)",
+                    "1g", [])
+        otros = [d["id"] for d in viables if d["id"] != principal["id"]]
+        ids = list(principal.get("hallazgos", []))
+        if otros:
+            return (False, "El principal (%s) no sobrevive al abogado del diablo, pero %s sí es viable" % (
+                principal["id"], ", ".join(otros)), "Llevar %s a principal (1g)" % ", ".join(otros), "1g", ids)
+        return (True, "El diferenciador principal (%s) no sobrevive al abogado del diablo y no hay otro viable (%s)" % (
+            principal["id"], detalle.split(": ", 1)[-1]),
+                "Un diferenciador viable que quede sostenido con confianza media o alta", None, ids)
+    if clave == "checklist" and "bloqueos" in detalle:
+        return (True, "El checklist de políticas tiene bloqueos (%s)" % detalle.replace("bloqueos: ", ""),
+                "Un MVP que evite esos bloqueos, con su requisito resuelto", None, [])
+    return False, "%s: %s" % (criterio["texto"], detalle), "Completarlo en el PRD (sesión 4)", "4", []
+
+
+def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
+    """El veredicto de la skill en una puerta, con reglas fijas: No viable (recomienda descartar), Viable con reservas
+    (recomienda ajustar una sesión) o Viable (recomienda seguir), con 1 a 3 razones y qué lo cambiaría."""
+    evaluados = evaluados if evaluados is not None else evaluar_puerta(numero_puerta, carpeta, producto, registro)
+    fatales, ajustes, hallazgos = [], [], []
+    for criterio in evaluados:
+        if not criterio["cumple"]:
+            fatal, razon, cambiaria, sesion, ids = motivos_criterio(numero_puerta, criterio, producto, registro)
+            (fatales if fatal else ajustes).append((razon, cambiaria, sesion))
+            hallazgos += ids
+    vigente_ = puntaje_vigente(producto, registro) if numero_puerta == 1 else None
+    if vigente_ and vigente_["incoherencias"]:
+        nueva = tipo_de(producto) == "nueva"
+        minimo = int(producto["criterios"]["puntaje_minimo_nueva" if nueva else "puntaje_minimo"])
+        registrado = producto["puntaje"]["total"]
+        if registrado >= minimo > vigente_["total"]:
+            fatales.insert(0, ("Con las reglas de hoy el puntaje es %d/25 (se registró %d/25), bajo el mínimo de %d"
+                               % (vigente_["total"], registrado, minimo),
+                               "Evidencia nueva que suba el puntaje a %d/25 o más con las reglas de hoy" % minimo,
+                               None))
+    if numero_puerta == 1 and producto.get("puntaje") and not fatales:
+        por_criterio, global_ = confianzas(registro)
+        if global_ < 2:
+            debiles = sorted((nivel, c) for c, nivel in por_criterio.items() if nivel is not None and nivel < 2)
+            criterio = debiles[0][1]
+            ids = sustento(registro)[criterio] or []
+            sesion = SESION_CRITERIO[criterio]
+            if criterio == "diferenciacion" and registro.principal():
+                sesion = sesion_de(registro, [i for i, _ in registro.sin_triangular(registro.principal())], "1g")
+            ajustes.append(("La confianza global es baja: %s se apoya%s en evidencia sin confirmar" % (
+                ", ".join(NOMBRES_CRITERIO[c] for _, c in debiles), "n" if len(debiles) > 1 else ""),
+                "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion))
+            hallazgos += ids
+    if not fatales:
+        for propuesta in propuestas_de(producto, numero_puerta):
+            sesion = propuesta.get("ajustar")
+            lineas_sesion = [linea for linea, (_, de_sesion) in LINEAS.items() if de_sesion == sesion]
+            if sesion and not vacios_de_herramienta(producto, registro, lineas_sesion):  # se puede cerrar
+                ajustes.append(("Hay una propuesta pendiente (%s): %s" % (propuesta["id"], llano(propuesta["texto"])),
+                                "Aplicarla al ajustar la sesión %s" % sesion, sesion))
+    if fatales:
+        nivel, elegidas, sesion = "no", fatales, None
+    elif ajustes:
+        nivel, elegidas, sesion = "reservas", ajustes, ajustes[0][2]
+    else:
+        nivel, sesion = "viable", None
+        global_ = confianzas(registro)[1]
+        elegidas = [("Cumple los %s de la puerta %d" % (plural(len(evaluados), "criterio"), numero_puerta),
+                     {1: "Que un hallazgo clave pierda vigencia o aparezca evidencia en contra y la confianza global "
+                         "baje a baja (pasaría a Viable con reservas)",
+                      2: "Que la validación refute una hipótesis crítica (pasaría a No viable)",
+                      3: "Que el MVP deje de caber en el presupuesto o pierda la trazabilidad (pasaría a Viable con "
+                         "reservas)"}[numero_puerta], None)]
+        if numero_puerta == 1:
+            elegidas.append(("La evidencia que la sostiene tiene confianza %s" % NIVELES[global_], None, None))
+        principal = registro.principal()
+        if principal and numero_puerta in (1, 2):
+            elegidas.append(("El diferenciador principal (%s) es viable" % principal["id"], None, None))
+            hallazgos += principal.get("hallazgos", [])
+        hallazgos += sustento(registro)["demanda"] or []
+    razones = [r for r, _, _ in elegidas][:MAXIMO_RAZONES]
+    cambiaria = list(dict.fromkeys(c for _, c, _ in elegidas if c))[:MAXIMO_RAZONES]
+    if nivel == "reservas":
+        cambiaria.append("Con eso, el veredicto pasaría a Viable")
+        lineas_sesion = [linea for linea, (_, de_sesion) in LINEAS.items() if de_sesion == sesion]
+        if vacios_de_herramienta(producto, registro, lineas_sesion):
+            cambiaria.append("La sesión %s tiene vacíos por límite de las herramientas: antes de ajustarla, dale al "
+                             "agente un navegador o aporta un CSV de reseñas" % sesion)
+    abiertas = [s for s in DEPENDE["P%d" % numero_puerta] if not cerrada(producto, s)]
+    return {"puerta": numero_puerta, "nivel": nivel, "titulo": VEREDICTOS[nivel]["titulo"],
+            "recomienda": VEREDICTOS[nivel]["recomienda"], "sesion": sesion, "razones": razones,
+            "cambiaria": cambiaria, "provisional": abiertas, "hallazgos": list(dict.fromkeys(hallazgos)),
+            "incoherencias": (vigente_ or {}).get("incoherencias", [])}
+
+
+def texto_recomendacion(resultado):
+    """'descartar', 'ajustar la sesión 1c' o 'seguir'."""
+    if resultado["recomienda"] == "ajustar":
+        return "ajustar la sesión %s" % resultado["sesion"]
+    return resultado["recomienda"]
+
+
+def lineas_banner(resultado):
+    """El banner de la puerta, para la terminal y para estado.md: el veredicto, la recomendación, las razones y qué
+    cambiaría el veredicto. El color va en la marca (y, en una terminal, también en el texto)."""
+    datos = VEREDICTOS[resultado["nivel"]]
+    raya = "━" * 72
+    recomienda = resultado["recomienda"].upper() + (" %s" % resultado["sesion"] if resultado["sesion"] else "")
+    lineas = [raya, "%s  PUERTA %d · %s  →  la skill recomienda: %s" % (
+        datos["marca"], resultado["puerta"], datos["titulo"].upper(), recomienda), raya]
+    if resultado["provisional"]:
+        lineas.append("⚠ Provisional: falta cerrar %s." % ", ".join(
+            "la sesión %s" % s for s in resultado["provisional"]))
+    lineas.append("Por qué:")
+    lineas += ["  %d. %s." % (indice, razon) for indice, razon in enumerate(resultado["razones"], start=1)]
+    lineas.append("Qué cambiaría el veredicto:")
+    lineas += ["  · %s." % texto for texto in resultado["cambiaria"]]
+    lineas += ["La decisión es tuya: el comando recomendado va primero. Decidir en contra de la recomendación pide "
+               "--motivo.", raya]
+    return lineas
+
+
+def con_color(texto, activo=None):
+    """El texto con el banner en color (ANSI) si la salida es una terminal y no hay NO_COLOR; si no, tal cual: en
+    estado.md, en un chat o en un archivo, el color lo da la marca del veredicto."""
+    if activo is None:
+        activo = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    if not activo:
+        return texto
+    colores = {datos["marca"]: datos["color"] for datos in VEREDICTOS.values()}
+    lineas = texto.split("\n")
+    pintar = set()
+    for indice, linea in enumerate(lineas):
+        if linea[:1] in colores and 0 < indice < len(lineas) - 1 and lineas[indice - 1].startswith("━"):
+            cierre = next((j for j in range(indice + 2, len(lineas)) if lineas[j].startswith("━")), indice + 1)
+            pintar.update((j, colores[linea[:1]]) for j in (indice - 1, indice, indice + 1, cierre))
+    for indice, color in pintar:
+        lineas[indice] = "\033[1;%sm%s\033[0m" % (color, lineas[indice])
+    return "\n".join(lineas)
+
+
+def comandos_decision(numero_puerta, carpeta, producto, resultado):
+    """Los comandos de la decisión, para la terminal del usuario: primero el recomendado; los que van en contra de la
+    recomendación llevan --motivo. Una propuesta con sesión trae su Ajustar listo."""
+    recomienda = resultado["recomienda"]
+    contra = ' --motivo "<por qué decides distinto de la recomendación>"'
+
+    def comando(tipo, resto):
+        return orden("decidir --puerta %d %s%s" % (numero_puerta, resto, contra if tipo != recomienda else ""),
+                     carpeta)
+
+    motivo = "No viable: %s" % "; ".join(resultado["razones"])
+    recomendado = {"seguir": ("Seguir", "--seguir"),
+                   "ajustar": ("Ajustar %s" % resultado["sesion"], "--ajustar %s" % resultado["sesion"]),
+                   "descartar": ("Descartar", "--descartar %s" % shlex.quote(motivo))}[recomienda]
+    lineas = ["   ★ Recomendado · %s: %s" % (recomendado[0], comando(recomienda, recomendado[1]))]
+    if recomienda != "seguir":
+        lineas.append("   Seguir:    " + comando("seguir", "--seguir"))
+    sesiones = [p["ajustar"] for p in propuestas_de(producto, numero_puerta) if p.get("ajustar")]
+    for sesion in dict.fromkeys(sesiones):
+        if not (recomienda == "ajustar" and sesion == resultado["sesion"]):
+            lineas.append("   Ajustar %s: " % sesion + comando("ajustar", "--ajustar %s" % sesion))
+    lineas.append("   Ajustar:   " + comando("ajustar", "--ajustar <sesión>"))
+    if recomienda != "descartar":
+        lineas.append("   Descartar: " + comando("descartar", "--descartar \"<motivo>\""))
     return lineas
 
 
@@ -1351,15 +1707,15 @@ def pasos(carpeta, producto, registro):
     for numero_puerta in (1, 2, 3):
         nodo = "P%d" % numero_puerta
         if disponible(producto, lista_decisiones, nodo) and not cumplido(producto, lista_decisiones, nodo):
+            resultado = veredicto(numero_puerta, carpeta, producto, registro)
+            bloque_, _, _ = bloque_puerta(numero_puerta, carpeta, producto, registro, resultado)
+            lineas += bloque_
             previa = vigente(lista_decisiones, numero_puerta)
             if previa and previa["decision"] == "ajustar":
-                lineas += ["La puerta %d se ajustó (sesión %s) y hay que volver a decidirla." % (
-                    numero_puerta, previa.get("sesion")), ""]
-            veredicto, _, _ = bloque_puerta(numero_puerta, carpeta, producto, registro)
-            lineas += veredicto + [
-                "",
-                "Terminal · La decisión es tuya (el agente nunca corre este comando). Elige uno:",
-            ] + comandos_decision(numero_puerta, carpeta, producto)
+                lineas += ["", "La puerta %d se ajustó (sesión %s) y hay que volver a decidirla." % (
+                    numero_puerta, previa.get("sesion"))]
+            lineas += ["", "Terminal · La skill recomienda; la decisión es tuya (el agente nunca corre este comando). "
+                           "Elige uno:"] + comandos_decision(numero_puerta, carpeta, producto, resultado)
             return lineas
     lineas += ["Proceso cerrado: el PRD está aprobado y no queda ningún paso de hb-product %s." % VERSION,
                "Para construir, pide una funcionalidad del PRD a la vez citando su ID (por ejemplo: \"Implementa "
@@ -1393,6 +1749,15 @@ def texto_siguiente(carpeta, producto, registro=None):
     if pendientes:
         avisos.append("Consumo sin anotar (opcional): %s · al cerrar cada chat, `%s`" % (
             ", ".join(pendientes), orden("consumo --sesion <id> --costo '<USD>'", carpeta)))
+    lista_decisiones = decisiones(carpeta)
+    sin_sesiones = not any(not cerrada(producto, s["id"]) and disponible(producto, lista_decisiones, s["id"])
+                           for s in SESIONES)
+    filas = producto.get("consumo") or []
+    if filas and sin_sesiones and not any(f["sesion"] == "orquestador" for f in filas):
+        avisos.append("Consumo del chat orquestador (si lo usaste): al terminar, anota lo que muestre /cost (en "
+                      "Copilot, /usage, con --creditos); si ese total ya incluye a los subagentes, agrega --incluye "
+                      "con sus sesiones:")
+        avisos.append("   " + orden("consumo --sesion orquestador --costo '<USD>' --tokens '<tokens>'", carpeta))
     return "\n".join([titulo, ""] + pasos(carpeta, producto, registro) + ([""] + avisos if avisos else []))
 
 
@@ -1443,9 +1808,9 @@ def texto_resumen(carpeta, producto, registro):
             " · " + " · ".join(escenarios["rotulos"]) if escenarios["rotulos"] else ""))
     consumo = producto.get("consumo", [])
     if consumo:
-        lineas.append("- **Consumo anotado:** %s · total %s USD%s" % (
+        lineas.append("- **Consumo anotado:** %s · total %s%s" % (
             " · ".join("%s %s" % (fila["sesion"], texto_consumo(fila)) for fila in consumo),
-            numero(total_usd(consumo)), " (sin anotar: %s)" % ", ".join(sin_consumo(producto))
+            texto_total(consumo), " (sin anotar: %s)" % ", ".join(sin_consumo(producto))
             if sin_consumo(producto) else ""))
     cambios = producto.get("criterios_cambios", [])
     if cambios:
@@ -1467,6 +1832,11 @@ def texto_resumen(carpeta, producto, registro):
                 " (%s)" % decision["desde"] if decision.get("desde") else "", decision["cumple"], decision["total"])
             if decision.get("sesion"):
                 detalle += " · sesión %s" % decision["sesion"]
+            recomendacion = decision.get("recomendacion")
+            if recomendacion:
+                detalle += " · la skill recomendaba %s" % texto_recomendacion(recomendacion)
+            if decision.get("contra_recomendacion"):
+                detalle += " · **contra la recomendación**: %s" % decision.get("motivo_decision", "")
         else:
             detalle = "pendiente"
         lineas.append("| P%d · %s | %s |" % (numero_puerta, nombre, detalle))
@@ -2429,6 +2799,25 @@ def total_usd(filas):
     return sum((f.get("costo") or 0) + (f.get("creditos") or 0) * USD_POR_CREDITO for f in filas)
 
 
+def con_costo(fila):
+    return fila.get("costo") is not None or fila.get("creditos") is not None
+
+
+def texto_total(filas):
+    """El total anotado: en USD solo si alguna fila trae costo (si no, "sin dato en USD", nunca 0), con las sesiones
+    que no lo traen y los tokens sumados."""
+    costeadas = [f for f in filas if con_costo(f)]
+    if costeadas:
+        texto = "%s USD" % numero(total_usd(costeadas))
+        sin_dato = [f["sesion"] for f in filas if not con_costo(f)]
+        if sin_dato:
+            texto += " (sin dato en USD: %s)" % ", ".join(sin_dato)
+    else:
+        texto = "sin dato en USD"
+    tokens = sum(f.get("tokens") or 0 for f in filas)
+    return texto + (" · %s tokens" % numero(tokens) if tokens else "")
+
+
 def monto(texto, opcion):
     """Un monto escrito por una persona ('0.40', '$0,40', '1.2 USD'); rechaza el que el shell mutiló con '$'."""
     limpio = str(texto).strip()
@@ -2458,7 +2847,7 @@ def cmd_consumo(args):
             print("%-12s %s%s" % (fila["sesion"], texto_consumo(fila), " · %s" % fila["modelo"] if fila.get("modelo")
                                   else ""))
         if filas:
-            print("Total: %s USD (los AI Credits, a %s USD)" % (numero(total_usd(filas)), numero(USD_POR_CREDITO)))
+            print("Total: %s (los AI Credits, a %s USD)" % (texto_total(filas), numero(USD_POR_CREDITO)))
         pendientes = sin_consumo(producto)
         print("Siguiente paso: %s" % ("anotar %s con `consumo --sesion <id> --costo '<USD>'` (opcional)" % ", ".join(
             pendientes) if pendientes else "nada pendiente."))
@@ -2485,8 +2874,7 @@ def cmd_consumo(args):
     fila["fecha"] = ahora()
     guardar(carpeta, producto)
     actualizar_estado(carpeta, producto)
-    print("✔ Consumo de %s: %s · total anotado: %s USD" % (args.sesion, texto_consumo(fila),
-                                                         numero(total_usd(filas))))
+    print("✔ Consumo de %s: %s · total anotado: %s" % (args.sesion, texto_consumo(fila), texto_total(filas)))
     pendientes = sin_consumo(producto)
     print("Siguiente paso: %s" % ("falta anotar %s (opcional)." % ", ".join(pendientes) if pendientes
                                   else "`siguiente` muestra por dónde seguir."))
@@ -2841,14 +3229,15 @@ def cmd_puerta(args):
     carpeta, producto, registro = abrir(args)
     if not tipo_de(producto):
         raise Fallo("Falta el tipo de idea (`tipo`): cada puerta usa el juego de criterios de ese tipo.")
-    lineas, cumplidos, total = bloque_puerta(args.n, carpeta, producto, registro)
-    print("\n".join(lineas))
-    print("\nVeredicto: cumple %d de %d criterios." % (cumplidos, total))
+    resultado = veredicto(args.n, carpeta, producto, registro)
+    lineas, cumplidos, total = bloque_puerta(args.n, carpeta, producto, registro, resultado)
+    print(con_color("\n".join(lineas)))
+    print("\nCriterios: cumple %d de %d." % (cumplidos, total))
     previa = vigente(decisiones(carpeta), args.n)
     if previa and previa["decision"] == "seguir":
         print("Esta puerta ya está decidida: seguir, el %s." % previa["fecha"].replace("T", " "))
-    print("Siguiente paso: la decisión es del usuario (el agente nunca corre `decidir`). Elige uno:")
-    print("\n".join(comandos_decision(args.n, carpeta, producto)))
+    print("Siguiente paso: la skill recomienda y el usuario decide (el agente nunca corre `decidir`). Elige uno:")
+    print("\n".join(comandos_decision(args.n, carpeta, producto, resultado)))
 
 
 def cmd_decidir(args):
@@ -2901,9 +3290,29 @@ def cmd_decidir(args):
     if args.descartar is not None and len(args.descartar.strip()) < 10:
         raise Fallo("--descartar lleva el motivo completo (qué evidencia en contra hay, o qué camino no "
                     "existe): es lo que queda como aprendizaje")
+    resultado = veredicto(args.puerta, carpeta, producto, registro)
+    tomada = "seguir" if args.seguir else "ajustar" if args.ajustar else "descartar"
+    contra = tomada != resultado["recomienda"]
+    motivo_usuario = (args.motivo or "").strip()
+    if contra and len(motivo_usuario) < 10:
+        raise Fallo("La skill recomienda %s (veredicto: %s; %s). Para %s en contra de la recomendación, agrega "
+                    "--motivo \"<por qué decides distinto>\" (al menos 10 caracteres): queda registrado como decisión "
+                    "contra la recomendación." % (texto_recomendacion(resultado), resultado["titulo"],
+                                                  "; ".join(resultado["razones"]), tomada))
+    registro_decision["recomendacion"] = {
+        "veredicto": resultado["nivel"], "recomienda": resultado["recomienda"], "sesion": resultado["sesion"],
+        "razones": resultado["razones"], "cambiaria": resultado["cambiaria"]}
+    registro_decision["contra_recomendacion"] = contra
+    if motivo_usuario:
+        registro_decision["motivo_decision"] = motivo_usuario
     for decision in lista_decisiones:
         if decision["puerta"] == args.puerta:
             decision["vigente"] = False
+    if contra:
+        print("⚠ Decisión contra la recomendación (la skill recomendaba %s; veredicto: %s): queda registrada con tu "
+              "motivo: «%s»" % (texto_recomendacion(resultado), resultado["titulo"], motivo_usuario))
+    else:
+        print("· Coincide con la recomendación de la skill (veredicto: %s)." % resultado["titulo"])
     resueltas = []
     for propuesta in propuestas_de(producto, args.puerta):  # la decisión de la puerta responde a sus propuestas
         propuesta.update(estado="seguir" if args.seguir else "ajustar %s" % args.ajustar if args.ajustar
@@ -2923,7 +3332,7 @@ def cmd_decidir(args):
             print("⚠ Sigues con %d criterio(s) sin cumplir: queda anotado en decisiones.json." % (
                 len(criterios) - cumplidos))
         regenerar_reporte(carpeta)
-        print("\n" + siguiente)
+        print("\n" + con_color(siguiente))
     elif args.ajustar:
         sesion = args.ajustar
         reabiertas = [sesion] if cerrada(producto, sesion) else []
@@ -2952,7 +3361,7 @@ def cmd_decidir(args):
                   "· Fuentes difíciles)." % (", ".join(sorted({v["linea"] for v in herramienta})), "; ".join(
                       "%s %s" % (DIMENSIONES[v["dimension"]], v["valor"]) for v in herramienta)))
         regenerar_reporte(carpeta)
-        print("\n" + siguiente)
+        print("\n" + con_color(siguiente))
     else:
         motivo = args.descartar.strip()
         registro_decision.update(decision="descartar", motivo=motivo)
@@ -2983,7 +3392,7 @@ def cmd_siguiente(args):
         return
     with bloqueo(carpeta):
         producto = cargar(carpeta)
-        print(actualizar_estado(carpeta, producto))
+        print(con_color(actualizar_estado(carpeta, producto)))
 
 
 def cmd_estado(args):
@@ -2993,7 +3402,7 @@ def cmd_estado(args):
         registro = Registro(carpeta, producto["criterios"])
         siguiente = actualizar_estado(carpeta, producto)
     print(re.sub(r"\*\*", "", texto_resumen(carpeta, producto, registro)))
-    print("\n" + siguiente)
+    print("\n" + con_color(siguiente))
 
 
 def cmd_archivar(args):
@@ -3043,9 +3452,15 @@ def cmd_reabrir(args):
 # ---------------------------------------------------------------------------------------------------------------
 # Reporte de una idea y tablero de ideas (HTML de un solo archivo, sin red: CSS y gráficos SVG en línea)
 
-ESTADOS_IDEA = {"en-curso": ("En curso", "◐"), "seguir": ("Seguir", "✔"), "descartada": ("Descartada", "✖"),
-                "archivada": ("Archivada", "■")}
-ORDEN_ESTADOS = ("en-curso", "seguir", "descartada", "archivada")
+# Cada idea está en un solo estado: las descartadas y las pausadas viven en archivo/, pero "archivada" es un lugar, no
+# un estado (antes se cruzaba con "descartada").
+ESTADOS_IDEA = {"en-curso": ("En curso", "◐"), "lista": ("Lista para construir", "✔"),
+                "descartada": ("Descartada", "✖"), "pausada": ("Pausada", "■")}
+ORDEN_ESTADOS = ("en-curso", "lista", "descartada", "pausada")
+TONO_ESTADO = {"en-curso": "neutro", "lista": "bien", "descartada": "mal", "pausada": "neutro"}
+EXPLICACION_ESTADOS = ("Cada idea está en un solo estado: en curso (con sesiones o una puerta por delante), lista para "
+                       "construir (la puerta 3 aprobó el PRD), descartada (en una puerta) o pausada (archivada a mano, "
+                       "sin descartar). Las descartadas y las pausadas se guardan en archivo/ y se pueden reabrir.")
 TIPOS_LLANO = {"existente": "Ya existen apps que hacen lo mismo y tienen usuarios.",
                "variante": "Ya existen apps parecidas, pero esta idea cambia algo importante.",
                "nueva": "No hay apps que hagan lo mismo: la evidencia sale de casos parecidos (por analogía)."}
@@ -3124,6 +3539,20 @@ th{color:var(--texto-2);font-weight:600;border-top:0}
 .grafico text{fill:var(--texto);font:13px system-ui,-apple-system,sans-serif}
 .grafico .t2{fill:var(--texto-2)}
 .vacio{color:var(--texto-2);font-style:italic}
+.veredicto{border:2px solid var(--borde);border-left-width:12px;border-radius:12px;padding:18px 20px;margin:0 0 16px}
+.veredicto.mal{border-color:var(--mal);background:var(--mal-f);color:var(--texto)}
+.veredicto.aviso{border-color:var(--aviso);background:var(--aviso-f);color:var(--texto)}
+.veredicto.bien{border-color:var(--bien);background:var(--bien-f);color:var(--texto)}
+.veredicto.neutro{background:var(--suave);color:var(--texto)}
+.veredicto .titulo{font-size:1.6rem;font-weight:800;line-height:1.2;margin:0 0 4px}
+.veredicto.mal .titulo{color:var(--mal)}.veredicto.aviso .titulo{color:var(--aviso)}
+.veredicto.bien .titulo{color:var(--bien)}
+.veredicto .recomienda{font-size:1.15rem;font-weight:700;margin:0 0 10px}
+.veredicto ol,.veredicto ul{margin:4px 0 10px;padding-left:22px}
+.veredicto h3{margin-top:8px}
+.veredicto.compacto{padding:10px 14px;margin:8px 0 0;border-left-width:8px}
+.veredicto.compacto .titulo{font-size:1.05rem}
+.fuentes{font-size:.9rem;color:var(--texto-2)}
 footer{color:var(--texto-2);font-size:.85rem;margin-top:24px}
 @media (max-width:640px){.dato{grid-template-columns:1fr}h1{font-size:1.4rem}.tarjeta{padding:14px}}
 """
@@ -3185,14 +3614,14 @@ def estado_idea(carpeta, producto):
     ultima = hechas[-1] if hechas else None
     archivo = producto.get("archivo")
     if archivo:
-        clave = "descartada" if str(archivo.get("por", "")).startswith("descarte") else "archivada"
+        clave = "descartada" if str(archivo.get("por", "")).startswith("descarte") else "pausada"
         motivo = archivo.get("motivo", "")
     else:
-        vigentes = [d for d in hechas if d.get("vigente")]
-        if vigentes and vigentes[-1]["decision"] == "seguir":
-            clave = "seguir"
-            motivo = "Puerta %d: seguir, con %d de %d criterios cumplidos." % (
-                vigentes[-1]["puerta"], vigentes[-1].get("cumple", 0), vigentes[-1].get("total", 0))
+        final = vigente(lista_decisiones, 3)
+        if final and final["decision"] == "seguir":
+            clave = "lista"
+            motivo = "Puerta 3: seguir, con %d de %d criterios cumplidos." % (final.get("cumple", 0),
+                                                                              final.get("total", 0))
         else:
             clave = "en-curso"
             motivo = ""
@@ -3224,8 +3653,95 @@ def fecha_corta(texto):
     return str(texto or "").replace("T", " ")[:16]
 
 
-def seccion_resumen(carpeta, producto, registro, estado):
-    tono = {"en-curso": "neutro", "seguir": "bien", "descartada": "mal", "archivada": "neutro"}[estado["clave"]]
+def veredicto_de_idea(carpeta, producto, registro):
+    """El veredicto que encabeza el reporte y el tablero: el de la puerta pendiente o, si no hay, el de la última
+    puerta decidida, calculado con las reglas y la evidencia de hoy: {resultado, decision} o None."""
+    lista_decisiones = decisiones(carpeta)
+    if not producto.get("archivo") and tipo_de(producto):
+        for numero_puerta in PUERTAS:
+            nodo = "P%d" % numero_puerta
+            if disponible(producto, lista_decisiones, nodo) and not cumplido(producto, lista_decisiones, nodo):
+                return {"resultado": veredicto(numero_puerta, carpeta, producto, registro), "decision": None}
+    hechas = [d for d in lista_decisiones if d.get("decision") in DECISIONES_LLANO]
+    if not hechas or not tipo_de(producto):
+        return None
+    ultima = hechas[-1]
+    return {"resultado": veredicto(ultima["puerta"], carpeta, producto, registro), "decision": ultima}
+
+
+def seccion_veredicto(info, compacto=False):
+    """El banner grande y con color del veredicto de la skill: arriba del reporte y, compacto, en el tablero."""
+    if not info:
+        if compacto:
+            return ""
+        return ('<section class="veredicto neutro"><p class="titulo">Todavía sin veredicto</p><p>La skill calcula '
+                'su veredicto y su recomendación al llegar a la puerta 1, cuando cierra la investigación.</p>'
+                '</section>')
+    resultado, decision = info["resultado"], info["decision"]
+    datos = VEREDICTOS[resultado["nivel"]]
+    cuando = ("hoy, pendiente de tu decisión" if decision is None else
+              "recalculado hoy con las reglas actuales (la puerta se decidió el %s)" % fecha_corta(decision["fecha"]))
+    titulo = '<p class="titulo">%s %s</p><p class="recomienda">Puerta %d · %s · la skill recomienda: %s</p>' % (
+        datos["marca"], escape(datos["titulo"]), resultado["puerta"], escape(PUERTAS[resultado["puerta"]]),
+        escape(texto_recomendacion(resultado)))
+    if compacto:
+        return '<div class="veredicto compacto %s">%s<p class="nota">%s</p></div>' % (
+            datos["tono"], titulo, escape(resultado["razones"][0] + "." if resultado["razones"] else ""))
+    partes = [titulo, '<p class="nota">Veredicto %s.%s</p>' % (escape(cuando), escape(
+        " Provisional: falta cerrar %s." % ", ".join("la sesión %s" % s for s in resultado["provisional"]))
+        if resultado["provisional"] else "")]
+    partes.append("<h3>Por qué</h3><ol>%s</ol>" % "".join("<li>%s</li>" % escape(r) for r in resultado["razones"]))
+    partes.append("<h3>Qué cambiaría el veredicto</h3><ul>%s</ul>" % "".join(
+        "<li>%s</li>" % escape(c) for c in resultado["cambiaria"]))
+    if decision:
+        tomada = DECISIONES_LLANO[decision["decision"]].lower() + (
+            " la sesión %s" % decision["sesion"] if decision.get("sesion") else "")
+        if decision.get("contra_recomendacion"):
+            partes.append("<p>%s Decidiste %s en contra de la recomendación. Tu motivo: «%s».</p>" % (
+                chip("Decisión contra la recomendación", "aviso", "⚠"), escape(tomada),
+                escape(decision.get("motivo_decision", ""))))
+        elif decision.get("recomendacion"):
+            partes.append("<p>Decidiste %s, como recomendaba la skill.</p>" % escape(tomada))
+        else:
+            partes.append('<p class="nota">Decidiste %s antes de que la skill diera recomendaciones.</p>' % escape(
+                tomada))
+    partes.append('<p class="nota">La skill recomienda con reglas fijas; la decisión es tuya.</p>')
+    return '<section class="veredicto %s">%s</section>' % (datos["tono"], "".join(partes))
+
+
+def hallazgos_decisivos(producto, registro, estado, info, maximo=5):
+    """Los 3 a 5 hallazgos que decidieron: los que cita el motivo, los que sostienen el veredicto (los criterios que
+    fallaron o lo que lo hace viable) y, si faltan, los clave de menor confianza."""
+    textos = [estado.get("motivo") or ""]
+    if info and info["decision"]:
+        textos.append(info["decision"].get("motivo") or "")
+        textos += [c.get("detalle", "") for c in info["decision"].get("criterios", []) if not c.get("cumple")]
+    ids = [i for texto in textos for i in re.findall(r"\bH-[A-Z]{3}-\d+\b", texto)]
+    ids += (info or {}).get("resultado", {}).get("hallazgos", [])
+    elegidos = [i for i in dict.fromkeys(ids) if i in registro.hallazgos][:maximo]
+    if len(elegidos) < 3:
+        claves = sorted((h for h in registro.hallazgos.values() if h.get("critico") and h["id"] not in elegidos),
+                        key=lambda h: (registro.evaluar(h)["nivel"], h["id"]))
+        elegidos += [h["id"] for h in claves[:3 - len(elegidos)]]
+    return [registro.hallazgos[i] for i in elegidos]
+
+
+def lista_decisivos(registro, hallazgos):
+    items = []
+    for hallazgo in hallazgos:
+        etiqueta, _ = etiqueta_llana(registro, hallazgo)
+        fuentes = registro.fuentes_de(hallazgo.get("fuentes", []))
+        items.append('<li><p>%s%s</p><div class="fila">%s<span class="nota">%s</span></div><p class="fuentes">'
+                     '%s: %s</p></li>' % (
+                         escape(hallazgo.get("texto", "")), ref(hallazgo["id"]), etiqueta,
+                         escape(LINEAS_LLANO.get(hallazgo["linea"], hallazgo["linea"])),
+                         "Fuente" if len(fuentes) == 1 else "Fuentes",
+                         " · ".join(enlace(f) for f in fuentes) or "sin fuentes registradas"))
+    return '<ul class="lista">%s</ul>' % "".join(items)
+
+
+def seccion_resumen(carpeta, producto, registro, estado, info=None):
+    tono = TONO_ESTADO[estado["clave"]]
     partes = ['<div class="fila">%s</div>' % chip(estado["etiqueta"], tono + " estado", estado["icono"])]
     ultima = estado["ultima"]
     if estado["archivo"]:
@@ -3252,11 +3768,21 @@ def seccion_resumen(carpeta, producto, registro, estado):
         ("%d/25" % puntaje["total"] if puntaje else "—", "puntaje (mínimo %d)" % minimo),
         (NIVELES[global_].capitalize() if puntaje else "—", "confianza global"),
         ("%d de %d" % (len(registro.viables()), len(registro.diferenciadores)), "diferenciadores viables"),
-        ("%d de %d" % (confirmados, len(claves)), "hallazgos clave confirmados"),
+        ("%d de %d" % (confirmados, len(claves)), "hallazgo clave confirmado" if len(claves) == 1
+         else "hallazgos clave confirmados"),
         (str(len(registro.fuentes)), "fuentes registradas"),
     ]
     partes.append('<div class="cifras">%s</div>' % "".join(
         '<div class="cifra"><b>%s</b><span>%s</span></div>' % (escape(v), escape(t)) for v, t in cifras))
+    vigente_ = puntaje_vigente(producto, registro)
+    if vigente_ and vigente_["incoherencias"]:
+        partes.append("<p>%s El puntaje se registró con reglas anteriores (o la evidencia cambió después): con las "
+                      "de hoy sería %d/25. %s.</p>" % (chip("Puntaje desactualizado", "aviso", "⚠"),
+                                                       vigente_["total"], escape("; ".join(
+                                                           vigente_["incoherencias"]).capitalize())))
+    decisivos = hallazgos_decisivos(producto, registro, estado, info)
+    if decisivos:
+        partes.append("<h3>Los hallazgos que decidieron</h3>" + lista_decisivos(registro, decisivos))
     return tarjeta("Resumen ejecutivo", "".join(partes), "resumen")
 
 
@@ -3289,6 +3815,12 @@ def seccion_puntaje(producto, registro):
              'evidencia detrás de cada número; la global es la más baja: <b>%s</b>.</p>' % escape(NIVELES[global_]))
     if puntaje.get("mitigacion"):
         texto += "<p><b>Mitigación del riesgo de políticas:</b> %s</p>" % escape(puntaje["mitigacion"])
+    vigente_ = puntaje_vigente(producto, registro)
+    if vigente_ and vigente_["incoherencias"]:
+        texto += ("<p>%s Este puntaje se registró el %s con reglas anteriores, o la evidencia cambió después. Con las "
+                  "reglas de hoy sería <b>%d/25</b>:</p><ul>%s</ul>" % (
+                      chip("Registrado con reglas anteriores", "aviso", "⚠"), escape(fecha_corta(puntaje.get("fecha"))),
+                      vigente_["total"], "".join("<li>%s</li>" % escape(i) for i in vigente_["incoherencias"])))
     return tarjeta("Puntaje por criterio", texto + "".join(filas))
 
 
@@ -3307,11 +3839,21 @@ def seccion_puertas(carpeta, producto, registro):
                                                                     if decision.get("sesion") else ""), tono)
             linea = "Decidida el %s · cumplía %d de %d criterios." % (
                 fecha_corta(decision["fecha"]), decision.get("cumple", 0), decision.get("total", 0))
+            recomendacion = decision.get("recomendacion")
+            if recomendacion:
+                linea += " La skill recomendaba %s (%s)." % (texto_recomendacion(recomendacion),
+                                                             VEREDICTOS[recomendacion["veredicto"]]["titulo"].lower())
+            if decision.get("contra_recomendacion"):
+                estado += chip("Contra la recomendación", "aviso", "⚠")
+                linea += " Tu motivo: «%s»." % decision.get("motivo_decision", "")
             criterios = [(c["cumple"], c["texto"], c.get("detalle", "")) for c in decision.get("criterios", [])]
             cuando = "al decidir"
         elif not producto.get("archivo") and disponible(producto, lista_decisiones, nodo):
             criterios = criterios_puerta(numero_puerta, carpeta, producto, registro)
-            estado = chip("Pendiente de tu decisión", "aviso", "◐")
+            resultado = veredicto(numero_puerta, carpeta, producto, registro)
+            datos = VEREDICTOS[resultado["nivel"]]
+            estado = chip("Pendiente de tu decisión", "aviso", "◐") + chip(
+                "%s · recomienda %s" % (datos["titulo"], texto_recomendacion(resultado)), datos["tono"], datos["marca"])
             linea = "Hoy cumple %d de %d criterios." % (sum(1 for c in criterios if c[0]), len(criterios))
             cuando = "evaluados hoy"
         else:
@@ -3335,7 +3877,8 @@ def seccion_puertas(carpeta, producto, registro):
         extra = "<details><summary>Propuestas pendientes para la puerta (%d)</summary><ul>%s</ul></details>" % (
             len(pendientes), "".join("<li>%s%s</li>" % (escape(p["texto"]), ref(p["id"])) for p in pendientes))
     return tarjeta("Puertas", '<p class="nota">En cada puerta decides seguir, ajustar una parte o descartar. El script '
-                              'evalúa los criterios; la decisión es tuya.</p><ul class="lista">%s</ul>%s' % (
+                              'evalúa los criterios y la skill recomienda; la decisión es tuya.</p>'
+                              '<ul class="lista">%s</ul>%s' % (
                                   "".join(items), extra))
 
 
@@ -3362,13 +3905,13 @@ def seccion_diferenciadores(producto, registro):
         se_ve = ("Se ve en la ficha de la tienda: atrae descargas." if diferenciador.get("se_ve") == "ficha"
                  else "Se nota al usarla: retiene usuarios.")
         items.append(
-            '<li><div class="fila"><h3>%s</h3>%s%s</div><p>%s%s</p><p class="nota">%s · %s · %s · %s semana(s)</p>'
+            '<li><div class="fila"><h3>%s</h3>%s%s</div><p>%s%s</p><p class="nota">%s · %s · %s · %s</p>'
             '<p class="nota">%s %s</p><details><summary>Detalle de los criterios</summary><ul>%s</ul></details></li>' % (
                 escape(diferenciador.get("texto", "")), chip(nombre, tono, {"bien": "✔", "aviso": "⚠", "mal": "✖"}[tono]),
                 chip("principal", "neutro", "★") if diferenciador.get("principal") else "",
                 escape(explicacion), ref(diferenciador["id"]), escape(se_ve),
                 escape(COPIABLE_LLANO.get(diferenciador.get("copiable"), "copiabilidad sin evaluar")),
-                escape(diferenciador.get("motivo", "")), numero(float(diferenciador.get("semanas") or 0)),
+                escape(diferenciador.get("motivo", "")), plural(float(diferenciador.get("semanas") or 0), "semana"),
                 "✔" if sustituto[0] else "✖", escape(llano(sustituto[1])),
                 "".join("<li>%s %s</li>" % ("✔" if c else "✖", escape(t)) for c, t in criterios)))
     return tarjeta("Diferenciadores", texto + '<ul class="lista">%s</ul>' % "".join(items))
@@ -3415,8 +3958,9 @@ def seccion_hallazgos(registro):
                          escape(LINEAS_LLANO.get(hallazgo["linea"], hallazgo["linea"])), extra, len(fuentes),
                          lista_fuentes, en_contra, faltan))
     bloques = "".join(
-        '<details class="grupo"><summary><b>%s</b> · %d hallazgo(s), %d confirmado(s)</summary><ul class="lista">%s'
-        '</ul></details>' % (escape(LINEAS_LLANO.get(linea, linea)), len(items), confirmados, "".join(items))
+        '<details class="grupo"><summary><b>%s</b> · %s, %s</summary><ul class="lista">%s'
+        '</ul></details>' % (escape(LINEAS_LLANO.get(linea, linea)), plural(len(items), "hallazgo"),
+                             plural(confirmados, "confirmado"), "".join(items))
         for linea, (items, confirmados) in grupos.items())
     return tarjeta("Hallazgos clave", '<p class="nota">Lo que sostiene el puntaje y las puertas, por línea de '
                                       'investigación. Un hallazgo está confirmado con 3 fuentes independientes y '
@@ -3444,7 +3988,9 @@ def seccion_competidores(registro):
             escape(fila.get("nombre", "")), " ★" if registro.con_traccion(fila) else "", ref(fila["id"]), escape(que),
             escape(numero(fila["descargas"]) if fila.get("descargas") else "—"),
             escape(numero(fila["nota"]) if fila.get("nota") else "—"), escape(precio or "—"),
-            escape(", ".join(quejas.get(fila["id"], [])) or "—")))
+            '<details><summary>%s</summary><p class="ref">%s</p></details>' % (
+                plural(len(quejas[fila["id"]]), "hallazgo"), escape(", ".join(quejas[fila["id"]])))
+            if quejas.get(fila["id"]) else "—"))
     return tarjeta("Competidores y sustitutos", '<p class="nota">★ = con tracción. Las descargas son acumuladas desde '
                    'el lanzamiento: sirven de contexto, no miden la demanda de hoy.</p><div class="tabla"><table>'
                    '<thead><tr><th>Nombre</th><th>Qué es</th><th>Descargas</th><th>Nota</th><th>Precio y modelo</th>'
@@ -3476,11 +4022,12 @@ def seccion_cobertura(producto, registro):
         filas.append("<tr><td>%s</td><td>%s</td></tr>" % (escape(LINEAS_LLANO[linea]), " ".join(celdas)
                                                           or '<span class="nota">nada que cubrir</span>'))
     return tarjeta("Cobertura por mercado, idioma y tienda", '<p class="nota">Objetivo: mercados %s · idiomas %s · '
-                   'tiendas %s. %d hueco(s) sin explicar y %d vacío(s) con su motivo. Un vacío por límite de las '
+                   'tiendas %s. %s sin explicar y %s con su motivo. Un vacío por límite de las '
                    'herramientas no es falta de evidencia.</p><div class="tabla"><table><thead><tr><th>Línea</th>'
                    '<th>Cobertura</th></tr></thead><tbody>%s</tbody></table></div>' % (
                        escape(", ".join(objetivo["mercados"]) or "—"), escape(", ".join(objetivo["idiomas"]) or "—"),
-                       escape(", ".join(objetivo["tiendas"]) or "ninguna"), huecos, vacios, "".join(filas)))
+                       escape(", ".join(objetivo["tiendas"]) or "ninguna"), plural(huecos, "hueco"),
+                       plural(vacios, "vacío"), "".join(filas)))
 
 
 def seccion_escenarios(producto):
@@ -3557,15 +4104,18 @@ def seccion_costo(producto):
         return tarjeta("Costo", '<p class="vacio">Sin consumo anotado: es opcional, y se anota con el comando consumo.</p>')
     filas = "".join("<tr><td>%s</td><td>%s</td></tr>" % (escape(f["sesion"]), escape(texto_consumo(f)))
                     for f in consumo)
-    return tarjeta("Costo", "<p><b>Total anotado:</b> %s USD%s</p><div class=\"tabla\"><table><thead><tr><th>Sesión"
+    return tarjeta("Costo", "<p><b>Total anotado:</b> %s%s</p><div class=\"tabla\"><table><thead><tr><th>Sesión"
                             "</th><th>Consumo</th></tr></thead><tbody>%s</tbody></table></div>" % (
-                                escape(numero(total_usd(consumo))),
+                                escape(texto_total(consumo)),
                                 escape(" (sin anotar: %s)" % ", ".join(sin_consumo(producto))
                                        if sin_consumo(producto) else ""), filas))
 
 
 GLOSARIO = (
     ("Puerta", "Un punto de control donde decides seguir, ajustar una parte o descartar la idea."),
+    ("Veredicto", "Lo que concluye la skill en cada puerta, con reglas fijas: No viable (recomienda descartar), Viable "
+                  "con reservas (recomienda ajustar una parte) o Viable (recomienda seguir). La decisión es tuya; si "
+                  "decides en contra, queda anotado con tu motivo."),
     ("Hallazgo clave", "Una afirmación con fuentes de la que dependen el puntaje o una puerta."),
     ("Confirmado", "Tiene 3 fuentes independientes publicadas en los últimos 18 meses (con un dato medido si es de "
                    "demanda o de ingresos); en políticas basta el texto oficial."),
@@ -3586,8 +4136,10 @@ def html_reporte(carpeta, producto, registro):
     cabecera = '<h1>%s</h1><p class="sub">%s Creada el %s · reporte generado el %s.</p>' % (
         escape(producto["nombre"]), escape(TIPOS_LLANO.get(tipo, "Tipo de idea sin registrar todavía.")),
         escape(producto.get("creado", "")), escape(fecha_corta(ahora())))
+    info = veredicto_de_idea(carpeta, producto, registro)
     secciones = [
-        cabecera, seccion_resumen(carpeta, producto, registro, estado), seccion_puntaje(producto, registro),
+        cabecera, seccion_veredicto(info), seccion_resumen(carpeta, producto, registro, estado, info),
+        seccion_puntaje(producto, registro),
         seccion_puertas(carpeta, producto, registro), seccion_diferenciadores(producto, registro),
         seccion_hallazgos(registro), seccion_competidores(registro), seccion_cobertura(producto, registro),
         seccion_escenarios(producto), seccion_hipotesis(carpeta, registro), seccion_costo(producto),
@@ -3668,10 +4220,10 @@ def buscar_ideas(raiz, profundidad=6):
 
 def html_tablero(raiz, filas, fallidas):
     conteo = {clave: sum(1 for f in filas if f["estado"]["clave"] == clave) for clave in ORDEN_ESTADOS}
-    tonos = {"en-curso": "neutro", "seguir": "bien", "descartada": "mal", "archivada": "neutro"}
-    cifras = '<div class="cifras">%s</div>' % "".join(
+    tonos = TONO_ESTADO
+    cifras = '<div class="cifras">%s</div><p class="nota">%s</p>' % ("".join(
         '<div class="cifra"><b>%d</b><span>%s</span></div>' % (conteo[c], escape(ESTADOS_IDEA[c][0].lower()))
-        for c in ORDEN_ESTADOS)
+        for c in ORDEN_ESTADOS), escape(EXPLICACION_ESTADOS))
     renglones = []
     for fila in filas:
         estado, puntaje = fila["estado"], fila["puntaje"]
@@ -3679,7 +4231,7 @@ def html_tablero(raiz, filas, fallidas):
         renglones.append(
             '<li><div class="fila"><h3><a href="%s">%s</a></h3>%s<span class="nota">%s</span></div>'
             '<div class="dato"><div><b>Puntaje:</b> %s<br><span class="nota">mínimo de la puerta 1: %d</span></div>'
-            '%s<div class="nota"><b>Última puerta:</b> %s</div></div><p><b>%s</b> %s</p></li>' % (
+            '%s<div class="nota"><b>Última puerta:</b> %s</div></div>%s<p><b>%s</b> %s</p></li>' % (
                 escape(fila["enlace"], quote=True), escape(fila["nombre"]),
                 chip(estado["etiqueta"], tonos[estado["clave"]], estado["icono"]),
                 escape("idea %s" % fila["tipo"] if fila["tipo"] else "tipo sin registrar"),
@@ -3688,7 +4240,8 @@ def html_tablero(raiz, filas, fallidas):
                 if puntaje is not None else "<span></span>",
                 escape("puerta %d · %s · %s" % (ultima["puerta"], DECISIONES_LLANO[ultima["decision"]].lower(),
                                                  fecha_corta(ultima["fecha"])[:10]) if ultima else "ninguna"),
-                "Motivo:" if estado["archivo"] or estado["clave"] == "seguir" else "Siguiente paso:",
+                seccion_veredicto(fila["veredicto"], compacto=True),
+                "Motivo:" if estado["archivo"] or estado["clave"] == "lista" else "Siguiente paso:",
                 escape(fila["motivo"])))
     tabla_html = ('<ul class="lista">%s</ul>' % "".join(renglones)) if filas else \
         '<p class="vacio">No se encontró ninguna idea.</p>'
@@ -3696,10 +4249,11 @@ def html_tablero(raiz, filas, fallidas):
     if fallidas:
         aviso = tarjeta("No se pudieron leer", "<ul>%s</ul>" % "".join(
             "<li>%s: %s</li>" % (escape(ruta), escape(motivo)) for ruta, motivo in fallidas))
-    cuerpo = ('<h1>Tablero de ideas</h1><p class="sub">%d idea(s) bajo esta carpeta · generado el %s. Cada nombre '
+    cuerpo = ('<h1>Tablero de ideas</h1><p class="sub">%s bajo esta carpeta · generado el %s. Cada nombre '
               'abre su reporte.</p>%s%s<footer>Generado por hb-product %s. Se regenera con <code>producto.py tablero '
-              '--raiz &lt;carpeta&gt;</code>; la barra marca el mínimo de la puerta 1.</footer>' % (
-                  len(filas), escape(fecha_corta(ahora())), tarjeta("Resumen", cifras, "resumen"),
+              '--raiz &lt;carpeta&gt;</code>; la barra marca el mínimo de la puerta 1. El veredicto de cada idea lo '
+              'calcula la skill con reglas fijas; la decisión es tuya.</footer>' % (
+                  plural(len(filas), "idea"), escape(fecha_corta(ahora())), tarjeta("Resumen", cifras, "resumen"),
                   tarjeta("Ideas", tabla_html) + aviso, VERSION))
     return pagina("Tablero de ideas", cuerpo)
 
@@ -3715,6 +4269,7 @@ def cmd_tablero(args):
             registro = Registro(carpeta, producto["criterios"])
             ruta = carpeta / REPORTE
             escribir(ruta, html_reporte(carpeta, producto, registro))
+            info = veredicto_de_idea(carpeta, producto, registro)
         except (Fallo, KeyError, TypeError, ValueError) as error:
             fallidas.append((str(carpeta), "%s" % error))
             continue
@@ -3726,6 +4281,7 @@ def cmd_tablero(args):
             "puntaje": puntaje["total"] if puntaje else None,
             "minimo": int(producto["criterios"]["puntaje_minimo_nueva" if nueva else "puntaje_minimo"]),
             "motivo": estado["motivo"] or paso_corto(carpeta, producto, registro),
+            "veredicto": info,
             "enlace": Path(os.path.relpath(str(ruta), str(raiz))).as_posix(),
             "fecha": max([producto.get("creado", "")] + [d.get("fecha", "") for d in decisiones(carpeta)]
                          + [(estado["archivo"] or {}).get("fecha", "")]),
@@ -3734,9 +4290,13 @@ def cmd_tablero(args):
     filas.sort(key=lambda f: ORDEN_ESTADOS.index(f["estado"]["clave"]))
     destino = raiz / TABLERO
     escribir(destino, html_tablero(raiz, filas, fallidas))
-    print("✔ Tablero con %d idea(s): %s" % (len(filas), destino))
+    print("✔ Tablero con %s: %s" % (plural(len(filas), "idea"), destino))
     for fila in filas:
-        print("  · %s · %s · %s" % (fila["nombre"], fila["estado"]["etiqueta"], fila["enlace"]))
+        info = fila["veredicto"]
+        print("  · %s · %s%s · %s" % (fila["nombre"], fila["estado"]["etiqueta"], " · %s %s (puerta %d), recomienda %s"
+                                      % (VEREDICTOS[info["resultado"]["nivel"]]["marca"], info["resultado"]["titulo"],
+                                         info["resultado"]["puerta"], texto_recomendacion(info["resultado"]))
+                                      if info else "", fila["enlace"]))
     for ruta, motivo in fallidas:
         print("⚠ No se pudo leer %s: %s" % (ruta, motivo))
     print("Siguiente paso: abre %s en el navegador; cada nombre lleva a su reporte (regenerado ahora)." % destino)
@@ -3925,6 +4485,8 @@ def parser():
     grupo.add_argument("--ajustar", metavar="SESIÓN")
     grupo.add_argument("--descartar", metavar="MOTIVO")
     grupo.add_argument("--reabrir", action="store_true", help="deshace la decisión vigente de la puerta")
+    sub.add_argument("--motivo", help="por qué decides distinto de la recomendación de la skill (obligatorio en ese "
+                                      "caso; queda registrado)")
 
     sub = comando("modelos", cmd_modelos, "Muestra o cambia el modelo de cada nivel y la herramienta que abre los chats")
     for nivel in MODELOS:
