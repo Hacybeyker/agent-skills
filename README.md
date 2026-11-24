@@ -122,7 +122,7 @@ Cada push y cada PR pasan por el workflow `Validate`:
 - `agentskills validate` (de [skills-ref](https://pypi.org/project/skills-ref/), la referencia oficial) contra la especificación de Agent Skills.
 - `scripts/check_conventions.py` con las convenciones de este repo: prefijo `hb-`, metadata, SemVer, máximo de 500 líneas por `SKILL.md`, enlaces rotos, scripts ejecutables y con sintaxis válida, y que `README.md` y `CATALOG.md` estén al día.
 - `scripts/check_version_bump.py`, en cada PR: toda skill cambiada sube su `metadata.version` (SemVer) respecto de la rama base.
-- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `contexto.py` de `hb-setup`, `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `coach.py` de `hb-coach`, `check_version_bump.py` y `run_tests.py`. `scripts/run_tests.py` los reparte entre varios procesos (una clase de test por proceso) y da el mismo resultado que `python3 -m unittest discover -s tests` en menos tiempo.
+- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `contexto.py` y `dod.py` de `hb-setup`, `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `coach.py` de `hb-coach`, `check_version_bump.py` y `run_tests.py`. `scripts/run_tests.py` los reparte entre varios procesos (una clase de test por proceso) y da el mismo resultado que `python3 -m unittest discover -s tests` en menos tiempo.
 - `scripts/test_install.sh`: test de contrato de `install.sh` en un `HOME` temporal (instala dos veces, desinstala y comprueba que no toca carpetas ni enlaces ajenos). Es la interfaz pública que usan los instaladores externos, así que no cambia.
 - `shellcheck` sobre los scripts de shell.
 

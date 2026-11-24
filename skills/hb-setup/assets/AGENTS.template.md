@@ -29,9 +29,11 @@ Lo que el proyecto tiene hoy, literal y con versiones. Los agentes trabajan con 
 
 Antes de dar una tarea por terminada, en este orden:
 
-1. `<comando de calidad>`
-2. `<comando de tests>`
-3. `<comando de build>`
+1. Formato: `cd <ruta del proyecto> && <formateador, solo si está configurado>`
+2. Checks, tests y build, en una sola invocación: `cd <ruta del proyecto> && <todos los checks, los tests y el build>`
+
+<Fuera del DoD: lo que corre el CI y no puede hacer fallar un PR, con su motivo | quita la línea si no hay nada>
+Origen: <los pasos de verificación del CI (<archivos>) | DoD derivado del build; el proyecto no tiene CI>.
 
 ## Arquitectura
 
