@@ -42,7 +42,7 @@ La sesión 0 registra el objetivo (`producto.py objetivo --mercados MX,ES --idio
 
 - **Por peldaño (idea nueva).** Lo que buscaste en un peldaño de la escalera sin encontrar nada se registra igual: `producto.py vacio --linea demanda --peldano 4 --motivo sin-resultados --texto "<qué buscaste>"`. Así la puerta distingue **lo buscado sin resultado** (evidencia: si ningún peldaño muestra el problema, es motivo de descarte) de **lo no buscado** (no lo es: recomienda ajustar la línea). `producto.py estado` cuenta los hallazgos por peldaño, vigentes y vencidos.
 
-- `producto.py cobertura` lista por línea lo cubierto (✔), los vacíos (⚠) y los huecos sin registrar (✖). La síntesis y la puerta 1 los muestran.
+- `producto.py cobertura` lista por línea lo cubierto (✔), los vacíos (⚠) y los huecos sin registrar (✖). La síntesis y la puerta 1 los muestran. Un vacío de algo que ya tiene fuentes (las reseñas en español sí, Reddit en español no) es un **vacío parcial**: sale junto a su ✔ (`⚠ vacío parcial V-VOZ-1 (límite de las herramientas): …`), y la puerta 1, `siguiente` y el reporte lo muestran sin cambiar la cobertura ni el veredicto.
 
 ## Fuentes difíciles
 
@@ -78,7 +78,7 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 | En una idea nueva | Quejas sobre cómo se resuelve hoy (peldaño 4) y conversaciones sobre la necesidad de fondo (peldaño 5) |
 
 - Cuenta la **frecuencia por competidor**: en cuántas fuentes independientes aparece cada tema. No midas el tamaño del dolor con reseñas: exageran.
-- Enlaza cada hallazgo con sus competidores **por su ID en la matriz** (`--competidor C-1,C-3`; `matriz` los lista): la sesión 1g necesita saber qué queja es de quién, y un diferenciador pide un dolor triangulado en 2 competidores o más. No los cites por nombre: la misma app aparece con nombres distintos según la tienda y el idioma ("Fakeit: Imposter Game" o "Fakeit"), y un nombre que no coincide queda sin enlazar. Si 1a todavía no registró esa fila, cita la URL de su ficha (o el nombre, como último recurso): el script la enlaza por la URL de la ficha cuando 1a la registra con esa misma fuente.
+- Enlaza cada hallazgo con sus competidores **por su ID en la matriz** (`--competidor C-1,C-3`; `matriz` los lista): la sesión 1g necesita saber qué queja es de quién, y un diferenciador pide un dolor triangulado en 2 competidores o más. No los cites por nombre: la misma app aparece con nombres distintos según la tienda y el idioma ("Fakeit: Imposter Game" o "Fakeit"), y un nombre que no coincide queda sin enlazar. Si 1a todavía no registró esa fila, cita la URL de su ficha (o el nombre, como último recurso): el script la enlaza por la URL de la ficha cuando 1a la registra con esa misma fuente. Como 1a y 1b corren en paralelo, si la matriz de la 1a aún no tiene la fila, registra el hallazgo sin `--competidor` (o con la URL de la ficha) y enlázalo después, cuando la fila exista: `producto.py hallazgo --id H-VOZ-3 --competidor C-1,C-3`. Conserva el ID y la confianza, solo agrega enlaces, valida que los competidores existan y no estén anulados, y sirve aunque la 1b ya esté cerrada. No anules el hallazgo para volver a registrarlo: cambiaría su ID.
 - Busca también a los usuarios satisfechos: es la evidencia en contra de esta línea.
 
 ## 1c · Demanda

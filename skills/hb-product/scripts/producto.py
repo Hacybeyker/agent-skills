@@ -1048,6 +1048,46 @@ def vacios_de_herramienta(producto, registro, lineas=None):
             if estado == "vacio" and detalle["motivo"] == "herramienta" and (lineas is None or linea in lineas)]
 
 
+def fuentes_que_cubren(registro, linea, dimension, valor):
+    """Los IDs de las fuentes de la línea que llevan ese mercado, idioma o tienda en sus etiquetas."""
+    buscado = normal(valor)
+    return [f["id"] for f in registro.fuentes.values() if f["linea"] == linea
+            and buscado in [normal(v) for v in f.get(dimension, [])]]
+
+
+def vacios_parciales(registro, lineas=None, motivo=None):
+    """Los vacíos de un mercado, idioma o tienda que ya tiene fuentes en su línea (feedback #51): [(vacío, [S-…])].
+    La cobertura los da por cubiertos (no son huecos ni cambian ningún veredicto), pero lo que dice el vacío (no se
+    pudo leer Reddit en español, por ejemplo) sigue sin fuentes: se muestran junto a la cobertura para que no se
+    pierdan. Con `lineas` o `motivo`, solo los de esas líneas o ese motivo."""
+    parciales = []
+    for vacio in registro.vacios.values():
+        linea, dimension = vacio["linea"], vacio["dimension"]
+        if dimension not in DIMENSIONES or (lineas is not None and linea not in lineas) or (
+                motivo and vacio["motivo"] != motivo):
+            continue  # un vacío por peldaño no es de cobertura
+        fuentes = fuentes_que_cubren(registro, linea, dimension, vacio["valor"])
+        if fuentes:
+            parciales.append((vacio, fuentes))
+    return parciales
+
+
+def texto_corto(texto, maximo=80):
+    texto = " ".join(str(texto).split())
+    return texto if len(texto) <= maximo else texto[:maximo - 1].rstrip() + "…"
+
+
+def texto_parcial(vacio):
+    """'⚠ vacío parcial V-VOZ-1 (límite de las herramientas): no se pudo leer Reddit en español'."""
+    return "⚠ vacío parcial %s (%s): %s" % (vacio["id"], MOTIVOS_VACIO[vacio["motivo"]], texto_corto(vacio["texto"]))
+
+
+def texto_parciales(parciales):
+    """'voz-del-usuario · idioma es (V-VOZ-1: no se pudo leer Reddit…)', para los avisos."""
+    return "; ".join("%s · %s %s (%s: %s)" % (v["linea"], DIMENSIONES[v["dimension"]], v["valor"], v["id"],
+                                              texto_corto(v["texto"], 60)) for v, _ in parciales)
+
+
 def lineas_de(sesiones):
     """Las líneas de investigación que escriben esas sesiones (la 1d escribe monetizacion); [] si ninguna lo es."""
     return [linea for linea, (_, sesion) in LINEAS.items() if sesion in sesiones]
@@ -1675,6 +1715,12 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
                               "aportes (references/investigacion.md · Fuentes difíciles)." % "; ".join(
                                   "%s · %s %s" % (v["linea"], DIMENSIONES[v["dimension"]], v["valor"])
                                   for v in herramienta))
+            parciales = vacios_parciales(registro, motivo="herramienta")
+            if parciales:
+                avisos.append("· Vacíos parciales por límite de las herramientas (esa cobertura ya tiene fuentes, pero "
+                              "lo que dice el vacío sigue sin leerse): %s. No cambian la cobertura ni el veredicto; "
+                              "con las mismas herramientas, ajustar esas líneas no los resuelve." % texto_parciales(
+                                  parciales))
     descarte = criterio_descarte_vigente(carpeta) if numero_puerta in (2, 3) else None
     if descarte:
         avisos.append("· La puerta 1 fue Viable para probar: la prueba de elección se mide después del lanzamiento. "
@@ -2886,12 +2932,15 @@ def texto_resumen(carpeta, producto, registro):
         mapa = cobertura(producto, registro)
         huecos = sum(1 for filas in mapa.values() for fila in filas if fila[2] == "falta")
         vacios = [fila[3] for filas in mapa.values() for fila in filas if fila[2] == "vacio"]
-        lineas.append("- **Objetivo:** mercados %s · idiomas %s · tiendas %s · cobertura: %s sin registrar, %s%s" % (
+        parciales = [v for v, _ in vacios_parciales(registro)]
+        lineas.append("- **Objetivo:** mercados %s · idiomas %s · tiendas %s · cobertura: %s sin registrar, %s%s%s" % (
                           ", ".join(objetivo["mercados"]) or "—", ", ".join(objetivo["idiomas"]) or "—",
                           ", ".join(objetivo["tiendas"]) or "ninguna", plural(huecos, "hueco"),
                           plural(len(vacios), "vacío"),
                           " (%d por límite de las herramientas)" % sum(1 for v in vacios if v["motivo"] == "herramienta")
-                          if vacios else ""))
+                          if vacios else "",
+                          ", %s (%s)" % (plural(len(parciales), "vacío parcial", "vacíos parciales"), ", ".join(
+                              v["id"] for v in parciales)) if parciales else ""))
     else:
         lineas.append("- **Objetivo:** sin registrar (mercados, idiomas y tiendas: `objetivo`, en la sesión 0)")
     lineas.append("- **Hallazgos por peldaño:** %s" % texto_peldanos(conteo_peldanos(registro)))
@@ -3512,8 +3561,73 @@ def ids_existentes(ids, universo, que):
     return ids
 
 
+def competidores_anulados(carpeta):
+    """Los IDs de las filas de la matriz que se anularon (no están en el Registro, que solo carga lo vigente)."""
+    return {item["id"] for linea in LINEAS for item in cargar_linea(carpeta, linea).get("matriz", [])
+            if item.get("anulado")}
+
+
+def enlazar_hallazgo(carpeta, registro, args):
+    """`hallazgo --id H-… --competidor C-…` (feedback #52): la 1b corre en paralelo con la 1a y puede registrar un
+    hallazgo antes de que exista la fila de su competidor. Esto completa el enlace después, como `fuente` con una URL ya
+    registrada completa la fecha: el hallazgo conserva su ID, su texto, sus fuentes y su confianza; solo se agregan
+    competidores (nunca se quitan), que tienen que existir en la matriz y no estar anulados. Funciona con la sesión del
+    hallazgo cerrada, porque no cambia lo que ya se investigó."""
+    sobra = [opcion for opcion, valor in (("--linea", args.linea), ("--texto", args.texto), ("--fuentes", args.fuentes),
+                                         ("--en-contra", args.en_contra), ("--sin-contra", args.sin_contra),
+                                         ("--critico", args.critico), ("--bloquea", args.bloquea)) if valor]
+    if sobra:
+        raise Fallo("Con --id solo se enlazan competidores (--competidor C-…): %s no va. Para cambiar un hallazgo, "
+                    "anúlalo y regístralo otra vez" % ", ".join(sobra))
+    referencias = lista(args.competidores)
+    if not referencias:
+        raise Fallo("Con --id, pasa los competidores a enlazar: --competidor C-1,C-3 (`matriz` los lista)")
+    hallazgo = registro.hallazgos.get(args.id)
+    if not hallazgo:
+        raise Fallo("No existe el hallazgo %s, o está anulado" % args.id)
+    anulados = competidores_anulados(carpeta)
+    nuevos, malos = [], []
+    for referencia in referencias:
+        fila = registro.competidor(referencia)
+        if fila:
+            nuevos.append(fila["id"])
+        elif referencia in anulados:
+            malos.append("%s está anulado" % referencia)
+        else:
+            malos.append("%s no está en la matriz" % referencia)
+    if malos:
+        raise Fallo("%s: el enlace es a una fila vigente de la matriz, por su ID (`matriz` las lista)" % "; ".join(
+            malos))
+    ya = {registro.competidor(r)["id"] for r in hallazgo.get("competidores", []) if registro.competidor(r)}
+    agregados = [c for c in dict.fromkeys(nuevos) if c not in ya and c not in hallazgo.get("competidores", [])]
+    if not agregados:
+        print("· %s ya estaba enlazado a %s: nada que agregar." % (args.id, ", ".join(dict.fromkeys(nuevos))))
+        return
+    datos = cargar_linea(carpeta, hallazgo["linea"])
+    for item in datos["hallazgos"]:
+        if item["id"] == args.id:
+            item["competidores"] = list(item.get("competidores", [])) + agregados
+            item.setdefault("enlaces", []).append({"competidores": agregados, "fecha": ahora()})
+            hallazgo = item
+    escribir_json(ruta_linea(carpeta, hallazgo["linea"]), datos)
+    enlazados, sin_fila = registro.referencias(hallazgo)
+    print("✔ %s enlazado a %s · mismo ID, mismas fuentes y misma confianza (%s)" % (
+        args.id, ", ".join(agregados), registro.etiqueta(hallazgo)))
+    print("· Cita a %s (por su ID en la matriz).%s" % (", ".join(enlazados), " Sin fila todavía: %s." % ", ".join(
+        sin_fila) if sin_fila else ""))
+    print("Siguiente paso: `matriz` muestra qué hallazgos tiene cada competidor; si una puerta ya se evaluó, vuelve a "
+          "correrla.")
+
+
 def cmd_hallazgo(args):
     carpeta, producto, registro = abrir(args)
+    if args.id:
+        return enlazar_hallazgo(carpeta, registro, args)
+    faltan = [opcion for opcion, valor in (("--linea", args.linea), ("--texto", args.texto),
+                                           ("--fuentes", args.fuentes)) if not valor]
+    if faltan:
+        raise Fallo("Para registrar un hallazgo faltan %s (o --id H-… --competidor C-… para enlazar uno ya "
+                    "registrado)" % ", ".join(faltan))
     linea = linea_valida(args.linea)
     fuentes = ids_existentes(lista(args.fuentes), registro.fuentes, "esta fuente")
     if not fuentes:
@@ -3558,9 +3672,10 @@ def cmd_hallazgo(args):
     if enlazados:
         print("· Cita a %s (por su ID en la matriz)." % ", ".join(enlazados))
     if sin_fila:
-        print("· %s sin fila en la matriz todavía: %s. Cuando la 1a lo registre, cítalo por su ID (`--competidor "
-              "C-…`); mientras, se enlaza por la URL de su ficha si una de tus fuentes es esa ficha." % (
-                  "Competidor" if len(sin_fila) == 1 else "Competidores", ", ".join(sin_fila)))
+        print("· %s sin fila en la matriz todavía: %s. Cuando la 1a lo registre, enlázalo por su ID sin volver a "
+              "registrar el hallazgo (`hallazgo --id %s --competidor C-…`); mientras, se enlaza por la URL de su "
+              "ficha si una de tus fuentes es esa ficha." % (
+                  "Competidor" if len(sin_fila) == 1 else "Competidores", ", ".join(sin_fila), identificador))
     if args.critico and evaluacion["faltan"]:
         print("⚠ Para cumplir la regla de triangulación: %s." % "; ".join(evaluacion["faltan"]))
     if args.critico and evaluacion["sin_busqueda"]:
@@ -3747,9 +3862,9 @@ def cmd_matriz(args):
               "registra antes de cerrar.")
     for clave, ids in quejas.items():
         if clave.startswith("sin fila: "):
-            print("⚠ Competidor %s: lo %s %s, pero no tiene fila en la matriz ni una ficha en común. Cítalo por su ID "
-                  "(`hallazgo … --competidor C-…`) o por la URL de su ficha." % (
-                      clave[10:], "cita" if len(ids) == 1 else "citan", ", ".join(ids)))
+            print("⚠ Competidor %s: lo %s %s, pero no tiene fila en la matriz ni una ficha en común. Cuando tenga "
+                  "fila, enlázalo por su ID sin volver a registrar el hallazgo (`hallazgo --id %s --competidor C-…`)."
+                  % (clave[10:], "cita" if len(ids) == 1 else "citan", ", ".join(ids), ids[0] if len(ids) == 1 else "H-…"))
     print("Siguiente paso: con la matriz y las quejas, la sesión 1g busca los huecos por vector "
           "(references/diferenciacion.md).")
 
@@ -3992,11 +4107,20 @@ def cmd_cobertura(args):
     print("Cobertura · objetivo: mercados %s · idiomas %s · tiendas %s" % (
         ", ".join(objetivo["mercados"]), ", ".join(objetivo["idiomas"]), ", ".join(objetivo["tiendas"]) or "ninguna"))
     huecos = vacios = 0
+    # un vacío de algo que ya tiene fuentes va junto a su ✔ (feedback #51): si no, no aparecería en ninguna parte
+    parciales = vacios_parciales(registro, [args.linea] if args.linea else None)
+    for vacio, _ in parciales:
+        mapa.setdefault(vacio["linea"], [])
     for linea, filas in mapa.items():
         print("\n%s (sesión %s)" % (linea, LINEAS[linea][1]))
+        propios = [(v, f) for v, f in parciales if v["linea"] == linea]
+        mostrados = set()
         for dimension, valor, estado, detalle in filas:
             if estado == "fuentes":
-                print("  ✔ %s %s · %s" % (DIMENSIONES[dimension], valor, ", ".join(detalle)))
+                suyos = [v for v, _ in propios if v["dimension"] == dimension and normal(v["valor"]) == normal(valor)]
+                mostrados.update(v["id"] for v in suyos)
+                print("  ✔ %s %s · %s%s" % (DIMENSIONES[dimension], valor, ", ".join(detalle),
+                                           "".join(" · " + texto_parcial(v) for v in suyos)))
             elif estado == "vacio":
                 vacios += 1
                 print("  ⚠ %s %s · vacío, %s (%s): %s" % (DIMENSIONES[dimension], valor, MOTIVOS_VACIO[detalle["motivo"]],
@@ -4004,10 +4128,17 @@ def cmd_cobertura(args):
             else:
                 huecos += 1
                 print("  ✖ %s %s · sin fuentes ni vacío registrado" % (DIMENSIONES[dimension], valor))
-        if not filas:
+        for vacio, fuentes in propios:  # de una dimensión que la línea no pide (la tienda en monetización)
+            if vacio["id"] not in mostrados:
+                print("  ✔ %s %s · %s · %s" % (DIMENSIONES[vacio["dimension"]], vacio["valor"], ", ".join(fuentes),
+                                              texto_parcial(vacio)))
+        if not filas and not propios:
             print("  (sin nada que cubrir en el objetivo)")
-    print("\n%s sin registrar · %s." % (plural(huecos, "hueco"), plural(vacios, "vacío registrado",
-                                                                       "vacíos registrados")))
+    print("\n%s sin registrar · %s%s." % (plural(huecos, "hueco"), plural(vacios, "vacío registrado",
+                                                                         "vacíos registrados"),
+                                        " · %s (la cobertura tiene fuentes, pero lo que dice el vacío sigue sin "
+                                        "leerse)" % plural(len(parciales), "vacío parcial", "vacíos parciales")
+                                        if parciales else ""))
     print("Siguiente paso: %s" % (
         "por cada ✖, una fuente con su etiqueta (`fuente … --mercados/--idiomas/--tiendas`) o el vacío con su motivo "
         "(`vacio`). Una línea no cierra con huecos sin registrar." if huecos else
@@ -4267,8 +4398,10 @@ def cmd_triangulacion(args):
     if mapa is not None:
         huecos = sum(1 for filas in mapa.values() for fila in filas if fila[2] == "falta")
         vacios = sum(1 for filas in mapa.values() for fila in filas if fila[2] == "vacio")
-        print("Cobertura: %s sin fuentes ni vacío registrado · %s (`cobertura`)." % (
-            plural(huecos, "hueco"), plural(vacios, "vacío registrado", "vacíos registrados")))
+        parciales = len(vacios_parciales(registro))
+        print("Cobertura: %s sin fuentes ni vacío registrado · %s%s (`cobertura`)." % (
+            plural(huecos, "hueco"), plural(vacios, "vacío registrado", "vacíos registrados"),
+            " · %s" % plural(parciales, "vacío parcial", "vacíos parciales") if parciales else ""))
     if incompletos or sin_busqueda:
         print("Siguiente paso: consigue lo que falta o deja el hallazgo con su confianza actual y dilo en la "
               "síntesis; nunca lo presentes como confirmado.")
@@ -4974,6 +5107,10 @@ def cmd_decidir(args):
                   "mismo: antes, dale al agente un navegador o consigue un CSV de reseñas (references/investigacion.md "
                   "· Fuentes difíciles)." % (", ".join(sorted({v["linea"] for v in herramienta})), "; ".join(
                       "%s %s" % (DIMENSIONES[v["dimension"]], v["valor"]) for v in herramienta)))
+        parciales = vacios_parciales(registro, lineas_sesion, "herramienta") if lineas_sesion else []
+        if parciales:
+            print("· Vacíos parciales por límite de las herramientas en lo que se ajusta: %s. Con las mismas "
+                  "herramientas, esa parte seguirá sin leerse." % texto_parciales(parciales))
         regenerar_reporte(carpeta)
         actualizar_tablero(carpeta, producto)
         print("\n" + con_color(siguiente))
@@ -5907,11 +6044,23 @@ def seccion_cobertura(producto, registro):
                                                                  'investigar.</p>')
     objetivo = objetivo_de(producto)
     filas, huecos, vacios = [], 0, 0
+    parciales = vacios_parciales(registro)  # el vacío de algo que ya tiene fuentes, a la vista (feedback #51)
+    for vacio, _ in parciales:
+        mapa.setdefault(vacio["linea"], [])
+
+    def chip_parcial(valor, vacio):
+        return '<span title="%s">%s</span>' % (escape("Vacío parcial %s, %s: %s" % (
+            vacio["id"], MOTIVOS_VACIO[vacio["motivo"]], vacio["texto"]), quote=True),
+            chip("%s ✔ · ⚠ vacío parcial (%s)" % (valor, MOTIVOS_VACIO[vacio["motivo"]]), "aviso"))
+
     for linea, datos in mapa.items():
-        celdas = []
+        celdas, mostrados = [], set()
+        propios = [v for v, _ in parciales if v["linea"] == linea]
         for dimension, valor, estado, detalle in datos:
             if estado == "fuentes":
-                celdas.append(chip("%s ✔" % valor, "bien"))
+                suyos = [v for v in propios if v["dimension"] == dimension and normal(v["valor"]) == normal(valor)]
+                mostrados.update(v["id"] for v in suyos)
+                celdas.append(" ".join(chip_parcial(valor, v) for v in suyos) if suyos else chip("%s ✔" % valor, "bien"))
             elif estado == "vacio":
                 vacios += 1
                 celdas.append('<span title="%s">%s</span>' % (escape(MOTIVOS_VACIO[detalle["motivo"]] + ": "
@@ -5921,15 +6070,18 @@ def seccion_cobertura(producto, registro):
             else:
                 huecos += 1
                 celdas.append(chip("%s ✖ sin fuentes" % valor, "mal"))
+        celdas += [chip_parcial(v["valor"], v) for v in propios if v["id"] not in mostrados]
         filas.append("<tr><td>%s</td><td>%s</td></tr>" % (escape(LINEAS_LLANO[linea]), " ".join(celdas)
                                                           or '<span class="nota">nada que cubrir</span>'))
     return tarjeta("Cobertura por mercado, idioma y tienda", '<p class="nota">Objetivo: mercados %s · idiomas %s · '
-                   'tiendas %s. %s sin explicar y %s con su motivo. Un vacío por límite de las '
+                   'tiendas %s. %s sin explicar y %s con su motivo%s. Un vacío por límite de las '
                    'herramientas no es falta de evidencia.</p><div class="tabla"><table><thead><tr><th>Línea</th>'
                    '<th>Cobertura</th></tr></thead><tbody>%s</tbody></table></div>' % (
                        escape(", ".join(objetivo["mercados"]) or "—"), escape(", ".join(objetivo["idiomas"]) or "—"),
                        escape(", ".join(objetivo["tiendas"]) or "ninguna"), plural(huecos, "hueco"),
-                       plural(vacios, "vacío"), "".join(filas)))
+                       plural(vacios, "vacío"), "; %s: esa cobertura tiene fuentes, pero lo que dice el vacío "
+                       "sigue sin leerse" % plural(len(parciales), "vacío parcial", "vacíos parciales")
+                       if parciales else "", "".join(filas)))
 
 
 def seccion_escenarios(producto):
@@ -6492,10 +6644,14 @@ def parser():
     sub.add_argument("--idiomas", help="idiomas del objetivo que cubre (es,pt)")
     sub.add_argument("--tiendas", help="tiendas del objetivo que cubre (google-play,app-store)")
 
-    sub = comando("hallazgo", cmd_hallazgo, "Registra un hallazgo (H-…) y calcula su confianza")
-    sub.add_argument("--linea", required=True, help=", ".join(LINEAS))
-    sub.add_argument("--texto", required=True)
-    sub.add_argument("--fuentes", required=True, help="S-…,S-…")
+    sub = comando("hallazgo", cmd_hallazgo, "Registra un hallazgo (H-…) y calcula su confianza. Con --id H-… "
+                  "--competidor C-…, enlaza un hallazgo ya registrado a filas de la matriz (las que la 1a creó "
+                  "después), sin cambiar su ID ni su confianza: solo agrega enlaces y sirve con la sesión ya cerrada")
+    sub.add_argument("--id", metavar="H-…", help="un hallazgo ya registrado: con --competidor, le agrega esos "
+                                                  "competidores de la matriz (sin --linea, --texto ni --fuentes)")
+    sub.add_argument("--linea", help="obligatorio sin --id: " + ", ".join(LINEAS))
+    sub.add_argument("--texto", help="obligatorio sin --id")
+    sub.add_argument("--fuentes", help="obligatorio sin --id: S-…,S-…")
     sub.add_argument("--en-contra", dest="en_contra", help="fuentes con evidencia en contra")
     sub.add_argument("--sin-contra", dest="sin_contra", help="qué se buscó en contra cuando no apareció nada")
     sub.add_argument("--critico", action="store_true", help="hallazgo clave: sostiene el puntaje o una puerta")

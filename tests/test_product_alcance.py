@@ -310,8 +310,8 @@ class CompetidorPorIdTest(Base):
         self.assertIn("| H-VOZ-1 |", matriz)
         self.assertNotIn("no tiene fila en la matriz", matriz)
         _, salida = self.hallazgo("voz-del-usuario", self.fuente("voz-del-usuario"), "--competidor", "Otra app")
-        self.assertIn("· Competidor sin fila en la matriz todavía: Otra app. Cuando la 1a lo registre, cítalo por su "
-                      "ID (`--competidor C-…`)", salida)
+        self.assertIn("· Competidor sin fila en la matriz todavía: Otra app. Cuando la 1a lo registre, enlázalo por "
+                      "su ID sin volver a registrar el hallazgo (`hallazgo --id H-VOZ-2 --competidor C-…`)", salida)
         self.assertIn("⚠ Competidor Otra app: lo cita H-VOZ-2, pero no tiene fila en la matriz", self.p("matriz"))
 
 
