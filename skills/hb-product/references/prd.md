@@ -37,6 +37,7 @@ Define el producto mínimo que se va a construir, con cada funcionalidad enlazad
 - **El diferenciador principal.** Sin él, el MVP es otra app más: es un criterio de la puerta 3.
 - **Las funcionalidades básicas** (Kano), aunque no diferencien: sin ellas la app no compite.
 - **En una idea nueva,** lo que pone a prueba la hipótesis más riesgosa, y poco más: un MVP más chico, centrado en aprender.
+- **Si la puerta 1 fue Viable para probar,** la funcionalidad del diferenciador principal cita en su columna Hipótesis la más riesgosa (el criterio de descarte) y la mide con su métrica y su umbral: la puerta 3 lo pide, igual que en una idea nueva.
 
 ## RICE
 

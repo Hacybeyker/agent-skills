@@ -88,6 +88,22 @@ Si el chat se quedó quieto con un subagente que ya terminó (o tras su aviso de
 Continúa en modo orquestado: anota el consumo de los subagentes que terminaron y sigue el ciclo. Lanza los subagentes siempre en primer plano, los que corren juntos en un mismo mensaje, y no cierres tu turno mientras corre uno. En cada parada, pon arriba el recordatorio de /cost con su comando armado. No hagas commit ni push.
 ```
 
+### Toda la idea sin preguntas ni paradas (modo autónomo)
+
+Para no copiar ni aprobar entre chats: es el modo orquestado, pero la sesión 0 no te pregunta (lo que falte en tu descripción queda como "Supuestos sin confirmar") y en cada puerta el orquestador aplica la recomendación de la skill con `decidir --automatico`, que nunca va en contra de ella y queda marcada como **decisión automática** en el reporte, el tablero y `estado.md` para que la revises o la reabras. Solo se detiene si una puerta pide ajustar la misma sesión por tercera vez, si falta algo que solo tú puedes dar (un CSV de reseñas, un navegador para el agente) o por un error ([orquestacion.md](orquestacion.md)).
+
+**Dónde:** chat nuevo · Haiku 5.5, esfuerzo bajo (el orquestador), abierto desde la carpeta donde vive `product/`
+
+```text
+Usa hb-product en modo autónomo: <la idea en tus palabras, o "la descripción está en <ruta absoluta del archivo>">. Sin preguntas: lo que falte va a Supuestos sin confirmar. En cada puerta decide con decidir --automatico, salvo que siguiente --json diga detener. Lanza los subagentes siempre en primer plano, los que corren juntos en un mismo mensaje, y no cierres tu turno mientras corre uno. En cada parada, pon arriba el recordatorio de /cost con su comando armado. No hagas commit ni push.
+```
+
+Al terminar, revisa las decisiones automáticas en el reporte o en el tablero; para deshacer una:
+
+```bash
+cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta <n> --reabrir --carpeta product
+```
+
 ### Retomar donde quedó
 
 **Dónde:** chat nuevo · el modelo y el esfuerzo que diga "Siguiente paso" de `estado.md`
@@ -204,7 +220,7 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py reporte --carpeta product
 cd <raíz> && python3 -I <skill>/scripts/producto.py reporte --idea <nombre> --carpeta product
 ```
 
-El tablero reúne todas las ideas que encuentre bajo una carpeta (en curso y archivadas) en `<carpeta>/index.html`, con el enlace a cada reporte:
+El tablero reúne todas las ideas que encuentre bajo una carpeta (en curso y archivadas) en `<carpeta>/index.html`, con el enlace a cada reporte. Se regenera solo con `nuevo`, `cerrar`, `decidir`, `archivar` y `reabrir`, en la carpeta que fijes con `--raiz` (por ejemplo, `nuevo --nombre "<nombre>" --raiz <carpeta con tus ideas> …`; queda guardada) o, sin ella, en la más cercana hacia arriba que ya tenga un tablero. Nunca pisa un `index.html` que no generó la skill. Para armarlo a mano:
 
 ```bash
 cd <raíz> && python3 -I <skill>/scripts/producto.py tablero --raiz <carpeta con tus ideas>

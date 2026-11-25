@@ -22,10 +22,11 @@ def setUpModule():
 
 
 class Base(base.Base):
-    def hasta_1g(self, rival=True):
+    def hasta_1g(self, rival=True, bloquea=False):
         """Sesiones 0 a 1e de una idea existente con un competidor gratis (PlantaPlus) y un diferenciador de precio
         (D-1) cuyo dolor triangulado y en confianza alta es H-VOZ-1. La sesión 1g queda abierta, sin la comparación con
-        el rival."""
+        el rival. Con bloquea, la tienda del objetivo nombra la categoría (un bloqueo de políticas: no hay Viable para
+        probar)."""
         self.sesion0()
         fuentes = self.fuente("competencia", 3, "medido")
         self.p("tipo", "--existente", "--motivo", "Hay dos apps directas con más de 100k descargas")
@@ -40,7 +41,8 @@ class Base(base.Base):
             self.cerrar("1a")
         voz = self.linea("1b", "voz-del-usuario", "usuario", 1, "--competidores", "RiegoFácil,PlantaPlus")
         for sesion, nombre in (("1c", "demanda"), ("1d", "monetizacion"), ("1e", "politicas")):
-            self.linea(sesion, nombre)
+            self.linea(sesion, nombre, "terceros", 1, *(["--bloquea", "google-play"] if bloquea and
+                                                        nombre == "politicas" else []))
         self.p("diferenciador", "--vector", "precio", "--texto", "Pago único en vez de suscripción", "--hallazgos",
                voz, "--se-ve", "ficha", "--copiable", "media", "--motivo", "Les cuesta el ingreso recurrente",
                "--semanas", 2, "--principal")
@@ -57,11 +59,11 @@ class Base(base.Base):
                                          "--competidores", "PlantaPlus", "--sin-contra", "Se buscó y no apareció")
         return identificador
 
-    def puerta1(self, *frente, valores="4,4,4,4,3"):
+    def puerta1(self, *frente, valores="4,4,4,4,3", mitigacion=None):
         """Registra la comparación de D-1 con el rival, cierra 1g y 1f y devuelve la salida de la puerta 1."""
         self.p("frente", "--id", "D-1", *frente)
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
-        self.p("puntaje", "--valores", valores)
+        self.p("puntaje", "--valores", valores, *(["--mitigacion", mitigacion] if mitigacion else []))
         self.cerrar("1f", "01-sintesis.md")
         return self.p("puerta", "--n", 1)
 
@@ -147,10 +149,22 @@ class RivalTest(Base):
         self.assertIn("El diferenciador principal (D-1) es viable y supera al rival C-2 (PlantaPlus), con prueba de "
                       "elección", salida)
 
-    def test_supera_con_un_hallazgo_en_media_es_viable_con_reservas(self):
+    def test_supera_con_un_hallazgo_en_media_es_viable_para_probar(self):
+        # sin la prueba de elección, pero con el dolor triangulado: se prueba después del lanzamiento (feedback #47)
         self.hasta_1g()
         media = self.comparacion_media()
         salida = self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción")
+        self.assertIn("🟡  PUERTA 1 · VIABLE PARA PROBAR  →  la skill recomienda: SEGUIR", salida)
+        self.assertIn("D-1 supera al rival C-2 (PlantaPlus) con el dolor confirmado (H-VOZ-1), pero falta la prueba de "
+                      "que eso haga elegir la app (%s en confianza media)" % media, salida)
+        self.assertIn("decidir --puerta 1 --seguir --carpeta product", salida)
+
+    def test_con_un_bloqueo_de_politicas_supera_sin_prueba_de_eleccion_sigue_con_reservas(self):
+        # sin cambios cuando hay un bloqueo de políticas, aunque tenga mitigación (feedback #47)
+        self.hasta_1g(bloquea=True)
+        media = self.comparacion_media()
+        salida = self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción",
+                              valores="5,4,4,1,3", mitigacion="Lanzar solo en la web")
         self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1g", salida)
         self.assertIn("D-1 supera al rival C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app (%s en confianza "
                       "media)" % media, salida)
@@ -161,8 +175,11 @@ class RivalTest(Base):
         voz = self.hasta_1g()
         write(self.carpeta / "03-validacion.md", base.HIPOTESIS.replace("| D-1 | sostenida |", "| D-1 | débil |"))
         salida = self.puerta1("--resultado", "supera", "--hallazgos", voz, "--texto", "Sin suscripción")
-        self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS", salida)
+        self.assertIn("🟡  PUERTA 1 · VIABLE PARA PROBAR", salida)
         self.assertIn("(la hipótesis HIP-02 quedó débil)", salida)
+        # una hipótesis refutada sobre él no es falta de prueba: es evidencia en contra
+        write(self.carpeta / "03-validacion.md", base.HIPOTESIS.replace("| D-1 | sostenida |", "| D-1 | refutada |"))
+        self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS", self.p("puerta", "--n", 1))
 
     def test_supera_sin_ningun_hallazgo_triangulado_es_no_viable(self):
         self.hasta_1g()
@@ -181,9 +198,10 @@ class RivalTest(Base):
         return "\n".join(texto for _, texto in registro.viabilidad(registro.diferenciadores["D-1"]))
 
     def test_con_la_1g_reabierta_y_sin_presupuesto_no_recomienda_ajustarla_otra_vez(self):
-        self.hasta_1g()
+        self.hasta_1g(bloquea=True)  # con un bloqueo de políticas no hay Viable para probar
         media = self.comparacion_media()
-        self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción")
+        self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción",
+                     valores="5,4,4,1,3", mitigacion="Lanzar solo en la web")
         self.p("decidir", "--puerta", 1, "--ajustar", "1g")
         self.assertEqual(self.datos()["sesiones"]["1g"]["reaperturas"], 1)
         self.assertIn("lo que usó la línea en esta pasada", self.falla("cerrar", "--sesion", "1g", "--busquedas",
@@ -207,9 +225,10 @@ class RivalTest(Base):
         self.assertEqual([p["reapertura"] for p in sesion["pasadas"]], [1])
 
     def test_con_presupuesto_de_sobra_sigue_recomendando_ajustar_la_1g(self):
-        self.hasta_1g()
+        self.hasta_1g(bloquea=True)
         media = self.comparacion_media()
-        self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción")
+        self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción",
+                     valores="5,4,4,1,3", mitigacion="Lanzar solo en la web")
         self.p("decidir", "--puerta", 1, "--ajustar", "1g")
         self.p("cerrar", "--sesion", "1g", "--busquedas", 5, "--lecturas", 3)
         self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1g", self.cerrar("1f"))

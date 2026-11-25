@@ -68,6 +68,8 @@ Es la que combina más impacto si es falsa con menos evidencia a favor. El MVP t
 
 En una idea nueva es un criterio de las puertas 2 y 3: sin métrica y umbral, la idea llegaría al lanzamiento sin saber qué mirar.
 
+**Si la puerta 1 fue Viable para probar** (el texto de la sesión lo dice), la hipótesis más riesgosa es la del **criterio de descarte**: que la gente elige la app por el diferenciador principal frente al rival. Márcala como la más riesgosa, con el diferenciador en su columna, y escribe su métrica y su umbral con las **instalaciones orgánicas** (al mes) y la **retención** (por ejemplo, a 30 días), medidas a los días que dice el criterio (`dias_descarte`, 60 por defecto). El umbral sale de lo que ya está registrado (el caso pesimista de los escenarios, una referencia de retención de la línea `validacion`), con su fuente. Puede quedar **débil**: es justo lo que se prueba después del lanzamiento, y la puerta 2 no la cuenta contra el principal; **refutada**, sí. Las puertas 2 y 3 piden entonces lo mismo que en una idea nueva: la hipótesis más riesgosa con su métrica y su umbral, y el MVP que la pone a prueba.
+
 ## Lo que esta sesión no hace
 
 No cambia el puntaje, los escenarios ni el diferenciador principal, no decide y no convierte "no encontré nada en contra" en "validado": deja escrito con qué confianza llega cada hipótesis a la construcción.

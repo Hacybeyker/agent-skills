@@ -96,6 +96,7 @@ CRITERIOS_DEFECTO = {
     "meta_obligatoria": "no",      # "si": la meta es criterio de la puerta 2; "no": solo referencia
     "moneda": "USD",
     "presupuesto_semanas": 0,      # semanas para construir el MVP (sesión 0)
+    "dias_descarte": 60,           # Viable para probar: días después del lanzamiento para el criterio de descarte
 }
 PRESUPUESTO = {"busquedas": 15, "lecturas": 10}
 PRESUPUESTO_NUEVA = {"busquedas": 20, "lecturas": 12}
@@ -802,6 +803,21 @@ class Registro:
     def principal(self):
         return next((d for d in self.diferenciadores.values() if d.get("principal")), None)
 
+    def dolor_triangulado(self, diferenciador):
+        """«El dolor está triangulado» (feedback #47): los hallazgos propios del diferenciador (`diferenciador
+        --hallazgos`: el dolor, el pedido o el vector medible que lo sostienen) cumplen la regla 2. Los de sus
+        comparaciones con el rival (`frente`) no entran: lo que les falta es la prueba de elección."""
+        propios = list(diferenciador.get("hallazgos", []))
+        return bool(propios) and all(i in self.hallazgos and self.evaluar(self.hallazgos[i])["triangulado"]
+                                     for i in propios)
+
+    def para_probar(self, diferenciador):
+        """Supera a cada rival con el dolor triangulado (feedback #47): hay rivales, cumple los criterios 1 a 5 de
+        viabilidad (también superar a cada rival con al menos un hallazgo triangulado) y sus hallazgos propios están
+        triangulados. Si algo le falta, es la prueba de elección, que se mide después del lanzamiento."""
+        return bool(self.rivales()) and self.estado(diferenciador) in ("viable", "baja") \
+            and self.dolor_triangulado(diferenciador)
+
 
 def independencia(fuente):
     """Dos fuentes son independientes si son de autor distinto; sin autor, cuenta el dominio."""
@@ -952,12 +968,12 @@ def texto_estados(registro, diferenciadores):
                      for estado, ids in sorted(grupos.items(), key=lambda par: list(plurales).index(par[0])))
 
 
-def y_lista(elementos):
-    """['D-1', 'D-5', 'D-6'] → 'D-1, D-5 y D-6'."""
+def y_lista(elementos, conector="y"):
+    """['D-1', 'D-5', 'D-6'] → 'D-1, D-5 y D-6' (o 'D-1, D-5 o D-6')."""
     elementos = list(elementos)
     if len(elementos) <= 1:
         return "".join(elementos)
-    return "%s y %s" % (", ".join(elementos[:-1]), elementos[-1])
+    return "%s %s %s" % (", ".join(elementos[:-1]), conector, elementos[-1])
 
 
 def meta_obligatoria(producto):
@@ -1503,22 +1519,31 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
             refutadas = [fila["id"] for fila in filas if fila["veredicto"] == "refutada"]
             agregar("hipotesis", not refutadas, texto,
                     "refutadas: %s" % ", ".join(refutadas) if refutadas else "%d hipótesis" % len(filas))
-        if nueva:
+        # una idea que pasó la puerta 1 como Viable para probar (#47): la prueba de elección es la hipótesis más
+        # riesgosa, que se mide después del lanzamiento; no se vuelve a pedir, pero sí su métrica y su umbral
+        descarte = criterio_descarte_vigente(carpeta) if not nueva else None
+        if nueva or descarte:
             riesgosas = [fila for fila in filas or [] if fila["riesgosa"]]
             medible = len(riesgosas) == 1 and riesgosas[0]["metrica"]
-            agregar("riesgosa", medible, "La hipótesis más riesgosa, identificada y medible después del lanzamiento",
+            agregar("riesgosa", medible, "La hipótesis más riesgosa, identificada y medible después del lanzamiento%s"
+                    % (" (el criterio de descarte de la puerta 1)" if descarte else ""),
                     "%s, con métrica y umbral" % riesgosas[0]["id"] if medible
                     else "falta marcar una sola hipótesis como la más riesgosa, con su métrica y su umbral")
-        else:
+        if not nueva:
             principal = registro.principal()
             texto = "El diferenciador principal sobrevive al abogado del diablo, con confianza media o alta"
             if not principal:
                 agregar("sobrevive", False, texto, "no hay un diferenciador principal registrado")
             else:
                 suyas = [fila for fila in filas or [] if fila["diferenciador"] == principal["id"]]
-                sobrevive = suyas and all(f["veredicto"] == "sostenida" and f["nivel"] >= 2 for f in suyas)
+                # la hipótesis más riesgosa sobre él puede quedar débil: es la prueba de elección que se mide después
+                diferidas = [f for f in suyas if descarte and f["riesgosa"] and f["veredicto"] == "débil"]
+                sobrevive = suyas and all(f["veredicto"] == "sostenida" and f["nivel"] >= 2
+                                          for f in suyas if f not in diferidas)
                 agregar("sobrevive", sobrevive, texto, "%s: %s" % (principal["id"], ", ".join(
-                    "%s %s (confianza %s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]])
+                    "%s %s (confianza %s%s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]],
+                                                "; es la más riesgosa: se prueba después del lanzamiento"
+                                                if f in diferidas else "")
                     for f in suyas) or "ninguna hipótesis lo pone a prueba en 03-validacion.md"))
 
     else:
@@ -1553,7 +1578,7 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
         agregar("checklist", datos["politicas"] and not bloqueos, "Checklist de políticas sin bloqueos",
                 "bloqueos: %s" % "; ".join(bloqueos) if bloqueos
                 else plural(len(datos["politicas"]), "requisito") if datos["politicas"] else "el checklist está vacío")
-        if nueva:
+        if nueva or criterio_descarte_vigente(carpeta):
             riesgosas = [fila for fila in hipotesis(carpeta, registro) or [] if fila["riesgosa"]]
             riesgosa = riesgosas[0] if len(riesgosas) == 1 else None
             prueba = riesgosa and riesgosa["metrica"] and [f["id"] for f in mvp if riesgosa["id"] in f["hipotesis"]]
@@ -1650,6 +1675,10 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
                               "aportes (references/investigacion.md · Fuentes difíciles)." % "; ".join(
                                   "%s · %s %s" % (v["linea"], DIMENSIONES[v["dimension"]], v["valor"])
                                   for v in herramienta))
+    descarte = criterio_descarte_vigente(carpeta) if numero_puerta in (2, 3) else None
+    if descarte:
+        avisos.append("· La puerta 1 fue Viable para probar: la prueba de elección se mide después del lanzamiento. "
+                      "Criterio de descarte: %s." % descarte["texto"])
     if numero_puerta == 2:
         for aviso in (producto.get("escenarios") or {}).get("avisos") or []:
             avisos.append("⚠ Usuarios activos de un comparable maduro: %s." % aviso)
@@ -1682,9 +1711,13 @@ def bloque_puerta(numero_puerta, carpeta, producto, registro, resultado=None):
     if resultado["provisional"]:
         lineas.append("⚠ Veredicto provisional: falta cerrar %s." % ", ".join(
             "la sesión %s" % s for s in resultado["provisional"]))
+    diferidos = resultado.get("diferidos") or []
     for c in evaluados:
-        lineas.append("  %s %s%s" % ("✔" if c["cumple"] else "✖", c["texto"], " · " + c["detalle"] if c["detalle"]
-                                    else ""))
+        diferido = not c["cumple"] and c["clave"] in diferidos
+        lineas.append("  %s %s%s%s" % ("✔" if c["cumple"] else "◐" if diferido else "✖", c["texto"],
+                                      " · " + c["detalle"] if c["detalle"] else "",
+                                      " · se prueba después del lanzamiento (criterio de descarte)" if diferido
+                                      else ""))
     lineas += ["  " + aviso for aviso in avisos_puerta(numero_puerta, carpeta, producto, registro)]
     return lineas, cumplidos, len(evaluados)
 
@@ -1697,6 +1730,8 @@ VEREDICTOS = {
     "no": {"titulo": "No viable", "recomienda": "descartar", "tono": "mal", "marca": "🔴", "color": "31"},
     "reservas": {"titulo": "Viable con reservas", "recomienda": "ajustar", "tono": "aviso", "marca": "🟡",
                  "color": "33"},
+    # supera al rival con el dolor triangulado y falta la prueba de elección, que se mide después del lanzamiento
+    "probar": {"titulo": "Viable para probar", "recomienda": "seguir", "tono": "aviso", "marca": "🟡", "color": "33"},
     "viable": {"titulo": "Viable", "recomienda": "seguir", "tono": "bien", "marca": "🟢", "color": "32"},
 }
 MAXIMO_RAZONES = 3
@@ -1714,8 +1749,14 @@ def limites_puntaje(producto, registro):
     registrarlo): {criterio: (mínimo, máximo, motivo)}."""
     limites = {}
     viables, bajas = registro.viables(), registro.con_confianza_baja()
+    probar = [] if condiciones_probar(producto, registro) else [d for d in bajas if registro.para_probar(d)]
     if not viables and not bajas:
         limites["diferenciacion"] = (1, 1, "ningún diferenciador es viable")
+    elif not viables and probar:  # su confianza baja es solo la prueba de elección, que no castiga el puntaje (#47)
+        limites["diferenciacion"] = (2, 5, "%s %s al rival con el dolor triangulado: le falta solo la prueba de "
+                                           "elección, que se mide después del lanzamiento" % (
+                                               y_lista(d["id"] for d in probar),
+                                               "supera" if len(probar) == 1 else "superan"))
     elif not viables:
         limites["diferenciacion"] = (1, 2, "solo hay diferenciadores viables con confianza baja: %s" % y_lista(
             d["id"] for d in bajas))
@@ -2012,6 +2053,69 @@ def criterios_sin_aceptacion(mvp):
     return [f["id"] for f in mvp if not f.get("aceptacion")]
 
 
+# Viable para probar (feedback #47): la prueba de elección casi nunca está en la web antes de lanzar (la evidencia
+# muestra el dolor, no la elección). Si un diferenciador supera al rival con el dolor triangulado, construirlo es
+# barato, no hay bloqueo de políticas y la demanda tiene confianza media o alta, la puerta 1 recomienda seguir con un
+# criterio de descarte después del lanzamiento, en vez de pedir una prueba que la investigación no puede dar.
+CRITERIOS_ELECCION = ("diferenciador", "rival", "principal")  # los de la puerta 1 que la prueba de elección decide
+
+
+def candidatos_para_probar(carpeta, producto, registro, filas=None):
+    """Los diferenciadores para probar: superan a cada rival con el dolor triangulado (`Registro.para_probar`), no
+    tienen prueba de elección y ninguna hipótesis de 03-validacion.md sobre ellos quedó refutada. Vacío si no hay
+    rivales, si alguno viable ya tiene la prueba de elección (la puerta puede dar Viable) o si falta alguna de las
+    condiciones de la idea: la demanda con confianza media o alta y ningún bloqueo de políticas."""
+    if not registro.rivales() or condiciones_probar(producto, registro):
+        return []
+    filas = (hipotesis(carpeta, registro) or []) if filas is None else filas
+    if any(registro.eleccion(d, filas)[0] for d in registro.viables()):
+        return []
+    refutados = {f["diferenciador"] for f in filas if f["veredicto"] == "refutada"}
+    return [d for d in registro.diferenciadores.values() if registro.para_probar(d) and d["id"] not in refutados]
+
+
+def condiciones_probar(producto, registro):
+    """Lo que le falta a la idea para que un diferenciador sin prueba de elección se pueda probar: [texto]. Construirlo
+    barato ya lo pide el criterio 4 de viabilidad (sus semanas caben en el presupuesto)."""
+    faltan = []
+    demanda = confianzas(registro)[0]["demanda"] or 0
+    if demanda < 2:
+        faltan.append("la demanda tiene confianza %s" % NIVELES[demanda])
+    bloqueos = registro.bloqueos(objetivo_de(producto))
+    if bloqueos:
+        faltan.append("%s nombra o rechaza la categoría" % ", ".join(sorted(bloqueos)))
+    return faltan
+
+
+def criterio_descarte(producto, registro, diferenciador, filas=None):
+    """El criterio de descarte después del lanzamiento de una idea Viable para probar: la hipótesis más riesgosa (la
+    gente elige la app por ese diferenciador frente a los rivales) y cómo se mide. El umbral lo fija la sesión 3 en la
+    hipótesis más riesgosa de 03-validacion.md, con su métrica: {diferenciador, rivales, hipotesis, dias, metricas,
+    faltas, texto}."""
+    rivales = registro.rivales()
+    dias = int(float(producto["criterios"].get("dias_descarte") or CRITERIOS_DEFECTO["dias_descarte"]))
+    faltas = registro.eleccion(diferenciador, filas or [])[1]
+    hipotesis_ = "la gente elige la app por %s frente %s" % (diferenciador["id"], a_los_rivales(rivales))
+    metricas = ["instalaciones orgánicas", "retención"]
+    texto = ("la hipótesis más riesgosa es que %s. El MVP la pone a prueba: a los %s del lanzamiento se miden las %s y "
+             "la %s; si no llegan al umbral que fija la sesión 3 (la hipótesis más riesgosa de 03-validacion.md, con "
+             "su métrica y su umbral), se descarta la idea o se cambia el diferenciador" % (
+                 hipotesis_, plural(dias, "día"), metricas[0], metricas[1]))
+    return {"diferenciador": diferenciador["id"], "rivales": [r["id"] for r in rivales], "hipotesis": hipotesis_,
+            "dias": dias, "metricas": metricas, "faltas": faltas, "texto": texto}
+
+
+def criterio_descarte_vigente(carpeta):
+    """El criterio de descarte de una idea que pasó la puerta 1 como Viable para probar: el de la decisión vigente de
+    seguir en la puerta 1, o None. Las puertas 2 y 3 no vuelven a pedir la prueba de elección: piden la hipótesis
+    más riesgosa con su métrica y su umbral, y que el MVP la ponga a prueba."""
+    decision = vigente(decisiones(carpeta), 1)
+    if decision and decision["decision"] == "seguir" and (
+            decision.get("recomendacion") or {}).get("veredicto") == "probar":
+        return decision.get("criterio_descarte") or {"texto": "la prueba de elección se mide después del lanzamiento"}
+    return None
+
+
 def motivos_criterio(numero_puerta, criterio, producto, registro):
     """Lo que un criterio que no se cumple dice del veredicto: (fatal, razón, qué lo cambiaría, sesión, hallazgos).
     Fatal es lo que lleva a No viable; lo demás se puede completar ajustando una sesión."""
@@ -2196,13 +2300,36 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     sin_buscar = [s for s, _, _ in revisar]
     # cada motivo: (razón, qué lo cambiaría, sesión que lo completa, si completarlo pide investigar más)
     fatales, ajustes, hallazgos = [], [], []
+    # Viable para probar (feedback #47): los criterios que solo fallan por la prueba de elección se difieren al
+    # lanzamiento si un diferenciador supera al rival con el dolor triangulado; si no es el principal, elegirlo en la 1g
+    # no pide búsquedas.
+    filas_hipotesis = hipotesis(carpeta, registro) or [] if numero_puerta == 1 else []
+    probar = candidatos_para_probar(carpeta, producto, registro, filas_hipotesis) if numero_puerta == 1 else []
+    principal_probar = registro.principal() if registro.principal() in probar else None
+    diferidos = []
     for sesion, antes, peldanos in revisar:
         ajustes.append(("La sesión %s cerró %s y la idea es %s: no buscó en los peldaños %s, así que esa evidencia no "
                         "se buscó (no es evidencia en contra)" % (sesion, "como idea %s" % antes if antes else
                                                                   "sin tipo registrado", tipo_de(producto),
                                                                   y_lista(str(n) for n in peldanos)),
                         "Ajustar la sesión %s con el tipo de hoy (%s)" % (sesion, tipo_de(producto)), sesion, True))
+    if probar and not principal_probar:
+        principal = registro.principal()
+        ajustes.append(("%s %s %s con el dolor triangulado (%s para probar), pero %s" % (
+            y_lista(d["id"] for d in probar), "supera" if len(probar) == 1 else "superan", a_los_rivales(
+                registro.rivales()), "viable" if len(probar) == 1 else "viables",
+            ("el principal (%s) solo %s: no viable (paridad)" % (principal["id"], "lo iguala" if len(
+                registro.rivales()) == 1 else "iguala a los rivales")) if principal and registro.iguala(principal)
+            else "el principal (%s) no supera %s con el dolor triangulado" % (principal["id"], a_los_rivales(
+                registro.rivales())) if principal else "no hay un diferenciador principal elegido"),
+            "Elegir como principal %s en la 1g (no pide búsquedas): el veredicto pasaría a Viable para probar"
+            % y_lista((d["id"] for d in probar), "o"), "1g", False))
+        hallazgos += [i for d in probar for i in d.get("hallazgos", [])]
     for criterio in evaluados:
+        if not criterio["cumple"] and probar and criterio["clave"] in CRITERIOS_ELECCION:
+            if criterio["clave"] != "principal" or principal_probar:
+                diferidos.append(criterio["clave"])  # se prueba después del lanzamiento: el criterio de descarte
+            continue  # sin el principal entre los candidatos, el ajuste de arriba lo resuelve
         if not criterio["cumple"]:
             fatal, razon, cambiaria, sesion, ids, *resto = motivos_criterio(numero_puerta, criterio, producto,
                                                                             registro)
@@ -2218,8 +2345,8 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             ajustes.append(("Revisar el rival: " + texto_rival_a_revisar(registro, revisar_rival),
                             "Confirmar o cambiar el rival y comparar cada diferenciador con él", "1g", False))
     rivales = registro.rivales() if numero_puerta == 1 else []
-    if rivales and not fatales:  # superar al rival no alcanza si nada prueba que eso hace elegir la app
-        filas = hipotesis(carpeta, registro) or []
+    if rivales and not fatales and not probar:  # superar al rival no alcanza si nada prueba que eso hace elegir la app
+        filas = filas_hipotesis
         candidatos = [d for d in registro.diferenciadores.values() if registro.frente_al_rival(d)[0]]
         if candidatos and not any(registro.eleccion(d, filas)[0] for d in registro.viables()):
             principal = registro.principal()
@@ -2265,12 +2392,34 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                 % agotado, "Evidencia que no dependa de más búsquedas en la 1g: un navegador en el agente, un CSV de "
                            "reseñas que aportes o datos propios", None, True)]
             ajustes = []
+    descarte = None
     if fatales:
         nivel, elegidas, sesion = "no", fatales + ajustes, None
         cambios = fatales
     elif ajustes:
         nivel, elegidas, sesion = "reservas", ajustes, ajustes[0][2]
         cambios = ajustes
+    elif principal_probar:
+        nivel, sesion = "probar", None
+        descarte = criterio_descarte(producto, registro, principal_probar, filas_hipotesis)
+        global_ = confianzas(registro)[1]
+        demanda = confianzas(registro)[0]["demanda"] or 0
+        elegidas = [("%s supera %s con el dolor confirmado (%s), pero falta la prueba de que eso haga elegir la app "
+                     "(%s): esa prueba casi nunca está en la web antes de lanzar, así que se mide después" % (
+                         principal_probar["id"], a_los_rivales(rivales), y_lista(principal_probar.get("hallazgos", [])),
+                         "; ".join(descarte["faltas"]) or "sin un hallazgo de elección"), None, None, False),
+                    ("Construirlo cabe en el presupuesto (%s de %s), la demanda tiene confianza %s y no hay bloqueo de "
+                     "políticas" % (numero(float(principal_probar.get("semanas") or 0)), plural(float(
+                         producto["criterios"].get("presupuesto_semanas") or 0), "semana"), NIVELES[demanda]),
+                     None, None, False),
+                    ("La evidencia que la sostiene tiene confianza %s" % NIVELES[global_], None, None, False)]
+        cambios = [(None, "Que a los %s del lanzamiento no se cumpla el criterio de descarte (se descarta la idea o se "
+                          "cambia el diferenciador)" % plural(descarte["dias"], "día"), None, False),
+                   (None, "Un hallazgo triangulado y en confianza alta de que la gente elige la app por %s frente %s "
+                          "(pasaría a Viable)" % (principal_probar["id"], a_los_rivales(rivales)), None, False),
+                   (None, "Evidencia en contra del dolor o una hipótesis sobre %s refutada (pasaría a No viable)"
+                    % principal_probar["id"], None, False)]
+        hallazgos += registro.hallazgos_de(principal_probar) + (sustento(registro)["demanda"] or [])
     else:
         nivel, sesion = "viable", None
         global_ = confianzas(registro)[1]
@@ -2299,7 +2448,8 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     razones = [r for r, _, _, _ in elegidas][:MAXIMO_RAZONES]
     cambiaria = list(dict.fromkeys(c for _, c, _, _ in cambios if c))[:MAXIMO_RAZONES]
     if nivel == "reservas":
-        cambiaria.append("Con eso, el veredicto pasaría a Viable")
+        if not any("Viable para probar" in c for c in cambiaria):
+            cambiaria.append("Con eso, el veredicto pasaría a %s" % ("Viable para probar" if probar else "Viable"))
         herramienta = vacios_de_sesion(producto, registro, sesion)  # solo los de la línea dueña (feedback #44)
         if herramienta:
             cambiaria.append("%s: antes de ajustarla, dale al agente un navegador o aporta un CSV de reseñas" % (
@@ -2308,7 +2458,12 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     return {"puerta": numero_puerta, "nivel": nivel, "titulo": VEREDICTOS[nivel]["titulo"],
             "recomienda": VEREDICTOS[nivel]["recomienda"], "sesion": sesion, "razones": razones,
             "cambiaria": cambiaria, "provisional": abiertas, "hallazgos": list(dict.fromkeys(hallazgos)),
-            "incoherencias": (vigente_ or {}).get("incoherencias", [])}
+            "incoherencias": (vigente_ or {}).get("incoherencias", []),
+            "diferidos": diferidos if nivel in ("probar", "reservas") else [], "descarte": descarte}
+
+
+def primera_mayuscula(texto):
+    return texto[:1].upper() + texto[1:]
 
 
 def texto_recomendacion(resultado):
@@ -2333,6 +2488,9 @@ def lineas_banner(resultado):
     lineas += ["  %d. %s." % (indice, razon) for indice, razon in enumerate(resultado["razones"], start=1)]
     lineas.append("Qué cambiaría el veredicto:")
     lineas += ["  · %s." % texto for texto in resultado["cambiaria"]]
+    if resultado.get("descarte"):
+        lineas += ["Criterio de descarte después del lanzamiento (queda registrado al seguir):",
+                   "  · %s." % primera_mayuscula(resultado["descarte"]["texto"])]
     lineas += ["La decisión es tuya: el comando recomendado va primero. Decidir en contra de la recomendación pide "
                "--motivo.", raya]
     return lineas
@@ -2369,7 +2527,7 @@ def opciones_decision(numero_puerta, carpeta, producto, resultado):
         return orden("decidir --puerta %d %s%s" % (numero_puerta, resto, contra if tipo != recomienda or distinta
                                                    else ""), carpeta)
 
-    motivo = "No viable: %s" % "; ".join(resultado["razones"])
+    motivo = motivo_descarte(resultado)
     recomendado = {"seguir": ("Seguir", "--seguir"),
                    "ajustar": ("Ajustar %s" % resultado["sesion"], "--ajustar %s" % resultado["sesion"]),
                    "descartar": ("Descartar", "--descartar %s" % shlex.quote(motivo))}[recomienda]
@@ -2531,6 +2689,15 @@ def texto_sesion(carpeta, producto, sesion):
     if sesion in INVESTIGACION and tipo_de(producto):
         partes.append("Idea %s%s." % (texto_tipo(producto), ": trabaja por analogía desde el inicio"
                                       if tipo_de(producto) == "nueva" else ""))
+    descarte = criterio_descarte_vigente(carpeta) if sesion in ("3", "4") else None
+    if descarte:  # Viable para probar (#47): la sesión 3 y la 4 recogen el criterio de descarte
+        partes.append("La puerta 1 fue Viable para probar: %s." % (
+            "registra como la hipótesis más riesgosa que %s, con su métrica y su umbral (instalaciones orgánicas y "
+            "retención a los %s del lanzamiento)" % (descarte.get("hipotesis") or "la gente elige la app por el "
+                                                     "diferenciador principal", plural(int(
+                                                         descarte.get("dias") or 60), "día"))
+            if sesion == "3" else "el MVP pone a prueba la hipótesis más riesgosa (el criterio de descarte), con su "
+                                  "métrica y su umbral, en la columna Hipótesis de su funcionalidad"))
     reapertura = int((producto["sesiones"].get(sesion) or {}).get("reaperturas") or 0)
     if sesion in INVESTIGACION and reapertura:
         limites = presupuesto_reapertura(producto)
@@ -2779,6 +2946,10 @@ def texto_resumen(carpeta, producto, registro):
                 detalle += " · la skill recomendaba %s" % texto_recomendacion(recomendacion)
             if decision.get("contra_recomendacion"):
                 detalle += " · **contra la recomendación**: %s" % decision.get("motivo_decision", "")
+            if decision.get("automatica"):
+                detalle += " · **decisión automática (modo autónomo)**: revísala o reábrela"
+            if decision.get("criterio_descarte"):
+                detalle += " · Viable para probar, criterio de descarte: %s" % decision["criterio_descarte"]["texto"]
         else:
             detalle = "pendiente"
         lineas.append("| P%d · %s | %s |" % (numero_puerta, nombre, detalle))
@@ -2846,6 +3017,8 @@ def mover_a_archivo(carpeta, producto, motivo, por):
 
 def cmd_nuevo(args):
     carpeta = resolver_carpeta(args)
+    if args.raiz and not Path(os.path.abspath(os.path.expanduser(args.raiz))).is_dir():
+        raise Fallo("--raiz: no existe la carpeta %s" % os.path.abspath(os.path.expanduser(args.raiz)))
     if (carpeta / "producto.json").exists():
         raise Fallo("Ya hay una idea activa en %s (%s). Para empezar otra, archívala antes: `archivar --motivo "
                     "\"<motivo>\"`." % (carpeta, cargar(carpeta)["nombre"]))
@@ -2866,6 +3039,8 @@ def cmd_nuevo(args):
                     "creado": hoy().isoformat(), "tipo": None, "tipo_historial": [], "criterios": criterios,
                     "criterios_cambios": [], "sesiones": {}, "intentos": [], "puntaje": None, "escenarios": None,
                     "archivo": None, "objetivo": objetivo, "objetivo_cambios": [], "modelos": {}, "herramienta": None, "propuestas": [], "consumo": []}
+        if args.raiz:
+            fijar_raiz(carpeta, producto, args.raiz)
         creados, existentes = [], []
         for origen_plantilla, destino in ARCHIVOS_PLANTILLA:
             ruta = carpeta / destino
@@ -2885,6 +3060,7 @@ def cmd_nuevo(args):
     print("✔ Idea \"%s\" creada en %s (%d archivos)" % (producto["nombre"], carpeta, len(creados)))
     if existentes:
         print("· Ya existían y no se tocaron: %s" % ", ".join(existentes))
+    actualizar_tablero(carpeta, producto, silencio=False)
     print("\n" + siguiente)
 
 
@@ -4142,14 +4318,16 @@ def leer_valores(texto, opcion):
 def validar_valores(valores, producto, registro, con):
     """Las anclas atadas al registro (references/puntaje.md), para el modelo base y para cada alternativo."""
     viables, bajas = registro.viables(), registro.con_confianza_baja()
+    probar = [] if condiciones_probar(producto, registro) else [  # solo les falta la prueba de elección (#47)
+        d for d in bajas if registro.para_probar(d)]
     if not viables and not bajas and valores["diferenciacion"] > 1:
         raise Fallo("Diferenciación = %d%s no corresponde: no hay ningún diferenciador viable registrado, y esa es "
                     "el ancla del 1 (references/puntaje.md)." % (valores["diferenciacion"], con))
-    if not viables and bajas and valores["diferenciacion"] > 2:
+    if not viables and bajas and not probar and valores["diferenciacion"] > 2:
         raise Fallo("Diferenciación = %d%s no corresponde: %s, así que el máximo es 2 (references/puntaje.md)." % (
             valores["diferenciacion"], con, texto_estados(registro, bajas)))
-    if viables and valores["diferenciacion"] == 1:
-        raise Fallo("Diferenciación = 1%s no corresponde: %s." % (con, texto_estados(registro, viables)))
+    if (viables or probar) and valores["diferenciacion"] == 1:
+        raise Fallo("Diferenciación = 1%s no corresponde: %s." % (con, texto_estados(registro, viables or probar)))
     actuales = [h["id"] for h in registro.hallazgos.values() if h["linea"] == "demanda" and h.get("critico")
                 and registro.evaluar(h)["triangulado"]]
     if valores["demanda"] >= 4 and not actuales:
@@ -4536,6 +4714,8 @@ def cmd_cerrar(args):
                 raise Fallo("--%s es un número entero: lo que usó la línea en esta pasada (desde que se abrió o se "
                             "reabrió la sesión)" % clave)
             uso[clave] = int(valor)
+    if args.raiz:
+        fijar_raiz(carpeta, producto, args.raiz)  # solo queda guardada si la sesión cierra
     faltan = pendientes_de(carpeta, producto, registro, args.sesion)
     if faltan:
         raise Fallo("La sesión %s · %s todavía no se puede cerrar:\n  - %s" % (
@@ -4574,6 +4754,7 @@ def cmd_cerrar(args):
         if rivales and not any(registro.frente_al_rival(d)[0] for d in registro.diferenciadores.values()):
             print("⚠ Ningún diferenciador supera %s con un hallazgo triangulado: la puerta 1 lo marca como criterio "
                   "sin cumplir." % a_los_rivales(rivales, "ni"))
+    actualizar_tablero(carpeta, producto)
     print("\n" + siguiente)
 
 
@@ -4592,10 +4773,47 @@ def cmd_puerta(args):
     print("\n".join(comandos_decision(args.n, carpeta, producto, resultado)))
 
 
+def ajustes_previos(lista_decisiones, numero_puerta, sesion):
+    """Cuántas veces se decidió ajustar esa sesión en esa puerta (vigentes o no)."""
+    return sum(1 for d in lista_decisiones if d["puerta"] == numero_puerta and d.get("decision") == "ajustar"
+               and d.get("sesion") == sesion)
+
+
+def parada_autonoma(numero_puerta, carpeta, producto, registro, resultado):
+    """Por qué el modo autónomo se detiene en esta puerta y le pregunta al usuario, o None (feedback #49): la puerta
+    pide ajustar la misma sesión por tercera vez, o la sesión que se recomienda ajustar tiene vacíos por límite de las
+    herramientas (un navegador o un CSV de reseñas solo los puede dar el usuario: ajustarla otra vez da lo mismo)."""
+    if resultado["recomienda"] != "ajustar":
+        return None
+    sesion = resultado["sesion"]
+    previos = ajustes_previos(decisiones(carpeta), numero_puerta, sesion)
+    if previos >= 2:
+        return ("la puerta %d pide ajustar la sesión %s por tercera vez (ya se ajustó %s): otra vuelta automática no "
+                "promete nada nuevo" % (numero_puerta, sesion, plural(previos, "vez", "veces")))
+    herramienta = vacios_de_sesion(producto, registro, sesion)
+    if herramienta:
+        return "%s: antes de ajustarla hace falta un navegador en el agente o un CSV de reseñas que aporte el usuario" % (
+            texto_vacios_sesion(sesion, herramienta))
+    return None
+
+
+def motivo_descarte(resultado):
+    """El motivo que la skill propone al recomendar descartar: sus razones."""
+    return "No viable: %s" % "; ".join(resultado["razones"])
+
+
 def cmd_decidir(args):
     carpeta, producto, registro = abrir(args)
     lista_decisiones = decisiones(carpeta)
     nodo = "P%d" % args.puerta
+    if not (args.seguir or args.ajustar or args.descartar is not None or args.reabrir or args.automatico):
+        raise Fallo("Elige una decisión: --seguir, --ajustar <sesión>, --descartar \"<motivo>\", --reabrir o, solo en "
+                    "el modo autónomo que pidió el usuario, --automatico (aplica la recomendación de la skill).")
+    if args.automatico and (args.reabrir or args.motivo):
+        raise Fallo("--automatico solo aplica la recomendación de la skill: no lleva --motivo ni --reabrir.")
+    if args.raiz:
+        fijar_raiz(carpeta, producto, args.raiz)
+        guardar(carpeta, producto)
     if args.reabrir:
         previa = vigente(lista_decisiones, args.puerta)
         if not previa:
@@ -4616,6 +4834,8 @@ def cmd_decidir(args):
         print("✔ Puerta %d reabierta: vuelve a quedar pendiente de tu decisión." % args.puerta)
         if afectadas:
             print("· Las sesiones posteriores ya cerradas (%s) conservan su trabajo." % ", ".join(afectadas))
+        regenerar_reporte(carpeta)  # el reporte ya no muestra la decisión deshecha (feedback #50)
+        actualizar_tablero(carpeta, producto)
         print("\n" + siguiente)
         return
     if not tipo_de(producto):
@@ -4625,12 +4845,30 @@ def cmd_decidir(args):
     sin_decidir = [p for p in previas if not cumplido(producto, lista_decisiones, p)]
     if sin_decidir:
         raise Fallo("Antes hay que decidir seguir en la puerta %s." % sin_decidir[0][1])
-    criterios = criterios_puerta(args.puerta, carpeta, producto, registro)
-    cumplidos = sum(1 for cumple, _, _ in criterios if cumple)
+    evaluados = evaluar_puerta(args.puerta, carpeta, producto, registro)
+    resultado = veredicto(args.puerta, carpeta, producto, registro, evaluados)
+    if args.automatico:  # modo autónomo (feedback #49): solo la recomendación de la skill, nunca en contra
+        recomendada = resultado["recomienda"]
+        pedida = "seguir" if args.seguir else "ajustar" if args.ajustar else "descartar" if \
+            args.descartar is not None else None
+        if pedida and (pedida != recomendada or (pedida == "ajustar" and args.ajustar != resultado["sesion"])):
+            raise Fallo("--automatico solo aplica la recomendación de la skill: %s (veredicto: %s). Decidir otra cosa "
+                        "es una decisión del usuario, sin --automatico y con --motivo." % (
+                            texto_recomendacion(resultado), resultado["titulo"]))
+        parada = parada_autonoma(args.puerta, carpeta, producto, registro, resultado)
+        if parada:
+            raise Fallo("Modo autónomo: aquí se detiene y le pregunta al usuario, porque %s. La decisión la toma el "
+                        "usuario en su terminal, sin --automatico." % parada)
+        args.seguir = recomendada == "seguir"
+        args.ajustar = resultado["sesion"] if recomendada == "ajustar" else None
+        args.descartar = motivo_descarte(resultado) if recomendada == "descartar" else None
+    diferidos = resultado.get("diferidos") or []
+    cumplidos = sum(1 for c in evaluados if c["cumple"])
     registro_decision = {
         "puerta": args.puerta, "fecha": ahora(), "desde": origen(), "tipo": tipo_de(producto), "vigente": True,
-        "cumple": cumplidos, "total": len(criterios),
-        "criterios": [{"cumple": cumple, "texto": texto, "detalle": detalle} for cumple, texto, detalle in criterios],
+        "cumple": cumplidos, "total": len(evaluados),
+        "criterios": [dict({"cumple": c["cumple"], "texto": c["texto"], "detalle": c["detalle"]}, **(
+            {"diferido": True} if not c["cumple"] and c["clave"] in diferidos else {})) for c in evaluados],
         "criterios_cambiados": producto.get("criterios_cambios", []),
     }
     abiertas = [s for s in DEPENDE[nodo] if not cerrada(producto, s)]
@@ -4642,7 +4880,6 @@ def cmd_decidir(args):
     if args.descartar is not None and len(args.descartar.strip()) < 10:
         raise Fallo("--descartar lleva el motivo completo (qué evidencia en contra hay, o qué camino no "
                     "existe): es lo que queda como aprendizaje")
-    resultado = veredicto(args.puerta, carpeta, producto, registro)
     tomada = "seguir" if args.seguir else "ajustar" if args.ajustar else "descartar"
     # ajustar otra sesión que la recomendada también va en contra: el registro dice por qué (feedback #26)
     contra = tomada != resultado["recomienda"] or (tomada == "ajustar" and args.ajustar != resultado["sesion"])
@@ -4659,10 +4896,19 @@ def cmd_decidir(args):
     registro_decision["contra_recomendacion"] = contra
     if motivo_usuario:
         registro_decision["motivo_decision"] = motivo_usuario
+    if args.automatico:
+        registro_decision.update(automatica=True, por="decisión automática (modo autónomo)")
+    if tomada == "seguir" and resultado.get("descarte"):  # Viable para probar: la puerta 3 y la medición lo usan
+        registro_decision["criterio_descarte"] = resultado["descarte"]
     for decision in lista_decisiones:
         if decision["puerta"] == args.puerta:
             decision["vigente"] = False
-    if contra:
+    if args.automatico:
+        print("· Decisión automática (modo autónomo): la skill aplicó su recomendación, %s (veredicto: %s; %s). Queda "
+              "marcada para que la revises; si no la compartes: `%s`." % (
+                  texto_recomendacion(resultado), resultado["titulo"], "; ".join(resultado["razones"]),
+                  orden("decidir --puerta %d --reabrir" % args.puerta, carpeta)))
+    elif contra:
         print("⚠ Decisión contra la recomendación (la skill recomendaba %s; veredicto: %s): queda registrada con tu "
               "motivo: «%s»" % (texto_recomendacion(resultado), resultado["titulo"], motivo_usuario))
     else:
@@ -4681,11 +4927,16 @@ def cmd_decidir(args):
         escribir_json(carpeta / "decisiones.json", lista_decisiones)
         siguiente = actualizar_estado(carpeta, producto)
         print("✔ Puerta %d · %s: seguir (cumplía %d de %d criterios)" % (
-            args.puerta, PUERTAS[args.puerta], cumplidos, len(criterios)))
-        if cumplidos < len(criterios):
-            print("⚠ Sigues con %s sin cumplir: queda anotado en decisiones.json." % plural(
-                len(criterios) - cumplidos, "criterio"))
+            args.puerta, PUERTAS[args.puerta], cumplidos, len(evaluados)))
+        sin_cumplir = len(evaluados) - cumplidos - len(diferidos)
+        if sin_cumplir > 0:
+            print("⚠ Sigues con %s sin cumplir: queda anotado en decisiones.json." % plural(sin_cumplir, "criterio"))
+        if registro_decision.get("criterio_descarte"):
+            print("· Viable para probar: la prueba de elección queda para después del lanzamiento. Criterio de "
+                  "descarte: %s. La sesión 3 la registra como la hipótesis más riesgosa, con su métrica y su umbral, y "
+                  "la puerta 3 pide que el MVP la ponga a prueba." % registro_decision["criterio_descarte"]["texto"])
         regenerar_reporte(carpeta)
+        actualizar_tablero(carpeta, producto)
         print("\n" + con_color(siguiente))
     elif args.ajustar:
         sesion = args.ajustar
@@ -4724,6 +4975,7 @@ def cmd_decidir(args):
                   "· Fuentes difíciles)." % (", ".join(sorted({v["linea"] for v in herramienta})), "; ".join(
                       "%s %s" % (DIMENSIONES[v["dimension"]], v["valor"]) for v in herramienta)))
         regenerar_reporte(carpeta)
+        actualizar_tablero(carpeta, producto)
         print("\n" + con_color(siguiente))
     else:
         motivo = args.descartar.strip()
@@ -4734,6 +4986,7 @@ def cmd_decidir(args):
         print("✔ Puerta %d · %s: idea descartada y archivada en %s" % (args.puerta, PUERTAS[args.puerta], destino))
         print("· Motivo: %s" % motivo)
         regenerar_reporte(destino)
+        actualizar_tablero(carpeta, producto)
         print("Siguiente paso: no queda nada por hacer con esta idea. Para recuperarla: `%s`. Para evaluar otra: "
               "`nuevo --nombre \"<nombre>\"`." % orden("reabrir --idea %s" % destino.name, carpeta))
 
@@ -4774,6 +5027,18 @@ def datos_orquestador(carpeta, producto=None):
                 modelo, "claude"), ESFUERZO_CLI[ESFUERZO[nivel]])}
 
 
+def datos_automatico(numero_puerta, carpeta, producto, registro, resultado):
+    """Lo que necesita el modo autónomo en una puerta (feedback #49), determinista: el comando `decidir --automatico`
+    listo (aplica la recomendación de la skill), la decisión que tomaría, cuántas veces se ajustó ya esa sesión en esa
+    puerta y si hay que detenerse (el tercer ajuste de la misma sesión, o algo que solo el usuario puede dar)."""
+    parada = parada_autonoma(numero_puerta, carpeta, producto, registro, resultado)
+    sesion = resultado["sesion"] if resultado["recomienda"] == "ajustar" else None
+    return {"comando": orden("decidir --puerta %d --automatico" % numero_puerta, carpeta),
+            "decision": resultado["recomienda"], "sesion": sesion,
+            "ajustes_previos": ajustes_previos(decisiones(carpeta), numero_puerta, sesion) if sesion else 0,
+            "detener": bool(parada), "motivo": parada}
+
+
 def siguiente_json(carpeta):
     """El paso siguiente como datos: {formato, tipo, quien, requiere_persona, motivo, pasos, en_paralelo, esperan,
     avisos, costo, …}. `quien` es subagente (lanzar `pasos` a la vez), usuario (una puerta: se detiene) o nadie."""
@@ -4788,6 +5053,11 @@ def siguiente_json(carpeta):
         producto = {"modelos": {}, "sesiones": {}}
         paso = paso_sesion(carpeta, producto, "0")
         paso["texto"] = "Usa hb-product: <pedido del usuario, tal cual>. Carpeta: %s. No hagas commit ni push." % carpeta
+        # modo autónomo (#49): la sesión 0 no pregunta; lo que falta va a «Supuestos sin confirmar» de 00-idea.md
+        paso["texto_autonomo"] = ("Usa hb-product en modo autónomo, sin preguntas: <la descripción del usuario, tal "
+                                  "cual, o la ruta del archivo que la trae>. No hagas la entrevista: toma lo que diga "
+                                  "la descripción y lo que falte va en «Supuestos sin confirmar» de 00-idea.md, con "
+                                  "el valor que elegiste y por qué. Carpeta: %s. No hagas commit ni push." % carpeta)
         return dict(base, tipo="sesion", quien="subagente", requiere_persona=True, titulo="sesión 0 · idea",
                     motivo="la sesión 0 entrevista al usuario: el subagente devuelve sus preguntas y el orquestador "
                            "se las hace", pasos=[paso], en_paralelo=False, esperan=[], avisos=[], costo=None)
@@ -4838,11 +5108,14 @@ def siguiente_json(carpeta):
                                                                         "razones", "cambiaria", "provisional")},
                     "recomendacion": texto_recomendacion(resultado),
                     "opciones": opciones_decision(numero_puerta, carpeta, producto, resultado),
+                    "automatico": datos_automatico(numero_puerta, carpeta, producto, registro, resultado),
                     "texto": "\n".join(lineas)}
             return dict(base, tipo="puerta", quien="usuario", requiere_persona=True, pasos=[paso], donde="terminal",
                         motivo="puerta %d: arriba, el recordatorio de /cost (costo.recordatorio); después, la puerta. La "
                                "decisión es del usuario: corre el comando en su terminal y escribe «continúa». El "
-                               "orquestador nunca corre decidir" % numero_puerta)
+                               "orquestador nunca corre decidir, salvo en el modo autónomo que pidió el usuario: ahí "
+                               "corre pasos[0].automatico.comando si pasos[0].automatico.detener es false" %
+                               numero_puerta)
     return dict(base, tipo="fin", quien="nadie", requiere_persona=False, pasos=[],
                 motivo="el proceso cerró: el PRD está aprobado; la construcción la hace hb-implement. Repite el "
                        "recordatorio de /cost (costo.recordatorio) en el mensaje final")
@@ -4889,9 +5162,12 @@ def cmd_estado(args):
 
 def cmd_archivar(args):
     carpeta, producto, registro = abrir(args)
+    if args.raiz:
+        fijar_raiz(carpeta, producto, args.raiz)
     destino = mover_a_archivo(carpeta, producto, args.motivo.strip(), "archivada a mano")
     print("✔ Idea \"%s\" archivada en %s (no se borra nada)" % (producto["nombre"], destino))
     regenerar_reporte(destino)
+    actualizar_tablero(carpeta, producto)
     print("Siguiente paso: `%s` la recupera; `nuevo --nombre \"<nombre>\"` empieza otra." % orden(
         "reabrir --idea %s" % destino.name, carpeta))
 
@@ -4919,6 +5195,8 @@ def cmd_reabrir(args):
     producto = cargar(carpeta)
     anterior = producto.get("archivo") or {}
     producto["archivo"] = None
+    if args.raiz:
+        fijar_raiz(carpeta, producto, args.raiz)
     lista_decisiones = decisiones(carpeta)
     for decision in lista_decisiones:
         if decision["decision"] == "descartar":
@@ -4928,6 +5206,7 @@ def cmd_reabrir(args):
     siguiente = actualizar_estado(carpeta, producto)
     print("✔ Idea \"%s\" reabierta (estaba archivada: %s)" % (producto["nombre"], anterior.get("motivo", "")))
     regenerar_reporte(carpeta)
+    actualizar_tablero(carpeta, producto)
     print("\n" + siguiente)
 
 
@@ -5064,11 +5343,11 @@ def tarjeta(titulo, cuerpo, clase=""):
     return '<section class="tarjeta %s"><h2>%s</h2>%s</section>' % (clase, escape(titulo), cuerpo)
 
 
-def pagina(titulo, cuerpo):
+def pagina(titulo, cuerpo, cabeza=""):
     return ("<!doctype html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>%s</title>\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n%s<title>%s</title>\n"
             "<style>%s</style>\n</head>\n<body>\n<main>\n%s\n</main>\n</body>\n</html>\n" % (
-                escape(titulo), ESTILO, cuerpo))
+                cabeza, escape(titulo), ESTILO, cuerpo))
 
 
 def enlace(fuente):
@@ -5173,6 +5452,8 @@ def recorrido(carpeta):
                  "descartar": "descartada"}[decision["decision"]]
         if decision.get("contra_recomendacion"):
             hecho += " contra la recomendación"
+        if decision.get("automatica"):
+            hecho += " (automática)"
         pasos.append({"puerta": decision["puerta"], "nivel": nivel, "tono": VEREDICTOS[nivel]["tono"]
                       if nivel in VEREDICTOS else "neutro",
                       "texto": "P%d%s → %s" % (decision["puerta"], " %s" % VEREDICTOS[nivel]["marca"]
@@ -5241,10 +5522,18 @@ def seccion_veredicto(info, compacto=False, estado=None, pasos=None):
     partes.append("<h3>Por qué</h3><ol>%s</ol>" % "".join("<li>%s</li>" % escape(r) for r in resultado["razones"]))
     partes.append("<h3>Qué cambiaría el veredicto</h3><ul>%s</ul>" % "".join(
         "<li>%s</li>" % escape(c) for c in resultado["cambiaria"]))
+    if resultado.get("descarte"):
+        partes.append("<h3>Criterio de descarte después del lanzamiento</h3><p>%s.</p>" % escape(primera_mayuscula(
+            resultado["descarte"]["texto"])))
     if decision:
         tomada = DECISIONES_LLANO[decision["decision"]].lower() + (
             " la sesión %s" % decision["sesion"] if decision.get("sesion") else "")
-        if decision.get("contra_recomendacion"):
+        if decision.get("automatica"):
+            partes.append("<p>%s La skill decidió %s, su propia recomendación, en el modo autónomo que pediste. "
+                          "Revísala: si no la compartes, reábrela y decide tú (<code>decidir --puerta %d --reabrir"
+                          "</code>).</p>" % (chip("Decisión automática (modo autónomo)", "aviso", "⚙"), escape(tomada),
+                                              decision["puerta"]))
+        elif decision.get("contra_recomendacion"):
             partes.append("<p>%s Decidiste %s en contra de la recomendación. Tu motivo: «%s».</p>" % (
                 chip("Decisión contra la recomendación", "aviso", "⚠"), escape(tomada),
                 escape(decision.get("motivo_decision", ""))))
@@ -5425,11 +5714,18 @@ def seccion_puertas(carpeta, producto, registro):
             if decision.get("contra_recomendacion"):
                 estado += chip("Contra la recomendación", "aviso", "⚠")
                 linea += " Tu motivo: «%s»." % decision.get("motivo_decision", "")
-            criterios = [(c["cumple"], c["texto"], c.get("detalle", "")) for c in decision.get("criterios", [])]
+            if decision.get("automatica"):
+                estado += chip("Decisión automática: revísala", "aviso", "⚙")
+                linea += " La tomó la skill en el modo autónomo, con su recomendación: revísala o reábrela."
+            if decision.get("criterio_descarte"):
+                linea += " Criterio de descarte después del lanzamiento: %s." % decision["criterio_descarte"]["texto"]
+            criterios = [(True if c["cumple"] else None if c.get("diferido") else False, c["texto"],
+                          c.get("detalle", "")) for c in decision.get("criterios", [])]
             cuando = "al decidir"
         elif not producto.get("archivo") and disponible(producto, lista_decisiones, nodo):
-            criterios = criterios_puerta(numero_puerta, carpeta, producto, registro)
             resultado = veredicto(numero_puerta, carpeta, producto, registro)
+            criterios = [(True if c["cumple"] else None if c["clave"] in resultado["diferidos"] else False, c["texto"],
+                          c["detalle"]) for c in evaluar_puerta(numero_puerta, carpeta, producto, registro)]
             datos = VEREDICTOS[resultado["nivel"]]
             estado = chip("Pendiente de tu decisión", "aviso", "◐") + chip(
                 "%s · recomienda %s" % (datos["titulo"], texto_recomendacion(resultado)), datos["tono"], datos["marca"])
@@ -5441,8 +5737,10 @@ def seccion_puertas(carpeta, producto, registro):
         detalle = ""
         if criterios:
             detalle = "<details><summary>Criterios (%s)</summary><ul>%s</ul></details>" % (cuando, "".join(
-                "<li>%s %s%s</li>" % ("✔" if c else "✖", escape(t), (" · <span class=\"nota\">%s</span>" % escape(d))
-                                      if d else "") for c, t, d in criterios))
+                "<li>%s %s%s%s</li>" % ("✔" if c else "◐" if c is None else "✖", escape(t),
+                                        (" · <span class=\"nota\">%s</span>" % escape(d)) if d else "",
+                                        " · <span class=\"nota\">se prueba después del lanzamiento</span>"
+                                        if c is None else "") for c, t, d in criterios))
         if len(historial) > 1:
             detalle += "<details><summary>Historial (%d decisiones)</summary><ul>%s</ul></details>" % (
                 len(historial), "".join("<li>%s · %s%s</li>" % (
@@ -5687,8 +5985,12 @@ def seccion_escenarios(producto):
 
 def seccion_hipotesis(carpeta, registro):
     filas = hipotesis(carpeta, registro)
+    descarte = criterio_descarte_vigente(carpeta)
+    nota = ('<p>%s %s.</p>' % (chip("Criterio de descarte de la puerta 1", "aviso", "◐"), escape(primera_mayuscula(
+        descarte["texto"]))) if descarte else "")
     if not filas:
-        return tarjeta("Hipótesis más riesgosa", '<p class="vacio">Sin validación documental todavía (sesión 3).</p>')
+        return tarjeta("Hipótesis más riesgosa", nota + '<p class="vacio">Sin validación documental todavía (sesión '
+                                                        '3).</p>')
     riesgosas = [f for f in filas if f["riesgosa"]]
     tono = {"sostenida": "bien", "débil": "aviso", "refutada": "mal"}
     cuerpo = ""
@@ -5705,7 +6007,7 @@ def seccion_hipotesis(carpeta, registro):
         "<li>%s %s%s</li>" % (chip(f["veredicto"] or "sin veredicto", tono.get(f["veredicto"], "neutro")),
                               escape(f["texto"]), ref(f["id"])) for f in filas))
     return tarjeta("Hipótesis más riesgosa", '<p class="nota">La que el primer producto tiene que poner a prueba '
-                                             'antes que nada.</p>' + cuerpo)
+                                             'antes que nada.</p>' + nota + cuerpo)
 
 
 TONO_POLITICA = {"cumple": "bien", "pendiente": "aviso", "bloqueo": "mal", "no aplica": "neutro"}
@@ -5793,8 +6095,14 @@ def seccion_costo(producto):
 GLOSARIO = (
     ("Puerta", "Un punto de control donde decides seguir, ajustar una parte o descartar la idea."),
     ("Veredicto", "Lo que concluye la skill en cada puerta, con reglas fijas: No viable (recomienda descartar), Viable "
-                  "con reservas (recomienda ajustar una parte) o Viable (recomienda seguir). La decisión es tuya; si "
-                  "decides en contra, queda anotado con tu motivo."),
+                  "con reservas (recomienda ajustar una parte), Viable para probar o Viable (recomiendan seguir). La "
+                  "decisión es tuya; si decides en contra, queda anotado con tu motivo."),
+    ("Viable para probar", "Un diferenciador supera al rival con el dolor confirmado, pero falta la prueba de que eso "
+                           "haga elegir la app, que casi nunca está en la web antes de lanzar. Se sigue con un criterio "
+                           "de descarte: si a los días fijados después del lanzamiento las instalaciones orgánicas y la "
+                           "retención no llegan al umbral, se descarta la idea o se cambia el diferenciador."),
+    ("Decisión automática", "La tomó la skill en el modo autónomo que pediste, aplicando su propia recomendación. "
+                            "Revísala: si no la compartes, reábrela y decide tú."),
     ("Hallazgo clave", "Una afirmación con fuentes de la que dependen el puntaje o una puerta."),
     ("Confirmado", "Tiene 3 fuentes independientes y vigentes (18 meses; 5 años para la estadística oficial y los "
                    "estudios académicos), una de ellas de los últimos 18 meses, y un dato medido si es de demanda o de "
@@ -5917,12 +6225,15 @@ def html_tablero(raiz, filas, fallidas):
         estado, puntaje = fila["estado"], fila["puntaje"]
         ultima = estado["ultima"]
         renglones.append(
-            '<li><div class="fila"><h3><a href="%s">%s</a></h3>%s%s<span class="nota">%s</span></div>'
+            '<li><div class="fila"><h3>%s</h3>%s%s<span class="nota">%s</span></div>'
             '<div class="dato"><div><b>Puntaje:</b> %s<br><span class="nota">%smínimo de la puerta 1: %d</span></div>'
             '%s<div class="nota"><b>Última puerta:</b> %s</div></div>%s<p><b>%s</b> %s</p></li>' % (
-                escape(fila["enlace"], quote=True), escape(fila["nombre"]),
+                '<a href="%s">%s</a>' % (escape(fila["enlace"], quote=True), escape(fila["nombre"]))
+                if fila["enlace"] else escape(fila["nombre"]),
                 '<span class="nota">%s</span>' % escape(fila["distingue"]) if fila.get("distingue") else "",
-                chip(estado["etiqueta"], tonos[estado["clave"]], estado["icono"]),
+                chip(estado["etiqueta"], tonos[estado["clave"]], estado["icono"]) + (chip(
+                    "Decisión automática en %s: revísala" % y_lista("P%d" % n for n in fila["automaticas"]), "aviso",
+                    "⚙") if fila.get("automaticas") else ""),
                 escape("idea %s" % fila["tipo"] if fila["tipo"] else "tipo sin registrar"),
                 "%d/25" % puntaje if puntaje is not None else "sin puntaje",
                 "se registró %d/25 · " % fila["registrado"] if fila.get("registrado") else "", fila["minimo"],
@@ -5945,20 +6256,111 @@ def html_tablero(raiz, filas, fallidas):
               'calcula la skill con reglas fijas; la decisión es tuya.</footer>' % (
                   plural(len(filas), "idea"), escape(fecha_corta(ahora())), tarjeta("Resumen", cifras, "resumen"),
                   tarjeta("Ideas", tabla_html) + aviso, VERSION))
-    return pagina("Tablero de ideas", cuerpo)
+    return pagina("Tablero de ideas", cuerpo, MARCA_TABLERO + "\n")
 
 
-def cmd_tablero(args):
-    raiz = Path(os.path.abspath(os.path.expanduser(args.raiz)))
+# Tablero siempre al día (feedback #48): nuevo, cerrar, decidir, archivar y reabrir lo regeneran en la carpeta raíz de
+# las ideas, sin pisar nunca un index.html que no generó `tablero`.
+MARCA_TABLERO = '<meta name="generator" content="hb-product tablero">'
+
+
+def es_tablero(ruta):
+    """True si ese index.html lo generó `tablero`: con la marca de ahora o, uno anterior a la marca, con su título y su
+    pie."""
+    try:
+        texto = ruta.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return MARCA_TABLERO in texto or ("<title>Tablero de ideas</title>" in texto and "Generado por hb-product" in texto)
+
+
+def base_de_idea(carpeta):
+    """La carpeta activa de una idea: la misma o, si está archivada (`<carpeta>/archivo/<nombre>/`), la de arriba."""
+    carpeta = Path(os.path.abspath(str(carpeta)))
+    return carpeta.parent.parent if carpeta.parent.name == "archivo" else carpeta
+
+
+def en_repo(ruta):
+    """True si la carpeta está dentro de un repositorio git (ella o alguna de arriba tiene `.git`)."""
+    return any((r / ".git").exists() for r in [ruta] + list(ruta.parents))
+
+
+def raiz_tablero(carpeta, producto):
+    """La carpeta raíz de las ideas, donde vive el tablero: (ruta o None, de dónde sale). En este orden: la guardada en
+    producto.json (`--raiz`, relativa a la carpeta de la idea, así sobrevive a archivarla o copiarla); si no, la carpeta
+    más cercana hacia arriba que ya tiene un tablero (`<raíz>/<idea>/product/` y `<raíz>/<idea>/` funcionan igual); si
+    no, la que contiene la carpeta de la idea, salvo dentro de un repositorio, donde un index.html nuevo puede servirse
+    como página: ahí hace falta `--raiz`."""
+    base = base_de_idea(carpeta)
+    if producto.get("raiz"):
+        return Path(os.path.normpath(str(base / producto["raiz"]))), "guardada"
+    for ancestro in [base] + list(base.parents):
+        if es_tablero(ancestro / TABLERO):
+            return ancestro, "tablero"
+    if en_repo(base.parent):
+        return None, "repositorio"
+    return base.parent, "carpeta de arriba"
+
+
+def fijar_raiz(carpeta, producto, valor):
+    """Guarda en producto.json la carpeta raíz de las ideas (`--raiz`), relativa a la carpeta de la idea."""
+    raiz = Path(os.path.abspath(os.path.expanduser(valor)))
+    if not raiz.is_dir():
+        raise Fallo("--raiz: no existe la carpeta %s" % raiz)
+    base = base_de_idea(carpeta)
+    producto["raiz"] = os.path.relpath(str(raiz), str(base))
+    if raiz != base and raiz not in base.parents:
+        print("⚠ La idea no está dentro de %s: el tablero de esa carpeta no la va a listar." % raiz)
+    return raiz
+
+
+def actualizar_tablero(carpeta, producto, silencio=True):
+    """Regenera el tablero de la carpeta raíz de las ideas después de un comando que cambia el estado de una idea.
+    Nunca hace fallar el comando: si no puede, lo dice en una línea. No regenera ningún reporte (eso lo hacen las
+    puertas, archivar, reabrir y `tablero`): una idea sin reporte todavía sale sin enlace."""
+    try:
+        raiz, motivo = raiz_tablero(carpeta, producto)
+        if raiz is None:
+            if not silencio:
+                print("· Tablero: la carpeta está dentro de un repositorio y no tiene raíz fijada; para tenerlo al día, "
+                      "fíjala con `--raiz <carpeta de tus ideas>` (por ejemplo, en `nuevo` o en `cerrar`).")
+            return None
+        destino = raiz / TABLERO
+        if destino.exists() and not es_tablero(destino):
+            print("⚠ Tablero sin actualizar: %s no lo generó `tablero` y no se pisa; fija otra raíz con `--raiz`." %
+                  destino)
+            return None
+        destino, _, _ = escribir_tablero(raiz, reportes=False)
+        print("· Tablero actualizado: %s" % destino)
+        return destino
+    except Exception as error:  # el tablero nunca deshace ni hace fallar el comando principal
+        print("⚠ No se pudo actualizar el tablero (%s: %s); `tablero --raiz <carpeta>` lo reintenta." % (
+            type(error).__name__, error))
+        return None
+
+
+def escribir_tablero(raiz, reportes=True):
+    """Escribe <raíz>/index.html con las ideas que encuentra debajo: (destino, filas, fallidas). Con reportes, también
+    regenera el reporte de cada idea. Nunca pisa un index.html que no generó `tablero`."""
     if not raiz.is_dir():
         raise Fallo("No existe la carpeta %s" % raiz)
+    destino = raiz / TABLERO
+    if destino.exists() and not es_tablero(destino):
+        raise Fallo("%s no lo generó `tablero`: no se pisa. Muévelo o elige otra carpeta raíz." % destino)
+    filas, fallidas = filas_tablero(raiz, reportes)
+    escribir(destino, html_tablero(raiz, filas, fallidas))
+    return destino, filas, fallidas
+
+
+def filas_tablero(raiz, reportes=True):
     filas, fallidas = [], []
     for carpeta in buscar_ideas(raiz):
         try:
             producto = cargar(carpeta)
             registro = Registro(carpeta, producto["criterios"])
             ruta = carpeta / REPORTE
-            escribir(ruta, html_reporte(carpeta, producto, registro))
+            if reportes:
+                escribir(ruta, html_reporte(carpeta, producto, registro))
             info = veredicto_de_idea(carpeta, producto, registro)
         except (Fallo, KeyError, TypeError, ValueError) as error:
             fallidas.append((str(carpeta), "%s" % error))
@@ -5974,7 +6376,8 @@ def cmd_tablero(args):
             "minimo": int(producto["criterios"]["puntaje_minimo_nueva" if nueva else "puntaje_minimo"]),
             "motivo": estado["motivo"] or paso_corto(carpeta, producto, registro),
             "veredicto": info, "recorrido": recorrido(carpeta),
-            "enlace": Path(os.path.relpath(str(ruta), str(raiz))).as_posix(),
+            "automaticas": [d["puerta"] for d in decisiones(carpeta) if d.get("automatica") and d.get("vigente")],
+            "enlace": Path(os.path.relpath(str(ruta), str(raiz))).as_posix() if ruta.exists() else None,
             "carpeta": Path(os.path.relpath(str(carpeta), str(raiz))).as_posix(), "creado": producto.get("creado", ""),
             "fecha": max([producto.get("creado", "")] + [d.get("fecha", "") for d in decisiones(carpeta)]
                          + [(estado["archivo"] or {}).get("fecha", "")]),
@@ -5986,8 +6389,12 @@ def cmd_tablero(args):
     for fila in filas:  # dos ideas con el mismo nombre se distinguen por su carpeta y su fecha de creación
         fila["distingue"] = "carpeta %s%s" % (fila["carpeta"], " · creada el %s" % fila["creado"] if fila["creado"]
                                               else "") if normal(fila["nombre"]) in repetidos else ""
-    destino = raiz / TABLERO
-    escribir(destino, html_tablero(raiz, filas, fallidas))
+    return filas, fallidas
+
+
+def cmd_tablero(args):
+    raiz = Path(os.path.abspath(os.path.expanduser(args.raiz)))
+    destino, filas, fallidas = escribir_tablero(raiz)
     print("✔ Tablero con %s: %s" % (plural(len(filas), "idea"), destino))
     for fila in filas:
         info = fila["veredicto"]
@@ -6020,6 +6427,11 @@ def agregar_objetivo(sub):
     sub.add_argument("--tiendas", help="google-play,app-store, o ninguna")
 
 
+def agregar_raiz(sub):
+    sub.add_argument("--raiz", help="la carpeta raíz de tus ideas, donde vive el tablero (index.html) que se regenera "
+                                    "solo; queda guardada en producto.json")
+
+
 def parser():
     principal = argparse.ArgumentParser(prog="producto.py", description="Herramienta de hb-product %s" % VERSION)
     comandos = principal.add_subparsers(dest="comando", metavar="<comando>")
@@ -6040,6 +6452,7 @@ def parser():
     sub.add_argument("--meta-obligatoria", dest="meta_obligatoria", action="store_true",
                      help="la meta pasa a ser criterio de la puerta 2 (por defecto es solo una referencia)")
     agregar_objetivo(sub)
+    agregar_raiz(sub)
 
     sub = comando("criterio", cmd_criterio, "Muestra los criterios o cambia uno (después de la sesión 0, con motivo)")
     sub.add_argument("--clave")
@@ -6213,19 +6626,24 @@ def parser():
     sub.add_argument("--sesion", required=True, help=", ".join(SESION))
     sub.add_argument("--busquedas", help="sesiones de investigación: búsquedas usadas en esta pasada")
     sub.add_argument("--lecturas", help="sesiones de investigación: lecturas usadas en esta pasada")
+    agregar_raiz(sub)
 
     sub = comando("puerta", cmd_puerta, "Veredicto de una puerta, criterio por criterio")
     sub.add_argument("--n", required=True, type=int, choices=(1, 2, 3))
 
     sub = comando("decidir", cmd_decidir, "Registra la decisión de una puerta. Solo lo corre el usuario")
     sub.add_argument("--puerta", required=True, type=int, choices=(1, 2, 3))
-    grupo = sub.add_mutually_exclusive_group(required=True)
+    grupo = sub.add_mutually_exclusive_group()
     grupo.add_argument("--seguir", action="store_true")
     grupo.add_argument("--ajustar", metavar="SESIÓN")
     grupo.add_argument("--descartar", metavar="MOTIVO")
     grupo.add_argument("--reabrir", action="store_true", help="deshace la decisión vigente de la puerta")
     sub.add_argument("--motivo", help="por qué decides distinto de la recomendación de la skill (obligatorio en ese "
                                       "caso; queda registrado)")
+    sub.add_argument("--automatico", action="store_true",
+                     help="solo en el modo autónomo que pidió el usuario: aplica la recomendación de la skill (rechaza "
+                          "ir en contra) y la registra como decisión automática, para revisarla o reabrirla")
+    agregar_raiz(sub)
 
     sub = comando("modelos", cmd_modelos, "Muestra o cambia el modelo de cada nivel y la herramienta que abre los chats")
     for nivel in MODELOS:
@@ -6255,9 +6673,11 @@ def parser():
 
     sub = comando("archivar", cmd_archivar, "Mueve la idea activa a archivo/ (no borra nada)")
     sub.add_argument("--motivo", required=True)
+    agregar_raiz(sub)
 
     sub = comando("reabrir", cmd_reabrir, "Recupera una idea archivada")
     sub.add_argument("--idea", help="la carpeta dentro de archivo/")
+    agregar_raiz(sub)
     return principal
 
 
