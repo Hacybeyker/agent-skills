@@ -9797,9 +9797,19 @@ def index_cell(text):
 
 def index_folder(folder, root):
     """La carpeta de la investigación como ruta absoluta léxica, armada desde la misma raíz que la base (A2 · H9: las dos
-    rutas en la misma forma, sin resolver una sola)."""
+    rutas en la misma forma, sin resolver una sola). Si llegó por su ruta real (el destino de un enlace) y esa cae
+    dentro de la base de reportes o de una carpeta de investigaciones, se rearma bajo esa carpeta tal como se escribió."""
     inside = relative_folder(folder, root)
-    return lexical(pathlib.Path(root) / inside) if not inside.is_absolute() else lexical(inside)
+    target = lexical(pathlib.Path(root) / inside) if not inside.is_absolute() else lexical(inside)
+    bases = [lexical(reports_base(root))] + [lexical(base) for base in investigation_bases(root)]
+    if any(under(target, base) is not None for base in bases):
+        return target
+    real_target = pathlib.Path(os.path.realpath(str(target)))
+    for base in bases:
+        found = under(real_target, pathlib.Path(os.path.realpath(str(base))))
+        if found is not None:
+            return lexical(base / found)
+    return target
 
 
 def investigation_slug(folder, root):
@@ -9846,7 +9856,18 @@ def update_reports_index(root, folder, plan, status):
     """Agrega o actualiza la fila de la investigación en `<base de reportes>/INDEX.md` (lo crea si no existe). Escribe
     sobre la ruta real del archivo (un enlace sigue siendo enlace), nunca toca otras filas ni otras líneas y, si el
     archivo no tiene la tabla, la agrega al final. Con la carpeta de investigaciones de AGENTS.md fuera de la base, el
-    índice va igual en la base. Devuelve la línea para el usuario ('' si nada cambió); nunca detiene el comando."""
+    índice va igual en la base. Devuelve la línea para el usuario ('' si nada cambió); nunca detiene el comando.
+    No crea `reports/` solo para el índice cuando el proyecto fija sus investigaciones en otra carpeta y no tiene la línea
+    "Carpeta de reportes:" (no es invasivo), y en un worktree sin el enlace del contexto no escribe nada (A2 · H10)."""
+    base = reports_base(root)
+    if reports_line(root) is None and perf_folders(root)["investigaciones"] is not None and \
+            not os.path.lexists(str(base)):
+        return ""
+    main, missing = worktree_missing(root)
+    if missing:
+        return ("⚠ No anoté la investigación en el índice de reportes: este worktree no tiene %s, que el principal (%s) "
+                "sí tiene. Para recrearlo: %s" % (", ".join(name for name, _, _ in missing), main, "; ".join(
+                    "cd %s && ln -s %s %s" % (q(str(root)), q(target), q(name)) for name, _, target in missing)))
     try:
         row = index_row(root, folder, plan, status)
         key = (INDEX_SKILL, index_cell(investigation_slug(folder, root)))
@@ -23610,7 +23631,13 @@ def ensure_ignored(folder):
         if root.returncode != 0:
             return
         relative = pathlib.Path(folder).resolve().relative_to(pathlib.Path(root.stdout.strip()).resolve())
-        exclude = pathlib.Path(root.stdout.strip()) / ".git" / "info" / "exclude"
+        # En un worktree, .git es un archivo: la ruta de exclude la da git (es común a todos los worktrees)
+        found = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], capture_output=True, text=True,
+                               timeout=30)
+        if found.returncode != 0 or not found.stdout.strip():
+            raise OSError("sin ruta de exclude")
+        exclude = pathlib.Path(found.stdout.strip())
+        exclude = exclude if exclude.is_absolute() else pathlib.Path.cwd() / exclude
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with open(exclude, "a", encoding="utf-8") as handle:  # un archivo (INDEX.md, 0.20.0) va sin la barra final
             handle.write(("/%s\n" if pathlib.Path(folder).is_file() else "/%s/\n") % relative.as_posix())

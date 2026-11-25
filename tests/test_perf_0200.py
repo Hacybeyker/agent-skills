@@ -2,7 +2,9 @@
 `<base>/INDEX.md`, la rama y el commit de cada unidad en fuente por fase, el paso a fuente de la sesión 1 desde el tag
 de la versión fijada y la carpeta de contexto enlazada (escribir sobre la ruta real, rutas relativas y worktrees). Los
 datos son inventados."""
+import contextlib
 import datetime
+import io
 import json
 import os
 import unittest
@@ -105,7 +107,14 @@ class NewFolderTest(DeviceBase):
         self.assertEqual(perf_rows(self.dir / "ctx/reports/INDEX.md")[0][2:5],
                          ["arranque-frio/%s" % TODAY, "investigación", "en curso"])
 
+    def test_con_carpeta_de_investigaciones_y_sin_base_no_crea_reports_solo_para_el_indice(self):
+        write(self.dir / "AGENTS.md", "# P\n\n## Rendimiento\n\n- Carpeta de investigaciones: `ctx/perf/investigaciones`\n")
+        self.ok("nuevo", "--paquete", PKG, "--flujo", "detalle", "--serial", "emulator-5554")
+        self.assertTrue((self.dir / "ctx/perf/investigaciones/detalle" / TODAY / "plan.json").is_file())
+        self.assertFalse((self.dir / "reports").exists())
+
     def test_con_carpeta_de_investigaciones_no_se_mueve_y_el_indice_va_en_la_base(self):
+        (self.dir / "reports").mkdir()  # la base ya existe (por ejemplo, la creó hb-implement)
         write(self.dir / "AGENTS.md", "# P\n\n## Rendimiento\n\n- Carpeta de investigaciones: `ctx/perf/investigaciones`\n")
         self.ok("nuevo", "--paquete", PKG, "--flujo", "detalle", "--serial", "emulator-5554")
         self.assertTrue((self.dir / "ctx/perf/investigaciones/detalle" / TODAY / "plan.json").is_file())
@@ -182,6 +191,19 @@ class ReportsIndexTest(PerfBase):
         self.assertEqual(row[5], "[performance/detalle/2026-03-02/estado.md](performance/detalle/2026-03-02/estado.md)")
         target = outside / "reports" / "performance" / "detalle" / "2026-03-02" / "estado.md"
         self.assertTrue(target.is_file())
+
+    def test_por_la_ruta_real_del_enlace_el_enlace_del_indice_tambien_sirve(self):
+        """Revisión B2: --carpeta con la ruta real (el destino del enlace) se rearma bajo la base tal como se escribió."""
+        outside = self.dir / "contexto-real"
+        (outside / "reports").mkdir(parents=True)
+        os.symlink(str(outside), str(self.dir / "contexto"))
+        write(self.dir / "AGENTS.md", "- Carpeta de reportes: `contexto/reports`\n")
+        real_folder = outside / "reports" / "performance" / "detalle" / "2026-03-02"
+        write(real_folder / "estado.md", "x\n")
+        perf.update_reports_index(self.dir, real_folder, {}, "en curso")
+        row = perf_rows(outside / "reports" / "INDEX.md")[0]
+        self.assertEqual(row[2], "detalle/2026-03-02")
+        self.assertEqual(row[5], "[performance/detalle/2026-03-02/estado.md](performance/detalle/2026-03-02/estado.md)")
 
 
 class IndexLifecycleTest(TriageBase):
@@ -404,6 +426,32 @@ class WorktreeTest(PerfBase):
 
     def test_en_el_principal_no_se_detiene(self):
         self.assertEqual(perf.worktree_missing(self.main), (None, []))
+
+    def test_el_indice_no_se_escribe_en_un_worktree_sin_el_enlace(self):
+        """Revisión B3: pausar, archivar, reanudar y cerrar también pasan por el índice: sin el enlace, avisa y no crea
+        un reports/ en el worktree."""
+        folder = self.tree / "inv" / "detalle" / "2026-03-02"
+        write(folder / "estado.md", "x\n")
+        message = perf.update_reports_index(self.tree, folder, {}, "en pausa")
+        self.assertIn("No anoté la investigación en el índice", message)
+        self.assertIn("ln -s", message)
+        self.assertFalse((self.tree / "reports").exists())
+
+    def test_ensure_ignored_en_un_worktree_usa_el_exclude_comun(self):
+        """Revisión B4: en un worktree .git es un archivo; la ruta de exclude la da git."""
+        os.symlink(os.path.realpath(str(self.main / "AGENTS.md")), str(self.tree / "AGENTS.md"))
+        folder = self.tree / "evidencia"
+        folder.mkdir()
+        previous = os.getcwd()
+        os.chdir(str(self.tree))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                perf.ensure_ignored(folder)
+        finally:
+            os.chdir(previous)
+        self.assertIn("✔ git ignora evidencia", out.getvalue())
+        exclude = (self.main / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertIn("/evidencia/", exclude)
 
     def test_una_carpeta_de_reportes_local_en_el_principal_no_detiene(self):
         """Lo que ya funcionaba: con reports/ local (sin enlace), cada worktree tiene la suya."""
