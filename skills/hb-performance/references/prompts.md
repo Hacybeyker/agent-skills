@@ -69,10 +69,10 @@ Sesión 1 con el patrón de "Flujos que pasan por otra app": el recorrido se det
 **Dónde:** terminal, sin chat
 
 ```bash
-cd <raíz> && python3 -I <skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId> --serial <serial> --carpeta reports/perf/arranque-frio/<AAAA-MM-DD> --instalar "<comando que instala el build de profiling>"
+cd <raíz> && python3 -I <skill>/scripts/perf.py nuevo --receta arranque-frio --paquete <applicationId> --serial <serial> --instalar "<comando que instala el build de profiling>"
 ```
 
-Arma el plan sin sesión 1 e imprime los comandos para medir. Agrega `--red` si la primera pantalla carga de la red.
+Arma el plan sin sesión 1, en `<carpeta de investigaciones>/arranque-frio/<fecha>` (la de `AGENTS.md` o, sin ella, `<carpeta de reportes>/performance/`), e imprime los comandos para medir. Agrega `--red` si la primera pantalla carga de la red.
 
 ### Solo el diagnóstico, sin cambiar código (triage)
 

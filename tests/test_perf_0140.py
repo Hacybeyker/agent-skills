@@ -380,7 +380,7 @@ class SetupBase(PerfBase):
         # escribe en la carpeta del usuario)
         fake_adb = executable(self.dir / "bin" / "adb", "#!/bin/sh\necho 'List of devices attached'\n")
         self.env = dict(ENV, HOME=str(self.home), ADB=str(fake_adb))
-        self.patches = self.root / "reports" / "perf" / "setup" / "parches"
+        self.patches = self.root / "reports" / "performance" / "setup" / "parches"
 
     def run_perf(self, *args, cwd=None):
         return subprocess.run(perf_argv(SCRIPT) + [str(a) for a in args], cwd=str(cwd or self.root),
@@ -626,12 +626,12 @@ class SetupSaveTest(SetupBase):
         self.assertIn("No entran en el parche del setup (no son del setup; se quedan como están): docs/notas.md, "
                       "settings.gradle.kts", out)
         agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn("- Setup: en parche `reports/perf/setup/parches/%s`" % patch.name, agents)
+        self.assertIn("- Setup: en parche `reports/performance/setup/parches/%s`" % patch.name, agents)
         self.assertLess(agents.index("<!-- hb-performance:estado -->"), agents.index("- Setup: en parche"))
         self.assertLess(agents.index("- Setup: en parche"), agents.index("<!-- /hb-performance:estado -->"))
         self.assertIn("## DoD\n\n1. `true`", agents)  # nada fuera del bloque cambia
         self.assertEqual(git(self.root, "apply", "--check", "-R", str(patch)), "")
-        self.assertIn("/reports/perf/setup/parches/", (self.root / ".git" / "info" / "exclude").read_text())
+        self.assertIn("/reports/performance/setup/parches/", (self.root / ".git" / "info" / "exclude").read_text())
         self.assertIn("sigue puesto en el árbol", out)
         self.assertTrue((self.root / HOOKS).is_file())
 
@@ -1527,7 +1527,7 @@ class ModulesMapTest(ModulesBase):
         before = {name: (self.root / name).read_bytes() for name in ("settings.gradle.kts", "modulos-locales.json")}
         out = self.register(self.binary, "com.example:modulo-pagos")
         self.assertIn("el proyecto lo controla en `modulos-locales.json`, clave `modulo-pagos` (hoy: false)", out)
-        self.assertIn("Ese archivo es tuyo: cámbialo tú (perf.py nunca lo edita)", out)
+        self.assertIn("perf.py nunca lo edita: lo pasa a fuente la sesión 1, antes de medir", out)
         self.assertIn("settings.gradle.kts:5 (dependencySubstitution)", out)
         commands = pasteable(out)[0]
         self.assertTrue(commands[0].endswith("setup --estado --comprobar-modulos --carpeta %s" % self.rel), commands)

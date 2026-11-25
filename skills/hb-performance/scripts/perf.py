@@ -60,7 +60,7 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
@@ -2836,12 +2836,113 @@ def git_info():
         return None, None
 
 
-def git_is_ancestor(commit):
+def git_is_ancestor(commit, top=None, descendant="HEAD"):
     try:
-        return subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True,
-                              timeout=30).returncode == 0
+        return subprocess.run(["git"] + (["-C", str(top)] if top is not None else []) + [
+            "merge-base", "--is-ancestor", commit, descendant or "HEAD"], capture_output=True, timeout=30).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return True
+
+
+# ── Código de cada unidad en fuente, por fase (0.20.0 · hallazgo 27) ─────────
+# Hasta 0.19.0, cada fase registraba solo `commit` y `sucio` del repo desde el que se corre `capturar` (git_info, en la
+# carpeta actual). Desde 0.20.0 registra además `repos`: la rama, el commit, si tenía cambios y la versión del fuente
+# (`git describe --tags --always`) de cada repo de la investigación que se compila desde el fuente: la raíz, los que
+# incluye settings.gradle, los registrados por `lineabase` y `decidir --repo`, los de "Cambios temporales" y la carpeta
+# de los módulos del alcance que son código. La clave es la ruta del repo desde la raíz (`.`, `../core-lib`).
+UNIT_REPOS = "repos"
+
+
+def unit_repos(folder, root, plan):
+    """Los repos (realpath) de las unidades en fuente de la investigación: los de investigation_tops más la carpeta de
+    cada módulo del alcance que el build compila desde el fuente."""
+    extra = list(project_repos(folder, root, plan or {}))
+    for item in plan_modules(plan):
+        if item.get("tipo") != "codigo" or not item.get("carpeta"):
+            continue
+        path = pathlib.Path(os.path.expanduser(str(item["carpeta"])))
+        path = path if path.is_absolute() else pathlib.Path(root) / path
+        if path.is_dir() and path not in extra:
+            extra.append(path)
+    return investigation_tops(folder, root, plan, extra)
+
+
+def repo_state(top):
+    """{"rama", "commit", "sucio", "version_fuente"} de un repo, o None si no es un repo. `rama` es None con el HEAD
+    suelto (un tag o un commit sin rama)."""
+    head = git_out(top, "rev-parse", "HEAD")
+    if not head:
+        return None
+    dirty = git_out(top, "status", "--porcelain", "--untracked-files=no")
+    return {"rama": git_out(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None, "commit": head,
+            "sucio": bool(dirty), "version_fuente": git_out(top, "describe", "--tags", "--always") or head[:12]}
+
+
+def units_state(folder, root, plan):
+    """{ruta del repo desde la raíz: repo_state} de las unidades en fuente, o None si no hay ninguna en git."""
+    out, real = {}, pathlib.Path(os.path.realpath(str(root)))  # los repos salen resueltos: la raíz también
+    for top in unit_repos(folder, root, plan):
+        state = repo_state(top)
+        if state:
+            out[agents_path(top, real)] = state
+    return out or None
+
+
+def unit_words(key, state, root=None):
+    """Una unidad en una línea: `<repo> <rama> @ <commit>` (con la versión del fuente si no es solo el commit)."""
+    name = pathlib.Path(root).name if key in (".", "") and root is not None else key
+    commit = str(state.get("commit") or "—")[:12]
+    version = str(state.get("version_fuente") or "")
+    return "%s %s @ %s%s%s" % (name, state.get("rama") or "(sin rama)", commit,
+                               " (%s)" % version if version and not commit.startswith(version[:7]) else "",
+                               " con cambios" if state.get("sucio") else "")
+
+
+def unit_repo_changes(old, new):
+    """Lo que cambió entre dos registros de las unidades ([] si no se pueden comparar): rama o commit de cada repo que
+    está en los dos."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return []
+    out = []
+    for key in sorted(set(old) & set(new)):
+        before, after = old[key] or {}, new[key] or {}
+        if before.get("rama") != after.get("rama") or before.get("commit") != after.get("commit"):
+            out.append("%s: %s → %s" % (key, unit_words(key, before).split(" ", 1)[1], unit_words(key, after).split(" ", 1)[1]))
+    return out
+
+
+def unit_phase_notes(phases, root, current=None, phase=None):
+    """Avisos del código de las unidades en fuente entre fases: control repite el estado inicial (mismo commit en cada
+    repo que antes) y el commit de antes de cada repo tiene que ser ancestro del de después. Con `current` y `phase`,
+    contra la tanda que empieza; sin ellos, entre las fases medidas (comparar y el reporte). La raíz ya la cubre el
+    aviso del commit de la fase."""
+    before = (phases.get("antes") or {}).get(UNIT_REPOS) if isinstance(phases.get("antes"), dict) else None
+    if not isinstance(before, dict):
+        return []
+    pairs = [(phase, current)] if current is not None and phase else [
+        (name, phases[name].get(UNIT_REPOS)) for name in ("control", "despues")
+        if isinstance(phases.get(name), dict) and isinstance(phases[name].get(UNIT_REPOS), dict)]
+    out = []
+    for name, state in pairs:
+        if name not in ("control", "despues") or not isinstance(state, dict):
+            continue
+        for key in sorted(set(before) & set(state)):
+            if key in (".", ""):
+                continue
+            old, new = before[key] or {}, state[key] or {}
+            if name == "control" and old.get("commit") != new.get("commit"):
+                out.append("el código de %s cambió entre antes y control (%s → %s): control repite el estado inicial; "
+                           "repite control con --rehacer" % (key, str(old.get("commit"))[:12], str(new.get("commit"))[:12]))
+            if name == "despues" and old.get("rama") != new.get("rama"):
+                out.append("la rama de %s cambió entre antes y después (%s → %s): después mide otro código que el de la "
+                           "línea base" % (key, old.get("rama") or "sin rama", new.get("rama") or "sin rama"))
+            top = pathlib.Path(os.path.expanduser(key))
+            top = top if top.is_absolute() else pathlib.Path(root) / top
+            if name == "despues" and old.get("commit") and new.get("commit") != old.get("commit") and top.is_dir() \
+                    and not git_is_ancestor(old["commit"], top, new.get("commit")):
+                out.append("el commit de antes de %s (%s) no es ancestro del de después: la línea base puede no "
+                           "representar este código" % (key, str(old["commit"])[:12]))
+    return out
 
 
 # ── capturar ─────────────────────────────────────────────────────────────────
@@ -3743,6 +3844,16 @@ def write_phase(folder, phase, data, flow=None):
             if note not in data["avisos"]:
                 data["avisos"].append(note)
         data[MODULE_PRINT] = previous[MODULE_PRINT]
+    if previous.get("corridas") and isinstance(previous.get(UNIT_REPOS), dict):
+        # 0.20.0 · hallazgo 27: el código de las unidades de la fase es el de su primera tanda; otro distinto se avisa
+        changes = unit_repo_changes(previous[UNIT_REPOS], data.get(UNIT_REPOS))
+        if changes:
+            data.setdefault("avisos", [])
+            note = "el código de las unidades en fuente cambió entre tandas de la fase (%s): repite la fase con " \
+                   "--rehacer" % "; ".join(changes)
+            if note not in data["avisos"]:
+                data["avisos"].append(note)
+        data[UNIT_REPOS] = previous[UNIT_REPOS]
     merged = merge_run_data(previous, data)
     for key in ("hz_corridas", "avisos", "entorno", "configs", "ajustes"):
         data.pop(key, None)
@@ -7007,11 +7118,11 @@ def setup_session_pending(folder):
     if not section or AGENTS_BLOCK[0] not in agents[section[0]:section[1]]:
         return False
     states = [pathlib.Path(folder) / "estado.md"]
-    base = investigations_base(root)
-    try:
-        states += sorted(base.glob("**/estado.md"))[:500] if base.is_dir() else []
-    except OSError:
-        pass
+    for base in investigation_bases(root):  # 0.20.0: también las investigaciones de antes (reports/perf)
+        try:
+            states += sorted(base.glob("**/estado.md"))[:500] if base.is_dir() else []
+        except OSError:
+            pass
     for state in states:
         try:
             noted = cost_rows(state.read_text(encoding="utf-8"))
@@ -7832,12 +7943,7 @@ def next_json(folder, plan, flow=None, model=None):
 
 def setup_request_session(root):
     """La sesión 1 con el pedido que guardó la sesión 0 (pedido.json), si todavía no tiene investigación; None si no."""
-    configured = perf_folders(root)["investigaciones"]
-    base = pathlib.Path(configured) if configured else root / DEFAULT_INVESTIGATIONS
-    base = base if base.is_absolute() else root / base
-    path = next((candidate for candidate in (base / "setup" / "pedido.json",
-                                             root / DEFAULT_INVESTIGATIONS / "setup" / "pedido.json")
-                 if candidate.is_file()), None)
+    path = next((candidate for candidate in request_candidates(root) if candidate.is_file()), None)
     request = read_request(path) if path is not None else None
     if not request or request_investigations(root, path):
         return None
@@ -8358,6 +8464,9 @@ def cmd_pausar(args):
                         "skill": VERSION})
     print("✔ En pausa: %s. Commits anotados: %s. El setup queda %s; los reportes no cambiaron." % (
         pause_words({"fase": phase, "lista_para": ready}), commits_text(commits, root), setup_state))
+    index_line = update_reports_index(root, folder, plan, "en pausa")  # 0.20.0
+    if index_line:
+        print(index_line)
     print_next(folder, plan)
 
 
@@ -8434,6 +8543,9 @@ def cmd_archivar(args):
     print("✔ Archivada: %s%s. No se borró nada (la carpeta, los reportes y los parches quedan como estaban); ya no cuenta "
           "para el aviso que impide actualizar el parche del setup." % (pause_words(record),
                                                                          " · motivo: %s" % reason if reason else ""))
+    index_line = update_reports_index(root, folder, plan, "archivada")  # 0.20.0
+    if index_line:
+        print(index_line)
     print_next(folder, plan)
 
 
@@ -8591,6 +8703,9 @@ def cmd_reanudar(args):
         append_decision_lines(folder, ["- %s: retomada: ya no está archivada (perf.py reanudar)"
                                        % resumed["reanudada"][:16].replace("T", " ")])
     save_pause(folder, resumed)
+    index_line = update_reports_index(root, folder, plan, "en curso")  # 0.20.0: deja de estar en pausa o archivada
+    if index_line:
+        print(index_line)
     redo = any("rehacer" in reason for reason in reasons)
     plan = fresh_plan(folder, plan)  # S1: lo que otro comando haya decidido mientras este corría
     recalc = [terminal(perf_command(root, "recalcular", "--carpeta", rel),
@@ -8831,6 +8946,10 @@ def cmd_recuperar(args):
                 base = dict(state.get("registro") or {}) or {
                     "fecha": datetime.datetime.now().replace(microsecond=0).isoformat(), "skill": VERSION,
                     "commit": git_info()[0], "sucio": git_info()[1]}
+                if UNIT_REPOS not in base:  # 0.20.0 · hallazgo 27: un registro sin las unidades las toma de ahora
+                    units = units_state(folder, project_root(folder).resolve(), plan)
+                    if units:
+                        base[UNIT_REPOS] = units
                 base.pop("faltan", None)
                 write_phase(folder, phase, dict(base, corridas=len(found) - recorded), flow)
             wrote = set_missing(folder, phase, flow, missing) or wrote
@@ -8882,7 +9001,7 @@ def cmd_estado(args):
     case = setup_case(root)
     print("Investigaciones de %s · setup: %s" % (root, setup_label(case)))
     if not found:
-        print("  (ninguna en %s)" % investigations_base(root))
+        print("  (ninguna en %s)" % ", ".join(str(base) for base in investigation_bases(root)))
     steps, choices = [], []
     for folder, _ in found:
         try:
@@ -9563,9 +9682,17 @@ def cmd_decidir(args):
 
 # ── Carpetas de la investigación y de los parches ────────────────────────────
 # En la sección de rendimiento de AGENTS.md: "Carpeta de investigaciones: <ruta>" y "Carpeta de parches: <ruta>" (con o
-# sin viñeta, negrita o acentos graves; las rutas relativas parten de la raíz del proyecto). Sin esas líneas, las
-# investigaciones van en reports/perf y los parches no tienen una carpeta por defecto.
-DEFAULT_INVESTIGATIONS = "reports/perf"
+# sin viñeta, negrita o acentos graves; las rutas relativas parten de la raíz del proyecto). Esa línea manda y nada se
+# mueve. Sin ella (0.20.0 · base común de reportes), las investigaciones nuevas van en `<base>/performance`, con la base
+# de "Carpeta de reportes:" de AGENTS.md (la que usan todas las skills; sin la línea, `reports`), y las de antes se
+# siguen buscando en reports/perf y en <base>/perf. Los parches no tienen una carpeta por defecto.
+DEFAULT_INVESTIGATIONS = "reports/perf"  # la carpeta de antes de 0.20.0: se sigue buscando ahí
+DEFAULT_REPORTS = "reports"
+PERFORMANCE_FOLDER = "performance"
+LEGACY_FOLDER = "perf"
+# "Carpeta de reportes: <ruta>" en cualquier parte de AGENTS.md (como la lee hb-implement): la base común de las skills.
+REPORTS_KEY = re.compile(r"carpeta\s+de\s+(?:los\s+)?reportes|reports?\s+folder", re.I)
+REPORTS_MARKER = re.compile(r"\{fecha\}|\{slug\}")
 FOLDER_KEYS = (("investigaciones", re.compile(r"carpeta\s+de\s+(?:las\s+)?(?:investigaciones|evidencia)|"
                                               r"(?:investigations|evidence)\s+folder", re.I)),
                ("parches", re.compile(r"carpeta\s+de\s+(?:los\s+)?parches|patch(?:es)?\s+folder", re.I)))
@@ -9597,9 +9724,198 @@ def perf_folders(root):
     return out
 
 
+def reports_line(root):
+    """El valor de "Carpeta de reportes: <ruta>" de AGENTS.md (en cualquier parte del archivo, fuera de un bloque de
+    código; lo primero entre acentos graves), o None."""
+    agents = read_agents(root)
+    if agents is None:
+        return None
+    for _, line in prose_lines(agents):
+        found = FOLDER_LINE.match(line.rstrip("\r\n"))
+        if not found or not REPORTS_KEY.fullmatch(found.group("key").strip()):
+            continue
+        quoted = re.search(r"`([^`]+)`", found.group("value"))
+        value = (quoted.group(1) if quoted else found.group("value")).strip().rstrip(".").strip()
+        if value and not value.startswith("<"):
+            return value
+    return None
+
+
+def reports_base(root):
+    """0.20.0: la base común de reportes de las skills: la línea "Carpeta de reportes:" de AGENTS.md o, sin ella,
+    `reports`. Con {fecha} o {slug}, la parte fija antes del primer componente que los lleva. Relativa a la raíz, o
+    absoluta (también con ~). No se resuelve: una carpeta enlazada se usa por su enlace."""
+    value = reports_line(root) or DEFAULT_REPORTS
+    parts = pathlib.PurePosixPath(value.replace("\\", "/")).parts
+    first = next((index for index, part in enumerate(parts) if REPORTS_MARKER.search(part)), len(parts))
+    fixed = pathlib.PurePosixPath(*parts[:first]).as_posix() if first else "."
+    path = pathlib.Path(os.path.expanduser(fixed))
+    return path if path.is_absolute() else pathlib.Path(root) / path
+
+
 def investigations_base(root):
-    """La carpeta donde van las investigaciones del proyecto: la de AGENTS.md o, sin ella, reports/perf."""
-    return perf_folders(root)["investigaciones"] or pathlib.Path(root) / DEFAULT_INVESTIGATIONS
+    """La carpeta donde van las investigaciones nuevas del proyecto: la de AGENTS.md ("Carpeta de investigaciones:") o,
+    sin ella, `<base de reportes>/performance` (0.20.0; antes, reports/perf)."""
+    return perf_folders(root)["investigaciones"] or reports_base(root) / PERFORMANCE_FOLDER
+
+
+def legacy_investigation_bases(root):
+    """0.20.0: las carpetas donde quedaron las investigaciones de antes (reports/perf y <base>/perf), solo si AGENTS.md
+    no fija la carpeta de investigaciones (con la línea, manda ella y no se busca en otro lado). Sin la nueva."""
+    if perf_folders(root)["investigaciones"]:
+        return []
+    current = lexical(investigations_base(root))
+    out = []
+    for path in (pathlib.Path(root) / DEFAULT_INVESTIGATIONS, reports_base(root) / LEGACY_FOLDER):
+        if lexical(path) != current and lexical(path) not in [lexical(item) for item in out]:
+            out.append(path)
+    return out
+
+
+def investigation_bases(root):
+    """Dónde buscar las investigaciones del proyecto (estado, retomar, listar): la carpeta de ahora y las de antes."""
+    return [investigations_base(root)] + legacy_investigation_bases(root)
+
+
+# ── Índice de reportes (0.20.0): una fila por investigación en <base>/INDEX.md ──
+# El formato y las reglas son los mismos en las skills que reportan (hb-implement, hb-performance, hb-review): cada una
+# agrega o actualiza solo su fila (clave: Skill + Slug) y nunca toca otras filas ni otras líneas del archivo.
+INDEX_NAME = "INDEX.md"
+INDEX_SKILL = "hb-performance"
+INDEX_HEADER = "| Fecha | Skill | Slug | Tipo | Estado | Ruta |"
+INDEX_RULE = "| --- | --- | --- | --- | --- | --- |"
+INDEX_HEAD = ("# Índice de reportes\n\nUna fila por tarea. Cada skill agrega o actualiza solo sus filas (clave: Skill + "
+              "Slug).\n\n")
+INDEX_TYPE = "investigación"
+ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def index_cell(text):
+    """Una celda de la tabla: sin saltos de línea y con `|` escapado."""
+    return " ".join(str(text or "").split()).replace("|", "\\|")
+
+
+def index_folder(folder, root):
+    """La carpeta de la investigación como ruta absoluta léxica, armada desde la misma raíz que la base (A2 · H9: las dos
+    rutas en la misma forma, sin resolver una sola). Si llegó por su ruta real (el destino de un enlace) y esa cae
+    dentro de la base de reportes o de una carpeta de investigaciones, se rearma bajo esa carpeta tal como se escribió."""
+    inside = relative_folder(folder, root)
+    target = lexical(pathlib.Path(root) / inside) if not inside.is_absolute() else lexical(inside)
+    bases = [lexical(reports_base(root))] + [lexical(base) for base in investigation_bases(root)]
+    if any(under(target, base) is not None for base in bases):
+        return target
+    real_target = pathlib.Path(os.path.realpath(str(target)))
+    for base in bases:
+        found = under(real_target, pathlib.Path(os.path.realpath(str(base))))
+        if found is not None:
+            return lexical(base / found)
+    return target
+
+
+def investigation_slug(folder, root):
+    """El slug de la investigación en el índice: su ruta dentro de la carpeta de investigaciones (de ahora o de antes),
+    como `<flujo>/<fecha>`; fuera de ellas, sus dos últimas carpetas."""
+    target = index_folder(folder, root)
+    for base in investigation_bases(root):
+        inside = under(target, lexical(base))
+        if inside is not None and str(inside) not in ("", "."):
+            return inside.as_posix()
+    return "/".join(target.parts[-2:])
+
+
+def index_date(folder):
+    """La fecha de la investigación para el índice (AAAA-MM-DD): la de su carpeta, la de estado.md o la de plan.json."""
+    folder = pathlib.Path(folder)
+    for name in (folder.name, folder.parent.name):
+        if ISO_DAY.fullmatch(name):
+            return name
+    try:
+        found = ISO_DAY.search((folder / "estado.md").read_text(encoding="utf-8"))
+        if found:
+            return found.group(0)
+    except OSError:
+        pass
+    try:
+        return datetime.date.fromtimestamp((folder / "plan.json").stat().st_mtime).isoformat()
+    except OSError:
+        return datetime.date.today().isoformat()
+
+
+def index_row(root, folder, plan, status):
+    """La fila de la investigación en el índice. La ruta es un enlace a su estado.md, relativo a la carpeta del índice."""
+    base = lexical(reports_base(root))
+    target = index_folder(folder, root) / "estado.md"
+    link = pathlib.PurePath(os.path.relpath(str(target), str(base))).as_posix()
+    kind = INDEX_TYPE if (plan or {}).get("profundidad") != "triage" else "%s (triage)" % INDEX_TYPE
+    return "| %s |" % " | ".join(index_cell(cell) for cell in (
+        index_date(folder), INDEX_SKILL, investigation_slug(folder, root), kind, status,
+        "[%s](%s)" % (link.replace("]", "\\]"), link.replace(" ", "%20").replace(")", "%29"))))
+
+
+def update_reports_index(root, folder, plan, status):
+    """Agrega o actualiza la fila de la investigación en `<base de reportes>/INDEX.md` (lo crea si no existe). Escribe
+    sobre la ruta real del archivo (un enlace sigue siendo enlace), nunca toca otras filas ni otras líneas y, si el
+    archivo no tiene la tabla, la agrega al final. Con la carpeta de investigaciones de AGENTS.md fuera de la base, el
+    índice va igual en la base. Devuelve la línea para el usuario ('' si nada cambió); nunca detiene el comando.
+    No crea `reports/` solo para el índice cuando el proyecto fija sus investigaciones en otra carpeta y no tiene la línea
+    "Carpeta de reportes:" (no es invasivo), y en un worktree sin el enlace del contexto no escribe nada (A2 · H10)."""
+    base = reports_base(root)
+    if reports_line(root) is None and perf_folders(root)["investigaciones"] is not None and \
+            not os.path.lexists(str(base)):
+        return ""
+    main, missing = worktree_missing(root)
+    if missing:
+        return ("⚠ No anoté la investigación en el índice de reportes: este worktree no tiene %s, que el principal (%s) "
+                "sí tiene. Para recrearlo: %s" % (", ".join(name for name, _, _ in missing), main, "; ".join(
+                    "cd %s && ln -s %s %s" % (q(str(root)), q(target), q(name)) for name, _, target in missing)))
+    try:
+        row = index_row(root, folder, plan, status)
+        key = (INDEX_SKILL, index_cell(investigation_slug(folder, root)))
+        path = reports_base(root) / INDEX_NAME
+        target = pathlib.Path(os.path.realpath(str(path)))
+        try:
+            with open(str(target), encoding="utf-8", newline="") as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            text = None
+        if text is None:
+            new = INDEX_HEAD + INDEX_HEADER + "\n" + INDEX_RULE + "\n" + row + "\n"
+        else:
+            eol = "\r\n" if "\r\n" in text else "\n"
+            lines = text.splitlines(True)
+            header = next((index for index, line in enumerate(lines) if line.strip() == INDEX_HEADER), None)
+            if header is None or header + 1 >= len(lines) or not lines[header + 1].strip().startswith("| ---"):
+                stripped = text.rstrip("\r\n")
+                new = (stripped + eol * 2 if stripped.strip() else "") + INDEX_HEADER + eol + INDEX_RULE + eol + row + eol
+            else:
+                end = header + 2
+                while end < len(lines) and lines[end].lstrip().startswith("|"):
+                    end += 1
+                found = None
+                for index in range(header + 2, end):
+                    cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", lines[index].strip())[1:-1]]
+                    if len(cells) >= 3 and (cells[1], cells[2]) == key:
+                        found = index
+                        break
+                ending = (lambda line: line[len(line.rstrip("\r\n")):] or eol)
+                if found is not None:
+                    if lines[found].rstrip("\r\n") == row:
+                        return ""
+                    lines[found] = row + ending(lines[found])
+                else:
+                    if end > 0 and not lines[end - 1].endswith(("\n", "\r")):
+                        lines[end - 1] += eol
+                    lines.insert(end, row + eol)
+                new = "".join(lines)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(target), "w", encoding="utf-8", newline="") as handle:
+            handle.write(new)
+    except OSError as error:
+        return "⚠ No pude anotar la investigación en el índice de reportes (%s): %s" % (
+            reports_base(root) / INDEX_NAME, error.strerror or error)
+    if text is None:
+        ensure_ignored(path)
+    return "✔ Índice de reportes: %s (%s · %s)" % (shown_path(path, root), key[1], status)
 
 
 def shown_path(path, root):
@@ -10176,12 +10492,12 @@ def open_investigations(folder, root):
     folder = pathlib.Path(folder)
     own = folder.resolve()
     limits = (lexical(root), pathlib.Path(root).resolve())
-    bases = [lexical(folder).parent, lexical(folder).parent.parent, investigations_base(root)]
-    configured = perf_folders(root)["investigaciones"]
+    known = investigation_bases(root)  # 0.20.0: la de ahora (también fuera de la raíz) y las de antes
+    bases = [lexical(folder).parent, lexical(folder).parent.parent] + known
     seen, out = {own}, []
     for base in bases:
         inside = any(under(lexical(base), limit) is not None or under(base.resolve(), limit) is not None for limit in limits)
-        if not inside and base != configured:
+        if not inside and base not in known:
             continue
         for pattern in ("*/estado.md", "*/*/estado.md"):
             for state in sorted(base.glob(pattern)):
@@ -11179,6 +11495,12 @@ def cmd_cerrar(args):
         if read_pause(folder).get("estado") in ("en pausa", "reanudada"):
             save_pause(folder, dict(read_pause(folder), estado="cerrada"))
     close_setup(folder, root, args)
+    if plan and not args.simular:  # 0.20.0: la fila del índice de reportes dice si quedó cerrada
+        title, _ = next_steps(folder, fresh_plan(folder, plan))
+        closed = title.startswith(("investigación cerrada", "triage cerrado")) and "falta" not in title
+        line = update_reports_index(root, folder, plan, "cerrada" if closed else "cierre pendiente")
+        if line:
+            print(line)
     if plan:
         print_next(folder, plan)
 
@@ -11463,7 +11785,7 @@ def close_temporary(args, folder, plan, root, mode="cerrar"):
             print("    · %s: solo marcas, con %s (la mejora %s se queda)" % (rel, patch, ", ".join(ids)))
             only_marks.setdefault(top, {"parche": patch, "archivos": []})["archivos"].append((rel, label, more))
         own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
-               for path in (investigations_base(root), target_dir)]
+               for path in investigation_bases(root) + [target_dir]]
         own = [str(path) for path in own if path is not None]  # la carpeta de la investigación y la de los parches
         stay = ["%s (mejora %s)" % (rel, ", ".join(touched[(top, rel)])) if (top, rel) in touched else rel
                 for rel in sorted(changes) if rel not in temp_rels
@@ -11511,7 +11833,7 @@ def close_temporary(args, folder, plan, root, mode="cerrar"):
         return "fin"
     for top in touched_repos:
         own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top)
-               for path in (investigations_base(root), target_dir, folder.resolve())]
+               for path in investigation_bases(root) + [target_dir, folder.resolve()]]
         own = [str(path) for path in own if path is not None]  # la evidencia y los parches no son código del repo
         changes = {rel: code for rel, code in git_changes(top).items()
                    if not any(rel == path or rel.startswith(path.rstrip("/") + "/") for path in own)}
@@ -13536,8 +13858,8 @@ def update_agents_state(root, humo=None, http=None, setup=None):
         new_body = (stripped + eol * 2 if stripped.strip() else eol) + block + eol + (eol if end < len(text) else "")
     if new_body == body:
         return ""
-    try:
-        with open(str(path), "w", encoding="utf-8", newline="") as handle:
+    try:  # 0.20.0 · A2: sobre la ruta real; un AGENTS.md que es un enlace simbólico sigue siéndolo
+        with open(os.path.realpath(str(path)), "w", encoding="utf-8", newline="") as handle:
             handle.write(text[:start] + new_body + text[end:])
     except OSError as error:  # no poder anotarlo no puede romper la prueba de humo ni la corrida de prueba
         return "⚠ No pude escribir %s (%s): el estado del setup no quedó anotado ahí" % (path, error.strerror or error)
@@ -15931,6 +16253,11 @@ def capture_batch(args, plan=None):
     if args.plan and not startup:  # B6: el buffer de logcat que guarda la línea hb-perf de cada servicio
         ensure_logcat_buffer(adb, folder, plan, serial, project_root(folder).resolve())
     commit, dirty = git_info()
+    # 0.20.0 · hallazgo 27: la rama y el commit de cada unidad en fuente, por fase (y el aviso si cambió desde antes)
+    root_units = project_root(folder).resolve()
+    units_now = units_state(folder, root_units, plan) if args.plan and not args.prueba else None
+    if units_now:
+        warnings += unit_phase_notes(read_phases(folder), root_units, units_now, phase)
     build_warnings = []
     if not args.prueba:
         try:
@@ -16283,6 +16610,8 @@ def capture_batch(args, plan=None):
         record.update(prints)  # la huella de las marcas y del plan, por flujo (write_phase)
         if modules_now:  # A4: la de los módulos, por fase
             record[MODULE_PRINT] = modules_now
+        if units_now:  # 0.20.0 · hallazgo 27: rama y commit de cada unidad en fuente
+            record[UNIT_REPOS] = units_now
         if not args.prueba:  # C6: el corte de la traza del flujo (0: sin corte), para que todas sus fases corten igual
             record["corte_s"] = tail_cut[0] if tail_cut else 0
         record["memoria"] = bool(args.memoria)
@@ -17899,6 +18228,16 @@ def builds_table(folder):
         notes.append("antes y después se midieron con distinta compilación de ART (%s · %s): los tiempos no son "
                      "comparables; repite las fases con --rehacer" % (before.get("compilacion") or "sin registrar",
                                                                       after.get("compilacion") or "sin registrar"))
+    units = [[p, key, phases[p][UNIT_REPOS][key].get("rama") or "(sin rama)",
+              str(phases[p][UNIT_REPOS][key].get("commit") or "—")[:12],
+              phases[p][UNIT_REPOS][key].get("version_fuente") or "—",
+              "sí" if phases[p][UNIT_REPOS][key].get("sucio") else "no"]
+             for p in FASES if isinstance(phases.get(p), dict) and isinstance(phases[p].get(UNIT_REPOS), dict)
+             for key in sorted(phases[p][UNIT_REPOS]) if isinstance(phases[p][UNIT_REPOS][key], dict)]
+    if units:  # 0.20.0 · hallazgo 27: el código de cada unidad en fuente con que se midió cada fase
+        table += "\n\nCódigo de las unidades en fuente, por fase:\n\n" + markdown_table(
+            ["Fase", "Repo", "Rama", "Commit", "Versión del fuente", "Con cambios"], units)
+    notes += unit_phase_notes(phases, project_root(pathlib.Path(folder)).resolve())
     notes += phase_warnings(folder)
     notes += dev_settings_notes(folder)
     level, motive = frames_trust(folder)
@@ -21668,6 +22007,15 @@ def conditions_rows(data):
               if isinstance(data.phases.get(phase), dict) and data.phases[phase].get("corridas")
               and (data.final or phase != "despues")]
     add("Mediciones", e(" · ".join(counts) or "sin mediciones todavía"))
+    code = []  # 0.20.0 · hallazgo 27: la rama y el commit de cada unidad en fuente con que se midió cada fase
+    for phase in FASES:
+        record_ = data.phases.get(phase) if isinstance(data.phases.get(phase), dict) else {}
+        units = record_.get(UNIT_REPOS) if isinstance(record_.get(UNIT_REPOS), dict) else {}
+        if units and (data.final or phase != "despues"):
+            code.append("%s: %s" % (PHASE_WORDS.get(phase, phase).capitalize(), " · ".join(
+                unit_words(key, units[key], data.root) for key in sorted(units) if isinstance(units[key], dict))))
+    if code:
+        rows.append(("Código medido", "<br>".join(e(line) for line in code)))
     spans = []
     for flow in data.flows:
         for label, spec in measured_spans((data.plan.get("flujos") or {}).get(flow) or {}):
@@ -23283,17 +23631,34 @@ def ensure_ignored(folder):
         if root.returncode != 0:
             return
         relative = pathlib.Path(folder).resolve().relative_to(pathlib.Path(root.stdout.strip()).resolve())
-        exclude = pathlib.Path(root.stdout.strip()) / ".git" / "info" / "exclude"
+        # En un worktree, .git es un archivo: la ruta de exclude la da git (es común a todos los worktrees)
+        found = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], capture_output=True, text=True,
+                               timeout=30)
+        if found.returncode != 0 or not found.stdout.strip():
+            raise OSError("sin ruta de exclude")
+        exclude = pathlib.Path(found.stdout.strip())
+        exclude = exclude if exclude.is_absolute() else pathlib.Path.cwd() / exclude
         exclude.parent.mkdir(parents=True, exist_ok=True)
-        with open(exclude, "a", encoding="utf-8") as handle:
-            handle.write("/%s/\n" % relative.as_posix())
+        with open(exclude, "a", encoding="utf-8") as handle:  # un archivo (INDEX.md, 0.20.0) va sin la barra final
+            handle.write(("/%s\n" if pathlib.Path(folder).is_file() else "/%s/\n") % relative.as_posix())
         print("✔ git ignora %s (en .git/info/exclude, local: el repo no cambia)" % relative.as_posix())
     except (OSError, ValueError, subprocess.SubprocessError):
         print("⚠ no pude comprobar si git ignora %s: que la evidencia no entre a un commit" % folder)
 
 
+def request_candidates(root):
+    """Dónde puede estar el pedido de la sesión 0 (setup/pedido.json): en la carpeta de investigaciones de ahora y, si se
+    guardó antes de 0.20.0 o antes de configurarla, en las de antes (reports/perf y <base>/perf)."""
+    out = []
+    for base in investigation_bases(root) + [pathlib.Path(root) / DEFAULT_INVESTIGATIONS]:
+        path = base / "setup" / "pedido.json"
+        if lexical(path) not in [lexical(item) for item in out]:
+            out.append(path)
+    return out
+
+
 def read_request(path):
-    """El flujo que el usuario pidió en la sesión 0 (reports/perf/setup/pedido.json): {"texto" (el pedido literal),
+    """El flujo que el usuario pidió en la sesión 0 (<carpeta de investigaciones>/setup/pedido.json): {"texto" (el pedido literal),
     "modo", "flujo", "llegar", "requiere_env"}, o None. "texto" y "modo" son de 0.11.0: un pedido anterior trae solo
     "flujo" y "llegar"."""
     try:
@@ -23347,11 +23712,14 @@ def session1_prompt(request, serial):
 
 def cmd_humo(args):
     """Prueba de humo del setup: una corrida de arranque en frío, sin crear una investigación."""
+    if not args.carpeta:  # 0.20.0 · A2: en un worktree sin el enlace del contexto, no crea carpetas en otro lado
+        worktree_gate(project_root(pathlib.Path.cwd()).resolve())
     folder = pathlib.Path(args.carpeta) if args.carpeta else default_folder("humo")[0]
     if not args.pedido:
-        # El pedido del setup: en la carpeta de investigaciones del proyecto o, si se guardó antes de configurarla, en
-        # la de siempre.
-        candidates = [default_folder("setup")[0] / "pedido.json", pathlib.Path(DEFAULT_INVESTIGATIONS) / "setup" / "pedido.json"]
+        # El pedido del setup: en la carpeta de investigaciones del proyecto o, si se guardó antes de configurarla o antes
+        # de 0.20.0, en las de antes (reports/perf y <base>/perf).
+        candidates = [default_folder("setup")[0] / "pedido.json"] + [
+            from_cwd(path) for path in request_candidates(project_root(pathlib.Path.cwd()).resolve())[1:]]
         args.pedido = str(next((path for path in candidates if path.is_file()), candidates[0]))
     if not args.forzar:  # A5: con el setup en un parche y fuera del árbol, se detiene antes de tocar el dispositivo
         setup_gate(project_root(pathlib.Path.cwd()).resolve(), None, None)
@@ -23542,12 +23910,13 @@ def request_investigations(root, request_path):
         since = pathlib.Path(request_path).stat().st_mtime
     except OSError:
         return []
-    base = investigations_base(root)
     out = []
-    try:
-        states = sorted(base.glob("*/*/estado.md"))[:500] if base.is_dir() else []
-    except OSError:
-        states = []
+    states = []
+    for base in investigation_bases(root):  # 0.20.0: también las de antes (reports/perf)
+        try:
+            states += sorted(base.glob("*/*/estado.md"))[:500] if base.is_dir() else []
+        except OSError:
+            continue
     for state in states:
         if state.parent.parent.name in ("setup", "humo"):
             continue
@@ -23559,17 +23928,78 @@ def request_investigations(root, request_path):
     return out
 
 
+def from_cwd(path):
+    """La ruta relativa a la carpeta actual si está dentro (por donde se llega, o por donde está en el disco); si no,
+    tal cual."""
+    inside = under(lexical(path), lexical(pathlib.Path.cwd()))
+    if inside is None:
+        inside = under(lexical(path), pathlib.Path.cwd().resolve())
+    return inside if inside is not None else pathlib.Path(path)
+
+
+def worktree_missing(root):
+    """0.20.0 · A2: en un `git worktree` enlazado, lo que el worktree principal tiene y este no: AGENTS.md y la primera
+    carpeta de la base de reportes y de la de investigaciones (los enlaces y los archivos locales no están en git, así que
+    un worktree nuevo no los trae). (principal, [(nombre, "enlace" | "archivo local", destino real)]); (None, []) si no
+    es un worktree enlazado o no falta nada."""
+    root = pathlib.Path(root)
+    git_dir, common = git_out(root, "rev-parse", "--absolute-git-dir"), git_out(root, "rev-parse", "--git-common-dir")
+    if not git_dir or not common:
+        return None, []
+    common_path = pathlib.Path(common) if os.path.isabs(common) else root / common
+    if os.path.realpath(git_dir) == os.path.realpath(str(common_path)):
+        return None, []
+    listed = git_out(root, "worktree", "list", "--porcelain") or ""
+    main = next((pathlib.Path(line[len("worktree "):]) for line in listed.splitlines() if line.startswith("worktree ")),
+                None)
+    if main is None or os.path.realpath(str(main)) == os.path.realpath(str(root)):
+        return None, []
+    names = ["AGENTS.md"]
+    for value in (reports_line(root) or "", perf_folders(root)["investigaciones"]):
+        if not value:
+            continue
+        try:
+            relative = pathlib.Path(value).relative_to(root) if pathlib.Path(value).is_absolute() else pathlib.Path(value)
+        except ValueError:
+            continue  # una ruta absoluta fuera del worktree no depende de él
+        if relative.parts and relative.parts[0] not in ("..", ".") and relative.parts[0] not in names:
+            names.append(relative.parts[0])
+    missing = []
+    for name in names:
+        here, there = root / name, main / name
+        if os.path.lexists(str(here)) or not os.path.lexists(str(there)) or git_out(main, "ls-files", "--", name):
+            continue  # lo versionado lo trae el checkout
+        if name != "AGENTS.md" and not there.is_symlink():
+            continue  # una carpeta de reportes local (reports/) se crea en el worktree, como siempre
+        missing.append((name, "enlace" if there.is_symlink() else "archivo local", os.path.realpath(str(there))))
+    return main, missing
+
+
+def worktree_gate(root):
+    """0.20.0 · A2: se detiene si este worktree no tiene AGENTS.md o la carpeta de contexto donde van las investigaciones y
+    el principal sí: crearlas aquí dejaría la investigación lejos de las demás (un `reports/` nuevo). Dice cómo recrear el
+    enlace; no lo crea."""
+    main, missing = worktree_missing(root)
+    if not missing:
+        return
+    lines = ["%s: en el principal (%s) es un %s → %s. Para recrearlo: cd %s && ln -s %s %s" % (
+        name, main, kind, target, q(str(root)), q(target), q(name)) for name, kind, target in missing]
+    raise PerfError("este worktree no tiene lo que el principal sí tiene, y la investigación quedaría en otra carpeta que "
+                    "las demás (un reports/ nuevo en el worktree). No creé nada:\n  - %s\n  Recrea el enlace solo si tú o "
+                    "el proyecto lo piden (no está en git), o pasa la carpeta con --carpeta" % "\n  - ".join(lines)).con(
+        guardado="nada", seguir=[("después de recrear el enlace, repite", same_command())])
+
+
 def default_folder(name):
     """(carpeta, de dónde sale) de una investigación sin --carpeta: `<carpeta de investigaciones>/<nombre>/<fecha>`,
-    con la carpeta de investigaciones de AGENTS.md o, sin ella, reports/perf. Relativa a la carpeta actual si se puede."""
+    con la carpeta de investigaciones de AGENTS.md o, sin ella, `<base de reportes>/performance` (0.20.0). Relativa a la
+    carpeta actual si se puede."""
     root = project_root(pathlib.Path.cwd()).resolve()
     configured = perf_folders(root)["investigaciones"]
-    folder = (configured or root / DEFAULT_INVESTIGATIONS) / name
-    inside = under(lexical(folder), lexical(pathlib.Path.cwd()))
-    if inside is None:
-        inside = under(lexical(folder), pathlib.Path.cwd().resolve())
-    return (inside if inside is not None else folder), \
-        "la carpeta de investigaciones de AGENTS.md" if configured else "por defecto"
+    folder = investigations_base(root) / name
+    return from_cwd(folder), ("la carpeta de investigaciones de AGENTS.md" if configured else
+                              "la carpeta de reportes de AGENTS.md (%s)" % shown_path(reports_base(root), root)
+                              if reports_line(root) else "por defecto")
 
 
 def cmd_nuevo(args):
@@ -23582,6 +24012,7 @@ def cmd_nuevo(args):
             print("· AGENTS.md configura la carpeta de investigaciones en %s: esta investigación queda fuera de ella "
                   "(sin --carpeta, `nuevo` la crea ahí)" % shown_path(configured, root))
     else:
+        worktree_gate(project_root(pathlib.Path.cwd()).resolve())  # 0.20.0 · A2: no crea carpetas en otro lado
         folder, origin = default_folder(pathlib.Path(
             "arranque-frio" if args.receta == "arranque-frio" else slug(args.flujo)) / datetime.date.today().isoformat())
         print("✔ Carpeta de la investigación: %s (%s)" % (folder, origin))
@@ -23665,6 +24096,9 @@ def cmd_nuevo(args):
                   "\"recorrido\": \"bash %s\"" % (route, route))
     ensure_ignored(folder)
     setup_root = project_root(folder).resolve()
+    index_line = update_reports_index(setup_root, folder, plan, "en curso")  # 0.20.0: la fila en <base>/INDEX.md
+    if index_line:
+        print(index_line)
     missing_setup = setup_warning(setup_root)
     setup_now = setup_case(setup_root)
     print("%s Setup: %s" % ("⚠" if missing_setup else "·", setup_label(setup_now)))
@@ -24889,8 +25323,15 @@ def setup_patches_dir(root):
     """La carpeta de los parches del setup: la de AGENTS.md o, sin ella, setup/parches en la carpeta de investigaciones
     (que git ignora por .git/info/exclude)."""
     configured = perf_folders(root)["parches"]
-    return pathlib.Path(os.path.normpath(str(configured))) if configured else \
-        pathlib.Path(os.path.normpath(str(investigations_base(root) / "setup" / "parches")))
+    if configured:
+        return pathlib.Path(os.path.normpath(str(configured)))
+    current = pathlib.Path(os.path.normpath(str(investigations_base(root) / "setup" / "parches")))
+    if not current.is_dir():  # 0.20.0: los parches de antes siguen donde están (reports/perf/setup/parches)
+        for base in legacy_investigation_bases(root):
+            legacy = pathlib.Path(os.path.normpath(str(base / "setup" / "parches")))
+            if legacy.is_dir():
+                return legacy
+    return current
 
 
 def agents_path(path, root):
@@ -25465,7 +25906,7 @@ def setup_tokens(top, changes):
 
 def code_changes(top, root, folder=None):
     """Los archivos con cambios del repo ({ruta: estado}), sin la evidencia ni los parches de la skill."""
-    paths = [investigations_base(root), setup_patches_dir(root)] + ([pathlib.Path(folder).resolve()] if folder else [])
+    paths = investigation_bases(root) + [setup_patches_dir(root)] + ([pathlib.Path(folder).resolve()] if folder else [])
     own = [under(lexical(path), top) or under(pathlib.Path(path).resolve(), top) for path in paths]
     own = [str(path).rstrip("/") for path in own if path is not None and str(path) != "."]
     # AGENTS.md y CLAUDE.md no entran: ahí queda anotado el caso del setup (lo escribe perf.py), no son parte del setup.
@@ -25479,12 +25920,12 @@ NOT_SETUP_FILES = ("AGENTS.md", "CLAUDE.md")
 
 def project_investigations(root):
     """[(carpeta, abierta)] de las investigaciones del proyecto (con estado.md); abierta = sin reporte final."""
-    base = investigations_base(root)
-    out, seen = [], set()
-    try:
-        states = sorted(list(base.glob("*/estado.md")) + list(base.glob("*/*/estado.md")))[:500] if base.is_dir() else []
-    except OSError:
-        states = []
+    out, seen, states = [], set(), []
+    for base in investigation_bases(root):  # 0.20.0: la carpeta de ahora y las de antes (reports/perf, <base>/perf)
+        try:
+            states += sorted(list(base.glob("*/estado.md")) + list(base.glob("*/*/estado.md")))[:500] if base.is_dir() else []
+        except OSError:
+            continue
     for state in states:
         folder = state.parent
         if folder.resolve() in seen or folder.name in ("setup", "humo") or folder.parent.name in ("setup", "humo"):
@@ -27078,26 +27519,113 @@ def substitution_switch(root, module):
     return out
 
 
+# 0.20.0 · decisión 2: una unidad publicada se puede pasar a fuente, solo en la sesión 1 y antes de medir, con el mecanismo
+# del modelo (`## Estructura`, columna "Pasar a fuente y volver") y una rama de trabajo en el repo de la unidad desde el
+# tag de la versión fijada en la app: así la línea base mide lo publicado. perf.py no lo edita: lo hace la sesión 1.
+PASS_TO_SOURCE = ("perf.py nunca lo edita: lo pasa a fuente la sesión 1, antes de medir, con el mecanismo del modelo "
+                  "(`## Estructura` · Pasar a fuente y volver) y una rama de trabajo en el repo de la unidad desde el tag de "
+                  "la versión fijada; después se sincroniza Gradle y se comprueba de nuevo")
+
+
 def switch_text(switch, module):
     """El interruptor de un módulo binario, en una frase: el archivo y la clave, o que no hay mecanismo."""
     name = module.get("artefacto") or module.get("nombre")
     if switch["archivo"] and switch["valor"] and switch.get("exacta"):
-        return ("el proyecto lo controla en `%s`, clave `%s` (hoy: %s)%s. Ese archivo es tuyo: cámbialo tú (perf.py nunca "
-                "lo edita), sincroniza Gradle y comprueba de nuevo" % (
+        return ("el proyecto lo controla en `%s`, clave `%s` (hoy: %s)%s. %s" % (
                     switch["archivo"], switch["clave"], switch["valor"],
-                    "; lo usa %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else ""))
+                    "; lo usa %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else "", PASS_TO_SOURCE))
     if switch["archivo"]:
-        return ("puede que el proyecto lo controle en `%s`, clave `%s`%s (es una coincidencia por nombre: confírmalo tú)%s. "
-                "Ese archivo es tuyo: si es el interruptor, cámbialo tú (perf.py nunca lo edita), sincroniza Gradle y "
-                "comprueba de nuevo" % (switch["archivo"], switch["clave"],
-                                         " (hoy: %s)" % switch["valor"] if switch["valor"] else "",
-                              "; hay sustitución en %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else ""))
+        return ("puede que el proyecto lo controle en `%s`, clave `%s`%s (es una coincidencia por nombre: confírmalo con el "
+                "modelo)%s. %s" % (switch["archivo"], switch["clave"],
+                                   " (hoy: %s)" % switch["valor"] if switch["valor"] else "",
+                                   "; hay sustitución en %s" % ", ".join(switch["senales"][:2]) if switch["senales"] else "",
+                                   PASS_TO_SOURCE))
     if switch["senales"]:
-        return ("el proyecto tiene un mecanismo de sustitución (%s), pero no encontré la clave de %s en %s: búscala tú en "
-                "esos archivos, cámbiala (perf.py nunca los edita), sincroniza Gradle y comprueba de nuevo" % (
-                    ", ".join(switch["senales"][:3]), name, ", ".join(switch["archivos"][:4]) or "sus archivos"))
+        return ("el proyecto tiene un mecanismo de sustitución (%s), pero no encontré la clave de %s en %s: búscala en el "
+                "modelo o en esos archivos. %s" % (
+                    ", ".join(switch["senales"][:3]), name, ", ".join(switch["archivos"][:4]) or "sus archivos",
+                    PASS_TO_SOURCE))
     return ("no encontré ningún mecanismo de sustitución en settings.gradle(.kts) (dependencySubstitution, substitute "
-            "module(...), includeBuild ni un archivo de configuración): %s llega solo compilado" % name)
+            "module(...), includeBuild ni un archivo de configuración): %s llega solo compilado, salvo que el modelo "
+            "(`## Estructura` · Pasar a fuente y volver) diga cómo pasarlo a fuente" % name)
+
+
+def pinned_version(item):
+    """La versión fijada de un módulo publicado (la de su artefacto `grupo:nombre:versión`), o ''."""
+    artifact = str((item or {}).get("artefacto") or "")
+    return artifact.split(":")[2].strip() if artifact.count(":") >= 2 else ""
+
+
+def version_tags(repo, version):
+    """Los tags del repo que nombran esa versión: primero `v<versión>` y `<versión>`, después con prefijo
+    (`core-lib-1.2.0`, `core-lib/v1.2.0`, `core-lib@1.2.0`). [] si no hay ninguno o no es un repo."""
+    if not version:
+        return []
+    tags = [tag.strip() for tag in (git_out(repo, "tag", "--list") or "").splitlines() if tag.strip()]
+    exact = [tag for tag in ("v" + version, version) if tag in tags]
+    loose = [tag for tag in tags if tag not in exact and re.search(r"(?:^|[-_/@])v?%s$" % re.escape(version), tag)]
+    return exact + sorted(loose)
+
+
+def module_repo(root, item):
+    """El repo (git toplevel) donde está el código de un módulo del alcance, según su carpeta; None si no se sabe."""
+    if not (item or {}).get("carpeta"):
+        return None
+    path = pathlib.Path(os.path.expanduser(str(item["carpeta"])))
+    path = path if path.is_absolute() else pathlib.Path(root) / path
+    return git_toplevel(path) if path.is_dir() else None
+
+
+def work_branch(folder):
+    """La rama de trabajo de la investigación en el repo de una unidad: `perf/<flujo>` (el tipo `perf` de Conventional
+    Commits, como `feat/` y `fix/` en hb-implement); si `## Git` fija otra convención, manda esa."""
+    if folder is None:
+        return "perf/<flujo>"
+    folder = pathlib.Path(folder)
+    name = folder.parent.name if ISO_DAY.fullmatch(folder.name) else folder.name
+    return "perf/%s" % (slug(name) or "investigacion")
+
+
+def source_steps(root, folder, item):
+    """Las líneas para pasar a fuente un módulo publicado (decisión 2): la rama de trabajo desde el tag de la versión
+    fijada en su repo, o el aviso si no hay tag o no se sabe dónde está su código. [] si no es binario."""
+    if (item or {}).get("tipo") != "binario":
+        return []
+    version, repo = pinned_version(item), module_repo(root, item)
+    if repo is None:
+        return ["para pasar %s a fuente hace falta su repo en disco (la columna \"Fuente\" del modelo; si falta y el "
+                "modelo trae su remoto, la sesión 1 lo clona, salvo la línea `Repos vecinos: no clonar ni crear ramas`)"
+                % item["nombre"]]
+    tags = version_tags(repo, version)
+    where = agents_path(repo, root)
+    if not tags:
+        return ["%s no tiene un tag de la versión fijada%s: si se pasa a fuente, la línea base mide otro código que el "
+                "publicado. Anótalo en \"Precondiciones\" de estado.md y avísale al usuario" % (
+                    where, " (%s)" % version if version else " (el artefacto no dice su versión)")]
+    lines = ["para pasarlo a fuente (sesión 1, antes de medir): `git -C %s switch -c %s %s`%s y el cambio del modelo "
+             "(`## Estructura` · Pasar a fuente y volver); con la línea `Repos vecinos: no clonar ni crear ramas`, ese "
+             "comando se le propone al usuario" % (q(where), work_branch(folder), q(tags[0]),
+                                                   " (otros tags de %s: %s)" % (version, ", ".join(tags[1:4]))
+                                                   if len(tags) > 1 else "")]
+    return lines
+
+
+def source_check(root, item, version):
+    """Después de pasar un módulo a fuente: (tag de la versión fijada en el que está su repo o None, `git describe`, rama,
+    commit). Sin repo, (None, '', None, None)."""
+    repo = module_repo(root, item)
+    if repo is None:
+        return None, "", None, None
+    state = repo_state(repo) or {}
+    exact = git_out(repo, "describe", "--tags", "--exact-match", "HEAD") or ""
+    at_tag = exact if exact and exact in version_tags(repo, version) else None
+    if at_tag is None and version:  # un tag anotado y uno liviano en el mismo commit: alcanza con que uno sea de la versión
+        head = state.get("commit")
+        for tag in version_tags(repo, version):
+            if head and git_out(repo, "rev-list", "-n", "1", tag) == head:
+                at_tag = tag
+                break
+    return at_tag, state.get("version_fuente") or "", state.get("rama"), state.get("commit")
 
 
 def plan_modules(plan):
@@ -27290,8 +27818,8 @@ def module_gate(folder, root, plan, files, what, error=PerfError):
     raise error("%s: no se edita un módulo que la app consume compilado. No toqué nada:\n  - %s" % (
         what, "\n  - ".join(lines))).con(
         guardado="nada",
-        seguir=[("cuando el módulo se compile desde código (cambia tú el interruptor y sincroniza), comprueba de nuevo con "
-                 "Gradle", modules_recheck(root, folder)),
+        seguir=[("cuando el módulo se compile desde código (lo pasa a fuente la sesión 1, antes de medir, con el "
+                 "mecanismo del modelo, y se sincroniza Gradle), comprueba de nuevo con Gradle", modules_recheck(root, folder)),
                 ("después, repite", same_command())])
 
 
@@ -27568,6 +28096,10 @@ def modules_report(root, folder, plan, args):
             if item["tipo"] == "codigo":  # E4: ahora se puede poner la marca: `siguiente` da el chat
                 item["paso_a_codigo"] = datetime.datetime.now().replace(microsecond=0).isoformat()
                 item.pop("aceptado", None)
+                # 0.20.0 · decisión 2: si su repo quedó en el tag de la versión fijada (la línea base mide lo publicado)
+                version = pinned_version(old) or pinned_version(item)
+                tag, described, branch, head = source_check(root, item, version)
+                item.update(version_fijada=version or None, tag_fijado=tag, version_fuente=described or None)
             else:
                 item.pop("paso_a_codigo", None)
         if item["nombre"] in confirm:
@@ -27591,6 +28123,8 @@ def modules_report(root, folder, plan, args):
     for item in modules:
         if item["tipo"] == "binario":
             print("  ⚠ %s: %s." % (item["nombre"], switch_text(substitution_switch(root, item), item)))
+            for line in source_steps(root, folder, item):  # 0.20.0 · decisión 2
+                print("    · %s." % line)
 
         elif item["tipo"] == "sin confirmar":
             print("  ⚠ %s: sin confirmar (%s). Pregúntale al usuario si ese módulo se compila desde código o llega como "
@@ -27603,11 +28137,44 @@ def modules_report(root, folder, plan, args):
             name, MODULE_LABEL[before], MODULE_LABEL[after],
             ": ahora se puede poner la marca%s (`siguiente` te da el chat)" % (" (%s)" % why if why else "")
             if after == "codigo" else ": ya no se edita; las marcas y mejoras de ese módulo se detienen"))
+    for line in source_notes(folder, root, modules, changed):  # 0.20.0 · decisión 2
+        print("  " + line)
     wrote = write_modules_block(folder, modules, root, shown_configuration, source if deps is not None else
                                 "lo que respondió el usuario (Gradle no se pudo correr)")
     print("✔ plan.json: `modulos` con %d módulo%s del alcance%s" % (
         len(modules), "" if len(modules) == 1 else "s", " · estado.md: mapa en la ficha" if wrote else
         " (estado.md no tiene \"Mapa del alcance\": el mapa queda solo en el plan)"))
+
+
+def source_notes(folder, root, modules, changed):
+    """0.20.0 · decisión 2: lo que hay que saber de cada módulo que pasó a fuente desde la sesión 1: en qué rama y commit
+    quedó, si está en el tag de la versión fijada (si no, la línea base mide otro código que el publicado) y, si ya hay
+    fases medidas, que el estado de sustitución tenía que quedar fijo en antes, control y después."""
+    by_name = {item["nombre"]: item for item in modules}
+    measured = [name for name in FASES if isinstance(read_phases(folder).get(name), dict)
+                and read_phases(folder)[name].get("corridas")] if folder is not None else []
+    out = []
+    for name, before, after, _ in changed:
+        item = by_name.get(name) or {}
+        if after == "codigo" and before == "binario":
+            repo = module_repo(root, item)
+            state = repo_state(repo) if repo is not None else None
+            where = ("%s %s @ %s" % (agents_path(repo, root), state.get("rama") or "(sin rama)", state["commit"][:12])
+                     if state else "su repo")
+            version = item.get("version_fijada") or ""
+            if item.get("tag_fijado"):
+                out.append("✔ %s quedó en fuente en %s, en el tag %s de la versión fijada: la línea base mide lo "
+                           "publicado" % (name, where, item["tag_fijado"]))
+            else:
+                out.append("⚠ %s quedó en fuente en %s%s, que no es el tag de la versión fijada%s: la línea base mide otro "
+                           "código que el publicado. Anótalo en \"Precondiciones\" de estado.md y avísale al usuario" % (
+                               name, where, " (%s)" % item["version_fuente"] if item.get("version_fuente") else "",
+                               " (%s)" % version if version else " (no la sé: el artefacto no la dice)"))
+        if measured:
+            out.append("⚠ %s cambió de %s a %s con fases ya medidas (%s): el estado de sustitución queda fijo en antes, "
+                       "control y después. O lo vuelves a dejar como estaba al medir, o rehaces la línea base (antes y "
+                       "control, con --rehacer)" % (name, MODULE_LABEL[before], MODULE_LABEL[after], ", ".join(measured)))
+    return out
 
 
 def save_modules(folder, plan, modules, gradle=None):
@@ -27686,6 +28253,7 @@ def module_steps(folder, plan):
         if item["tipo"] == "binario":
             lines.append("%s llega como binario (%s): %s" % (item["nombre"], item.get("artefacto") or "sin versión",
                                                            switch_text(substitution_switch(root, item), item)))
+            lines += ["%s: %s" % (item["nombre"], line) for line in source_steps(root, folder, item)]  # 0.20.0
             if item.get("para") or item.get("pierde"):
                 lines.append("%s: lo pidió %s; si sigue binario, se pierde %s" % (
                     item["nombre"], item.get("para") or "el alcance", item.get("pierde") or "medir dentro del módulo: "
@@ -27698,7 +28266,7 @@ def module_steps(folder, plan):
                                  "código esté en disco: no llegaría al APK"]},
              terminal(modules_recheck(root, folder),
                       "le pregunta a Gradle de nuevo cómo llega cada módulo del alcance y actualiza el mapa del plan y de "
-                      "la ficha", "córrelo después de cambiar tú el interruptor del proyecto y sincronizar Gradle")]
+                      "la ficha", "córrelo después de pasarlo a fuente (sesión 1, antes de medir) y sincronizar Gradle")]
     for item in pending:
         if item["tipo"] == "sin confirmar":
             steps.append(terminal(setup_command(root, "--estado", "--confirmar", "%s=codigo" % item["nombre"], folder=folder),
@@ -27711,10 +28279,13 @@ def module_steps(folder, plan):
         recheck = steps.pop(1)
         steps.insert(1, {"tipo": "opciones", "titulo": "Elige uno (son caminos distintos: corre solo el que corresponda)",
                          "opciones": [
-            ("Pasarlo a código", "cuando quieres la marca o el tramo que pide ese módulo (%s): cambia tú cómo lo incluye "
-                                 "el proyecto (el interruptor que dice arriba o, si no encontré ninguno, el que use tu "
-                                 "proyecto) y sincroniza Gradle" % "; ".join(
-                                     item.get("para") or item["nombre"] for item in binaries), recheck),
+            ("Pasarlo a código", "cuando quieres la marca o el tramo que pide ese módulo (%s): lo pasa a fuente la "
+                                 "sesión 1, antes de medir, con el mecanismo del modelo (o el interruptor que dice "
+                                 "arriba) y una rama de trabajo desde el tag de la versión fijada; después se sincroniza "
+                                 "Gradle%s" % ("; ".join(item.get("para") or item["nombre"] for item in binaries),
+                                               "; ya hay fases medidas: el estado de sustitución queda fijo en antes, "
+                                               "control y después, así que pasarlo ahora obliga a rehacer antes y control"
+                                               if any(name in read_phases(folder) for name in FASES) else ""), recheck),
             ("Dejarlo binario", "cuando no puedes o no quieres compilarlo desde código: se mide desde el módulo app (con "
                                 "menos precisión)%s" % ("; se pierde %s" % "; ".join(
                                     item["pierde"] for item in binaries if item.get("pierde"))
@@ -27741,8 +28312,9 @@ def main(argv=None):
     sub.required = True
 
     p = sub.add_parser("nuevo", help="crea la carpeta de una investigación con plan.json y estado.md")
-    p.add_argument("--carpeta", help="por ejemplo reports/perf/arranque-frio/AAAA-MM-DD; sin ella, <carpeta de "
-                                     "investigaciones de AGENTS.md, o reports/perf>/<flujo>/<fecha>")
+    p.add_argument("--carpeta", help="por ejemplo reports/performance/arranque-frio/AAAA-MM-DD; sin ella, <carpeta de "
+                                     "investigaciones de AGENTS.md o, sin ella, <carpeta de reportes>/performance>/<flujo>/"
+                                     "<fecha>")
     p.add_argument("--paquete", required=True, help="applicationId instalado")
     p.add_argument("--receta", choices=["arranque-frio", "flujo"], default="flujo")
     p.add_argument("--flujo", default="flujo", help="nombre del flujo (receta flujo)")
@@ -27769,7 +28341,7 @@ def main(argv=None):
     p.add_argument("--paquete", required=True, help="applicationId del build de profiling instalado")
     p.add_argument("--serial", help="dispositivo (obligatorio con más de uno conectado)")
     p.add_argument("--carpeta", help="dónde queda la traza de prueba (por defecto, humo/ en la carpeta de "
-                                     "investigaciones de AGENTS.md, o reports/perf/humo)")
+                                     "investigaciones de AGENTS.md o, sin ella, <carpeta de reportes>/performance/humo)")
     p.add_argument("--actividad", help="actividad de inicio (paquete/.Actividad); si no, la del launcher")
     p.add_argument("--espera", type=float, default=5)
     p.add_argument("--instalar", help="comando que compila e instala el build de profiling (se repite en el paso siguiente)")

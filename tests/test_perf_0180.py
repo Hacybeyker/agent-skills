@@ -1122,7 +1122,7 @@ class UnifiedReportArchivedTest(ReportFixtureBase):
         for folder in (self.folder, other):
             self.ok("reporte", "--carpeta", folder, "--inicial")
         self.ok("reporte", "--gerencia-unificado", "--todas")
-        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        page = (self.dir / "reports" / "performance" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
         labels = re.findall(r'<section id="inv\d">\s*<h2>[^<]*</h2>\s*<p class="sub">[^<]* · <span class="chip [^"]*">'
                             r'([^<]+)</span>', page)
         self.assertEqual(sorted(labels).count("archivada"), 1)

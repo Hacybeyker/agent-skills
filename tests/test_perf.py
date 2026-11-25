@@ -1047,14 +1047,14 @@ class CaptureModesTest(CaptureCase):
         self.assertIn("TTID 456 ms", out)
         self.assertIn("Secciones propias: HTTP ×2", out)
         self.assertIn("· Solo si lo que quieres medir es el arranque en frío (receta, sin sesión 1) · Terminal (sin chat):", out)
-        self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/perf/arranque-frio/" % PKG, out)
+        self.assertIn("nuevo --receta arranque-frio --paquete %s --serial emulator-5554 --carpeta reports/performance/arranque-frio/" % PKG, out)
         self.assertIn("--instalar './gradlew app:installProfiling'", out)
         self.assertNotIn("[--red", out)  # la receta se pega tal cual: --red va en la explicación
         self.assertIn("· Una pantalla o un flujo · Chat nuevo · Modelo: Sonnet 5.5 · Esfuerzo: medio", out)
         self.assertIn("Dispositivo emulator-5554", out)
         self.assertLess(out.index("Una pantalla o un flujo"), out.index("arranque en frío (receta"))  # el flujo, primero
-        self.assertTrue(any((self.dir / "reports/perf/humo/prueba").glob("humo_1.perfetto-trace*")))
-        self.assertFalse((self.dir / "reports/perf/humo/plan.json").exists())
+        self.assertTrue(any((self.dir / "reports/performance/humo/prueba").glob("humo_1.perfetto-trace*")))
+        self.assertFalse((self.dir / "reports/performance/humo/plan.json").exists())
         log = (self.dir / "adb.log").read_text(encoding="utf-8")
         self.assertIn("am start -W -n %s/.MainActivity" % PKG, log)
 
@@ -7863,12 +7863,12 @@ class SafeRevertTest(PerfBase):
         self.assertEqual(len(saved), 1, saved)  # el cambio temporal; la fila "setup" ya no va en un parche de la investigación
         # 0.14.0: la fila "setup" la maneja el paso del setup, al final: guarda el setup entero como parche vigente, con su
         # ficha, y lo quita. Ya no se escribe en AGENTS.md cómo aplicarlo a mano: lo repone `perf.py setup`.
-        patches = self.dir / "reports" / "perf" / "setup" / "parches"
+        patches = self.dir / "reports" / "performance" / "setup" / "parches"
         setup = sorted(path.name for path in patches.glob("perf-setup-*.patch"))
         self.assertEqual(len(setup), 1, setup)
         agents = (self.dir / "AGENTS.md").read_text(encoding="utf-8")
         section = agents.split("## Rendimiento")[1].split("## Git")[0]
-        self.assertIn("- Setup: en parche `reports/perf/setup/parches/%s`" % setup[0], section)
+        self.assertIn("- Setup: en parche `reports/performance/setup/parches/%s`" % setup[0], section)
         self.assertNotIn("git -C", section)
         self.assertIn("Del setup (no son cambios temporales; los guarda y los quita el paso del setup, al final)", out)
         self.assertFalse((self.dir / "app" / "src" / "perf" / "PerfHooks.kt").exists())
@@ -8171,7 +8171,7 @@ class AudienceReportsTest(PerfBase):
 
 class SingleFolderTest(DeviceBase):
     """Una sola carpeta para todo lo de rendimiento: la sección de rendimiento de AGENTS.md fija dónde van las
-    investigaciones y los parches; sin esas líneas, todo sigue en reports/perf."""
+    investigaciones y los parches; sin esas líneas, las nuevas van en reports/performance (0.20.0)."""
 
     AGENTS = ("# Proyecto\n\n## Rendimiento\n\n- applicationId: com.example.app\n- setup listo\n"
               "- Carpeta de investigaciones: `ctx/perf/investigaciones`\n- **Carpeta de parches:** ctx/perf/parches.\n\n"
@@ -8193,13 +8193,13 @@ class SingleFolderTest(DeviceBase):
             self.assertEqual(perf.perf_folders(self.dir), {"investigaciones": None, "parches": None}, text)
         (self.dir / "AGENTS.md").unlink()
         self.assertEqual(perf.perf_folders(self.dir), {"investigaciones": None, "parches": None})
-        self.assertEqual(perf.investigations_base(self.dir), self.dir / "reports/perf")  # sin configurar, como siempre
+        self.assertEqual(perf.investigations_base(self.dir), self.dir / "reports/performance")  # sin configurar (0.20.0)
 
-    def test_nuevo_sin_carpeta_usa_la_de_agents_md_y_sin_configurar_reports_perf(self):
+    def test_nuevo_sin_carpeta_usa_la_de_agents_md_y_sin_configurar_reports_performance(self):
         today = datetime.date.today().isoformat()
         out = self.ok("nuevo", "--paquete", PKG, "--flujo", "Lista de clientes", "--serial", "emulator-5554")
-        self.assertIn("✔ Carpeta de la investigación: reports/perf/lista-de-clientes/%s (por defecto)" % today, out)
-        self.assertTrue((self.dir / "reports/perf/lista-de-clientes" / today / "plan.json").is_file())
+        self.assertIn("✔ Carpeta de la investigación: reports/performance/lista-de-clientes/%s (por defecto)" % today, out)
+        self.assertTrue((self.dir / "reports/performance/lista-de-clientes" / today / "plan.json").is_file())
         write(self.dir / "AGENTS.md", self.AGENTS)
         out = self.ok("nuevo", "--paquete", PKG, "--receta", "arranque-frio", "--serial", "emulator-5554")
         folder = self.dir / "ctx/perf/investigaciones/arranque-frio" / today

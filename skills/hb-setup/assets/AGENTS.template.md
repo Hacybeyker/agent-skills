@@ -39,16 +39,44 @@ Origen: <los pasos de verificación del CI (<archivos>) | DoD derivado del build
 
 <Cómo está organizado el proyecto hoy: módulos, capas, features principales, dónde viven los contratos de presentación. Si coincide con el perfil, "sigue el perfil" y las excepciones con su motivo; si no, descríbela tal cual y los agentes la respetan.>
 
-### Repos relacionados
+## Estructura
 
-<Quita esta subsección si el proyecto no depende de otros repos que se trabajen en local.>
+Las unidades del proyecto y cómo se trabaja con cada una. Las skills lo leen antes de tocar código y lo corrigen si no coincide con lo que encuentran. Describe lo estable: nada de estados del momento.
 
-| Repo | Ruta | Qué contiene | Cómo se incluye en local |
+### Unidades
+
+| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | Publica y versiona |
+| --- | --- | --- | --- | --- | --- | --- |
+| `<identificador: ruta desde la raíz de su repo, o la carpeta del repo vecino>` | `<ruta relativa: . o app/ o ../core-lib>` | <Es la app / En fuente (módulo del build) / Publicada: `<coordenada>`, versión fijada en `<archivo>`> | <— / A fuente: <cambio exacto>; volver: <cambio exacto> / sin mecanismo> | `cd <ruta del proyecto> && <comando acotado a la unidad>` | <este repo / `<URL del remoto>`>, `<rama principal>` | <con la app / la persona, con `hb-release` / el workflow `<nombre>` al crear el tag> |
+
+- El agente necesita **acceso a la carpeta** de cada unidad que está fuera del repo (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene. <Quita la línea si todas están en el repo.>
+- Repos vecinos: <clonar los que falten y crear ramas de trabajo | no clonar ni crear ramas>.
+
+### Variantes y entornos
+
+| Variante o entorno | Para qué sirve | Servicios funcionales | Para probar y medir |
 | --- | --- | --- | --- |
-| <nombre> | `<../ruta-relativa>` | <qué publica o aporta> | <el mecanismo que el proyecto ya usa, tal cual> |
+| `<nombre>` | <desarrollo, QA, tienda…> | <Sí: <qué backend> / No: <mocks, sin red>> | <Sí / No> |
 
-- El agente necesita **acceso a estas carpetas** además de la del proyecto (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene.
-- <Por cada dependencia publicada con código local> **<coordenada o nombre publicado>**: pasar a código local con <el comando o el cambio exacto>; volver con <el comando o el cambio exacto>. Es un cambio local: no se commitea.
+### Cliente HTTP
+
+- <`<archivo desde la raíz del proyecto>` (unidad `<identificador>`): <qué construye y con qué librería> | Ninguno: el proyecto no hace llamadas HTTP>
+
+### Configuración local modificada a propósito
+
+<Quita esta subsección si no hay ninguna.>
+
+- `<ruta>`: <para qué queda modificado>. No es un cambio de ninguna tarea y no se commitea.
+
+### Documentos
+
+| Documento | Léelo cuando… |
+| --- | --- |
+| `<docs/archivo.md o contexto/docs/archivo.md>` | <la situación en la que hace falta> |
+
+### Mapas del módulo
+
+- En `<docs | contexto>/modules/<identificador>.md`, <fuera de git (en `.git/info/exclude`) | versionados con el código>. Antes de tocar una unidad, lee su mapa; si no existe, créalo; si su `Commit analizado` quedó atrás, actualízalo solo con el diff desde ese commit.
 
 ## Modernización
 

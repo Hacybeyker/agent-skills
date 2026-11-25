@@ -14,13 +14,21 @@ También deja fuera de git (en .git/info/exclude) los archivos locales de las he
 versionados ni ignorados (.claude/settings.local.json, CLAUDE.local.md, los de aider), y revisa la sección de
 rendimiento de AGENTS.md que mantiene hb-performance sin reescribirla.
 
+`units` es el inventario de solo lectura para ## Estructura: las unidades candidatas del repo (módulos del build,
+paquetes de un espacio de trabajo, carpetas de feature), los repos vecinos clonados y sin clonar que nombra la
+configuración, los archivos versionados modificados que nombran a esos vecinos y lo que no coincide con el modelo que
+ya tenga AGENTS.md. No compila ni ejecuta nada.
+
 Uso:
   python3 -I contexto.py estado [--carpeta contexto] [--repo .]
   python3 -I contexto.py preparar --modo versionado|local|externo [--externa <ruta>] [--carpeta contexto]
-                                  [--reportes <ruta>] [--claude auto|si|no] [--repo .]
+                                  [--reportes <ruta>] [--claude auto|si|no] [--module-maps local|versioned] [--repo .]
+  python3 -I contexto.py units [--repo .]
   python3 -I contexto.py rendimiento [--repo .]
 """
 import argparse
+import glob
+import json
 import os
 import pathlib
 import re
@@ -41,6 +49,13 @@ SERIALS = ((re.compile(r"\bANDROID_SERIAL=(?!<)[^\s`'\"]+"), "ANDROID_SERIAL=<se
            (re.compile(r"(?<![\w-])emulator-\d{2,5}(?![\w-])"), "<serial>"))
 MARKER = re.compile(r"\{(?:fecha|slug)\}")
 SIBLING_REF = re.compile(r"\.\./([A-Za-z0-9._-]+)")
+# Una ruta relativa que puede salir del repo: uno o más "../" y un nombre (../core-lib, ../../core-lib)
+OUTSIDE_REF = re.compile(r"((?:\.\./)+)([A-Za-z0-9_-][A-Za-z0-9._-]*)")
+# Archivos de configuración donde se busca un repo vecino sin clonar (el código fuente usa ../ para sus imports)
+CONFIG_NAME = re.compile(r"(?:^|/)(?:[^/]*\.(?:json|ya?ml|toml|gradle|kts|properties|xml|mod|work|cfg|ini|conf|txt|lock)"
+                         r"|\.env[^/]*|\.gitmodules|Podfile|Package\.swift|Makefile)$")
+MAPS_CHOICES = ("local", "versioned")
+REPORT_FOLDERS = (("hb-implement", "implementation"), ("hb-performance", "performance"), ("hb-review", "review"))
 
 
 def git(repo, *args):
@@ -83,7 +98,27 @@ def add_exclude(repo, line):
 
 
 def exists(path):
-    return path.exists() or path.is_symlink()
+    """Si la ruta existe (también un enlace roto). Una carpeta sin permiso de lectura cuenta como que no existe: la
+    carpeta padre del proyecto puede tener carpetas ajenas (por ejemplo, /tmp)."""
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return False
+
+
+def is_directory(path):
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def child_folders(folder):
+    """Las carpetas hijas que se pueden listar; [] si la carpeta no se puede leer."""
+    try:
+        return [child for child in folder.iterdir() if is_directory(child)]
+    except OSError:
+        return []
 
 
 def uses_claude(repo, choice):
@@ -119,12 +154,27 @@ def describe(repo, name):
     return "excluido de git (local)" if ignored(repo, name) else "sin versionar y sin excluir"
 
 
+def common_dir(path):
+    """La carpeta común de git de un repo (la misma para todos sus worktrees), resuelta; None si no es un repo."""
+    found = git(path, "rev-parse", "--git-common-dir")
+    value = found.stdout.strip()
+    if found.returncode != 0 or not value:
+        return None
+    return os.path.realpath(value if os.path.isabs(value) else os.path.join(str(path), value))
+
+
+def same_repository(repo, other):
+    """Si la otra carpeta es un worktree del mismo repo (no es un repo vecino)."""
+    mine = common_dir(repo)
+    return mine is not None and mine == common_dir(other)
+
+
 def siblings(repo):
     """Repos hermanos (en la carpeta padre) que algún archivo versionado del proyecto nombra: por ruta (../<nombre>)
     o por nombre (una dependencia publicada con el mismo nombre que el repo). {nombre: {"ruta": [...], "nombre": [...]}}.
     Por nombre son candidatos: se confirman con el usuario."""
-    names = sorted(d.name for d in repo.parent.iterdir() if d != repo and d.is_dir() and exists(d / ".git")) \
-        if repo.parent.is_dir() else []
+    names = sorted(d.name for d in child_folders(repo.parent) if d != repo and exists(d / ".git")
+                   and not same_repository(repo, d))
     found = {}
 
     def note(name, how, file):
@@ -145,6 +195,323 @@ def siblings(repo):
             if match in words and file not in found.get(match, {}).get("ruta", []):
                 note(match, "nombre", file)
     return found
+
+
+def clean_url(url):
+    """La URL del remoto sin usuario ni credenciales (https://usuario:token@host/... → https://host/...)."""
+    return re.sub(r"^([a-z][a-z0-9+.-]*://)[^/@]*@", r"\1", url.strip())
+
+
+def remote_info(repo):
+    """(URL del remoto origin sin credenciales, rama principal) de un repo, con None en lo que no se sepa."""
+    url = git(repo, "remote", "get-url", "origin")
+    head = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    branch = head.stdout.strip().split("/", 1)[-1] if head.returncode == 0 and head.stdout.strip() else None
+    if branch is None:
+        for name in ("main", "master"):
+            if git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + name).returncode == 0:
+                branch = name
+                break
+    return (clean_url(url.stdout) if url.returncode == 0 and url.stdout.strip() else None), branch
+
+
+def repo_files(repo):
+    """Los archivos del repo que git ve (versionados y nuevos, sin los ignorados)."""
+    return git(repo, "ls-files", "--cached", "--others", "--exclude-standard").stdout.splitlines()
+
+
+def read_text(path):
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+
+
+def strip_comments(text):
+    return re.sub(r"/\*.*?\*/", "", re.sub(r"(?m)//.*$", "", text), flags=re.S)
+
+
+def gradle_modules(repo):
+    """Módulos de Gradle de settings.gradle(.kts): {ruta: evidencia}, con el projectDir propio si lo declara."""
+    found = {}
+    for name in ("settings.gradle.kts", "settings.gradle"):
+        text = strip_comments(read_text(repo / name))
+        if not text:
+            continue
+        dirs = {m.group(1).lstrip(":"): m.group(2) for m in re.finditer(
+            r"project\(\s*[\"']([^\"']+)[\"']\s*\)\.projectDir\s*=\s*(?:file\(\s*)?(?:new\s+File\([^,]*,\s*)?"
+            r"[\"']([^\"']+)[\"']", text)}
+        calls = [m.group(1) for m in re.finditer(r"\binclude\s*\(([^)]*)\)", text, re.S)]
+        calls += [m.group(1) for m in re.finditer(r"(?m)^[ \t]*include[ \t]+([^(\n][^\n]*)$", text)]
+        for call in calls:
+            for module in re.findall(r"[\"'](:?[A-Za-z0-9_.:-]+)[\"']", call):
+                key = module.lstrip(":")
+                path = dirs.get(key, key.replace(":", "/"))
+                found[os.path.normpath(path)] = "módulo de Gradle :%s (%s)" % (key, name)
+    return found
+
+
+def expand(repo, patterns, marker, label):
+    """Las carpetas que cumplen los patrones de un espacio de trabajo y tienen su archivo de paquete."""
+    found = {}
+    for pattern in patterns:
+        if pattern.startswith("!"):
+            continue
+        for match in glob.glob(str(repo / pattern.rstrip("/")), recursive=True):
+            path = pathlib.Path(match)
+            if path.is_dir() and (path / marker).is_file() and "node_modules" not in path.parts:
+                found[os.path.relpath(str(path), str(repo))] = label
+    return found
+
+
+def workspace_units(repo):
+    """Paquetes de espacios de trabajo y módulos de otros builds: {ruta: evidencia}."""
+    found = {}
+    pnpm = read_text(repo / "pnpm-workspace.yaml")
+    block = re.search(r"(?ms)^packages:[ \t]*\n((?:[ \t]+-[^\n]*\n?)+)", pnpm)
+    if block:
+        patterns = [item.strip().strip("'\"") for item in re.findall(r"-[ \t]*([^\n#]+)", block.group(1))]
+        found.update(expand(repo, patterns, "package.json", "paquete del espacio de trabajo (pnpm-workspace.yaml)"))
+    try:
+        package = json.loads(read_text(repo / "package.json") or "{}")
+    except ValueError:
+        package = {}
+    spaces = package.get("workspaces") if isinstance(package, dict) else None
+    if isinstance(spaces, dict):
+        spaces = spaces.get("packages")
+    if isinstance(spaces, list):
+        found.update(expand(repo, [str(s) for s in spaces], "package.json",
+                            "paquete del espacio de trabajo (workspaces de package.json)"))
+    work = read_text(repo / "go.work")
+    for group in re.findall(r"(?ms)^use\s*\((.*?)\)", work) + re.findall(r"(?m)^use\s+([^(\s][^\n]*)$", work):
+        for item in group.split():
+            if item != ".":
+                found[os.path.normpath(item)] = "módulo de Go (go.work)"
+    cargo = re.search(r"(?ms)^\[workspace\][^\[]*?members\s*=\s*\[(.*?)\]", read_text(repo / "Cargo.toml"))
+    if cargo:
+        found.update(expand(repo, re.findall(r"[\"']([^\"']+)[\"']", cargo.group(1)), "Cargo.toml",
+                            "crate del espacio de trabajo (Cargo.toml)"))
+    for module in re.findall(r"<module>\s*([^<\s]+)\s*</module>", read_text(repo / "pom.xml")):
+        found[os.path.normpath(module)] = "módulo de Maven (pom.xml)"
+    return {path: why for path, why in found.items() if not path.startswith("..")}
+
+
+def feature_folders(files, modules):
+    """Carpetas de feature (…/features/<nombre> o …/feature/<nombre>) que no contienen un módulo ya detectado. Los .md no
+    cuentan: una carpeta de mapas del módulo (modules/<…>/features/<nombre>.md) no es código."""
+    found = set()
+    for path in files:
+        if path.endswith(".md"):
+            continue
+        match = re.match(r"^((?:[^/]+/)*?(?:features?)/[^/]+)/", path)
+        if match:
+            found.add(match.group(1))
+    return sorted(f for f in found if not any(m == f or m.startswith(f + "/") for m in modules))
+
+
+def outside_refs(repo, files):
+    """Repos vecinos que nombran los archivos de configuración con una ruta que sale del repo:
+    {nombre: [archivos]}. Se resuelve cada ../ desde la carpeta del archivo, así que los imports del código no cuentan."""
+    root = os.path.normpath(str(repo))
+    parent = os.path.dirname(root)
+    configs = [f for f in files if CONFIG_NAME.search(f)]
+    found = {}
+    for file in configs:
+        text = read_text(repo / file)
+        if not text:
+            continue
+        here = os.path.dirname(os.path.join(root, file))
+        for ups, name in OUTSIDE_REF.findall(text):
+            target = os.path.normpath(os.path.join(here, ups, name))
+            if os.path.dirname(target) == parent and target != root:
+                files_found = found.setdefault(os.path.basename(target), [])
+                if file not in files_found:
+                    files_found.append(file)
+    return found
+
+
+def modified_naming(repo, names):
+    """Archivos versionados que hoy están modificados y nombran a un repo vecino: candidatos a "Configuración local
+    modificada a propósito"."""
+    out = []
+    for line in git(repo, "status", "--porcelain", "--untracked-files=no").stdout.splitlines():
+        if len(line) < 4 or "M" not in line[:2]:
+            continue
+        path = line[3:].strip().strip('"')
+        text = read_text(repo / path)
+        if any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(name) + r"(?![A-Za-z0-9_-])", text) for name in names):
+            out.append(path)
+    return sorted(out)
+
+
+def section_text(text, title, level):
+    """El cuerpo de la primera sección "<# * level> <title>" de un Markdown, o None."""
+    lines, body, inside = text.splitlines(), [], False
+    for line in lines:
+        heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$", line)
+        if inside and heading and len(heading.group(1)) <= level:
+            break
+        if inside:
+            body.append(line)
+        elif heading and len(heading.group(1)) == level and heading.group(2).strip().lower() == title.lower():
+            inside = True
+    return "\n".join(body) if inside else None
+
+
+def table_rows(text):
+    """Las filas de la primera tabla de un texto, sin la cabecera ni el separador: [[celda, ...]]."""
+    rows = [line.strip() for line in text.splitlines() if line.strip().startswith("|")]
+    cells = [[cell.strip() for cell in row.strip("|").split("|")] for row in rows]
+    return [row for row in cells[2:] if row and any(row)]
+
+
+def bare(cell):
+    """El primer valor entre acentos graves de una celda, o la celda sin adornos."""
+    quoted = re.search(r"`([^`]+)`", cell)
+    return (quoted.group(1) if quoted else cell).strip()
+
+
+def model_local_config(repo):
+    """Las rutas de "### Configuración local modificada a propósito" de ## Estructura (lo primero entre acentos graves de
+    cada viñeta)."""
+    structure = section_text(read_text(repo / "AGENTS.md"), "Estructura", 2)
+    block = section_text(structure, "Configuración local modificada a propósito", 3) if structure is not None else None
+    found = []
+    for line in (block or "").splitlines():
+        quoted = re.match(r"^[ \t]*[-*][ \t]+`([^`]+)`", line)
+        if quoted and not quoted.group(1).startswith("<"):
+            found.append(norm(quoted.group(1)))
+    return found
+
+
+def covered(path, sources):
+    """Si una ruta candidata cae dentro de la fuente de alguna unidad del modelo ("." cubre todo el repo)."""
+    path = norm(path)
+    return any(path == source or (source == "." and not path.startswith("..")) or path.startswith(source + "/")
+               for source in sources)
+
+
+def norm(path):
+    path = path.strip().rstrip("/")
+    return os.path.normpath(path) if path else "."
+
+
+def model_units(repo):
+    """Lo que dice AGENTS.md: ("estructura" | "repos relacionados" | None, [(identificador, fuente)])."""
+    text = read_text(repo / "AGENTS.md")
+    structure = section_text(text, "Estructura", 2)
+    if structure is not None:
+        units = section_text(structure, "Unidades", 3)
+        rows = table_rows(units if units is not None else structure)
+        return "estructura", [(bare(row[0]), norm(bare(row[1]))) for row in rows if len(row) >= 2]
+    related = section_text(text, "Repos relacionados", 3)
+    if related is not None:
+        return "repos relacionados", [(bare(row[0]), norm(bare(row[1]))) for row in table_rows(related) if len(row) >= 2]
+    return None, []
+
+
+def units(args):
+    """Inventario de solo lectura para ## Estructura: no cambia nada ni compila."""
+    repo = toplevel(args.repo)
+    files = repo_files(repo)
+    url, branch = remote_info(repo)
+    print("Repo principal: %s (remoto: %s; rama principal: %s)" % (repo.name, url or "sin remoto origin",
+                                                                    branch or "sin determinar"))
+    modules = dict(gradle_modules(repo))
+    modules.update(workspace_units(repo))
+    print("Unidades candidatas en este repo:")
+    if modules:
+        for path in sorted(modules):
+            state = "" if (repo / path).is_dir() else "  ⚠ la carpeta no existe"
+            print("  %s  (%s)%s" % (path, modules[path], state))
+    else:
+        print("  ninguna declarada por el build: la unidad es el repo entero, o las carpetas de feature")
+    features = feature_folders(files, modules)
+    if features:
+        more = " y %d más" % (len(features) - 30) if len(features) > 30 else ""
+        print("Carpetas de feature (candidatas a unidad en un proyecto de un solo módulo): " + ", ".join(features[:30])
+              + more)
+    cloned = siblings(repo)
+    refs = {name: found for name, found in outside_refs(repo, files).items()
+            if not (exists(repo.parent / name / ".git") and same_repository(repo, repo.parent / name))}
+    names = sorted(set(cloned) | set(refs))
+    print("Repos vecinos que nombra el proyecto:" + ("" if names else " ninguno"))
+    for name in names:
+        path = repo.parent / name
+        if name in refs:  # una ruta de un archivo de configuración que, resuelta, sale del repo
+            evidence, how = refs[name], "como ruta"
+        elif cloned[name]["ruta"]:  # ../<nombre> en cualquier archivo, también en el código: puede ser un import
+            evidence, how = cloned[name]["ruta"], "nombrado como ../%s, candidato a confirmar" % name
+        else:
+            evidence, how = cloned[name]["nombre"], "por nombre, candidato a confirmar"
+        more = " y %d más" % (len(evidence) - 3) if len(evidence) > 3 else ""
+        if exists(path / ".git"):
+            sibling_url, sibling_branch = remote_info(path)
+            state = "clonado; remoto: %s; rama principal: %s" % (sibling_url or "sin remoto origin",
+                                                                  sibling_branch or "sin determinar")
+        elif exists(path):
+            state = "la carpeta existe pero no es un repo de git"
+        else:
+            state = "SIN CLONAR: pregunta la URL de su remoto"
+        print("  ../%s  %s  (%s: %s%s)" % (name, state, how, ", ".join(evidence[:3]), more))
+    registered = model_local_config(repo)
+    candidates = modified_naming(repo, names)
+    new = [path for path in candidates if norm(path) not in registered]
+    if new:
+        print("Archivos versionados modificados que nombran repos vecinos (candidatos a «Configuración local "
+              "modificada a propósito»: confírmalos con el usuario): " + ", ".join(new))
+    if registered:
+        print("Configuración local modificada a propósito (ya en el modelo): " + ", ".join(registered))
+    kind, listed = model_units(repo)
+    if kind is None:
+        print("AGENTS.md sin ## Estructura: escríbela con estos candidatos y las respuestas del usuario")
+        return 0
+    if kind == "repos relacionados":
+        print("AGENTS.md tiene ### Repos relacionados (formato anterior): pasa sus filas a ## Estructura")
+    print("En el modelo (%s): %s" % (kind, ", ".join(ident for ident, _ in listed) or "sin filas"))
+    sources = {source for _, source in listed}
+    warnings = 0
+    for ident, source in listed:
+        if not exists(repo / source):
+            warnings += 1
+            print("  ⚠ %s: la fuente %s no existe en disco (¿sin clonar o ruta equivocada?)" % (ident, source))
+    found = set(modules) | {os.path.join("..", name) for name in refs}
+    missing = sorted(path for path in found if not covered(path, sources))
+    if missing:
+        print("  Candidatos que no están en el modelo: " + ", ".join(missing))
+    # Las carpetas de feature se comparan solo si el modelo ya usa carpetas de feature como unidades.
+    lost = [f for f in features if not covered(f, sources)] if any(norm(f) in sources for f in features) else []
+    if lost:
+        print("  Carpetas de feature que no están en el modelo: " + ", ".join(lost))
+    if not (warnings or missing or lost):
+        print("  ✔ El modelo cubre todos los candidatos")
+    return 0
+
+
+def worktree_links(repo, names):
+    """En un worktree enlazado: lo del contexto que el worktree principal tiene y este no (los enlaces y los archivos
+    locales no están en git, así que un worktree nuevo no los trae). [(nombre, "enlace" | "archivo local", destino)]."""
+    git_dir = git(repo, "rev-parse", "--absolute-git-dir").stdout.strip()
+    common = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
+    if not git_dir or not common:
+        return None, []
+    common_path = pathlib.Path(common) if os.path.isabs(common) else repo / common
+    if os.path.realpath(git_dir) == os.path.realpath(str(common_path)):
+        return None, []
+    main = None
+    for line in git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        if line.startswith("worktree "):
+            main = pathlib.Path(line[len("worktree "):])
+            break
+    if main is None or os.path.realpath(str(main)) == os.path.realpath(str(repo)):
+        return None, []
+    missing = []
+    for name in names:
+        there = main / name
+        if exists(repo / name) or not exists(there):
+            continue
+        missing.append((name, "enlace" if there.is_symlink() else "archivo local", os.path.realpath(str(there))))
+    return main, missing
 
 
 def local_ai_files(repo):
@@ -256,6 +623,15 @@ def status(args):
     else:
         mode = "sin definir (" + agents + ")"
     print(f"Modo del contexto: {mode}")
+    main, missing = worktree_links(repo, ("AGENTS.md", "CLAUDE.md", folder))
+    if main is not None:
+        print(f"Worktree enlazado: el principal es {home(main)}.")
+        for name, kind, target in missing:
+            covered = "git ya lo ignora (.git/info/exclude es común a los worktrees)" if ignored(repo, name) else \
+                f"agrega /{name} a .git/info/exclude"
+            print(f"  ⚠ Falta {name}: en el principal es un {kind} ({home(target)}). Para recrearlo: "
+                  f"cd {home(repo)} && ln -s {home(target)} {name} ({covered}). Hazlo solo si el usuario o el "
+                  f"proyecto lo piden.")
     local = local_ai_files(repo)
     print("Archivos locales de IA sin versionar ni excluir: " + (", ".join(local) if local else "ninguno")
           + (" (preparar los deja en .git/info/exclude)" if local else ""))
@@ -330,7 +706,13 @@ def prepare(args):
     entries = [("AGENTS.md", "file")] + ([("CLAUDE.md", "file")] if claude else [])
     if mode != "versionado":
         entries.append((folder, "dir"))
+    if args.module_maps == "versioned" and mode != "versionado":
+        raise ValueError("los mapas del módulo solo se versionan si el contexto se versiona (--modo versionado)")
+    maps = ("docs" if mode == "versionado" else folder) + "/modules"
     problems = conflicts(repo, mode, entries, external)
+    if mode == "versionado" and args.module_maps == "local" and tracked(repo, maps):
+        problems.append(f"{maps}/ tiene archivos versionados: excluirla no los saca de git. Usa --module-maps "
+                        f"versioned o sácalos tú (git rm --cached -r {maps}) y vuelve a correr.")
     if problems:
         print("✖ No cambié nada:\n" + "\n".join(f"  - {p}" for p in problems), file=sys.stderr)
         return 1
@@ -380,6 +762,10 @@ def prepare(args):
         if add_exclude(repo, line):
             done.append(f"{line} agregado a .git/info/exclude")
 
+    if mode == "versionado" and args.module_maps == "local" and not ignored(repo, maps + "/"):
+        if add_exclude(repo, "/" + maps + "/"):
+            done.append(f"/{maps}/ (mapas del módulo) agregado a .git/info/exclude")
+
     for line in exclude_local_ai(repo):  # S4
         done.append(f"{line} (archivo local de una herramienta de IA) agregado a .git/info/exclude")
 
@@ -402,6 +788,20 @@ def prepare(args):
         print(f"  - Contexto de IA: fuera del repo, en `{home(external)}`; en el repo son enlaces simbólicos "
               f"({files} y `{folder}`) excluidos en `.git/info/exclude`. Lo extenso, en `{docs}`.")
     print(f"  - Carpeta de reportes: `{reports}`")
+    base = fixed_part(reports) if MARKER.search(reports) else reports
+    marked = bool(MARKER.search(reports))
+    print("    Es la base común de los reportes: " + ", ".join(f"{skill} en `{base}/{sub}/`"
+                                                             for skill, sub in REPORT_FOLDERS
+                                                             if not (marked and skill == "hb-implement"))
+          + f", con el índice en `{base}/INDEX.md`."
+          + (f" Con {{fecha}} y {{slug}}, hb-implement usa la línea tal cual (`{reports}`)." if marked else ""))
+    where = "versionados con el código" if args.module_maps == "versioned" else (
+        "fuera de git (en `.git/info/exclude`)" if mode == "versionado" else f"fuera de git (dentro de `{folder}/`)")
+    print("Para ## Estructura, en ### Mapas del módulo (la línea tal cual):")
+    print(f"  - En `{maps}/<identificador>.md`, {where}. Antes de tocar una unidad, lee su mapa; "
+          f"si no existe, créalo; si su `Commit analizado` quedó atrás, actualízalo solo con el diff desde ese commit.")
+    print(f"Para ## Estructura, en ### Documentos: una fila por cada documento extenso de `{docs}`, con su ruta y "
+          f"cuándo leerlo. Por ejemplo: | `{docs}arquitectura.md` | Vayas a crear una feature o un módulo nuevo |")
     return 0
 
 
@@ -420,7 +820,13 @@ def main(argv=None):
                                          "(por defecto reports, o <carpeta>/reports fuera del modo versionado)")
     prep.add_argument("--claude", default="auto", choices=("auto", "si", "no"),
                       help="crear CLAUDE.md: auto = solo si ya hay CLAUDE.md o .claude/")
+    prep.add_argument("--module-maps", default="local", choices=MAPS_CHOICES,
+                      help="modo versionado: los mapas del módulo (docs/modules/) quedan fuera de git (local, por "
+                           "defecto) o se versionan (versioned)")
     prep.add_argument("--repo", default=".", help="raíz del repositorio")
+    inventory = sub.add_parser("units", help="inventario de solo lectura para ## Estructura: unidades candidatas, repos "
+                                             "vecinos clonados y sin clonar, y lo que no coincide con el modelo")
+    inventory.add_argument("--repo", default=".", help="raíz del repositorio")
     perf = sub.add_parser("rendimiento", help="el bloque de hb-performance que se conserva y lo que conviene cambiar en "
                                               "la sección de rendimiento (no escribe nada)")
     perf.add_argument("--repo", default=".", help="raíz del repositorio")
@@ -430,6 +836,8 @@ def main(argv=None):
         return 0
     if args.command == "rendimiento":
         return performance(args)
+    if args.command == "units":
+        return units(args)
     return prepare(args)
 
 
