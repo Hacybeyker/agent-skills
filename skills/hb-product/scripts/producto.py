@@ -1106,7 +1106,157 @@ def texto_vacios_sesion(sesion, vacios):
     return "La sesión %s (%s) tiene %s por límite de las herramientas (%s)" % (
         sesion, ", ".join(LINEAS_LLANO.get(l, l).lower() for l in lineas),
         "un vacío" if len(vacios) == 1 else "vacíos", "; ".join(
-            "%s: %s %s" % (v["id"], DIMENSIONES.get(v["dimension"], v["dimension"]), v["valor"]) for v in vacios))
+            "%s: %s %s" % (v["id"], NOMBRE_DIMENSION.get(v["dimension"], v["dimension"]), v["valor"]) for v in vacios))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Vacíos de herramienta y ajustes (feedback #57): ajustar una sesión con las mismas herramientas da lo mismo solo si lo
+# que el ajuste tiene que resolver cae entero en los mercados, idiomas, tiendas o peldaños que esas herramientas no
+# pudieron leer. Si algo queda fuera, el vacío es un aviso y el ajuste sigue; si no se sabe, lo seguro: detenerse.
+
+DIMENSIONES_VACIO = tuple(DIMENSIONES) + ("peldano",)
+NOMBRE_DIMENSION = dict(DIMENSIONES, peldano="peldaño")
+
+
+def alcance_hallazgos(ids):
+    """Lo que un ajuste tiene que resolver cuando es triangular o confirmar esos hallazgos; None si no nombra ninguno."""
+    ids = list(dict.fromkeys(ids))
+    return {"hallazgos": ids} if ids else None
+
+
+def clave_vacio(dimension, valor):
+    return str(int(valor)) if dimension == "peldano" else normal(valor)
+
+
+def vacios_herramienta_lineas(registro, lineas):
+    """Todos los vacíos por límite de las herramientas de esas líneas (de mercado, idioma, tienda o peldaño, cubiertos
+    en parte por fuentes o no): {dimensión: {valor normalizado: [vacíos]}}."""
+    por = {}
+    for vacio in registro.vacios.values():
+        if vacio["motivo"] == "herramienta" and vacio["linea"] in lineas and vacio["dimension"] in DIMENSIONES_VACIO:
+            por.setdefault(vacio["dimension"], {}).setdefault(clave_vacio(vacio["dimension"], vacio["valor"]),
+                                                              []).append(vacio)
+    return por
+
+
+def huella(registro, hallazgo):
+    """De qué depende un hallazgo: los mercados, idiomas, tiendas y peldaños de sus fuentes a favor,
+    {dimensión: {valor normalizado: valor}}."""
+    resultado = {d: {} for d in DIMENSIONES_VACIO}
+    for fuente in registro.fuentes_de(hallazgo.get("fuentes", [])):
+        for dimension in DIMENSIONES:
+            for valor in fuente.get(dimension) or []:
+                resultado[dimension].setdefault(normal(valor), str(valor))
+        resultado["peldano"].setdefault(str(fuente["peldano"]), str(fuente["peldano"]))
+    return resultado
+
+
+def estado_hallazgo(registro, identificador, por):
+    """Si triangular o confirmar ese hallazgo depende solo de los vacíos de herramienta `por`: (True, texto, vacíos)
+    si en alguna dimensión todas sus fuentes son de valores con un vacío así (más fuentes de lo mismo es leer justo
+    eso); (False, texto, []) si en una dimensión con vacíos tiene fuentes de un valor sin vacío; (None, texto, []) si
+    no se sabe (no está en el registro, no tiene fuentes o sus fuentes no dicen nada de esas dimensiones)."""
+    hallazgo = registro.hallazgos.get(identificador)
+    if not hallazgo or not hallazgo.get("fuentes"):
+        return None, "%s no tiene fuentes que digan de qué depende" % identificador, []
+    valores = huella(registro, hallazgo)
+    libre = None
+    for dimension in DIMENSIONES_VACIO:
+        if dimension not in por or not valores[dimension]:
+            continue
+        fuera = sorted(valor for clave, valor in valores[dimension].items() if clave not in por[dimension])
+        if not fuera:
+            return (True, "%s solo tiene fuentes de %s %s" % (identificador, NOMBRE_DIMENSION[dimension], y_lista(
+                sorted(valores[dimension].values()))), [v for clave in sorted(valores[dimension])
+                                                        for v in por[dimension][clave]])
+        libre = libre or "%s tiene fuentes de %s %s" % (identificador, NOMBRE_DIMENSION[dimension], y_lista(fuera))
+    if libre:
+        return False, libre, []
+    return None, "las fuentes de %s no dicen de qué %s son" % (identificador, " ni ".join(
+        NOMBRE_DIMENSION[d] for d in DIMENSIONES_VACIO if d in por)), []
+
+
+def estado_alcance(producto, registro, alcance, por):
+    """Si lo que un ajuste tiene que resolver cae entero en los vacíos de herramienta `por`: (True, texto, vacíos),
+    (False, texto, []) si algo queda fuera, o (None, texto, []) si no se sabe. El alcance es {"hallazgos"} (todos
+    tienen que depender solo de esos vacíos), {"peldanos"} (todos con un vacío así) o {"linea"} (un hallazgo nuevo de
+    esa línea: cada valor de una dimensión de su cobertura con un vacío así)."""
+    if not alcance:
+        return None, "no se sabe qué tiene que buscar", []
+    if "hallazgos" in alcance:
+        estados = [estado_hallazgo(registro, i, por) for i in alcance["hallazgos"]]
+        for estado in (False, None):
+            elegido = next((e for e in estados if e[0] is estado), None)
+            if elegido:
+                return elegido
+        if estados:
+            return True, "; ".join(dict.fromkeys(e[1] for e in estados)), [v for e in estados for v in e[2]]
+    if "peldanos" in alcance:
+        claves = [str(int(n)) for n in alcance["peldanos"]]
+        fuera = [c for c in claves if c not in por.get("peldano", {})]
+        if fuera:
+            return False, "se puede buscar en el peldaño %s" % y_lista(fuera, "o"), []
+        return (True, "%s solo %s vacíos por límite de las herramientas" % (
+            "el peldaño %s" % claves[0] if len(claves) == 1 else "los peldaños %s" % y_lista(claves),
+            "tiene" if len(claves) == 1 else "tienen"), [v for c in claves for v in por["peldano"][c]])
+    if "linea" in alcance:
+        objetivo = objetivo_de(producto)
+        libre = None
+        for dimension in COBERTURA_LINEAS.get(alcance["linea"], ()) if objetivo else ():
+            valores = objetivo[dimension]
+            fuera = [v for v in valores if normal(v) not in por.get(dimension, {})]
+            if valores and not fuera:
+                return (True, "cada %s del objetivo (%s) tiene un vacío por límite de las herramientas" % (
+                    NOMBRE_DIMENSION[dimension], ", ".join(valores)),
+                    [v for valor in valores for v in por[dimension][normal(valor)]])
+            libre = libre or ("se puede buscar en %s %s" % (NOMBRE_DIMENSION[dimension], y_lista(fuera, "o"))
+                              if fuera else None)
+        if libre:
+            return False, libre, []
+    return None, "no se sabe qué tiene que buscar", []
+
+
+def bloqueo_herramienta(producto, registro, sesion, por_resolver):
+    """Lo que los vacíos por límite de las herramientas de una sesión dicen de ajustarla (feedback #44, #49 y #57):
+    None si no hay nada que decir, o {"detener", "vacios", "motivo"}. `por_resolver` es lo que el ajuste tiene que
+    resolver, [(si pide buscar, alcance, qué lo cambiaría)]. Se detiene (y pide antes un navegador o un CSV) solo si
+    todo eso cae entero en las dimensiones de los vacíos de herramienta de sus líneas (cubiertos en parte o no, también
+    los de peldaño). Si algo queda fuera (no pide búsquedas, o un hallazgo tiene fuentes de un mercado, idioma o tienda
+    sin vacío), los vacíos sin fuentes de la sesión son un aviso: siguen, pero el ajuste no depende de ellos. Si no se
+    sabe, lo seguro de siempre: se detiene si la sesión tiene vacíos de herramienta sin fuentes."""
+    lineas = lineas_de([sesion]) if sesion else []
+    por = vacios_herramienta_lineas(registro, lineas) if lineas else {}
+    if not por:
+        return None
+    sin_fuentes = vacios_de_herramienta(producto, registro, lineas)
+    libres, dudas, bloqueados = [], [], []
+    for investigar, alcance, que in por_resolver:
+        if not investigar:
+            libres.append(("«%s» no pide búsquedas" % texto_corto(que, 70), []))
+            continue
+        estado, texto, vacios = estado_alcance(producto, registro, alcance, por)
+        (libres if estado is False else dudas if estado is None else bloqueados).append((texto, vacios))
+    if libres:
+        return {"detener": False, "vacios": sin_fuentes, "motivo": libres[0][0]} if sin_fuentes else None
+    if bloqueados:
+        vacios = list({v["id"]: v for _, lista in bloqueados for v in lista}.values())
+        vacios += [v for v in sin_fuentes if v not in vacios] if dudas else []
+        return {"detener": True, "vacios": vacios, "motivo": "; ".join(dict.fromkeys(texto for texto, _ in bloqueados))}
+    return {"detener": True, "vacios": sin_fuentes, "motivo": None} if sin_fuentes else None
+
+
+def texto_bloqueo(sesion, bloqueo):
+    """La línea de «qué cambiaría el veredicto» sobre los vacíos de herramienta de la sesión a ajustar (feedback #57)."""
+    base = texto_vacios_sesion(sesion, bloqueo["vacios"])
+    if bloqueo["detener"]:
+        return "%s: antes de ajustarla, dale al agente un navegador o aporta un CSV de reseñas%s" % (
+            base, " (lo que el ajuste tiene que resolver depende solo de %s: %s)" % (
+                "ese vacío" if len(bloqueo["vacios"]) == 1 else "esos vacíos", bloqueo["motivo"])
+            if bloqueo["motivo"] else "")
+    uno = len(bloqueo["vacios"]) == 1
+    return "%s: %s %s %s: con las mismas herramientas no se %s, pero el ajuste no depende de %s (%s)" % (
+        base, "el vacío" if uno else "los vacíos", y_lista(v["id"] for v in bloqueo["vacios"]),
+        "sigue" if uno else "siguen", "resuelve" if uno else "resuelven", "él" if uno else "ellos", bloqueo["motivo"])
 
 
 def texto_vacio(vacio):
@@ -1114,20 +1264,48 @@ def texto_vacio(vacio):
                                         vacio["valor"], MOTIVOS_VACIO[vacio["motivo"]], vacio["id"], vacio["texto"])
 
 
+# Los vacíos por peldaño (`vacio --peldano`) según su motivo (feedback #56): solo `sin-resultados` es lo buscado sin
+# resultado; un peldaño que las herramientas no pudieron leer, o que quedó sin buscar por el presupuesto, se dice tal cual.
+VACIOS_PELDANO = (("sin_resultado", "sin-resultados", "buscado sin resultado"),
+                  ("sin_leer", "herramienta", "sin leer por límite de las herramientas"),
+                  ("sin_buscar", "presupuesto", "sin buscar por falta de presupuesto"))
+
+
 def conteo_peldanos(registro):
     """Los hallazgos por peldaño de la escalera (feedback #32), vigentes (con al menos una fuente vigente) y vencidos,
-    y lo que se buscó sin resultado (`vacio --peldano`): {peldaño: {"vigentes", "vencidos", "sin_resultado",
-    "no_buscado"}}. Un peldaño sin hallazgos ni búsquedas registradas no se buscó (feedback #28)."""
-    conteo = {n: {"vigentes": 0, "vencidos": 0, "sin_resultado": [], "no_buscado": False} for n in PELDANOS}
+    y los vacíos por peldaño (`vacio --peldano`) según su motivo (feedback #56): {peldaño: {"vigentes", "vencidos",
+    "sin_resultado", "sin_leer", "sin_buscar", "no_buscado"}}. Un peldaño sin hallazgos ni vacíos registrados no se
+    buscó (feedback #28)."""
+    claves = {motivo: clave for clave, motivo, _ in VACIOS_PELDANO}
+    conteo = {n: dict({"vigentes": 0, "vencidos": 0, "no_buscado": False}, **{c: [] for c, _, _ in VACIOS_PELDANO})
+              for n in PELDANOS}
     for hallazgo in registro.hallazgos.values():
         evaluacion = registro.evaluar(hallazgo)
         conteo[evaluacion["peldano"]]["vigentes" if evaluacion["independientes"] else "vencidos"] += 1
     for vacio in registro.vacios.values():
         if vacio["dimension"] == "peldano":
-            conteo[int(vacio["valor"])]["sin_resultado"].append(vacio["id"])
+            conteo[int(vacio["valor"])][claves.get(vacio["motivo"], "sin_resultado")].append(vacio["id"])
     for datos in conteo.values():
-        datos["no_buscado"] = not (datos["vigentes"] or datos["vencidos"] or datos["sin_resultado"])
+        datos["no_buscado"] = not (datos["vigentes"] or datos["vencidos"] or any(
+            datos[c] for c, _, _ in VACIOS_PELDANO))
     return conteo
+
+
+def texto_vacios_peldano(datos, separador=", "):
+    """'buscado sin resultado (V-DEM-2), sin leer por límite de las herramientas (V-DEM-3)': cada vacío del peldaño
+    con lo que de verdad pasó (feedback #56)."""
+    return separador.join("%s (%s)" % (texto, ", ".join(datos[clave])) for clave, _, texto in VACIOS_PELDANO
+                          if datos[clave])
+
+
+def busqueda_problema(conteo):
+    """Si el problema se buscó en los peldaños 4 y 5 (hay hallazgos o un vacío sin resultados), None; si lo único
+    registrado son vacíos por límite de las herramientas o por el presupuesto, el texto de esos vacíos (feedback #56):
+    no se buscó del todo, y decir «se buscó» sería decir algo que no pasó."""
+    if any(conteo[n]["vigentes"] or conteo[n]["vencidos"] or conteo[n]["sin_resultado"] for n in (4, 5)):
+        return None
+    return "; ".join("peldaño %d %s" % (n, texto_vacios_peldano(conteo[n])) for n in (4, 5)
+                     if not conteo[n]["no_buscado"])
 
 
 def texto_peldanos(conteo):
@@ -1141,8 +1319,9 @@ def texto_peldanos(conteo):
         total = datos["vigentes"] + datos["vencidos"]
         texto = "%s: %d (%s, %s)" % (nombre, total, plural(datos["vigentes"], "vigente"),
                                      plural(datos["vencidos"], "vencido"))
-        if datos["sin_resultado"]:
-            texto += ", buscado sin resultado (%s)" % ", ".join(datos["sin_resultado"])
+        vacios = texto_vacios_peldano(datos)
+        if vacios:
+            texto += ", " + vacios
         partes.append(texto)
     return " · ".join(partes)
 
@@ -1443,8 +1622,10 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
             elif no_buscado:
                 detalle = "no buscado: ningún hallazgo ni búsqueda sin resultado registrada en los peldaños 4 y 5"
             else:
-                detalle = ("buscado: ningún hallazgo reúne %d fuentes independientes y vigentes de esos peldaños, una "
-                           "de los últimos %s meses" % (minimas, criterios["vigencia_meses"]))
+                sin_buscar = busqueda_problema(conteo)  # solo vacíos de herramienta o presupuesto (feedback #56)
+                detalle = ("%s: ningún hallazgo reúne %d fuentes independientes y vigentes de esos peldaños, una de los "
+                           "últimos %s meses" % ("sin buscar del todo (%s)" % sin_buscar if sin_buscar else "buscado",
+                                                  minimas, criterios["vigencia_meses"]))
             agregar("problema", documentado,
                     "El problema o la necesidad de fondo, con %d fuentes de peldaño 4 o 5" % minimas, detalle)
             analogos = [c for c in registro.competidores.values() if c["peldano"] in (2, 3)]
@@ -2090,13 +2271,15 @@ def motivo_demanda(numero_puerta, producto, registro):
         falta = "Triangular %s en la 1c con una señal medida y reciente de demanda (tendencias de búsqueda, descargas " \
                 "o búsquedas de los últimos %s meses)" % ("; ".join(falta_triangular(registro, h) for h in bajos[:3]),
                                                           meses)
+        alcance = {"hallazgos": [h["id"] for h in bajos[:3]]}  # los que nombra: lo que el ajuste resuelve (#57)
     else:
         falta = "Registrar en la 1c un hallazgo clave de demanda (`hallazgo --linea demanda --critico`) con %s " \
                 "fuentes independientes y recientes, una de ellas medida (tendencias de búsqueda, descargas o " \
                 "búsquedas de los últimos %s meses)" % (producto["criterios"]["fuentes_minimas"], meses)
+        alcance = {"linea": "demanda"}  # un hallazgo nuevo: de cualquier mercado de la línea
     return (False, "La demanda actual tiene confianza %s en la primera pasada de la 1c: ningún hallazgo de demanda está "
                    "confirmado con señales recientes, pero no hay evidencia en contra (sin datos no es lo mismo que sin "
-                   "demanda)" % nivel, falta, "1c", ids, True)
+                   "demanda)" % nivel, falta, "1c", ids, True, alcance)
 
 
 def motivo_problema(numero_puerta, producto, registro):
@@ -2114,19 +2297,23 @@ def motivo_problema(numero_puerta, producto, registro):
     cercano = mas_cercano(registro, ids)
     sesion = sesion_ajustable(numero_puerta, sesion_de(registro, [cercano["id"]] if cercano else [], "1c"), "1c")
     gastada = reapertura_gastada(producto, sesion)
+    sin_buscar = busqueda_problema(conteo_peldanos(registro))  # lo que de verdad pasó en los peldaños (feedback #56)
+    buscado = ("El problema en los peldaños 4 y 5 quedó sin buscar del todo (%s)" % sin_buscar if sin_buscar
+               else "Se buscó el problema en los peldaños 4 y 5")
     if gastada:
-        return (True, "Se buscó el problema en los peldaños 4 y 5, también al reabrir la %s (%s), y ningún hallazgo "
-                      "reúne %s fuentes independientes y vigentes (una de los últimos %s meses)" % (
-                          sesion, gastada, minimas, producto["criterios"]["vigencia_meses"]),
+        return (True, "%s, también al reabrir la %s (%s), y ningún hallazgo reúne %s fuentes independientes y vigentes "
+                      "(una de los últimos %s meses)" % (buscado, sesion, gastada, minimas,
+                                                         producto["criterios"]["vigencia_meses"]),
                 "El problema documentado con %s fuentes independientes y vigentes de peldaño 4 o 5, con evidencia que "
                 "no dependa de más búsquedas en la %s (un navegador en el agente o datos propios)" % (minimas, sesion),
                 None, ids)
-    return (False, "Se buscó el problema en los peldaños 4 y 5 y ningún hallazgo reúne %s fuentes independientes y "
-                   "vigentes (una de los últimos %s meses), pero no hay evidencia en contra: es la primera pasada" % (
-                       minimas, producto["criterios"]["vigencia_meses"]),
+    return (False, "%s y ningún hallazgo reúne %s fuentes independientes y vigentes (una de los últimos %s meses), pero "
+                   "no hay evidencia en contra: es la primera pasada" % (
+                       buscado, minimas, producto["criterios"]["vigencia_meses"]),
             "Triangular %s en la %s con fuentes de peldaño 4 o 5" % (falta_triangular(registro, cercano), sesion)
             if cercano else "Documentar el problema en la %s con %s fuentes independientes y vigentes de peldaño 4 o 5"
-            % (sesion, minimas), sesion, ids, True)
+            % (sesion, minimas), sesion, ids, True,
+            {"hallazgos": [cercano["id"]]} if cercano else {"peldanos": [4, 5]})
 
 
 def nombrados(registro, filas):
@@ -2185,7 +2372,8 @@ def motivo_sin_principal(numero_puerta, producto, registro):
         nombres = y_lista(d["id"] for d in bajas)
         return (False, "No hay un diferenciador principal: %s %s viable%s con confianza baja" % (
             nombres, "es" if len(bajas) == 1 else "son", "" if len(bajas) == 1 else "s"),
-            "Confirmar los hallazgos de %s en la 1g y elegirlo como principal" % nombres, "1g", ids, True)
+            "Confirmar los hallazgos de %s en la 1g y elegirlo como principal" % nombres, "1g", ids, True,
+            alcance_hallazgos(list(dict.fromkeys(i for d in bajas for i, _ in registro.sin_triangular(d)))))
     frente = " frente %s" % a_los_rivales(rivales, "ni") if rivales else ""
     propuestas = [p["id"] for p in propuestas_de(producto, numero_puerta) if p.get("ajustar") == "1g"]
     if propuestas:
@@ -2305,7 +2493,8 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
             return (False, "Nadie buscó el problema en los peldaños 4 y 5: es evidencia no buscada, no evidencia "
                            "buscada y no encontrada", "Buscar el problema en los peldaños 4 y 5 (cómo se resuelve hoy "
                                                       "y la necesidad de fondo) y registrar también lo que no "
-                                                      "aparezca (`vacio --peldano`)", "1c", [])
+                                                      "aparezca (`vacio --peldano`)", "1c", [], True,
+                    {"peldanos": [4, 5]})
         return motivo_problema(numero_puerta, producto, registro)
     if clave == "analogos":
         return (False, "Faltan análogos con tracción (%s)" % detalle,
@@ -2331,7 +2520,8 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
             if otros:
                 razon += "; %s" % texto_estados(registro, otros)
             return (False, razon, "Triangular los hallazgos de %s con 3 fuentes vigentes (una reciente)"
-                    % nombres_bajas, sesion_ajustable(numero_puerta, sesion_de(registro, faltan, "1g"), "1g"), faltan)
+                    % nombres_bajas, sesion_ajustable(numero_puerta, sesion_de(registro, faltan, "1g"), "1g"), faltan,
+                    True, alcance_hallazgos(faltan))
         if viables and registro.rival_pendiente():  # `competidor --rival` no pide reabrir 1a: `frente` es de la 1g
             return (False, "Falta marcar la alternativa gratis más fuerte, el rival que cada diferenciador tiene que "
                            "superar", "Marcarla en la matriz (`competidor … --rival`, sin reabrir 1a) o decir que no "
@@ -2374,7 +2564,8 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
                 % ", ".join(otros), "1g", faltan, False)
         return (False, "Los hallazgos del principal (%s) no están confirmados (%s)" % (principal["id"], ", ".join(
             faltan)), "Confirmar esos hallazgos con 3 fuentes recientes",
-                sesion_ajustable(numero_puerta, sesion_de(registro, faltan, "1g"), "1g"), faltan)
+                sesion_ajustable(numero_puerta, sesion_de(registro, faltan, "1g"), "1g"), faltan, True,
+                alcance_hallazgos(faltan))
     if clave == "riesgo":
         if not puntaje:
             return False, "Falta el puntaje de la síntesis", "Registrar el puntaje en la síntesis (sesión 1f)", "1f", []
@@ -2447,7 +2638,9 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     revisar = sorted(a_revisar_por_tipo(producto, registro) if numero_puerta == 1 else [],
                      key=lambda r: ("1c", "1b", "1d", "1g").index(r[0]))
     sin_buscar = [s for s, _, _ in revisar]
-    # cada motivo: (razón, qué lo cambiaría, sesión que lo completa, si completarlo pide investigar más)
+    # cada motivo: (razón, qué lo cambiaría, sesión que lo completa, si completarlo pide investigar más, y lo que la
+    # búsqueda tiene que resolver o None si no se sabe: {"hallazgos"}, {"peldanos"} o {"linea"}, para los vacíos de
+    # herramienta de la sesión, feedback #57)
     fatales, ajustes, hallazgos = [], [], []
     # Viable para probar (feedback #47): los criterios que solo fallan por la prueba de elección se difieren al
     # lanzamiento si un diferenciador supera al rival con el dolor triangulado; si no es el principal, elegirlo en la 1g
@@ -2461,7 +2654,8 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                         "se buscó (no es evidencia en contra)" % (sesion, "como idea %s" % antes if antes else
                                                                   "sin tipo registrado", tipo_de(producto),
                                                                   y_lista(str(n) for n in peldanos)),
-                        "Ajustar la sesión %s con el tipo de hoy (%s)" % (sesion, tipo_de(producto)), sesion, True))
+                        "Ajustar la sesión %s con el tipo de hoy (%s)" % (sesion, tipo_de(producto)), sesion, True,
+                        {"peldanos": list(peldanos)}))
     if probar and not principal_probar:
         principal = registro.principal()
         ajustes.append(("%s %s %s con el dolor triangulado (%s para probar), pero %s" % (
@@ -2472,7 +2666,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             else "el principal (%s) no supera %s con el dolor triangulado" % (principal["id"], a_los_rivales(
                 registro.rivales())) if principal else "no hay un diferenciador principal elegido"),
             "Elegir como principal %s en la 1g (no pide búsquedas): el veredicto pasaría a Viable para probar"
-            % y_lista((d["id"] for d in probar), "o"), "1g", False))
+            % y_lista((d["id"] for d in probar), "o"), "1g", False, None))
         hallazgos += [i for d in probar for i in d.get("hallazgos", [])]
     for criterio in evaluados:
         if not criterio["cumple"] and probar and criterio["clave"] in CRITERIOS_ELECCION:
@@ -2483,16 +2677,17 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             fatal, razon, cambiaria, sesion, ids, *resto = motivos_criterio(numero_puerta, criterio, producto,
                                                                             registro)
             depende = [s for s in sin_buscar if s in DEPENDE_CRITERIO.get(criterio["clave"], ())]
+            alcance = resto[1] if len(resto) > 1 else None
             if fatal and depende:  # no se descarta por un criterio cuya evidencia no se buscó
-                fatal, sesion = False, depende[0]
-            (fatales if fatal else ajustes).append((razon, cambiaria, sesion, resto[0] if resto else True))
+                fatal, sesion, alcance = False, depende[0], None
+            (fatales if fatal else ajustes).append((razon, cambiaria, sesion, resto[0] if resto else True, alcance))
             hallazgos += ids
     vigente_ = puntaje_vigente(producto, registro) if numero_puerta == 1 else None
     if numero_puerta == 1 and not fatales:
         revisar_rival = rival_a_revisar(registro)
         if revisar_rival:
             ajustes.append(("Revisar el rival: " + texto_rival_a_revisar(registro, revisar_rival),
-                            "Confirmar o cambiar el rival y comparar cada diferenciador con él", "1g", False))
+                            "Confirmar o cambiar el rival y comparar cada diferenciador con él", "1g", False, None))
     rivales = registro.rivales() if numero_puerta == 1 else []
     if rivales and not fatales and not probar:  # superar al rival no alcanza si nada prueba que eso hace elegir la app
         filas = filas_hipotesis
@@ -2505,7 +2700,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                 elegido["id"], a_los_rivales(rivales), "; ".join(faltas)),
                 "Un hallazgo triangulado y en confianza alta que muestre que la gente elige por %s frente %s, o "
                 "un vector todavía sin investigar" % (elegido["id"], a_los_rivales(rivales)),
-                sesion_ajustable(1, sesion_de(registro, debiles, "1g"), "1g"), True))
+                sesion_ajustable(1, sesion_de(registro, debiles, "1g"), "1g"), True, None))
             hallazgos += debiles
     if numero_puerta == 1 and producto.get("puntaje") and not fatales:
         por_criterio, global_ = confianzas(registro)
@@ -2514,19 +2709,22 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             criterio = debiles[0][1]
             ids = sustento(registro)[criterio] or []
             sesion = SESION_CRITERIO[criterio]
+            por_confirmar = [i for i in ids if i in registro.hallazgos
+                             and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
             if criterio == "diferenciacion" and registro.principal():
-                sesion = sesion_ajustable(1, sesion_de(registro, [i for i, _ in registro.sin_triangular(
-                    registro.principal())], "1g"), "1g")
+                por_confirmar = [i for i, _ in registro.sin_triangular(registro.principal())]
+                sesion = sesion_ajustable(1, sesion_de(registro, por_confirmar, "1g"), "1g")
             ajustes.append(("La confianza global es baja: %s se apoya%s en evidencia sin confirmar" % (
                 ", ".join(NOMBRES_CRITERIO[c] for _, c in debiles), "n" if len(debiles) > 1 else ""),
-                "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion, True))
+                "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion, True,
+                alcance_hallazgos(por_confirmar)))
             hallazgos += ids
     if not fatales:
         for propuesta in propuestas_de(producto, numero_puerta):
             sesion = propuesta.get("ajustar")
             if sesion and not vacios_de_sesion(producto, registro, sesion):  # se puede cerrar
                 ajustes.append(("Hay una propuesta pendiente (%s): %s" % (propuesta["id"], llano(propuesta["texto"])),
-                                "Aplicarla al ajustar la sesión %s" % sesion, sesion, False))
+                                "Aplicarla al ajustar la sesión %s" % sesion, sesion, False, None))
     # La 1g que ya se reabrió y usó su presupuesto, y la 1c que ya se reabrió (feedback #55), no se recomiendan otra
     # vez para buscar más evidencia: si no queda ningún otro ajuste que lo resuelva, el veredicto es No viable.
     agotadas = {s: t for s, t in (("1g", presupuesto_agotado(producto, registro, "1g")),
@@ -2542,7 +2740,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                 "La sesión %s ya se reabrió%s (%s): ajustarla otra vez no traería evidencia nueva" % (
                     s, " y usó su presupuesto" if s == "1g" else "", agotadas[s]),
                 "Evidencia que no dependa de más búsquedas en la %s: un navegador en el agente, un CSV de reseñas que "
-                "aportes o datos propios" % s, None, True) for s in sesiones_]
+                "aportes o datos propios" % s, None, True, None) for s in sesiones_]
             ajustes = []
     descarte = None
     if fatales:
@@ -2597,23 +2795,27 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                             "elegirlo" % (exigido["modelo"], texto_puntaje(exigido),
                                           nombre_modelo(producto["puntaje"]), texto_puntaje(
                                               puntajes_por_modelo(producto, registro)[0])), None, None, False))
-    razones = [r for r, _, _, _ in elegidas][:MAXIMO_RAZONES]
-    cambiaria = list(dict.fromkeys(c for _, c, _, _ in cambios if c))[:MAXIMO_RAZONES]
+    razones = [motivo[0] for motivo in elegidas][:MAXIMO_RAZONES]
+    cambiaria = list(dict.fromkeys(motivo[1] for motivo in cambios if motivo[1]))[:MAXIMO_RAZONES]
+    # lo que el ajuste de la sesión recomendada tiene que resolver (feedback #57): (si pide buscar, alcance, qué)
+    por_resolver = [(a[3], a[4], a[1]) for a in ajustes if a[2] == sesion] if nivel == "reservas" else []
     if nivel == "reservas":
         if not any("Viable para probar" in c for c in cambiaria):
             despues = probar or (numero_puerta == 1 and candidatos_para_probar(  # con la demanda ajustada (#55)
                 carpeta, producto, registro, filas_hipotesis, con_demanda=False))
             cambiaria.append("Con eso, el veredicto pasaría a %s" % ("Viable para probar" if despues else "Viable"))
-        herramienta = vacios_de_sesion(producto, registro, sesion)  # solo los de la línea dueña (feedback #44)
-        if herramienta:
-            cambiaria.append("%s: antes de ajustarla, dale al agente un navegador o aporta un CSV de reseñas" % (
-                texto_vacios_sesion(sesion, herramienta)))
+        bloqueo = bloqueo_herramienta(producto, registro, sesion, por_resolver)  # solo la línea dueña (#44 y #57)
+        if bloqueo:
+            cambiaria.append(texto_bloqueo(sesion, bloqueo))
+    else:
+        bloqueo = None
     abiertas = [s for s in DEPENDE["P%d" % numero_puerta] if not cerrada(producto, s)]
     return {"puerta": numero_puerta, "nivel": nivel, "titulo": VEREDICTOS[nivel]["titulo"],
             "recomienda": VEREDICTOS[nivel]["recomienda"], "sesion": sesion, "razones": razones,
             "cambiaria": cambiaria, "provisional": abiertas, "hallazgos": list(dict.fromkeys(hallazgos)),
             "incoherencias": (vigente_ or {}).get("incoherencias", []),
-            "diferidos": diferidos if nivel in ("probar", "reservas") else [], "descarte": descarte}
+            "diferidos": diferidos if nivel in ("probar", "reservas") else [], "descarte": descarte,
+            "por_resolver": por_resolver, "bloqueo": bloqueo}
 
 
 def primera_mayuscula(texto):
@@ -5138,8 +5340,9 @@ def ajustes_previos(lista_decisiones, numero_puerta, sesion):
 
 def parada_autonoma(numero_puerta, carpeta, producto, registro, resultado):
     """Por qué el modo autónomo se detiene en esta puerta y le pregunta al usuario, o None (feedback #49): la puerta
-    pide ajustar la misma sesión por tercera vez, o la sesión que se recomienda ajustar tiene vacíos por límite de las
-    herramientas (un navegador o un CSV de reseñas solo los puede dar el usuario: ajustarla otra vez da lo mismo)."""
+    pide ajustar la misma sesión por tercera vez, o lo que el ajuste de esa sesión tiene que resolver depende entero de
+    sus vacíos por límite de las herramientas (feedback #57; un navegador o un CSV de reseñas solo los puede dar el
+    usuario: ajustarla otra vez da lo mismo). Un vacío del que el ajuste no depende no lo detiene."""
     if resultado["recomienda"] != "ajustar":
         return None
     sesion = resultado["sesion"]
@@ -5147,10 +5350,12 @@ def parada_autonoma(numero_puerta, carpeta, producto, registro, resultado):
     if previos >= 2:
         return ("la puerta %d pide ajustar la sesión %s por tercera vez (ya se ajustó %s): otra vuelta automática no "
                 "promete nada nuevo" % (numero_puerta, sesion, plural(previos, "vez", "veces")))
-    herramienta = vacios_de_sesion(producto, registro, sesion)
-    if herramienta:
-        return "%s: antes de ajustarla hace falta un navegador en el agente o un CSV de reseñas que aporte el usuario" % (
-            texto_vacios_sesion(sesion, herramienta))
+    bloqueo = resultado["bloqueo"] if "bloqueo" in resultado else bloqueo_herramienta(producto, registro, sesion, [])
+    if bloqueo and bloqueo["detener"]:  # solo si el ajuste depende entero de esos vacíos (feedback #57)
+        return "%s: antes de ajustarla hace falta un navegador en el agente o un CSV de reseñas que aporte el usuario%s" % (
+            texto_vacios_sesion(sesion, bloqueo["vacios"]), " (lo que el ajuste tiene que resolver depende solo de %s: "
+            "%s)" % ("ese vacío" if len(bloqueo["vacios"]) == 1 else "esos vacíos", bloqueo["motivo"])
+            if bloqueo["motivo"] else "")
     return None
 
 
@@ -5326,6 +5531,11 @@ def cmd_decidir(args):
             ", ".join(sorted(reabiertas, key=lambda s: [x["id"] for x in SESIONES].index(s))) or "ninguna"))
         lineas_sesion = lineas_de(reabiertas)
         herramienta = vacios_de_herramienta(producto, registro, lineas_sesion) if lineas_sesion else []
+        bloqueo = resultado.get("bloqueo") if (resultado["recomienda"], resultado["sesion"]) == ("ajustar", sesion) \
+            else None
+        if bloqueo and not bloqueo["detener"]:  # el ajuste recomendado no depende de ellos (feedback #57): un aviso
+            print("· %s." % texto_bloqueo(sesion, bloqueo))
+            herramienta = [v for v in herramienta if v not in bloqueo["vacios"]]
         if herramienta:
             print("⚠ %s tiene vacíos por límite de las herramientas (%s). Con las mismas herramientas, el ajuste da lo "
                   "mismo: antes, dale al agente un navegador o consigue un CSV de reseñas (references/investigacion.md "
@@ -6220,9 +6430,8 @@ def seccion_peldanos(producto, registro):
         if datos["no_buscado"]:
             estado = chip("no buscado", "neutro")
         else:
-            estado = "%s · %s%s" % (plural(datos["vigentes"], "vigente"), plural(datos["vencidos"], "vencido"),
-                                    " · buscado sin resultado (%s)" % ", ".join(datos["sin_resultado"])
-                                    if datos["sin_resultado"] else "")
+            estado = " · ".join([plural(datos["vigentes"], "vigente"), plural(datos["vencidos"], "vencido")] + (
+                [texto_vacios_peldano(datos, " · ")] if texto_vacios_peldano(datos) else []))
         filas.append("<tr><td>%d · %s</td><td>%s</td></tr>" % (peldano, escape(PELDANOS_LLANO[peldano]),
                                                                estado if datos["no_buscado"] else escape(estado)))
     return tarjeta("Hallazgos por peldaño", '<p class="nota">Una idea nueva se investiga por analogía: cada peldaño se '

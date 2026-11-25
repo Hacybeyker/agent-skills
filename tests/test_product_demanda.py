@@ -87,17 +87,20 @@ class DemandaBajaTest(Base):
         self.assertIn("Evidencia de demanda que no dependa de más búsquedas en la 1c", salida)
         self.assertNotIn("AJUSTAR 1c", salida)
 
-    def test_con_vacios_de_herramienta_en_la_1c_ajusta_y_el_modo_autonomo_se_detiene(self):
-        self.demanda_debil()
+    def test_con_vacios_de_herramienta_en_la_1c_ajusta_y_solo_se_detiene_si_el_ajuste_depende_de_ellos(self):
+        debil = self.demanda_debil()  # sus fuentes son de MX
         self.p("objetivo", "--mercados", "MX,AR", "--motivo", "Sumamos Argentina")
         self.p("vacio", "--linea", "demanda", "--mercado", "AR", "--motivo", "herramienta", "--texto",
                "La tendencia de búsqueda es un gráfico que no se lee como texto")
         salida = self.p("puerta", "--n", 1)
         self.assertIn("AJUSTAR 1c", salida)
-        self.assertIn("La sesión 1c (demanda) tiene un vacío por límite de las herramientas", salida)
-        self.assertIn("antes de ajustarla, dale al agente un navegador", salida)
+        # el vacío es de AR y el hallazgo a triangular es de MX: es un aviso y el modo autónomo sigue (feedback #57)
+        self.assertIn("La sesión 1c (demanda) tiene un vacío por límite de las herramientas (V-DEM-1: mercado AR): el "
+                      "vacío V-DEM-1 sigue: con las mismas herramientas no se resuelve, pero el ajuste no depende de él "
+                      "(%s tiene fuentes de mercado MX)" % debil, salida)
+        self.assertNotIn("antes de ajustarla", salida)
         automatico = self.json()["pasos"][0]["automatico"]
-        self.assertEqual((automatico["decision"], automatico["sesion"], automatico["detener"]), ("ajustar", "1c", True))
+        self.assertEqual((automatico["decision"], automatico["sesion"], automatico["detener"]), ("ajustar", "1c", False))
 
     def test_el_modo_autonomo_cuenta_el_ajuste_de_la_1c_para_el_tope(self):
         self.demanda_debil()

@@ -335,8 +335,8 @@ class AutonomoTest(Base):
                       "sesión 1d por tercera vez (ya se ajustó 2 veces)", error)
         self.p("decidir", "--puerta", 1, "--ajustar", "1d")  # el usuario sí puede decidirlo
 
-    def test_un_vacio_de_herramienta_en_la_sesion_a_ajustar_se_detiene(self):
-        self.investigacion()
+    def test_un_vacio_de_herramienta_del_que_depende_el_ajuste_lo_detiene(self):
+        self.investigacion()  # las fuentes de H-MON-1 son de MX
         self.p("confianza", "--hallazgo", "H-MON-1", "--bajar", "baja", "--motivo", "Las fuentes se contradicen")
         self.p("objetivo", "--mercados", "MX,AR", "--motivo", "Sumamos Argentina")
         self.p("vacio", "--linea", "monetizacion", "--mercado", "AR", "--motivo", "herramienta", "--texto",
@@ -344,8 +344,13 @@ class AutonomoTest(Base):
         self.p("puntaje", "--valores", "4,4,4,4,3")
         self.cerrar("1f", "01-sintesis.md")
         automatico = self.json()["pasos"][0]["automatico"]
+        self.assertEqual((automatico["sesion"], automatico["detener"]), ("1d", False))  # AR no es de lo que se ajusta
+        self.p("vacio", "--linea", "monetizacion", "--mercado", "MX", "--motivo", "herramienta", "--texto",
+               "Los precios de MX ya no se leen: página dinámica")
+        automatico = self.json()["pasos"][0]["automatico"]
         self.assertTrue(automatico["detener"])
         self.assertIn("un navegador en el agente o un CSV de reseñas que aporte el usuario", automatico["motivo"])
+        self.assertIn("H-MON-1 solo tiene fuentes de mercado MX", automatico["motivo"])
 
     def test_la_sesion_0_trae_el_texto_del_modo_autonomo(self):
         paso = self.json()["pasos"][0]
