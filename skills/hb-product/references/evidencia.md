@@ -12,7 +12,7 @@ python3 -I <skill>/scripts/producto.py fuente --linea demanda --url https://ejem
 
 Devuelve el ID (`S-DEM-1`). Los códigos por línea: `COM` competencia, `VOZ` voz del usuario, `DEM` demanda, `MON` monetización, `POL` políticas, `DIF` diferenciación, `EST` estrategia y `VAL` validación. Cada sesión registra **solo en su línea**; puede citar fuentes de otra.
 
-- **`--publicada`:** la **fecha real de publicación**, `AAAA-MM-DD` o `AAAA-MM`, o `desconocida` si de verdad no aparece (con `--archivo`, también `auto`; `sin-fecha` es el nombre anterior de `desconocida`). Una fuente sin fecha o fuera de la ventana no es vigente: no cuenta para triangular ni para la confianza (abajo).
+- **`--publicada`:** la **fecha real de publicación**, `AAAA-MM-DD`, `AAAA-MM` o, si solo se sabe el año, `AAAA` (cuenta desde el 1 de enero, la fecha más antigua posible, y queda como fecha aproximada), o `desconocida` si de verdad no aparece (con `--archivo`, también `auto`; `sin-fecha` es el nombre anterior de `desconocida`). Una fuente sin fecha o fuera de la ventana no es vigente: no cuenta para triangular ni para la confianza (abajo).
   - Una reseña, un hilo, un artículo o un video llevan **su** fecha, no la del día en que los leíste: una reseña de 2011 leída hoy es de 2011. Si la página no la muestra, `desconocida`; buscarla casi siempre vale más.
   - Un **dato vivo** (el contador de una ficha, una tendencia de los últimos 12 meses) sí lleva la fecha del día en que lo leíste.
   - Si la fecha de publicación coincide con la de consulta, `fuente` lo avisa: confirma que es un dato vivo o corrígela (`anular` y otra vez `fuente`). Nunca se acepta una publicación posterior a la consulta (`--consultada`, por defecto hoy).
@@ -31,6 +31,8 @@ Devuelve el ID (`S-DEM-1`). Los códigos por línea: `COM` competencia, `VOZ` vo
 - **`--resumen`:** 3 líneas como máximo. Parafrasea; una cita textual va breve y sin quién la escribió.
 - **`--mercados`, `--idiomas`, `--tiendas`:** la cobertura que aporta la fuente, con las etiquetas del objetivo ([investigacion.md](investigacion.md) · Cobertura).
 - **`--tipo oficial`** lleva `--version "<versión o fecha de la última actualización>"` o una `--publicada` real: así se sabe qué versión leíste. Un blog o una nota de prensa que resume una política es `terceros`, no `oficial`.
+- **`--clase estadistica|academica`:** la vigencia larga de los datos estructurales (abajo, Triangulación). `estadistica` es un censo o una encuesta nacional de un organismo oficial; `academica`, un estudio académico (un artículo, una tesis, un informe con metodología). Una edición nueva de una estadística lleva `--reemplaza <S-…>` con la anterior.
+- **Completar una fuente.** Si registraste una fuente con `--publicada desconocida` y después encuentras su fecha (o solo el año), o le falta la clase, repite `fuente` con la misma URL: completa lo que falta, sin pisar lo que ya tiene.
 - **`--acumulado`** (solo con `--tipo medido`): el dato es acumulado desde el lanzamiento (descargas totales, valoraciones históricas). En la línea demanda es **contexto, no una señal actual**: no cuenta para la confianza ni para triangular un hallazgo de demanda ([puntaje.md](puntaje.md)). En otras líneas cuenta como siempre.
 - **`--archivo` en vez de `--url`:** un CSV de reseñas que aportó el usuario. Lleva `--autor` (la app y la tienda de esas reseñas), que es lo que la hace independiente de otra.
 
@@ -54,7 +56,16 @@ Si te equivocas, `producto.py anular --id <ID> --motivo "<por qué>"` deja el re
 Un hallazgo clave está triangulado cuando tiene **3 fuentes independientes y vigentes** y, si es de demanda o de monetización, al menos una de tipo `medido`.
 
 - **Independientes:** de autor distinto. Sin `--autor`, cuenta el dominio: tres páginas del mismo sitio son una sola fuente. Dos páginas de un mismo dominio cuentan por separado solo si sus autores son distintos (las fichas de dos apps en la misma tienda, dos medios en la misma plataforma).
-- **Vigentes:** publicadas dentro de la ventana (`vigencia_meses`, 18 por defecto). Una fuente sin fecha o fuera de la ventana no cuenta, y se nombra en lo que le falta al hallazgo.
+- **Vigentes:** publicadas dentro de su ventana, según el tipo de fuente. Una fuente sin fecha o fuera de su ventana no cuenta, y se nombra en lo que le falta al hallazgo.
+
+| Tipo de fuente | Vigente |
+| --- | --- |
+| Estadística oficial (`--clase estadistica`): censos, encuestas nacionales | Hasta que sale una edición más nueva (`--reemplaza`), con un máximo de 5 años (`vigencia_larga_meses`, 60) |
+| Estudio académico (`--clase academica`) | 5 años desde su publicación |
+| Norma (`--tipo oficial`): la política de una tienda, una ley | Mientras no la reemplacen: cuenta la fecha en que la consultaste |
+| Todo lo demás: reseñas, tiendas, prensa, tráfico, precios | 18 meses (`vigencia_meses`) |
+
+- **Una reciente.** De las 3 fuentes de un hallazgo clave, al menos una tiene que ser de los últimos 18 meses: los datos estructurales sostienen la necesidad de fondo, pero no muestran por sí solos que siga hoy.
 - **En una idea nueva** se triangula el peldaño más cercano a lo directo que tenga evidencia: el problema o el análogo, no la solución exacta.
 - **En políticas, la norma misma basta.** Un hallazgo de la línea `politicas` con una fuente `oficial` y vigente queda triangulado (y con confianza alta) aunque sea la única: es la fuente primaria. Una fuente oficial rige mientras no la reemplacen, así que cuenta como vigente si la **consultaste** dentro de la ventana, aunque se haya publicado antes. Fuera de políticas, una fuente oficial cuenta como cualquier otra.
 - **En demanda, los datos acumulados no cuentan** (`--acumulado`): la triangulación pide señales actuales.
@@ -67,7 +78,7 @@ La calcula el script; tú no la escribes. **Usa la misma regla de vigencia que l
 
 | Confianza | Cuándo |
 | --- | --- |
-| Alta | Triangulado, y al menos 2 de sus fuentes independientes no son `opinion`; en políticas, también con una sola fuente `oficial`. Sin triangular nunca es alta |
+| Alta | Triangulado (con una fuente reciente), y al menos 2 de sus fuentes independientes no son `opinion`; en políticas, también con una sola fuente `oficial`. Sin triangular nunca es alta |
 | Media | 2 fuentes independientes y vigentes (al menos una que no sea `opinion`), o 3 que no alcanzan lo anterior |
 | Baja | 1 fuente vigente, 2 que son solo opinión, o ninguna vigente |
 | Sin evidencia | Ningún hallazgo sostiene la afirmación |

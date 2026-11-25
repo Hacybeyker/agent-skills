@@ -71,6 +71,7 @@ class ModelosTest(Base):
         self.assertIn("1. Este chat · Sesión 0 · Idea · Modelo: Sonnet 5.5 · Esfuerzo: medio", salida)
         self.assertNotIn("modelo sugerido", salida)
         self.completar("criterios.md")
+        self.p("tipo", "--existente", "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         salida = self.cerrar("0", "00-idea.md")
         self.assertIn("Sesión 1a · Competencia · Modelo: Sonnet 5.5 · Esfuerzo: medio", salida)
         self.assertIn("modelos --herramienta <claude|copilot>", salida)
@@ -134,6 +135,7 @@ class MetaTest(Base):
         self.p("nuevo", "--nombre", "Riego en turnos", "--semanas", 6, "--mercados", "MX", "--idiomas", "es",
                "--tiendas", "google-play")
         self.completar("criterios.md")
+        self.p("tipo", "--existente", "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         self.assertIn("✔ Sesión 0 · Idea cerrada", self.cerrar("0", "00-idea.md"))
         self.assertIn("sin meta de ingresos (opcional)", self.p("estado"))
 
@@ -220,11 +222,11 @@ class ReglaUnicaTest(Base):
                                                                              publicada="sin-fecha")
         hallazgo, salida = self.hallazgo("voz-del-usuario", fuentes, "--critico", "--sin-contra", "Nada")
         self.assertIn("confianza media · sin triangular", salida)
-        self.assertIn("%s sin fecha o fuera de la ventana de 18 meses: no cuenta(n) para la confianza ni para "
+        self.assertIn("%s sin fecha o fuera de su ventana de vigencia: no cuenta para la confianza ni para "
                       "triangular" % fuentes[2], salida)
         salida = self.p("triangulacion")
         self.assertIn("✖ %s · confianza media · sin triangular" % hallazgo, salida)
-        self.assertIn("→ %s sin fecha o fuera de la ventana de 18 meses: no cuenta" % fuentes[2], salida)
+        self.assertIn("→ %s sin fecha o fuera de su ventana de vigencia: no cuenta" % fuentes[2], salida)
         self.assertIn("0 de 1 hallazgos clave triangulados (regla 2)", salida)
 
     def test_con_tres_vigentes_una_sin_fecha_no_impide_triangular(self):
@@ -286,8 +288,8 @@ class DiferenciadorTrianguladoTest(Base):
         self.assertIn("Diferenciación = 3 no corresponde", self.falla("puntaje", "--valores", "4,4,4,4,3"))
         self.p("puntaje", "--valores", "4,4,4,4,2")
         salida = self.cerrar("1f", "01-sintesis.md")
-        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 0 viables, 1 con "
-                      "confianza baja de 1 registrado", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 0 viables de 1 "
+                      "registrado: D-1 (viable con confianza baja)", salida)
         self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados · D-1: %s sin triangular "
                       "(falta 1 fuente independiente y vigente (tiene 2 de 3))" % debil, salida)
 
@@ -299,8 +301,8 @@ class DiferenciadorTrianguladoTest(Base):
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
         self.p("puntaje", "--valores", "4,4,4,4,3")
         salida = self.p("puerta", "--n", 1)
-        self.assertIn("✔ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 1 viable, 1 con "
-                      "confianza baja de 2 registrados", salida)
+        self.assertIn("✔ Al menos 1 diferenciador viable, con sus hallazgos triangulados · 1 viable de 2 "
+                      "registrados: D-2 (viable); D-1 (viable con confianza baja)", salida)
         self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados · D-1", salida)
 
     def test_la_puerta_1_avisa_la_confianza_global_baja(self):
@@ -377,6 +379,7 @@ class CoberturaTest(Base):
         self.p("nuevo", "--nombre", "Riego en turnos", "--semanas", 6, "--mercados", "MX,ES", "--idiomas", "es,pt",
                "--tiendas", "google-play,app-store")
         self.completar("criterios.md")
+        self.p("tipo", "--existente", "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         self.cerrar("0", "00-idea.md")
         self.p("tipo", "--existente", "--motivo", "Hay dos apps directas con más de 100k descargas")
 
@@ -673,7 +676,7 @@ class SustitutoTest(Base):
     def test_un_sustituto_nativo_que_resuelve_deja_al_diferenciador_sin_viabilidad(self):
         fila, salida = self.investigar()
         self.assertIn("Es gratuito o nativo y ya resuelve la necesidad", fila)
-        self.assertIn("✖ D-1 registrado como principal: todavía no es viable", salida)
+        self.assertIn("✖ D-1 registrado como principal: no viable", salida)
         self.assertIn("✖ Frente al rival: sin comparar con C-3 (Recordatorio del sistema) (`frente --id D-1 --rival "
                       "C-3", salida)
         self.assertIn("Rival a superar (la alternativa gratis más fuerte o un sustituto gratuito o nativo que ya "
@@ -837,8 +840,8 @@ class FechaPublicacionTest(Base):
     def test_desconocida_no_cuenta_y_sin_fecha_sigue_valiendo(self):
         self.nuevo()
         for valor in ("desconocida", "sin-fecha"):
-            self.assertIn("sin fecha o fuera de la ventana", self.fuente_con(valor))
-        self.assertIn("AAAA-MM-DD, AAAA-MM o desconocida", self.falla(
+            self.assertIn("sin fecha o fuera de su ventana", self.fuente_con(valor))
+        self.assertIn("AAAA-MM-DD, AAAA-MM, AAAA (solo el año) o desconocida", self.falla(
             "fuente", "--linea", "demanda", "--url", "https://a.example/z", "--publicada", "ayer", "--tipo",
             "usuario", "--peldano", 1, "--resumen", "x"))
 

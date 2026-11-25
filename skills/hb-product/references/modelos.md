@@ -17,8 +17,9 @@ La skill no elige el modelo: lo recomienda. `producto.py siguiente` imprime en c
 | 2 · Estrategia | Opus 5.5 (alto) | alto | Propuesta de valor, PR/FAQ y escenarios |
 | 3 · Validación documental | Opus 5.5 (alto) | alto | Abogado del diablo |
 | 4 · PRD | Opus 5.5 (alto) | alto | Priorización y trazabilidad |
+| Orquestador (modo orquestado) | Haiku 5.5 (económico) | bajo | Solo corre `producto.py`, lee su JSON y lanza subagentes |
 
-Los nombres son los de fábrica (`intermedio` y `alto`). Las decisiones de las puertas no usan modelo: van en la terminal.
+Los nombres son los de fábrica (`intermedio`, `alto` y `economico`). Las decisiones de las puertas no usan modelo: van en la terminal.
 
 ## Cambiar los nombres o la herramienta
 
@@ -28,7 +29,7 @@ Los nombres son los de fábrica (`intermedio` y `alto`). Las decisiones de las p
 cd <raíz> && python3 -I <skill>/scripts/producto.py modelos --intermedio "Sonnet 5.5" --alto "Opus 5.5" --herramienta claude --carpeta product
 ```
 
-- **`--intermedio` y `--alto`:** el nombre del modelo de cada nivel. Un id (sin espacios ni mayúsculas, como `claude-opus-5-5`) va tal cual al comando.
+- **`--intermedio`, `--alto` y `--economico`:** el nombre del modelo de cada nivel (el económico es el del chat orquestador). Un id (sin espacios ni mayúsculas, como `claude-opus-5-5`) va tal cual al comando.
 - **`--herramienta`:** con `claude` o `copilot`, cada chat de `siguiente` trae su línea `Abrir:` con el comando completo; `ninguna` la quita.
 - **`--herramienta otra --comando "<cli> --model {modelo}"`:** para otra CLI. `{modelo}` se reemplaza por el nombre del nivel y, si el comando lo lleva, `{esfuerzo}` por `low`, `medium` o `high`.
 
@@ -39,7 +40,18 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py modelos --intermedio "Sonne
 
 Sin herramienta anotada, eliges el modelo y el esfuerzo en el selector del chat antes de escribir. Dentro de una sesión, `/model` cambia los dos en ambas CLIs.
 
-**Con subagentes** (un chat orquestador que lanza las sesiones): cada subagente usa el modelo de su sesión. En Claude Code, el parámetro `model` de cada subagente acepta el alias (`sonnet`, `opus`); con otra herramienta, lo que ofrezca.
+## Subagentes del modo orquestado
+
+En el modo orquestado ([orquestacion.md](orquestacion.md)) cada sesión es un subagente, con el modelo de su nivel: `producto.py siguiente --json` trae, por cada sesión, `nivel`, `modelo` y `subagente` con los valores que acepta la herramienta. En Claude Code, el parámetro de modelo de un subagente es un alias de familia (`haiku`, `sonnet`, `opus` o `fable`), que toma la versión más nueva de esa familia, y el de esfuerzo, `low`, `medium` o `high`.
+
+| Sesión | Nivel | Subagente en Claude Code (por defecto) | Esfuerzo |
+| --- | --- | --- | --- |
+| 0 y 1a a 1e | `intermedio` | `sonnet` | `medium` |
+| 1g, 1f, 2, 3 y 4 | `alto` | `opus` | `high` |
+| El orquestador (el chat) | `economico` | — (es el chat: `claude --model claude-haiku-5-5 --effort low`) | `low` |
+
+- **El alias sale del nombre:** "Opus 5.5" da `opus`. Si cambias un nivel con `modelos`, el subagente cambia con él. Un nombre de otro proveedor ("GPT 5.3 Codex") da `null`: el orquestador usa el equivalente de su herramienta para ese nivel.
+- **Mismo ahorro que un chat por sesión:** un subagente arranca con su propio contexto (la skill, su referencia y `estado.md`), no con el del orquestador, y le devuelve un resumen de 10 líneas como máximo.
 
 ## Por qué se encarece
 
@@ -69,7 +81,7 @@ Repetir `consumo` con la misma `--sesion` actualiza su fila: lo nuevo reemplaza 
 
 | Herramienta | Dónde se ve | Por sesión con subagentes |
 | --- | --- | --- |
-| Claude Code | `/cost` (USD del chat) | El resultado de cada subagente trae sus tokens y la cantidad de herramientas que usó: el orquestador anota cada uno con `consumo --sesion <id> --tokens <n> --pasos <n>` y, al cerrar, el total del chat con `consumo --sesion orquestador --incluye <sesiones> --costo '<USD de /cost>'`. Por verificar en cada versión: el formato no está documentado como estable |
+| Claude Code | `/cost` (USD del chat) | El aviso de fin de cada subagente trae sus tokens y la cantidad de herramientas que usó: el orquestador espera a que terminen todos y anota cada uno con `consumo --sesion <id> --tokens <n> --pasos <n>`; al cerrar, el total del chat con `consumo --sesion orquestador --incluye <sesiones> --costo '<USD de /cost>'`, sin `--tokens` (ya van por sesión: el total no los cuenta dos veces). Por verificar en cada versión: el formato no está documentado como estable |
 | GitHub Copilot CLI | `/usage` (AI Credits y tokens) | Solo el total del chat: `consumo --sesion orquestador --incluye <sesiones> --creditos <n>` |
 | Otra | Lo que muestre | Si no da el uso por subagente, el total con `--incluye` |
 

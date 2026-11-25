@@ -113,8 +113,12 @@ class VeredictoTest(Base):
         self.assertIn("Con eso, el veredicto pasaría a Viable", salida)
         self.assertIn("   ★ Recomendado · Ajustar 1d: cd ", salida)
         self.assertIn("decidir --puerta 1 --ajustar 1d --carpeta product", salida)
-        # ajustar otra sesión no va en contra: es la misma decisión
-        self.assertIn("· Coincide con la recomendación", self.p("decidir", "--puerta", 1, "--ajustar", "1c"))
+        # ajustar otra sesión que la recomendada pide el motivo y queda como decisión en contra (feedback #26)
+        self.assertIn("Para ajustar la sesión 1c en contra de la recomendación, agrega --motivo",
+                      self.falla("decidir", "--puerta", 1, "--ajustar", "1c"))
+        self.assertIn("⚠ Decisión contra la recomendación (la skill recomendaba ajustar la sesión 1d",
+                      self.p("decidir", "--puerta", 1, "--ajustar", "1c", "--motivo", "La demanda me preocupa más"))
+        self.assertTrue(producto.decisiones(self.carpeta)[-1]["contra_recomendacion"])
 
     def test_una_propuesta_que_no_se_cierra_con_las_herramientas_no_pide_ajustar(self):
         self.hasta_puerta2()
@@ -191,7 +195,8 @@ class PuntajeDesactualizadoTest(Base):
     def test_avisa_y_el_veredicto_usa_el_puntaje_con_las_reglas_de_hoy(self):
         self.registrar_con_reglas_viejas()
         salida = self.p("puerta", "--n", 1)
-        self.assertIn("✔ Puntaje de 17/25 o más · tiene 20/25 · ⚠ con las reglas de hoy serían 17/25", salida)
+        self.assertIn("✔ Puntaje de 17/25 o más · tiene 17/25 (se registró 20/25) · con las reglas de hoy: "
+                      "diferenciación 4, pero con las reglas de hoy el máximo es 1", salida)
         self.assertIn("🔴  PUERTA 1 · NO VIABLE", salida)  # por el diferenciador, no por el puntaje
         datos = self.datos()
         registro = producto.Registro(self.carpeta, datos["criterios"])
@@ -201,9 +206,9 @@ class PuntajeDesactualizadoTest(Base):
                                                     "(ningún diferenciador es viable)"])
         self.p("reporte")
         html = self.reporte()
-        self.assertIn("Registrado con reglas anteriores", html)
-        self.assertIn("Con las reglas de hoy sería <b>17/25</b>", html)
-        self.assertIn("Puntaje desactualizado", html)
+        self.assertIn("Puntaje recalculado", html)
+        self.assertIn("Con las reglas de hoy el puntaje es <b>17/25</b>; se registró 20/25", html)
+        self.assertIn("<b>17/25</b><span>puntaje (mínimo 17); se registró 20/25</span>", html)
 
     def test_bajo_el_minimo_con_las_reglas_de_hoy_es_no_viable(self):
         self.registrar_con_reglas_viejas()
@@ -319,8 +324,8 @@ class ConsumoSinCostoTest(Base):
         self.p("consumo", "--sesion", "1a", "--tokens", "45k")
         salida = self.p("siguiente")
         self.assertIn("Consumo del chat orquestador (si lo usaste): al terminar, anota lo que muestre /cost", salida)
-        self.assertIn("producto.py consumo --sesion orquestador --costo '<USD>' --tokens '<tokens>' --carpeta product",
-                      salida)
+        self.assertIn("producto.py consumo --sesion orquestador --incluye 0,1a,1b,1c,1d,1e,1g,1f --costo '<USD que "
+                      "muestra /cost>' --carpeta product", salida)  # sin --tokens: no se cuentan dos veces
         self.assertIn("cd %s && python3 -I " % self.tmp, salida)
         self.p("consumo", "--sesion", "orquestador", "--costo", "1.20", "--incluye", "1a")
         self.assertNotIn("Consumo del chat orquestador", self.p("siguiente"))

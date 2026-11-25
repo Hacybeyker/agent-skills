@@ -4,18 +4,18 @@ Cada línea es una sesión en su propio chat (o en su propio subagente) y pueden
 
 ## Presupuesto y lista de tareas
 
-**Presupuesto por línea:** 15 búsquedas y 10 lecturas; 20 y 12 si la idea es nueva (`producto.py tipo` lo dice). Al llegar al 80 %, dilo en el chat y cierra con lo que tienes. Una lectura es una página abierta y resumida, no un resultado de búsqueda.
+**Presupuesto por línea:** 15 búsquedas y 10 lecturas; 20 y 12 si la idea es nueva (`producto.py tipo` lo dice). **Cada reapertura** (un ajuste en una puerta) tiene su propio presupuesto, la mitad del original (8 y 5; 10 y 6 en una idea nueva): el texto para pegar lo dice, y `fuente` cuenta las lecturas de esa pasada. Al llegar al 80 %, dilo en el chat y cierra con lo que tienes; si te pasas, `cerrar` lo avisa y la síntesis y la puerta 1 lo muestran. Una lectura es una página abierta y resumida, no un resultado de búsqueda.
 
 1. Primera línea: `Sesión 1c · Demanda (<motivo>)`.
 2. Lee `00-idea.md` y `criterios.md`. No leas los archivos de las otras líneas: están a medias.
-3. `producto.py tipo`: el tipo de idea y tu presupuesto. Si todavía no está registrado, investiga como si hubiera competencia y vuelve a consultarlo antes de cerrar.
+3. `producto.py tipo`: el tipo de idea y tu presupuesto. La sesión 0 deja un tipo provisional antes de abrir las líneas y la 1a lo confirma; trabaja con él desde el inicio (si es nueva, por analogía: [analogia.md](analogia.md)). Vuelve a consultarlo antes de cerrar: si cambió y tu línea no tiene fuentes de los peldaños que pide el tipo nuevo, la puerta la marca "a revisar por cambio de tipo" y recomienda ajustarla.
 4. `producto.py cobertura --linea <tu línea>`: los mercados, idiomas y tiendas que te tocan. Busca según la tabla de tu línea **en cada uno**, no solo en el que más resultados da.
 5. Por cada página útil, `producto.py fuente` con la cobertura que aporta (`--mercados`, `--idiomas`, `--tiendas`). Nunca copies la página: 3 líneas en `--resumen`.
 6. Cuando una afirmación tiene sus fuentes, `producto.py hallazgo`; los que sostienen el puntaje o una puerta llevan `--critico`.
 7. **Abogado del diablo:** por cada hallazgo clave, una búsqueda en contra, registrada con `--en-contra` o `--sin-contra`.
 8. Lo que quedó sin fuentes, regístralo como vacío con su motivo (`producto.py vacio`, abajo). La línea no cierra con huecos sin registrar.
 9. Completa tu `.md` con los IDs, tu lectura y la salida de `cobertura`. Lo que no tiene fuente va en "⚠ Sin evidencia". Tus notas para las otras sesiones van en "Para la síntesis", no en `estado.md`.
-10. `producto.py cerrar --sesion <id> --busquedas <n> --lecturas <n>` (lo que usó la línea en total, sumando las pasadas) y pega la salida.
+10. `producto.py cerrar --sesion <id> --busquedas <n> --lecturas <n>` (lo que usó la línea **en esta pasada**) y pega la salida.
 
 **No hagas:** escribir en archivos de otra línea, calcular puntajes o tamaños por tu cuenta, recomendar seguir o descartar, ni seguir con otra sesión en el mismo chat.
 
@@ -40,6 +40,8 @@ La sesión 0 registra el objetivo (`producto.py objetivo --mercados MX,ES --idio
 | `sin-resultados` | Buscaste en ese mercado o idioma y no hay nada sobre el tema. Es evidencia: dilo así en tu archivo |
 | `presupuesto` | Se te acabaron las búsquedas antes de llegar |
 
+- **Por peldaño (idea nueva).** Lo que buscaste en un peldaño de la escalera sin encontrar nada se registra igual: `producto.py vacio --linea demanda --peldano 4 --motivo sin-resultados --texto "<qué buscaste>"`. Así la puerta distingue **lo buscado sin resultado** (evidencia: si ningún peldaño muestra el problema, es motivo de descarte) de **lo no buscado** (no lo es: recomienda ajustar la línea). `producto.py estado` cuenta los hallazgos por peldaño, vigentes y vencidos.
+
 - `producto.py cobertura` lista por línea lo cubierto (✔), los vacíos (⚠) y los huecos sin registrar (✖). La síntesis y la puerta 1 los muestran.
 
 ## Fuentes difíciles
@@ -62,8 +64,8 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 - **Matriz de competidores.** Una fila por competidor con `producto.py competidor --nombre "<app>" --peldano <1-4> --fuentes S-COM-… [--descargas 1M] [--nota 4,2] [--actualizada 2026-03] [--precio "…"] [--modelo "…"] [--anuncios ninguno|pocos|muchos] [--tamano-mb 80] [--idiomas es,en] [--permisos ubicacion,camara] [--sin-conexion si|no|parcial] [--accesibilidad "…"] [--plataformas android,ios] [--funciones "a; b"] [--traccion "…"]`. Una fila se completa por partes: repetir el comando con el mismo nombre agrega columnas. El peldaño de la fila dice qué es: 1 directo, 2 variante, 3 análogo, 4 sustituto. `producto.py matriz` muestra la tabla; pégala en `competencia.md`.
 - **Sustitutos.** Registra siempre cómo se resuelve hoy la necesidad sin una app así (peldaño 4): la función que ya trae el sistema, una hoja de cálculo, un grupo de chat, papel. Cada uno con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin al menos uno evaluado, 1a no cierra. Si uno gratuito o nativo ya resuelve la necesidad, la sesión 1g tendrá que superarlo con evidencia ([diferenciacion.md](diferenciacion.md)), y la voz del usuario lo enlaza con `--competidores` cuando encuentra quejas sobre él.
 - **El rival a superar.** Marca la alternativa gratis más fuerte, sea un sustituto o un competidor directo gratis y completo: `producto.py competidor --nombre "<app>" --peldano 1 --fuentes S-COM-… --rival`. Si ninguna alternativa gratis resuelve la necesidad, dilo con `producto.py competidor --sin-rival "<por qué>"`. En una idea existente o variante, 1a no cierra sin una de las dos: la sesión 1g compara cada diferenciador con ese rival ([diferenciacion.md](diferenciacion.md)).
-- **Tracción.** Un competidor la tiene desde 100 000 descargas (`traccion_descargas`) o con `--traccion "<evidencia>"` cuando no es una app o no publica descargas.
-- **Tipo de idea.** Regístralo apenas lo sepas, porque las otras líneas lo consultan: `producto.py tipo --existente | --variante | --nueva --motivo "<por qué>"`. *Existente:* hay competidores directos con tracción. *Variante:* hay directos, pero la idea cambia algo relevante (otra plataforma, otro país, otro segmento). *Nueva:* no hay directos con tracción. Si no hay directos, sube por la escalera y llena la matriz con análogos y sustitutos.
+- **Tracción.** Un competidor la tiene desde 100 000 descargas (`traccion_descargas`), con la fuente de su fila, o con un respaldo institucional documentado en esas fuentes (`--respaldo "<el ministerio, el organismo o el programa que lo respalda>"`). `--traccion "<nota>"` queda como contexto y no cuenta: una fila con 10 000 descargas o sin datos no tiene tracción por lo que diga su nota. La puerta 1 de una idea nueva nombra los análogos que cuenta y los que no.
+- **Tipo de idea.** La sesión 0 deja uno provisional; confírmalo apenas lo sepas, porque las otras líneas trabajan con él: `producto.py tipo --existente | --variante | --nueva --motivo "<por qué>"` (sin `--provisional`). 1a no cierra sin confirmarlo. *Existente:* hay competidores directos con tracción. *Variante:* hay directos, pero la idea cambia algo relevante (otra plataforma, otro país, otro segmento). *Nueva:* no hay directos con tracción. Si no hay directos, sube por la escalera y llena la matriz con análogos y sustitutos.
 - **Intentos anteriores.** Regístralo siempre con `producto.py intento --resultado sin-rastro | fracaso-demanda | fracaso-otra-causa --texto "<qué buscaste y qué apareció>" [--fuentes S-…]`. En una idea nueva es un criterio de la puerta 1.
 - **No es un criterio** cuántos competidores hay. Anota la saturación como un hecho, sin valorarla.
 
@@ -86,6 +88,7 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 | Volumen y tendencia de búsqueda | Herramientas públicas de tendencias de búsqueda, autocompletado de buscadores y de tiendas |
 | Estacionalidad por mercado | La serie de tendencias de 12 meses o más |
 | Tamaño de la audiencia | Descargas recientes de los competidores (de los últimos meses), estadísticas oficiales, reportes del sector |
+| En una idea nueva: la necesidad de fondo | Censos, encuestas nacionales e investigación académica: datos estructurales que no caducan en 18 meses (`fuente --clase estadistica\|academica`, [evidencia.md](evidencia.md)) |
 
 - Un hallazgo clave de demanda necesita **al menos una fuente de tipo `medido`** y **señales actuales**: tendencia y descargas de los últimos 12 a 18 meses. Las descargas acumuladas de una ficha (cientos de millones desde hace una década) son contexto: regístralas con `fuente --acumulado`, y no sostienen la demanda de hoy ni las anclas altas del puntaje.
 - En una idea nueva se busca **el problema, no la solución**: lo que escribe la gente cuando tiene la necesidad. El tamaño se estima desde arriba con la población que la tiene (peldaño 6) y se dice que es una estimación, con sus supuestos.

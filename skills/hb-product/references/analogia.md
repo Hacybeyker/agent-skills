@@ -19,13 +19,17 @@ El ejemplo es inventado: una app que organiza turnos para regar las plantas de u
 
 ## Clasificar la idea
 
-La sesión 1a la clasifica con `producto.py tipo`, apenas lo sabe:
+**Antes de abrir las líneas.** Si las líneas arrancan sin saber que la idea es nueva, investigan como si hubiera competencia y nadie sube a los peldaños 4 y 5. Por eso la sesión 0 hace un triaje corto (en las tiendas del objetivo, 3 búsquedas como máximo: ¿hay apps que hagan lo mismo?) y registra un **tipo provisional** (`producto.py tipo --nueva --provisional --motivo "<lo que dio el triaje>"`); cada línea lo lee al empezar (viene en su texto para pegar) y la sesión 1a lo confirma con `producto.py tipo`, apenas lo sabe:
 
 - **Existente:** hay competidores directos con tracción.
 - **Variante:** hay directos, pero la idea cambia algo relevante.
 - **Nueva:** no hay directos con tracción.
 
-Las demás líneas consultan `producto.py tipo` antes de buscar. Si la idea resulta nueva cuando ya habían empezado, ajustan sin repetir lo hecho: lo ya registrado sirve, y lo que falta se busca en los peldaños siguientes.
+Las demás líneas consultan `producto.py tipo` antes de buscar y otra vez antes de cerrar. Si el tipo cambia cuando una línea ya cerró y esa línea no tiene fuentes de los peldaños que pide el tipo nuevo (en una idea nueva: 4 y 5 en la voz del usuario y la demanda, 2 y 3 en la monetización, 3 y 4 en la diferenciación), queda **a revisar por cambio de tipo**: `tipo`, `estado` y la puerta 1 lo dicen, y la puerta recomienda ajustarla. Lo ya registrado sirve; lo que falta se busca en los peldaños siguientes.
+
+## Lo no buscado no es evidencia en contra
+
+La puerta 1 no recomienda descartar por un criterio cuya evidencia no se buscó. Si ningún hallazgo ni ninguna búsqueda registrada toca los peldaños 4 y 5, el problema queda **no buscado** y la recomendación es ajustar la 1c (🟡); si se buscó y no apareció (`vacio --peldano 4 --motivo sin-resultados`), es evidencia y puede llevar a descartar. Lo mismo con una línea a revisar por cambio de tipo: lo que no buscó no cuenta en contra. `producto.py estado` (y la puerta 1 y el reporte de una idea nueva) cuenta los hallazgos por peldaño, vigentes y vencidos, y marca los peldaños no buscados.
 
 ## Cómo cambia cada sesión
 
@@ -62,8 +66,8 @@ Sin ningún registro, la puerta 1 de una idea nueva no se cumple.
 
 En una idea nueva se triangula **el peldaño más cercano a lo directo que tenga evidencia**, no la solución exacta: que el problema existe (peldaños 4 y 5) y que el mecanismo funciona en otra categoría (peldaño 3). La puerta 1 pide:
 
-- el problema o la necesidad de fondo documentados con 3 fuentes independientes y vigentes de los peldaños 4 o 5;
-- al menos 2 análogos con tracción (peldaños 2 o 3) en la matriz;
+- el problema o la necesidad de fondo documentados con 3 fuentes independientes y vigentes de los peldaños 4 o 5, una de ellas de los últimos 18 meses (los censos, las encuestas nacionales y los estudios académicos valen 5 años: [evidencia.md](evidencia.md));
+- al menos 2 análogos con tracción (peldaños 2 o 3) en la matriz: con 100 000 descargas o más o con un respaldo institucional (`--respaldo`), nunca por una nota;
 - la búsqueda de intentos anteriores registrada, sin un fracaso por falta de demanda.
 
 ## Falsa analogía

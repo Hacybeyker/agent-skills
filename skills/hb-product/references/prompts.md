@@ -3,7 +3,7 @@
 Para el usuario, no para el agente. Cada caso dice dónde va (un chat nuevo, con el modelo que conviene, o la terminal) y trae, en un bloque aparte, el texto para pegar: **copia solo el bloque**. Lo que va entre `<>` se completa.
 
 - **Después del primer pedido, solo pegas lo que imprime `producto.py siguiente`:** cada sesión termina con el paso que sigue, con el texto de cada chat o el comando completo. También queda en "Siguiente paso" de `estado.md`.
-- **Cada sesión va en un chat nuevo.** Cada paso del agente reenvía todo el chat, y uno que encadena sesiones cuesta varias veces más.
+- **Cada sesión va en un chat nuevo.** Cada paso del agente reenvía todo el chat, y uno que encadena sesiones cuesta varias veces más. La excepción es el modo orquestado (abajo): un solo chat, pero cada sesión corre en un subagente con su propio contexto.
 - **Modelo:** `siguiente` dice el de cada chat, con su esfuerzo: Sonnet 5.5 (medio) para la sesión 0 y las cinco líneas de investigación; Opus 5.5 (alto) para la diferenciación, la síntesis, la estrategia, la validación y el PRD. Con otra herramienta, cámbialos una vez con `producto.py modelos`; con `--herramienta claude` o `copilot`, cada chat trae el comando que lo abre ([modelos.md](modelos.md)).
 - **La carpeta** es `product/` dentro de la carpeta donde abres el chat. Para usar otra, agrégala al pedido ("en la carpeta `docs/producto`") o anótala en `AGENTS.md`: una sección `## Producto` con la línea `Carpeta: docs/producto`.
 - **Cada texto termina con "No hagas commit ni push."** La skill ya lo dice; la línea explícita evita sorpresas.
@@ -52,17 +52,35 @@ Copia el texto que imprime `producto.py siguiente` para cada sesión. Tiene esta
 Sigue hb-product con <ruta absoluta>/product/estado.md: sesión 1c · Demanda. No hagas commit ni push.
 ```
 
-Las sesiones 1a a 1e se abren juntas. La 1g aparece apenas cierran 1a y 1b; la 1f, cuando cierran las seis.
+Las sesiones 1a a 1e se abren juntas, cada una con el tipo de idea que dejó la sesión 0 (la 1a lo confirma). La 1g aparece apenas cierran 1a y 1b; la 1f, cuando cierran las seis. Si una sesión se reabrió en una puerta, el texto trae el presupuesto de esa reapertura (la mitad del original).
 
-### Los carriles con subagentes, en un solo chat
+### Toda la idea desde un solo chat (modo orquestado)
 
-**Dónde:** chat nuevo · Sonnet 5.5, esfuerzo medio (cada subagente, con el modelo de su sesión)
+Un chat recorre la idea entera: lanza cada sesión como un subagente con el modelo de su sesión (las cinco líneas a la vez, la 1g apenas cierran 1a y 1b, la 2 y la 3 juntas), espera a que terminen todos, anota el consumo de cada uno y se detiene en cada puerta, donde decides tú en tu terminal ([orquestacion.md](orquestacion.md)). No abres chats ni pegas pasos. Necesita una herramienta con subagentes (Claude Code los tiene); sin ellos, la skill lo dice y sigue con un chat por sesión.
+
+**Dónde:** chat nuevo · Haiku 5.5, esfuerzo bajo (es el orquestador: cada sesión usa el modelo de su nivel)
+
+**Ábrelo** (terminal, desde la carpeta donde vive `product/`): `cd <raíz> && claude --model claude-haiku-5-5 --effort low`. Después pega el bloque.
+
+Una idea nueva:
 
 ```text
-Sigue hb-product con <ruta absoluta>/product/estado.md como orquestador: lanza un subagente por cada sesión que ofrezca producto.py siguiente, con su texto para pegar y el modelo que indica; cuando cada uno termine, anota su uso con producto.py consumo si la herramienta lo muestra, vuelve a correr siguiente y lanza las que se abran, hasta llegar a la puerta. No investigues tú ni corras decidir. No hagas commit ni push.
+Usa hb-product en modo orquestado: tengo una idea de app. <La idea en tus palabras: qué problema resuelve, para quién, plataformas, países, idiomas, tiendas, cómo piensas ganar dinero y cuántas semanas tienes>. No hagas commit ni push.
 ```
 
-Sirve si tu herramienta tiene subagentes. El chat orquestador no investiga: espera y lanza lo que se abre. Al cerrarlo, anota el total del chat (abajo, "Anotar el costo").
+Una idea que ya empezó (retomar en modo orquestado):
+
+```text
+Sigue hb-product con <ruta absoluta>/product/estado.md en modo orquestado. No hagas commit ni push.
+```
+
+La sesión 0 te hace sus preguntas en el mismo chat, en una sola tanda. En cada puerta, el orquestador te muestra el veredicto y los comandos de `decidir`, el recomendado primero, y se detiene: el orquestador nunca decide por ti. Corre el que elijas en tu terminal y después escribe en el mismo chat:
+
+```text
+Continúa. No hagas commit ni push.
+```
+
+Al llegar a una puerta o al final, te recuerda correr `/cost` en ese chat y te da el comando `producto.py consumo --sesion orquestador --incluye … --costo '<USD>'`: el total del chat, que incluye a los subagentes (el consumo de cada subagente ya quedó anotado por sesión).
 
 ### Retomar donde quedó
 
@@ -96,7 +114,7 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --ajusta
 cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --descartar "<motivo>" --carpeta product
 ```
 
-Si decides distinto de lo que recomienda la skill, agrega por qué; queda registrado como decisión contra la recomendación:
+Si decides distinto de lo que recomienda la skill (también si ajustas otra sesión que la recomendada), agrega por qué; queda registrado como decisión contra la recomendación:
 
 ```bash
 cd <raíz> && python3 -I <skill>/scripts/producto.py decidir --puerta 1 --seguir --motivo "<por qué decides distinto>" --carpeta product
@@ -154,7 +172,7 @@ Con `--intermedio "<modelo>"` y `--alto "<modelo>"` cambias los nombres ([modelo
 cd <raíz> && python3 -I <skill>/scripts/producto.py consumo --sesion <id> --costo '<USD>' --carpeta product
 ```
 
-Con un orquestador: `--sesion orquestador --incluye 1a,1b,1c,1d,1e,1g` y el total del chat (lo que muestre `/cost`); `siguiente` te lo recuerda, con el comando completo, al llegar a la puerta. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
+Con un orquestador: `--sesion orquestador --incluye 1a,1b,1c,1d,1e,1g` y el total del chat (lo que muestre `/cost`), sin `--tokens`: los de cada subagente ya van por sesión; `siguiente` te lo recuerda, con el comando completo, al llegar a la puerta. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
 
 ### Guardar una idea para después, o recuperarla
 

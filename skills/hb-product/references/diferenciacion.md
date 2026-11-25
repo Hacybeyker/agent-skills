@@ -29,7 +29,9 @@ En una idea nueva, las filas son los análogos y los sustitutos: la comparación
 
 Ganarle a las apps de pago no sirve si hay una alternativa gratis que ya da lo mismo. Ese rival puede ser **otra app** (una directa, gratis y completa) o **un sustituto**: la linterna que trae el teléfono, el recordatorio del sistema, una hoja de cálculo o el grupo de chat. La lección de dos pruebas: con Linterna, el diferenciador era viable frente a las apps, pero no frente a la linterna nativa; en otra, el principal (gratis y sin topes) solo **igualaba** a una app directa que ya era gratis y sin topes, y la puerta daba verde porque solo miraba los sustitutos.
 
-- **La sesión 1a marca el rival** con `competidor --nombre "<la alternativa>" … --rival`: la alternativa gratis más fuerte, sea sustituto o competidor directo. Hay uno solo: marcar otro reemplaza al anterior. Si ninguna alternativa gratis resuelve la necesidad, lo dice con `competidor --sin-rival "<por qué>"`. En una idea existente o variante, 1a no cierra sin una de las dos.
+- **El rival es la alternativa gratis más fuerte para el mismo usuario y la misma necesidad**: el mismo segmento (la edad, el nivel, el contexto de uso) y el mismo trabajo, no la alternativa gratis más grande de la categoría. Una app escolar para 12 años no es el rival de una idea para niños de 3 a 6, aunque sea gratis y tenga respaldo; lo es la escuela de nivel inicial gratuita que hoy atiende a esos niños. Antes de marcarlo, comprueba en sus fuentes para quién es.
+- **La sesión 1a marca el rival** con `competidor --nombre "<la alternativa>" … --rival`: la alternativa gratis más fuerte, sea sustituto o competidor directo. Hay uno solo: marcar otro reemplaza al anterior. Si ninguna alternativa gratis resuelve la necesidad, lo dice con `competidor --sin-rival "<por qué>"`. En una idea existente o variante, 1a no cierra sin una de las dos. `competidor --rival` no pide la 1a abierta: si la puerta dice que falta el rival, se marca al ajustar la 1g, que es la que compara cada diferenciador con él (`frente`).
+- **Un sustituto que llega después puede ser el rival.** Si otra línea agrega a la matriz un sustituto gratuito o nativo con tracción después de marcar el rival (por ejemplo, la 1c al investigar cómo se resuelve hoy la necesidad), `siguiente` y la puerta 1 piden revisarlo: si es la alternativa más fuerte para el mismo usuario, márcalo con `--rival` y compara de nuevo cada diferenciador en la 1g; si no, confirma el rival con `competidor --nombre "<rival>" … --rival`.
 - **Los sustitutos fuertes también son rivales.** La sesión 1a registra siempre al menos un sustituto (peldaño 4) con `--sustituto nativo|gratuito|pago` y `--resuelve si|parcial|no`; sin eso, 1a no cierra. Sé honesto con `--resuelve si`: si la mayoría de quienes tienen la necesidad se arreglan con él, la resuelve. Uno nativo o gratuito que la resuelve se suma al rival marcado.
 - **La sesión 1g compara cada diferenciador con cada rival**, con sus hallazgos:
 
@@ -80,7 +82,7 @@ python3 -I <skill>/scripts/producto.py diferenciador --vector precio --texto "Pa
   --motivo "Cambiar de modelo les cuesta ingresos recurrentes" --semanas 2 --principal
 ```
 
-El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja**, **paridad** o **todavía no viable**. Tiene que cumplir los cinco criterios:
+El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza baja** o **no viable** (con la **paridad** como caso aparte). Tiene que cumplir los cinco criterios:
 
 1. **Evidencia.** Una de dos: un dolor o un pedido **triangulado en 2 competidores o más** (un hallazgo con sus 3 fuentes y `--competidores` con dos filas de la matriz), o un **vector medible comprobado en la matriz** en 2 competidores o más (`precio`, `rendimiento` por el tamaño, `anuncios`, `idioma`, `privacidad` por los permisos, `sin-conexion`, `accesibilidad`, `diseno` por la última actualización y `plataforma`). `usabilidad`, `funcionalidades` y `segmento` no se miden en la matriz: necesitan el dolor triangulado. Es el filtro del *diferenciador imaginario*.
 2. **Se percibe** (`--se-ve`). En la **ficha** de la tienda (precio, idioma, sin anuncios, diseño), que es lo que consigue descargas, o en el **uso** (rendimiento, usabilidad), que es lo que consigue retención y buenas notas. Lo ideal es tener uno viable de cada tipo: el script avisa cuál falta.
@@ -94,8 +96,10 @@ Y además, **sus hallazgos tienen que estar triangulados** (la regla de [evidenc
 | --- | --- | --- |
 | Viable | Los cinco criterios y sus hallazgos triangulados | Sí |
 | Viable con confianza baja | Los cinco criterios, pero algún hallazgo sin triangular | No: se muestra aparte, y el puntaje de diferenciación llega como máximo a 2 |
-| Paridad | Iguala al rival (`frente … --resultado iguala`) | No: es básico en Kano. Entra al MVP si hace falta para competir, pero no puede ser el principal |
-| Todavía no viable | Falta alguno de los cinco criterios | No |
+| No viable (paridad) | Iguala al rival (`frente … --resultado iguala`) | No: es básico en Kano. Entra al MVP si hace falta para competir, pero no puede ser el principal |
+| No viable | Falta alguno de los cinco criterios | No |
+
+Son tres estados (viable, viable con confianza baja y no viable; la paridad es una forma de no viable) y se escriben con esas mismas palabras en el script, el banner de la puerta, los criterios, el reporte y el tablero. El banner nombra a todos los diferenciadores que deciden el veredicto, con su estado.
 
 Un vector medible comprobado en la matriz cumple el criterio de evidencia, pero si el hallazgo que lo sostiene no está triangulado, el diferenciador queda con confianza baja. `producto.py triangulacion` dice qué le falta a cada hallazgo.
 

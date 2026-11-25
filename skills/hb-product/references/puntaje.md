@@ -11,7 +11,7 @@ La síntesis une las seis líneas y termina en la puerta 1. El puntaje tiene anc
 3. Lee los seis archivos de `01-investigacion/`, sobre todo "Para la síntesis" y "⚠ Sin evidencia".
 4. Confirma el tipo de idea. Si la investigación lo cambió, regístralo de nuevo con su motivo.
 5. Elige el valor de cada criterio con la tabla de anclas y escribe en `01-sintesis.md` qué ancla aplicaste y con qué hallazgos.
-6. `producto.py puntaje --valores d,m,f,r,x [--mitigacion "<texto>"]`, en este orden: demanda, monetización, facilidad, riesgo de políticas y diferenciación.
+6. `producto.py puntaje --valores d,m,f,r,x [--mitigacion "<texto>"]`, en este orden: demanda, monetización, facilidad, riesgo de políticas y diferenciación. Si la sesión 0 registró más de un modelo de monetización, puntúa con el base y con cada alternativo: `--modelo "<base>" --alternativo "<otro modelo>=d,m,f,r,x"` (se repite por modelo).
 7. Completa `01-sintesis.md`. En una idea nueva, separa la evidencia análoga de la pura hipótesis; en una con competencia, presenta el diferenciador principal.
 8. `producto.py cerrar --sesion 1f` y pega la salida: es la puerta 1.
 
@@ -33,7 +33,8 @@ Cinco criterios de 1 a 5. Los valores 2 y 4 son los intermedios entre dos anclas
 - **Una tienda que nombra o rechaza la categoría** (por ejemplo, una guía de revisión que la cita como saturada) se registra en un hallazgo de políticas con `--bloquea <tienda>`. En esa tienda el riesgo es 1: el script no acepta otro valor, y la puerta 1 pide una mitigación escrita y creíble (`--mitigacion`, por ejemplo, no lanzar en esa tienda), que muestra para que el usuario la juzgue. Cambiar las tiendas del objetivo para evitarlo es un cambio de criterio, con su motivo.
 - **La cantidad de competidores no baja ningún criterio.** Muchos competidores con tracción suben la demanda; lo que puede bajar es la diferenciación, y solo si no aparece un diferenciador viable.
 - **Diferenciación** está atada al registro (y un diferenciador que no supera a la alternativa gratis más fuerte, o que solo la iguala, no es viable): sin ningún diferenciador viable, el script solo acepta 1; si solo hay viables con confianza baja (sus hallazgos sin triangular), acepta 1 o 2; con alguno viable, no acepta 1.
-- **Un puntaje registrado con reglas anteriores** (o con evidencia que cambió después: una fuente que envejeció, un hallazgo anulado) puede quedar por encima de lo que las reglas de hoy aceptan. La puerta 1 y el reporte lo avisan ("con las reglas de hoy serían N/25") y el veredicto usa ese total ajustado; se corrige volviendo a correr `puntaje` en la sesión 1f.
+- **Un puntaje registrado con reglas anteriores** (o con evidencia que cambió después: una fuente que envejeció, un hallazgo anulado) puede quedar por encima de lo que las reglas de hoy aceptan. El criterio de la puerta 1, el veredicto, el reporte y el tablero muestran como principal el puntaje de hoy, con "se registró N/25" como dato secundario; se corrige volviendo a correr `puntaje` en la sesión 1f.
+- **El modelo de monetización cambia el puntaje.** Los anuncios en una app para niños bajan el riesgo de políticas a 1; un pago único detrás de un control parental, no. Si hay un modelo alternativo registrado en la sesión 0, puntúa con cada uno (`--alternativo`): la puerta 1 muestra los dos totales y, si el mínimo solo se alcanza con el alternativo, dice que lo exige y que la sesión 2 tiene que elegirlo.
 - **Facilidad** es una estimación tuya, sin fuentes: di con qué supuestos (stack, backend, integraciones).
 - **Riesgo de políticas = 1** pide una mitigación escrita (`--mitigacion`); sin ella, la puerta 1 no se cumple en ese criterio.
 

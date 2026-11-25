@@ -134,9 +134,10 @@ class Base(unittest.TestCase):
 
     # --- una idea completa, por etapas -------------------------------------------------------------------------
 
-    def sesion0(self):
+    def sesion0(self, tipo="existente"):
         self.nuevo()
         self.completar("criterios.md")
+        self.p("tipo", "--" + tipo, "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         return self.cerrar("0", "00-idea.md")
 
     def linea(self, sesion, nombre, tipo="terceros", peldano=1, *extra):
@@ -522,11 +523,18 @@ class MatrizTest(Base):
         self.assertIn("No existe(n) la(s) fuente(s)", self.falla("competidor", "--nombre", "Otra", "--peldano", 1,
                                                                  "--fuentes", "S-COM-9"))
 
-    def test_la_traccion_sale_de_las_descargas_o_de_una_evidencia(self):
-        self.assertNotIn("con tracción", self.p("competidor", "--nombre", "Chica", "--peldano", 3, "--fuentes",
-                                                self.fuentes[0], "--descargas", "50k"))
-        self.assertIn("con tracción", self.p("competidor", "--nombre", "Servicio de jardineros", "--peldano", 4,
-                                             "--fuentes", self.fuentes[1], "--traccion", "2 000 clientes al mes"))
+    def test_la_traccion_sale_de_las_descargas_o_de_un_respaldo_institucional(self):
+        salida = self.p("competidor", "--nombre", "Chica", "--peldano", 3, "--fuentes", self.fuentes[0], "--descargas",
+                        "50k")
+        self.assertIn("sin tracción: 50 000 descargas, bajo el umbral de 100 000", salida)
+        # una nota de tracción es contexto: no cuenta (feedback #30)
+        salida = self.p("competidor", "--nombre", "Servicio de jardineros", "--peldano", 4, "--fuentes",
+                        self.fuentes[1], "--traccion", "2 000 clientes al mes")
+        self.assertIn("sin tracción: sin descargas ni respaldo registrados", salida)
+        self.assertIn("La nota de tracción («2 000 clientes al mes») es contexto y no cuenta", salida)
+        salida = self.p("competidor", "--nombre", "Servicio de jardineros", "--peldano", 4, "--fuentes",
+                        self.fuentes[1], "--respaldo", "Programa municipal de huertos")
+        self.assertIn("con tracción: respaldo institucional: Programa municipal de huertos", salida)
 
     def test_matriz_enlaza_los_hallazgos_por_nombre_o_por_id(self):
         self.assertIn("La matriz está vacía", self.p("matriz"))
@@ -571,19 +579,19 @@ class DiferenciadorTest(Base):
                                "RiegoFácil,PlantaPlus")
         for hallazgo in (uno, dos):
             salida = self.diferenciador("usabilidad", hallazgo)
-            self.assertIn("todavía no es viable", salida)
+            self.assertIn("registrado: no viable", salida)
             self.assertIn("✖ Evidencia", salida)
 
     def test_viable_con_un_vector_medible_comprobado_en_la_matriz(self):
         hallazgo, _ = self.hallazgo("competencia", self.fuente("competencia", 1, "medido"))
         self.assertIn("vector medible comprobado en la matriz (C-1, C-2)", self.diferenciador("rendimiento", hallazgo))
-        self.assertIn("todavía no es viable", self.diferenciador("idioma", hallazgo))  # la matriz no trae idiomas
-        self.assertIn("todavía no es viable", self.diferenciador("segmento", hallazgo))  # no es un vector medible
+        self.assertIn("registrado: no viable", self.diferenciador("idioma", hallazgo))  # la matriz no trae idiomas
+        self.assertIn("registrado: no viable", self.diferenciador("segmento", hallazgo))  # no es un vector medible
 
     def test_no_es_viable_si_no_cabe_en_el_presupuesto(self):
         hallazgo, _ = self.hallazgo("competencia", self.fuente("competencia", 1, "medido"))
         salida = self.diferenciador("rendimiento", hallazgo, semanas=8)
-        self.assertIn("todavía no es viable", salida)
+        self.assertIn("registrado: no viable", salida)
         self.assertIn("✖ Presupuesto: 8 de 6 semanas", salida)
 
     def test_solo_hay_un_principal_y_exige_hallazgos(self):
@@ -715,14 +723,16 @@ class FlujoTest(Base):
         salida = self.falla("cerrar", "--sesion", "0")
         self.assertIn("00-idea.md todavía tiene", salida)
         self.assertIn("criterios.md todavía tiene texto de plantilla", salida)
+        self.assertIn("falta el tipo de idea provisional", salida)
         self.assertIn("No existe la sesión", self.falla("cerrar", "--sesion", "9"))
         self.completar("00-idea.md")
         self.completar("criterios.md")
         self.p("criterio", "--clave", "meta_ingresos_mes", "--valor", 300)
+        self.p("tipo", "--existente", "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         self.assertIn("Sesión 0 · Idea cerrada", self.p("cerrar", "--sesion", "0"))
         self.completar("01-investigacion/competencia.md")
         salida = self.falla("cerrar", "--sesion", "1a")
-        self.assertIn("falta registrar el tipo de idea", salida)
+        self.assertIn("falta confirmar el tipo de idea", salida)
         self.assertIn("la matriz no tiene ninguna fila", salida)
         self.assertIn("no tiene ningún hallazgo", salida)
         self.assertIn("antes va la sesión 1a", self.falla("cerrar", "--sesion", "1g"))
@@ -738,6 +748,7 @@ class FlujoTest(Base):
         self.assertIn("falta el objetivo de la sesión 0", salida)
         self.p("criterio", "--clave", "presupuesto_semanas", "--valor", 6)
         self.p("objetivo", "--mercados", "MX", "--idiomas", "es", "--tiendas", "ninguna")
+        self.p("tipo", "--existente", "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         self.assertIn("✔ Sesión 0 · Idea cerrada", self.p("cerrar", "--sesion", "0"))
 
     def test_las_cinco_lineas_van_en_paralelo_y_1g_se_abre_con_1a_y_1b(self):
@@ -746,8 +757,8 @@ class FlujoTest(Base):
         for sesion in ("1a · Competencia", "1b · Voz del usuario", "1c · Demanda", "1d · Monetización",
                        "1e · Políticas y riesgos"):
             self.assertIn("Chat nuevo · Sesión %s · Modelo: Sonnet 5.5 · Esfuerzo: medio" % sesion, salida)
-        self.assertIn("Sigue hb-product con %s: sesión 1a · Competencia. No hagas commit ni push." % (
-            self.carpeta / "estado.md"), salida)
+        self.assertIn("Sigue hb-product con %s: sesión 1a · Competencia. Idea existente (provisional: la confirma "
+                      "1a). No hagas commit ni push." % (self.carpeta / "estado.md"), salida)
         self.assertNotIn("Chat nuevo · Sesión 1g", salida)
         self.assertIn("1g · Diferenciación se abre apenas cierren 1a y 1b", salida)
         fuentes = self.fuente("competencia", 3, "medido")
@@ -914,7 +925,8 @@ class IdeaNuevaTest(Base):
         self.assertIn("idea nueva", salida)
         self.assertIn("✔ Puntaje de 15/25 o más", salida)
         self.assertIn("✔ El problema o la necesidad de fondo, con 3 fuentes de peldaño 4 o 5", salida)
-        self.assertIn("✔ Al menos 2 análogos con tracción (peldaño 2 o 3) · 2 en la matriz: C-1, C-2", salida)
+        self.assertIn("✔ Al menos 2 análogos con tracción (peldaño 2 o 3) · 2 de 2: C-1 (250 000 descargas); C-2 (250 000 "
+                      "descargas)", salida)
         self.assertIn("✔ Sin evidencia de que se probó y fracasó por falta de demanda · 1 búsqueda registrada", salida)
         self.assertNotIn("diferenciador viable", salida)
         self.assertIn("cumple 5 de 5", salida)
@@ -939,7 +951,7 @@ class IdeaNuevaTest(Base):
         self.investigar(intento="fracaso-demanda", analogos=1)
         self.p("puntaje", "--valores", "3,3,4,4,1")
         salida = self.p("puerta", "--n", 1)
-        self.assertIn("✖ Al menos 2 análogos con tracción (peldaño 2 o 3) · 1 en la matriz", salida)
+        self.assertIn("✖ Al menos 2 análogos con tracción (peldaño 2 o 3) · 1 de 2: C-1 (250 000 descargas)", salida)
         self.assertIn("✖ Sin evidencia de que se probó y fracasó por falta de demanda · 1 intento fallido por demanda",
                       salida)
         self.assertIn("necesita su fuente", self.falla("intento", "--resultado", "fracaso-otra-causa", "--texto",

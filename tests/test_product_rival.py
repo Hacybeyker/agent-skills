@@ -122,21 +122,21 @@ class RivalTest(Base):
                         "PlantaPlus ya es gratis y sin anuncios")
         self.assertIn("✔ D-1 frente a C-2 (PlantaPlus): lo iguala (paridad)", salida)
         self.assertIn("· Igualar es paridad (básico en Kano)", salida)
-        self.assertIn("✖ D-1: paridad: iguala al rival, no diferencia", salida)
-        self.assertIn("✖ Frente al rival: iguala a C-2 (PlantaPlus): es paridad", salida)
+        self.assertIn("✖ D-1: no viable (paridad: iguala al rival)", salida)
+        self.assertIn("✖ Frente al rival: iguala a C-2 (PlantaPlus): no viable (paridad", salida)
         salida = self.cerrar("1g", "01-investigacion/diferenciacion.md")
         self.assertIn("⚠ D-1 solo iguala a C-2 (PlantaPlus): es paridad", salida)
         self.p("puntaje", "--valores", "4,4,4,4,1")
         salida = self.cerrar("1f", "01-sintesis.md")
         self.assertIn("🔴  PUERTA 1 · NO VIABLE  →  la skill recomienda: DESCARTAR", salida)
         self.assertIn("Ningún diferenciador supera a C-2 (PlantaPlus), la alternativa gratis más fuerte, con hallazgos "
-                      "triangulados; D-1 solo lo iguala: es paridad", salida)
-        self.assertIn("El principal (D-1) iguala a C-2 (PlantaPlus): es paridad (básico en Kano)", salida)
+                      "triangulados: D-1 (no viable: paridad)", salida)
+        self.assertIn("El principal (D-1) iguala a C-2 (PlantaPlus): no viable (paridad, básico en Kano)", salida)
         self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados y supera a la alternativa "
                       "gratis más fuerte · D-1: iguala a C-2 (PlantaPlus)", salida)
         self.p("reporte")
         html = (self.carpeta / "reporte.html").read_text(encoding="utf-8")
-        self.assertIn("Paridad", html)
+        self.assertIn("No viable · paridad", html)
         self.assertIn("rival a superar", html)
 
     def test_supera_con_prueba_de_eleccion_es_viable(self):
@@ -185,20 +185,25 @@ class RivalTest(Base):
         self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción")
         self.p("decidir", "--puerta", 1, "--ajustar", "1g")
         self.assertEqual(self.datos()["sesiones"]["1g"]["reaperturas"], 1)
-        self.assertIn("lo usado en total por la línea", self.falla("cerrar", "--sesion", "1g", "--busquedas", "muchas"))
+        self.assertIn("lo que usó la línea en esta pasada", self.falla("cerrar", "--sesion", "1g", "--busquedas",
+                                                                       "muchas"))
         self.assertIn("son de una sesión de investigación", self.falla("cerrar", "--sesion", "1f", "--lecturas", "2"))
-        salida = self.p("cerrar", "--sesion", "1g", "--busquedas", 13, "--lecturas", 10)
-        self.assertIn("· Presupuesto usado por la línea diferenciacion: 13 de 15 búsquedas y 10 de 10 lecturas.",
-                      salida)
+        salida = self.p("cerrar", "--sesion", "1g", "--busquedas", 7, "--lecturas", 4)
+        # cada reapertura tiene su propio presupuesto: la mitad del original (feedback #34)
+        self.assertIn("· Presupuesto usado por la línea diferenciacion: 7 de 8 búsquedas y 4 de 5 lecturas en la "
+                      "reapertura 1.", salida)
         self.assertIn("la skill no recomendará ajustar la 1g otra vez", salida)
         salida = self.cerrar("1f")
         self.assertIn("🔴  PUERTA 1 · NO VIABLE  →  la skill recomienda: DESCARTAR", salida)
-        self.assertIn("La sesión 1g ya se reabrió y usó su presupuesto (13 de 15 búsquedas y 10 de 10 lecturas): "
+        self.assertIn("La sesión 1g ya se reabrió y usó su presupuesto (7 de 8 búsquedas y 4 de 5 lecturas en la "
+                      "reapertura 1): "
                       "ajustarla otra vez no traería evidencia nueva", salida)
         self.assertIn("D-1 supera a C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app", salida)
         self.assertNotIn("★ Recomendado · Ajustar 1g", salida)
         self.p("decidir", "--puerta", 1, "--ajustar", "1g", "--motivo", "Quiero buscar en otro vector")
-        self.assertEqual(self.datos()["sesiones"]["1g"]["uso"], {"busquedas": 13, "lecturas": 10})  # se conserva
+        sesion = self.datos()["sesiones"]["1g"]
+        self.assertEqual(sesion["uso"], {"busquedas": 7, "lecturas": 4})  # se conserva
+        self.assertEqual([p["reapertura"] for p in sesion["pasadas"]], [1])
 
     def test_con_presupuesto_de_sobra_sigue_recomendando_ajustar_la_1g(self):
         self.hasta_1g()
@@ -349,6 +354,7 @@ class ConsumoSinAnotarTest(Base):
         self.nuevo()
         self.p("consumo", "--sesion", "1a", "--tokens", "90k")
         self.completar("criterios.md")
+        self.p("tipo", "--existente", "--provisional", "--motivo", "Triaje inventado de la sesión 0")
         self.cerrar("0", "00-idea.md")
         salida = self.p("siguiente")
         self.assertIn("Consumo sin anotar (opcional) de la sesión 0:", salida)
