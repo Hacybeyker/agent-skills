@@ -77,13 +77,23 @@ Va entre `## Arquitectura` y `## Modernización`, con estas subsecciones y en es
 - En `contexto/modules/<identificador>.md`, fuera de git. Antes de tocar una unidad, lee su mapa; si no existe, créalo; si su `Commit analizado` quedó atrás, actualízalo solo con el diff desde ese commit.
 ```
 
+En un proyecto de un solo paquete con features por carpetas (por ejemplo, un espacio de trabajo pnpm), las filas serían así:
+
+```markdown
+| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | Publica y versiona |
+| --- | --- | --- | --- | --- | --- | --- |
+| `packages/web` | `packages/web` | Es la app | — | `cd <ruta del proyecto> && pnpm --filter web test` | este repo, `main` | la persona, con `hb-release` |
+| `packages/web/src/features/payments` | `packages/web/src/features/payments` | En fuente (carpeta de `packages/web`) | — | `cd <ruta del proyecto> && pnpm --filter web test -- src/features/payments` | este repo, `main` | con la app |
+```
+
 ### Unidades
 
 - **Unidad:** el identificador, entre acentos graves. Es la ruta de la unidad desde la raíz de su repo, con sus subcarpetas (`features/payments/impl`, sin aplanar). Un repo vecino entero se identifica por el nombre de su carpeta (`core-lib`); un módulo dentro de él, por `<carpeta del repo>/<ruta>`. El repo principal entero, cuando es una sola unidad, por el nombre de su carpeta.
+- **Unidades anidadas.** Una unidad puede vivir dentro de otra (las carpetas de feature dentro de un paquete, los módulos dentro del repo). Un archivo es de la unidad cuya "Fuente" es la ruta más larga que lo contiene, así que conviene una fila también para la unidad que contiene a las demás (el paquete o el módulo de la app): de ella es lo que no cae en ninguna feature, como el cliente HTTP compartido.
 - **Fuente:** la ruta relativa a la raíz del proyecto (`.`, `app/`, `../core-lib`). Nunca absoluta.
-- **Cómo se consume:** "Es la app", "En fuente (módulo del build)", o "Publicada: `<coordenada>`, versión fijada en `<archivo>`". El número de la versión no se escribe: cambia con cada bump y se lee del archivo.
+- **Cómo se consume:** "Es la app" (el repo entero, o en un multimódulo el módulo o paquete que se ejecuta), "En fuente (módulo del build)" (otro módulo o paquete del build), "En fuente (carpeta de `<unidad que la contiene>`)" (una carpeta de feature), o "Publicada: `<coordenada>`, versión fijada en `<archivo>`". El número de la versión no se escribe: cambia con cada bump y se lee del archivo.
 - **Pasar a fuente y volver:** el cambio exacto para cada sentido, o "—" si la unidad siempre está en fuente, o "sin mecanismo" si es publicada y el proyecto no tiene forma de usar su código local.
-- **DoD de la unidad:** el comando acotado, con `cd` a su repo. Si no se puede acotar, "el `## DoD` del proyecto".
+- **DoD de la unidad:** el comando acotado, con `cd` a su repo (`./gradlew :<módulo>:check`, `pnpm --filter web test -- src/features/payments`, `go test ./<carpeta>/...`). Si no se puede acotar, "el `## DoD` del proyecto". Las skills corren además el `## DoD` del proyecto cuando el cambio toca la app, algo de ninguna unidad, un contrato que otras consumen o una unidad sin build propio.
 - **Repo y rama principal:** "este repo" o la URL del remoto (sirve para clonarlo), y la rama principal.
 - **Publica y versiona:** quién y cómo: "con la app", "la persona, con `hb-release`", "el workflow `<nombre>` al crear el tag".
 - Debajo de la tabla, la línea de acceso a las carpetas y la línea **Repos vecinos**: `Repos vecinos: clonar los que falten y crear ramas de trabajo` (por defecto) o `Repos vecinos: no clonar ni crear ramas`. Con la segunda, ninguna skill clona un repo ni crea ramas en ningún repo de la tarea, tampoco en el principal: propone el comando y sigue. Commit y push siguen las reglas de `## Git`.
@@ -102,8 +112,8 @@ Un mapa por unidad, con lo que un agente necesita saber antes de tocarla: qué h
 
 - **Ruta:** `<carpeta de contexto>/modules/<identificador>.md`, con las subcarpetas del identificador (`modules/features/payments/impl.md`; para un repo vecino, `modules/core-lib.md`). La carpeta de contexto es `contexto/` en los modos local y externo, y `docs/` en el versionado.
 - **Fuera de git por defecto**, con `.git/info/exclude` (nunca `.gitignore`). En los modos local y externo ya lo están, dentro de `contexto/`. Si el contexto se versiona, el setup pregunta una vez si los mapas también (`contexto.py preparar --module-maps versioned`) y lo deja escrito en la línea.
-- **Se crean al trabajar, no en el setup:** la primera skill que toca una unidad sin mapa lo crea.
-- **`Commit analizado`** en la cabecera: el commit del repo de la unidad que se leyó. Si el `HEAD` de ese repo avanzó, se actualiza solo con `git -C <repo> diff <commit>..HEAD -- <ruta de la unidad>`, sin releer todo.
+- **Se crean al trabajar, no en el setup:** la primera skill que toca una unidad sin mapa lo crea, en la ruta real de la carpeta de mapas (un archivo nuevo todavía no tiene ruta real propia).
+- **`Commit analizado`** en la cabecera: el commit del repo de la unidad cuyo código describe el mapa. Si el `HEAD` de ese repo avanzó, se actualiza solo con `git -C <repo> diff <commit>..HEAD -- <ruta de la unidad>`, sin releer todo. Si el mapa describe cambios todavía sin commitear, lleva el commit de la base con la nota "(incluye cambios sin commitear de `<slug>`)", y se corrige cuando se commitean.
 
 ## Lo estable, no el momento
 

@@ -1,9 +1,11 @@
 # Mapa del módulo: `<identificador>`
 
-Commit analizado: `<sha completo>` (repo `<nombre de la carpeta del repo>`, <AAAA-MM-DD>)
+Commit analizado: `<sha completo>` (repo `<nombre de la carpeta del repo>`, <AAAA-MM-DD>)<, si describe cambios sin commitear: (incluye cambios sin commitear de `<slug>`)>
 Ruta de la unidad: `<ruta desde la raíz de su repo, o . si es el repo entero>`
 
 <!-- Cómo mantenerlo:
+- Commit analizado: el commit cuyo código describe el mapa. Con cambios sin commitear, el de la base y la nota de
+  arriba; cuando se commitean, ese commit y sin la nota.
 - Antes de tocar la unidad, compara el commit analizado con el HEAD de su repo. Si avanzó, revisa solo
   `git -C <repo> diff <commit analizado>..HEAD -- <ruta de la unidad>`, corrige lo que cambió y actualiza el commit.
 - Describe lo estable: nada de estados del momento (git status, ramas actuales, "hoy").

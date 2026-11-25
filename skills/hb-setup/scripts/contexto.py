@@ -134,12 +134,27 @@ def describe(repo, name):
     return "excluido de git (local)" if ignored(repo, name) else "sin versionar y sin excluir"
 
 
+def common_dir(path):
+    """La carpeta común de git de un repo (la misma para todos sus worktrees), resuelta; None si no es un repo."""
+    found = git(path, "rev-parse", "--git-common-dir")
+    value = found.stdout.strip()
+    if found.returncode != 0 or not value:
+        return None
+    return os.path.realpath(value if os.path.isabs(value) else os.path.join(str(path), value))
+
+
+def same_repository(repo, other):
+    """Si la otra carpeta es un worktree del mismo repo (no es un repo vecino)."""
+    mine = common_dir(repo)
+    return mine is not None and mine == common_dir(other)
+
+
 def siblings(repo):
     """Repos hermanos (en la carpeta padre) que algún archivo versionado del proyecto nombra: por ruta (../<nombre>)
     o por nombre (una dependencia publicada con el mismo nombre que el repo). {nombre: {"ruta": [...], "nombre": [...]}}.
     Por nombre son candidatos: se confirman con el usuario."""
-    names = sorted(d.name for d in repo.parent.iterdir() if d != repo and d.is_dir() and exists(d / ".git")) \
-        if repo.parent.is_dir() else []
+    names = sorted(d.name for d in repo.parent.iterdir() if d != repo and d.is_dir() and exists(d / ".git")
+                   and not same_repository(repo, d)) if repo.parent.is_dir() else []
     found = {}
 
     def note(name, how, file):
@@ -262,9 +277,12 @@ def workspace_units(repo):
 
 
 def feature_folders(files, modules):
-    """Carpetas de feature (…/features/<nombre> o …/feature/<nombre>) que no contienen un módulo ya detectado."""
+    """Carpetas de feature (…/features/<nombre> o …/feature/<nombre>) que no contienen un módulo ya detectado. Los .md no
+    cuentan: una carpeta de mapas del módulo (modules/<…>/features/<nombre>.md) no es código."""
     found = set()
     for path in files:
+        if path.endswith(".md"):
+            continue
         match = re.match(r"^((?:[^/]+/)*?(?:features?)/[^/]+)/", path)
         if match:
             found.add(match.group(1))
@@ -333,6 +351,26 @@ def bare(cell):
     return (quoted.group(1) if quoted else cell).strip()
 
 
+def model_local_config(repo):
+    """Las rutas de "### Configuración local modificada a propósito" de ## Estructura (lo primero entre acentos graves de
+    cada viñeta)."""
+    structure = section_text(read_text(repo / "AGENTS.md"), "Estructura", 2)
+    block = section_text(structure, "Configuración local modificada a propósito", 3) if structure is not None else None
+    found = []
+    for line in (block or "").splitlines():
+        quoted = re.match(r"^[ \t]*[-*][ \t]+`([^`]+)`", line)
+        if quoted and not quoted.group(1).startswith("<"):
+            found.append(norm(quoted.group(1)))
+    return found
+
+
+def covered(path, sources):
+    """Si una ruta candidata cae dentro de la fuente de alguna unidad del modelo ("." cubre todo el repo)."""
+    path = norm(path)
+    return any(path == source or (source == "." and not path.startswith("..")) or path.startswith(source + "/")
+               for source in sources)
+
+
 def norm(path):
     path = path.strip().rstrip("/")
     return os.path.normpath(path) if path else "."
@@ -374,13 +412,18 @@ def units(args):
         print("Carpetas de feature (candidatas a unidad en un proyecto de un solo módulo): " + ", ".join(features[:30])
               + more)
     cloned = siblings(repo)
-    refs = outside_refs(repo, files)
+    refs = {name: found for name, found in outside_refs(repo, files).items()
+            if not (exists(repo.parent / name / ".git") and same_repository(repo, repo.parent / name))}
     names = sorted(set(cloned) | set(refs))
     print("Repos vecinos que nombra el proyecto:" + ("" if names else " ninguno"))
     for name in names:
         path = repo.parent / name
-        evidence = refs.get(name) or cloned.get(name, {}).get("ruta") or cloned.get(name, {}).get("nombre") or []
-        how = "como ruta" if name in refs or cloned.get(name, {}).get("ruta") else "por nombre, candidato a confirmar"
+        if name in refs:  # una ruta de un archivo de configuración que, resuelta, sale del repo
+            evidence, how = refs[name], "como ruta"
+        elif cloned[name]["ruta"]:  # ../<nombre> en cualquier archivo, también en el código: puede ser un import
+            evidence, how = cloned[name]["ruta"], "nombrado como ../%s, candidato a confirmar" % name
+        else:
+            evidence, how = cloned[name]["nombre"], "por nombre, candidato a confirmar"
         more = " y %d más" % (len(evidence) - 3) if len(evidence) > 3 else ""
         if exists(path / ".git"):
             sibling_url, sibling_branch = remote_info(path)
@@ -391,10 +434,14 @@ def units(args):
         else:
             state = "SIN CLONAR: pregunta la URL de su remoto"
         print("  ../%s  %s  (%s: %s%s)" % (name, state, how, ", ".join(evidence[:3]), more))
+    registered = model_local_config(repo)
     candidates = modified_naming(repo, names)
-    if candidates:
+    new = [path for path in candidates if norm(path) not in registered]
+    if new:
         print("Archivos versionados modificados que nombran repos vecinos (candidatos a «Configuración local "
-              "modificada a propósito»: confírmalos con el usuario): " + ", ".join(candidates))
+              "modificada a propósito»: confírmalos con el usuario): " + ", ".join(new))
+    if registered:
+        print("Configuración local modificada a propósito (ya en el modelo): " + ", ".join(registered))
     kind, listed = model_units(repo)
     if kind is None:
         print("AGENTS.md sin ## Estructura: escríbela con estos candidatos y las respuestas del usuario")
@@ -403,13 +450,21 @@ def units(args):
         print("AGENTS.md tiene ### Repos relacionados (formato anterior): pasa sus filas a ## Estructura")
     print("En el modelo (%s): %s" % (kind, ", ".join(ident for ident, _ in listed) or "sin filas"))
     sources = {source for _, source in listed}
+    warnings = 0
     for ident, source in listed:
         if not exists(repo / source):
+            warnings += 1
             print("  ⚠ %s: la fuente %s no existe en disco (¿sin clonar o ruta equivocada?)" % (ident, source))
-    found = set(modules) | {os.path.join("..", name) for name in names}
-    missing = sorted(path for path in found if norm(path) not in sources)
+    found = set(modules) | {os.path.join("..", name) for name in refs}
+    missing = sorted(path for path in found if not covered(path, sources))
     if missing:
         print("  Candidatos que no están en el modelo: " + ", ".join(missing))
+    # Las carpetas de feature se comparan solo si el modelo ya usa carpetas de feature como unidades.
+    lost = [f for f in features if not covered(f, sources)] if any(norm(f) in sources for f in features) else []
+    if lost:
+        print("  Carpetas de feature que no están en el modelo: " + ", ".join(lost))
+    if not (warnings or missing or lost):
+        print("  ✔ El modelo cubre todos los candidatos")
     return 0
 
 
@@ -720,11 +775,11 @@ def prepare(args):
           + (" Con {fecha} y {slug}, hb-implement usa la línea tal cual." if MARKER.search(reports) else ""))
     where = "versionados con el código" if args.module_maps == "versioned" else (
         "fuera de git (en `.git/info/exclude`)" if mode == "versionado" else f"fuera de git (dentro de `{folder}/`)")
-    print("Para ## Estructura:")
-    print(f"  - Mapas del módulo: En `{maps}/<identificador>.md`, {where}. Antes de tocar una unidad, lee su mapa; "
+    print("Para ## Estructura, en ### Mapas del módulo (la línea tal cual):")
+    print(f"  - En `{maps}/<identificador>.md`, {where}. Antes de tocar una unidad, lee su mapa; "
           f"si no existe, créalo; si su `Commit analizado` quedó atrás, actualízalo solo con el diff desde ese commit.")
-    print(f"  - Documentos: una fila por cada documento extenso de `{docs}`, con su ruta y cuándo leerlo. Por ejemplo: "
-          f"| `{docs}arquitectura.md` | Vayas a crear una feature o un módulo nuevo |")
+    print(f"Para ## Estructura, en ### Documentos: una fila por cada documento extenso de `{docs}`, con su ruta y "
+          f"cuándo leerlo. Por ejemplo: | `{docs}arquitectura.md` | Vayas a crear una feature o un módulo nuevo |")
     return 0
 
 

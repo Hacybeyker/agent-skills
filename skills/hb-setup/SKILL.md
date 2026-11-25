@@ -117,7 +117,7 @@ En los dos casos:
 - **La carpeta de reportes queda fuera de git:** el script la deja en `.git/info/exclude` (local). No edites `.gitignore` por tu cuenta: si el equipo lo prefiere ahí, inclúyelo en el diff que muestras para aprobar.
 - **Archivos locales de las herramientas de IA:** si hay alguno sin versionar y sin ignorar (`.claude/settings.local.json`, `CLAUDE.local.md`, los de aider), `contexto.py preparar` lo agrega a `.git/info/exclude` (no toca `.gitignore`) y lo dice: nómbralo en tu resumen.
 - **Nada de la máquina en `AGENTS.md`:** nunca escribas seriales de dispositivo (los comandos llevan `ANDROID_SERIAL=<serial>`) ni rutas de la máquina, salvo la ruta del proyecto en los `cd` de los comandos.
-- **Sobre la ruta real:** si `AGENTS.md` o la carpeta de contexto son enlaces simbólicos, escribe en `realpath AGENTS.md` (y en la ruta real de cada archivo de la carpeta): algunas herramientas reemplazan un enlace por un archivo al guardar.
+- **Sobre la ruta real:** si `AGENTS.md` o la carpeta de contexto son enlaces simbólicos, escribe en `realpath AGENTS.md` (y en la ruta real de cada archivo de la carpeta; para un archivo que todavía no existe, la ruta real de su carpeta): algunas herramientas reemplazan un enlace por un archivo al guardar. Si el enlace todavía no apunta a nada, escribe en la ruta que imprimió `contexto.py preparar`.
 - Mantén el `AGENTS.md` corto, idealmente por debajo de 150 líneas: los agentes lo cargan en cada sesión. Lo extenso va a la carpeta de docs del modo (`docs/` si el contexto se versiona; `contexto/docs/` si no) y tiene su fila en "Documentos", con la ruta explícita del archivo: con la carpeta enlazada, `rg` y `find` sin `-L` no entran al enlace.
 
 ## 4. Verifica y entrega

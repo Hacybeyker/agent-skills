@@ -205,7 +205,8 @@ class ModuleMapsTest(Base):
     def test_versionado_deja_los_mapas_fuera_de_git_por_defecto_y_lo_dice(self):
         result = self.prepare("--modo", "versionado")
         self.assertIn("/docs/modules/", self.exclude())
-        self.assertIn("Mapas del módulo: En `docs/modules/<identificador>.md`, fuera de git", result.stdout)
+        self.assertIn("en ### Mapas del módulo (la línea tal cual):\n  - En `docs/modules/<identificador>.md`, fuera de git",
+                      result.stdout)
         self.assert_gitignore_intact()
 
     def test_versionado_con_mapas_versionados_no_los_excluye(self):
@@ -332,6 +333,66 @@ class UnitsTest(Base):
         self.assertIn("  packages/web  (paquete del espacio de trabajo (pnpm-workspace.yaml))", result.stdout)
         self.assertNotIn("sin-paquete", result.stdout)
         self.assertIn("packages/web/src/features/payments, packages/web/src/features/profile", result.stdout)
+
+
+class UnitsModelTest(UnitsTest):
+    """Arreglos de la validación: unidades anidadas, carpetas de feature, falsos vecinos y configuración registrada."""
+
+    def model(self, rows, local=""):
+        head = ("| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal "
+                "| Publica y versiona |\n| --- | --- | --- | --- | --- | --- | --- |\n")
+        body = "".join("| `%s` | `%s` | x | — | `x` | este repo, `main` | con la app |\n" % row for row in rows)
+        extra = ("\n### Configuración local modificada a propósito\n\n- `%s`: motivo.\n" % local) if local else ""
+        write(self.repo / "AGENTS.md", "# X\n\n## Estructura\n\n### Unidades\n\n" + head + body + extra
+              + "\n## Modernización\n")
+
+    def test_una_unidad_con_fuente_punto_cubre_los_modulos_del_repo(self):
+        self.model([("app-shell", "."), ("feature-payments", "../feature-payments"), ("core-lib", "../core-lib")])
+        out = self.units()
+        self.assertNotIn("Candidatos que no están en el modelo", out)
+
+    def test_si_todo_coincide_lo_confirma(self):
+        (self.base / "core-lib").mkdir()
+        init_repo(self.base / "core-lib")
+        self.model([("app", "app/"), ("features/payments/impl", "features/payments/impl"),
+                    ("feature-payments", "../feature-payments"), ("core-lib", "../core-lib")])
+        out = self.units()
+        self.assertIn("✔ El modelo cubre todos los candidatos", out)
+
+    def test_la_configuracion_ya_registrada_no_vuelve_a_proponerse(self):
+        write(self.repo / "local-modules.json", '{"feature-payments": true, "paths": ["../feature-payments"]}\n')
+        self.model([("app-shell", ".")], local="local-modules.json")
+        out = self.units()
+        self.assertNotIn("confírmalos con el usuario): local-modules.json", out)
+        self.assertIn("Configuración local modificada a propósito (ya en el modelo): local-modules.json", out)
+
+    def test_un_worktree_del_mismo_repo_no_es_un_repo_vecino(self):
+        git(self.repo, "worktree", "add", "-q", str(self.base / "repo-principal-wt"), "-b", "otra")
+        write(self.repo / "notas.txt", "ver ../repo-principal-wt\n")
+        commit_all(self.repo, "notas")
+        self.assertNotIn("repo-principal-wt", self.units())
+
+    def test_un_import_del_codigo_con_el_nombre_de_un_vecino_es_solo_candidato(self):
+        (self.base / "comun").mkdir()
+        init_repo(self.base / "comun")
+        out = self.units()
+        line = next(l for l in out.splitlines() if "../comun" in l)
+        self.assertIn("candidato a confirmar", line)
+        self.assertNotIn("../comun", "".join(l for l in out.splitlines() if "no están en el modelo" in l))
+
+    def test_carpetas_de_feature_que_faltan_si_el_modelo_las_usa(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp))
+            for feature in ("payments", "profile"):
+                write(repo / "src" / "features" / feature / "index.ts", "\n")
+            write(repo / "docs" / "modules" / "src" / "features" / "payments" / "checkout.md", "# mapa\n")
+            write(repo / "AGENTS.md", "## Estructura\n\n### Unidades\n\n| Unidad | Fuente |\n| --- | --- |\n"
+                  "| `src/features/payments` | `src/features/payments` |\n")
+            commit_all(repo)
+            result = run([sys.executable, "-I", SCRIPT, "units", "--repo", repo], repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Carpetas de feature que no están en el modelo: src/features/profile", result.stdout)
+        self.assertNotIn("docs/modules", result.stdout)
 
 
 class WorktreeTest(Base):
