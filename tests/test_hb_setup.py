@@ -244,7 +244,8 @@ class ModuleMapsTest(Base):
     def test_con_marcadores_la_base_es_la_parte_fija(self):
         result = self.prepare("--modo", "versionado", "--reportes", "reports/{fecha}/{slug}")
         self.assertIn("hb-review en `reports/review/`", result.stdout)
-        self.assertIn("hb-implement usa la línea tal cual", result.stdout)
+        self.assertIn("hb-implement usa la línea tal cual (`reports/{fecha}/{slug}`)", result.stdout)
+        self.assertNotIn("hb-implement en", result.stdout)
 
 
 class UnitsTest(Base):

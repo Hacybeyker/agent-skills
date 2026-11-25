@@ -108,7 +108,7 @@ En la entrega, por cada unidad **publicada** que cambiaste, en este orden:
 
 1. **PR del módulo** en su repo, desde su rama de trabajo.
 2. **Release del módulo** en su repo, con `hb-release` (o como diga "Publica y versiona": por ejemplo, el workflow que publica al crear el tag).
-3. **PR de bump en la app**: sube la versión fijada al número nuevo y vuelve la unidad a publicada.
+3. **PR de bump en la app**: sube la versión fijada al número nuevo, y solo eso. La configuración que pasa la unidad a fuente no entra en ese PR: se revierte aparte, como cualquier cambio temporal (última viñeta).
 
 - La configuración que pasa a fuente **nunca se commitea**, en ningún paso.
 - Las unidades "En fuente" (un módulo o una carpeta del repo) no tienen release propio: van en el PR del repo donde viven.

@@ -769,10 +769,12 @@ def prepare(args):
               f"({files} y `{folder}`) excluidos en `.git/info/exclude`. Lo extenso, en `{docs}`.")
     print(f"  - Carpeta de reportes: `{reports}`")
     base = fixed_part(reports) if MARKER.search(reports) else reports
-    print(f"    Es la base común de los reportes: " + ", ".join(f"{skill} en `{base}/{sub}/`"
-                                                                for skill, sub in REPORT_FOLDERS)
+    marked = bool(MARKER.search(reports))
+    print("    Es la base común de los reportes: " + ", ".join(f"{skill} en `{base}/{sub}/`"
+                                                             for skill, sub in REPORT_FOLDERS
+                                                             if not (marked and skill == "hb-implement"))
           + f", con el índice en `{base}/INDEX.md`."
-          + (" Con {fecha} y {slug}, hb-implement usa la línea tal cual." if MARKER.search(reports) else ""))
+          + (f" Con {{fecha}} y {{slug}}, hb-implement usa la línea tal cual (`{reports}`)." if marked else ""))
     where = "versionados con el código" if args.module_maps == "versioned" else (
         "fuera de git (en `.git/info/exclude`)" if mode == "versionado" else f"fuera de git (dentro de `{folder}/`)")
     print("Para ## Estructura, en ### Mapas del módulo (la línea tal cual):")
