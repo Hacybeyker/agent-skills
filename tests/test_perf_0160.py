@@ -1205,7 +1205,7 @@ class ReportStructureTest(PerfBase):
         broken = self.investigation(name="rota")
         write(broken / "fases.json", "[]")
         self.ok("reporte", "--gerencia-unificado", "--todas")
-        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        page = (self.dir / "reports" / "performance" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
         self.assertIn("Resumen de 3 investigaciones", page)
         self.assertIn("Todavía sin mediciones", page)
 
@@ -1216,7 +1216,7 @@ class ReportStructureTest(PerfBase):
         out = self.ok("estado")
         self.assertIn("reporte --gerencia-unificado --todas", out)  # R12: `estado` lo ofrece
         out = self.ok("reporte", "--gerencia-unificado", "--todas")
-        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        page = (self.dir / "reports" / "performance" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
         self.assertIn("reporte-gerencia-unificado.html", out)
         self.assertIn("Performance · Resumen de 2 investigaciones", page)
         self.assertIn("App de pedidos", page)
@@ -1594,7 +1594,7 @@ class AcceptanceT3bUnificado(ReportFixtureBase):
         out = self.ok("estado")
         self.assertIn("reporte --gerencia-unificado --todas", out)
         self.ok("reporte", "--gerencia-unificado", "--todas")
-        page = (self.dir / "reports" / "perf" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
+        page = (self.dir / "reports" / "performance" / "reporte-gerencia-unificado.html").read_text(encoding="utf-8")
         sections = re.findall(r'<section id="(inv\d)">\s*<h2>[^<]*</h2>\s*<p class="sub">([^<]*) · <span class="chip '
                               r'[^"]*">([^<]+)</span>', page)
         self.assertEqual([(date, label) for _, date, label in sections],
