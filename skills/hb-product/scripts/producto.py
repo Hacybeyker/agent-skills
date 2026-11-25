@@ -1458,10 +1458,24 @@ def sobrevive_abogado(filas, diferenciador, descarte=None):
         for f in suyas) or "ninguna hipótesis lo pone a prueba en 03-validacion.md"
 
 
+def lo_que_impide(filas, diferenciador, descarte=None):
+    """Lo que impide que un diferenciador sobreviva al abogado del diablo (feedback #63 y #64): {id, sin_hipotesis,
+    refutadas: [ID], fortalecer: [fila]}. Sin ninguna hipótesis (nada lo puso a prueba) o con hipótesis débiles (o
+    sostenidas con confianza baja) falta evidencia, que se busca en la sesión 3; solo una refutada es evidencia en
+    contra. Con un criterio de descarte vigente, la más riesgosa débil no cuenta, igual que en `sobrevive_abogado`."""
+    suyas = [fila for fila in filas or [] if fila["diferenciador"] == diferenciador["id"]]
+    impiden = [f for f in suyas if not (f["veredicto"] == "sostenida" and f["nivel"] >= 2)
+               and not (descarte and f["riesgosa"] and f["veredicto"] == "débil")]
+    return {"id": diferenciador["id"], "sin_hipotesis": not suyas,
+            "refutadas": [f["id"] for f in impiden if f["veredicto"] == "refutada"],
+            "fortalecer": [f for f in impiden if f["veredicto"] != "refutada"]}
+
+
 def alternativas_validadas(filas, registro, principal, descarte=None):
     """Los otros diferenciadores viables, con la regla de «sobrevive» (feedback #61): {sobreviven: [ID], no: [(ID,
-    detalle)]}. Son los que la puerta puede recomendar como principal; uno que no sobrevive no se recomienda."""
-    resultado = {"sobreviven": [], "no": []}
+    detalle)], impide: [lo que impide que sobreviva cada uno de «no»]}. Son los que la puerta puede recomendar como
+    principal; uno que no sobrevive no se recomienda, pero si solo le falta evidencia se puede fortalecer (#64)."""
+    resultado = {"sobreviven": [], "no": [], "impide": []}
     for diferenciador in registro.viables():
         if principal and diferenciador["id"] == principal["id"]:
             continue
@@ -1470,6 +1484,7 @@ def alternativas_validadas(filas, registro, principal, descarte=None):
             resultado["sobreviven"].append(diferenciador["id"])
         else:
             resultado["no"].append((diferenciador["id"], detalle))
+            resultado["impide"].append(lo_que_impide(filas, diferenciador, descarte))
     return resultado
 
 
@@ -1481,8 +1496,9 @@ def texto_alternativas(alternativas):
         "%s no sobrevive: %s" % par for par in alternativas["no"]])
 
 
-def problemas_validacion(filas):
-    """Lo que le falta a la tabla de hipótesis para poder cerrar la sesión 3."""
+def problemas_validacion(filas, principal=None):
+    """Lo que le falta a la tabla de hipótesis para poder cerrar la sesión 3. Con un diferenciador principal, una
+    hipótesis lo pone a prueba (feedback #63): sin ella, la puerta 2 no sabría si sobrevive."""
     if not filas:
         return ["03-validacion.md no tiene filas en la tabla de hipótesis (ID, Hipótesis, Hallazgos, En contra, "
                 "Diferenciador, Veredicto, Más riesgosa, Métrica y umbral)"]
@@ -1502,6 +1518,9 @@ def problemas_validacion(filas):
     riesgosas = [fila["id"] for fila in filas if fila["riesgosa"]]
     if len(riesgosas) != 1:
         problemas.append("marca exactamente una hipótesis como la más riesgosa (hay %d)" % len(riesgosas))
+    if principal and not any(fila["diferenciador"] == principal["id"] for fila in filas):
+        problemas.append("ninguna hipótesis pone a prueba el diferenciador principal (%s): agrega la suya, con %s en "
+                         "la columna Diferenciador (siempre va la del principal)" % (principal["id"], principal["id"]))
     return problemas
 
 
@@ -1796,16 +1815,19 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
         if not nueva:
             principal = registro.principal()
             texto = "El diferenciador principal sobrevive al abogado del diablo, con confianza media o alta"
+            # si la sesión 3 ya se reabrió para fortalecer las hipótesis, no se recomienda otra vez (feedback #64)
+            gastada = reapertura_validacion(carpeta, producto)
             if not principal:
                 alternativas = alternativas_validadas(filas, registro, None, descarte)
                 agregar("sobrevive", False, texto, "no hay un diferenciador principal registrado%s" % texto_alternativas(
-                    alternativas), alternativas=alternativas)
+                    alternativas), alternativas=alternativas, reapertura_3=gastada)
             else:
                 sobrevive, propio = sobrevive_abogado(filas, principal, descarte)
                 # la alternativa que se recomendaría como principal pasa la misma regla (feedback #61)
                 alternativas = None if sobrevive else alternativas_validadas(filas, registro, principal, descarte)
                 agregar("sobrevive", sobrevive, texto, "%s: %s%s" % (principal["id"], propio, texto_alternativas(
-                    alternativas)), alternativas=alternativas, propio=propio)
+                    alternativas)), alternativas=alternativas, propio=propio, reapertura_3=gastada,
+                        impide=None if sobrevive else lo_que_impide(filas, principal, descarte))
 
     else:
         datos = prd(carpeta, registro)
@@ -1827,7 +1849,7 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
                 "%s en %s" % (principal["id"], ", ".join(dentro)) if dentro
                 else "ninguna funcionalidad del MVP lo cita" if principal
                 else "no hay un diferenciador principal registrado%s" % texto_alternativas(alternativas),
-                alternativas=alternativas)
+                alternativas=alternativas, reapertura_3=None if principal else reapertura_validacion(carpeta, producto))
         trazadas = [f for f in mvp if not f["faltas"]]
         agregar("trazabilidad", mvp and len(trazadas) == len(mvp),
                 "100 % de las funcionalidades del MVP con trazabilidad", "%d de %d" % (len(trazadas), len(mvp)))
@@ -2280,6 +2302,87 @@ def reapertura_gastada(producto, sesion):
     return "reabierta %s" % ("una vez" if veces == 1 else "%d veces" % veces)
 
 
+def reapertura_validacion(carpeta, producto):
+    """Si la sesión 3 ya se reabrió por un ajuste suyo (`decidir --ajustar 3`, en cualquier puerta) y volvió a cerrar,
+    el texto de esa pasada; si no, None (feedback #64). La skill recomienda reabrirla una sola vez para fortalecer las
+    hipótesis, como la 1c (#55). Una reapertura en cascada (al ajustar la 1g, por ejemplo) no cuenta: no se reabrió
+    para eso."""
+    if not any(d.get("decision") == "ajustar" and d.get("sesion") == "3" for d in decisiones(carpeta)):
+        return None
+    return reapertura_gastada(producto, "3")
+
+
+def texto_impide(impide):
+    """'HIP-05 débil (confianza baja), HIP-07 refutada' o 'ninguna hipótesis lo pone a prueba'."""
+    if impide["sin_hipotesis"]:
+        return "ninguna hipótesis lo pone a prueba"
+    return ", ".join(["%s %s (confianza %s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]])
+                      for f in impide["fortalecer"]] + ["%s refutada" % i for i in impide["refutadas"]])
+
+
+def que_fortalecer(registro, impide):
+    """Qué evidencia le falta a un diferenciador para sobrevivir (feedback #64): (texto, hallazgos a triangular, si todo
+    es triangular esos hallazgos). Una hipótesis con hallazgos en confianza baja los triangula; una con sus hallazgos ya
+    en media o alta pide evidencia a favor nueva; sin ninguna hipótesis, se pone a prueba."""
+    if impide["sin_hipotesis"]:
+        return ("poner a prueba %s con una hipótesis (con %s en la columna Diferenciador), buscando evidencia en contra"
+                % (impide["id"], impide["id"]), [], False)
+    partes, ids, solo_hallazgos = [], [], True
+    for fila in impide["fortalecer"]:
+        bajos = [registro.hallazgos[i] for i in fila["hallazgos"] if i in registro.hallazgos
+                 and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
+        if bajos:
+            partes.append("%s, triangulando %s" % (fila["id"], "; ".join(falta_triangular(registro, h) for h in bajos)))
+            ids += [h["id"] for h in bajos]
+        else:
+            partes.append("%s, con evidencia a favor nueva que la sostenga frente a lo que tiene en contra (sus "
+                          "hallazgos ya están en confianza %s)" % (fila["id"], NIVELES[fila["nivel"]]))
+            solo_hallazgos = False
+    return ("fortalecer las hipótesis de %s: %s" % (impide["id"], "; ".join(partes)), list(dict.fromkeys(ids)),
+            solo_hallazgos)
+
+
+def motivo_fortalecer(criterio, registro, candidatos, sin_principal=False):
+    """Un principal (o, sin él, cada viable) que no sobrevive al abogado del diablo solo por hipótesis débiles o sin
+    poner a prueba (feedback #63 y #64): falta evidencia, no hay evidencia en contra, igual que la demanda en la primera
+    pasada de la 1c (#55). `candidatos` son lo que impide a cada uno (`lo_que_impide`), el principal primero. Si alguno
+    no tiene una hipótesis refutada, 🟡 ajustar la sesión 3 una vez, diciendo qué hipótesis fortalecer y con qué
+    evidencia; si la 3 ya se reabrió por eso, No viable. None si todos tienen una refutada: la regla de siempre."""
+    fortalecibles = [c for c in candidatos if not c["refutadas"]]
+    if not fortalecibles:
+        return None
+    detalle = texto_impide(candidatos[0]) if len(candidatos) == 1 and not sin_principal else "; ".join(
+        "%s: %s" % (c["id"], texto_impide(c)) for c in candidatos)
+    quien = ("No hay un diferenciador principal y ningún viable sobrevive al abogado del diablo" if sin_principal
+             else "El principal (%s) no sobrevive al abogado del diablo%s" % (candidatos[0]["id"], (
+                 " y ningún otro viable sobrevive" if len(candidatos) > 1 else "")))
+    ids = [i for c in fortalecibles for i in que_fortalecer(registro, c)[1]]
+    gastada = criterio.get("reapertura_3")
+    if gastada:
+        return (True, "%s (%s), también después de reabrir la sesión 3 para fortalecer sus hipótesis (%s): ajustarla "
+                      "otra vez con las mismas herramientas no traería evidencia nueva" % (quien, detalle, gastada),
+                "Evidencia que sostenga esas hipótesis sin depender de otra pasada de la sesión 3: datos propios o una "
+                "prueba con usuarios", None, ids)
+    grupos, solo = [], True
+    for candidato in fortalecibles:
+        texto, _, solo_hallazgos = que_fortalecer(registro, candidato)
+        solo = solo and solo_hallazgos
+        if sin_principal or candidato is not candidatos[0]:  # una alternativa: fortalecerla y luego elegirla (1g)
+            texto = texto.replace(": ", ", para %s en la 1g: " % (
+                "elegirlo como principal" if sin_principal else "llevarlo a principal"), 1) \
+                if not candidato["sin_hipotesis"] else "%s, para %s en la 1g" % (
+                    texto, "elegirlo como principal" if sin_principal else "llevarlo a principal")
+        grupos.append(texto)
+    razon = "%s (%s), pero solo por hipótesis débiles o sin poner a prueba (%s): falta evidencia, no hay evidencia " \
+            "en contra, y la sesión 3 todavía no se reabrió para fortalecerlas" % (
+                quien, detalle, "ninguna está refutada" if len(fortalecibles) == len(candidatos)
+                else "%s no tiene%s ninguna refutada" % (y_lista(c["id"] for c in fortalecibles),
+                                                        "" if len(fortalecibles) == 1 else "n"))
+    cambiaria = "Ajustar la sesión 3, una sola vez, para %s" % " · o ".join(grupos)
+    alcance = {"hallazgos": ids} if solo and ids else {"linea": "validacion"}  # lo que el ajuste resuelve (#57)
+    return False, razon, cambiaria, "3", ids, True, alcance
+
+
 def refutados(registro, ids):
     """Los hallazgos con evidencia en contra que los refuta (feedback #55): tantas fuentes independientes y vigentes
     en contra (`hallazgo --en-contra`) como a favor, lo que los deja en confianza baja. Menos en contra los debilita,
@@ -2470,6 +2573,9 @@ def motivo_elegir_principal(numero_puerta, criterio, producto, registro):
         return (False, "No hay un diferenciador principal elegido, pero %s %s al abogado del diablo" % (
             nombres, "sobrevive" if len(sobreviven) == 1 else "sobreviven"),
             "Elegir el principal entre los que sobreviven (%s) en la 1g" % nombres, "1g", [], False)
+    fortalecer = motivo_fortalecer(criterio, registro, alternativas.get("impide") or [], sin_principal=True)
+    if fortalecer:  # a los viables solo les falta evidencia y la 3 no se reabrió por eso (feedback #64)
+        return fortalecer
     return (True, "No hay un diferenciador principal y ningún viable sobrevive al abogado del diablo (%s)" % "; ".join(
         "%s: %s" % (i, llano(texto)) for i, texto in alternativas["no"]),
             "Un diferenciador viable que quede sostenido con confianza media o alta", None, [])
@@ -2696,6 +2802,11 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
             return (False, "El principal (%s) no sobrevive al abogado del diablo, pero %s sí %s" % (
                 principal["id"], y_lista(sobreviven), "sobrevive" if len(sobreviven) == 1 else "sobreviven"),
                 "Llevar %s a principal (1g)" % y_lista(sobreviven, "o"), "1g", ids, False)
+        # solo le falta evidencia (débiles o sin poner a prueba) y la 3 no se reabrió por eso: ajustar 3 (#63 y #64)
+        fortalecer = motivo_fortalecer(criterio, registro, [criterio["impide"]] + alternativas.get("impide", [])) \
+            if criterio.get("impide") else None
+        if fortalecer:
+            return fortalecer[:4] + (list(dict.fromkeys(fortalecer[4] + ids)),) + fortalecer[5:]
         propio = llano(criterio.get("propio") or detalle.split(": ", 1)[-1])
         if alternativas["no"]:
             return (True, "El diferenciador principal (%s) no sobrevive al abogado del diablo (%s) y ningún otro "
@@ -3131,7 +3242,7 @@ def pendientes_de(carpeta, producto, registro, sesion):
     if sesion == "2" and not producto.get("escenarios"):
         faltan.append("faltan los escenarios de ingresos (`escenarios --entrada escenarios.json`)")
     if sesion == "3":
-        faltan.extend(problemas_validacion(hipotesis(carpeta, registro)))
+        faltan.extend(problemas_validacion(hipotesis(carpeta, registro), registro.principal()))
     if sesion == "4":
         datos_prd = prd(carpeta, registro)
         if not any(f["mvp"] for f in datos_prd["funciones"]):
@@ -3157,10 +3268,17 @@ def texto_sesion(carpeta, producto, sesion):
             if sesion == "3" else "el MVP pone a prueba la hipótesis más riesgosa (el criterio de descarte), con su "
                                   "métrica y su umbral, en la columna Hipótesis de su funcionalidad"))
     reapertura = int((producto["sesiones"].get(sesion) or {}).get("reaperturas") or 0)
-    if sesion in INVESTIGACION and reapertura:
+    if sesion in CON_PRESUPUESTO and reapertura:
         limites = presupuesto_reapertura(producto)
         partes.append("Reapertura %d: el presupuesto de esta pasada es de %d búsquedas y %d lecturas." % (
             reapertura, limites["busquedas"], limites["lecturas"]))
+        ajustes = [d for d in decisiones(carpeta) if d.get("decision") == "ajustar"]
+        if sesion == "3" and ajustes and ajustes[-1].get("sesion") == "3":  # la reabrió un ajuste suyo (#64)
+            resolver = ajustes[-1].get("resolver") or []
+            partes.append("Es la reapertura de la validación%s. Es la única: si al cerrar el principal (y cada otro "
+                          "diferenciador viable) sigue sin sobrevivir al abogado del diablo, la puerta no recomienda "
+                          "reabrirla otra vez." % (". Lo que tiene que conseguir, según la puerta: %s" % "; ".join(
+                              "«%s»" % llano(r) for r in resolver) if resolver else ""))
         if sesion == "1c":  # la skill recomienda reabrir la 1c una sola vez (feedback #55)
             partes.append("Es la reapertura de la demanda: si al cerrar la demanda sigue en confianza baja (o el "
                           "problema sin documentar, en una idea nueva), la puerta 1 no recomienda reabrirla otra vez.")
@@ -5437,7 +5555,7 @@ def cmd_validacion(args):
             " · " + fila["diferenciador"] if fila["diferenciador"] else "",
             " · la más riesgosa" + (" (%s)" % fila["metrica"] if fila["metrica"] else " (sin métrica ni umbral)")
             if fila["riesgosa"] else ""))
-    problemas = problemas_validacion(filas)
+    problemas = problemas_validacion(filas, registro.principal())
     for problema in problemas:
         print("✖ %s" % problema)
     if problemas:
@@ -5692,6 +5810,8 @@ def cmd_decidir(args):
         "veredicto": resultado["nivel"], "recomienda": resultado["recomienda"], "sesion": resultado["sesion"],
         "razones": resultado["razones"], "cambiaria": resultado["cambiaria"]}
     registro_decision["contra_recomendacion"] = contra
+    if tomada == "ajustar" and args.ajustar == resultado["sesion"]:  # lo que la reapertura tiene que conseguir (#64)
+        registro_decision["resolver"] = [que for _, _, que in resultado.get("por_resolver") or []]
     if motivo_usuario:
         registro_decision["motivo_decision"] = motivo_usuario
     if args.automatico:

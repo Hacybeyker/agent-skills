@@ -74,26 +74,29 @@ class AlternativaTest(Base):
         self.assertIn("Con eso, el veredicto pasaría a Viable", salida)
         self.assertIn("· otros viables: D-2 sobrevive", salida)
 
-    def test_la_alternativa_debil_no_se_recomienda_ni_promete_viable(self):
+    def test_la_alternativa_debil_no_se_recomienda_como_principal(self):
         salida = self.puerta2(D2_DEBIL)
-        self.assertIn("🔴  PUERTA 2 · NO VIABLE  →  la skill recomienda: DESCARTAR", salida)
-        self.assertIn("El diferenciador principal (D-1) no sobrevive al abogado del diablo (HIP-02 débil (confianza "
-                      "alta)) y ningún otro viable sobrevive (D-2: HIP-03 débil (confianza alta))", salida)
+        # débiles y sin refutar: falta evidencia, que se busca en la sesión 3 (feedback #64), no llevar D-2 a principal
+        self.assertIn("🟡  PUERTA 2 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 3", salida)
+        self.assertIn("El principal (D-1) no sobrevive al abogado del diablo y ningún otro viable sobrevive (D-1: "
+                      "HIP-02 débil (confianza alta); D-2: HIP-03 débil (confianza alta))", salida)
         self.assertIn("· otros viables: D-2 no sobrevive: HIP-03 débil (confianza alta)", salida)
         self.assertNotIn("Llevar D-2", salida)
-        self.assertNotIn("pasaría a Viable", salida)
 
     def test_la_alternativa_sin_hipotesis_no_sobrevive(self):
         salida = self.puerta2("")
-        self.assertIn("🔴  PUERTA 2 · NO VIABLE", salida)
-        self.assertIn("D-2: ninguna hipótesis lo pone a prueba en 03-validacion.md", salida)
+        self.assertIn("D-2 no sobrevive: ninguna hipótesis lo pone a prueba en 03-validacion.md", salida)
+        self.assertIn("AJUSTAR 3", salida)  # sin poner a prueba no es evidencia en contra (feedback #63)
+        self.assertIn("poner a prueba D-2 con una hipótesis (con D-2 en la columna Diferenciador), buscando evidencia "
+                      "en contra, para llevarlo a principal en la 1g", salida)
 
     def test_la_regla_es_la_misma_funcion_para_los_dos(self):
         self.puerta2(D2_DEBIL)
         registro = producto.Registro(self.carpeta, self.datos()["criterios"])
         filas = producto.hipotesis(self.carpeta, registro)
         alternativas = producto.alternativas_validadas(filas, registro, registro.principal())
-        self.assertEqual(alternativas, {"sobreviven": [], "no": [("D-2", "HIP-03 débil (confianza alta)")]})
+        self.assertEqual(alternativas["sobreviven"], [])
+        self.assertEqual(alternativas["no"], [("D-2", "HIP-03 débil (confianza alta)")])
         # la más riesgosa débil no cuenta con un criterio de descarte vigente (la puerta 1 fue Viable para probar)
         filas = [dict(f, riesgosa=f["id"] == "HIP-03") for f in filas]
         self.assertTrue(producto.sobrevive_abogado(filas, registro.diferenciadores["D-2"], {"texto": "x"})[0])
@@ -115,9 +118,11 @@ class AlternativaTest(Base):
         self.assertIn("Elegir el principal entre los que sobreviven (D-2) en la 1g", salida)
         write(self.carpeta / "03-validacion.md", HIPOTESIS.format(d2=D2_DEBIL))
         salida = self.p("puerta", "--n", 2)
-        self.assertIn("🔴  PUERTA 2 · NO VIABLE", salida)
+        self.assertIn("AJUSTAR 3", salida)  # a los dos les falta evidencia, no tienen evidencia en contra (#64)
         self.assertIn("No hay un diferenciador principal y ningún viable sobrevive al abogado del diablo (D-1: "
-                      "HIP-02 débil (confianza alta); D-2: HIP-03 débil (confianza alta))", salida)
+                      "HIP-02 débil (confianza alta); D-2: HIP-03 débil (confianza alta)), pero solo por hipótesis "
+                      "débiles", salida)
+        self.assertIn("fortalecer las hipótesis de D-1, para elegirlo como principal en la 1g: HIP-02", salida)
 
     def test_la_puerta_3_sin_principal_usa_la_misma_regla(self):
         self.puerta2(D2_SOSTENIDA)
@@ -128,7 +133,7 @@ class AlternativaTest(Base):
         salida = self.p("puerta", "--n", 3)
         self.assertIn("Elegir el principal entre los que sobreviven (D-2) en la 1g", salida)
         write(self.carpeta / "03-validacion.md", HIPOTESIS.format(d2=D2_DEBIL))
-        self.assertIn("🔴  PUERTA 3 · NO VIABLE", self.p("puerta", "--n", 3))
+        self.assertIn("🟡  PUERTA 3 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 3", self.p("puerta", "--n", 3))
 
     def test_la_referencia_dice_cuando_una_de_canal_o_de_pago_lleva_el_diferenciador(self):
         texto = (base.SKILL / "references" / "validacion.md").read_text(encoding="utf-8")

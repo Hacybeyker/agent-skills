@@ -23,7 +23,7 @@ Una afirmación que, si es falsa, tumba el producto. Salen de la síntesis; esta
 
 - **Problema:** el usuario tiene el problema con la frecuencia suficiente.
 - **Solución:** la app lo resuelve mejor que lo que usa hoy.
-- **Diferenciador:** una por cada diferenciador, y siempre la del principal.
+- **Diferenciador:** una por cada diferenciador, y siempre la del principal: `cerrar --sesion 3` no cierra sin ella.
 - **Canal:** hay una forma de que los usuarios lleguen a la app.
 - **Pago:** alguien paga, o el volumen alcanza para los anuncios.
 - **Políticas:** las tiendas la aceptan.
@@ -57,6 +57,8 @@ Por cada hipótesis, búsquedas pensadas para **perder**: "por qué fallaría <i
 Lo que aparece se registra y se enlaza: un hallazgo nuevo en la línea `validacion`, o `--en-contra` en un hallazgo propio. Si no aparece nada, se anota qué se buscó. "No busqué" no es lo mismo que "no hay".
 
 El diferenciador principal **sobrevive** si todas sus hipótesis (las que lo llevan en la columna Diferenciador) quedan sostenidas, con confianza media o alta; sin ninguna, no sobrevive, porque nada lo puso a prueba. **Otro diferenciador viable pasa la misma regla con sus propias hipótesis**: la puerta 2 solo recomienda llevarlo a principal si sobrevive, así que pon a prueba también a los que podrían reemplazarlo. Si el principal queda débil o refutado, se dice, y si otro diferenciador lo sostendría mejor, se deja como propuesta, nunca como un comando suelto: `producto.py propuesta --texto "<qué cambiar y por qué>" --ajustar 1g`. La puerta 2 la muestra y el usuario decide si reabre 1g.
+
+Débil o sin poner a prueba no es lo mismo que refutada: le falta evidencia, no tiene evidencia en contra. Si el principal (y cada otro viable) no sobrevive solo por eso, la puerta 2 recomienda reabrir esta sesión **una sola vez** y dice qué hipótesis fortalecer y con qué evidencia (qué hallazgo triangular, o evidencia a favor nueva si sus hallazgos ya están en confianza media o alta); el texto de la reapertura lo repite. En esa pasada, busca justo eso y vuelve a dar el veredicto de cada hipótesis con lo que aparezca: si al cerrar sigue sin sobrevivir, la puerta ya no recomienda reabrirla y el veredicto es No viable.
 
 ## La hipótesis más riesgosa
 
