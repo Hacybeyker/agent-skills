@@ -31,7 +31,7 @@ import unicodedata
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 VERSION = "0.1.0"
 FORMATO = 1
@@ -406,6 +406,7 @@ class Registro:
                 for item in datos.get(campo, []):
                     if not item.get("anulado"):
                         destino[item["id"]] = item
+        self._editores = None  # los grupos de fuentes de un mismo editor (feedback #74), al primer uso
 
     @staticmethod
     def dentro(fecha, meses):
@@ -449,6 +450,75 @@ class Registro:
 
     def fuentes_de(self, ids):
         return [self.fuentes[i] for i in ids if i in self.fuentes]
+
+    def grupos_editor(self):
+        """Los grupos de independencia (feedback #74): {"raiz": {clave: raíz}, "nombres": {clave: texto}}. Parten de
+        la regla de siempre (el autor o, sin él, el dominio) y solo juntan: las fuentes que describen un producto desde
+        su editor (su ficha en cualquier tienda o país, su etiqueta de privacidad, su web, su nota de prensa) son un
+        solo autor. Se juntan por la app en la URL de la tienda (`id=` de Google Play, `/id<n>` de App Store), por
+        `fuente --editor` y por la fila de la matriz cuyas fichas son de una sola app por tienda. Las reseñas de
+        usuarios (`--tipo usuario`) no se juntan con su ficha: son voces de usuarios, no del editor."""
+        if self._editores is not None:
+            return self._editores
+        padre, nombres = {}, {}
+
+        def raiz(clave):
+            padre.setdefault(clave, clave)
+            while padre[clave] != clave:
+                padre[clave] = padre[padre[clave]]
+                clave = padre[clave]
+            return clave
+
+        def unir(una, otra):
+            primera, segunda = raiz(una), raiz(otra)
+            if primera != segunda:
+                padre[max(primera, segunda)] = min(primera, segunda)
+
+        for fila in self.competidores.values():  # una fila con una sola app por tienda es un solo producto
+            apps = {app_de_tienda(f.get("url", "")) for f in self.fuentes_de(fila.get("fuentes", []))} - {None}
+            nombres["competidor:%s" % fila["id"]] = nombre_fila(fila)
+            if len({tienda for tienda, _ in apps}) == len(apps):
+                for app in apps:
+                    unir(clave_app(app), "competidor:%s" % fila["id"])
+        por_nombre = {normal(f.get("nombre", "")): f["id"] for f in self.competidores.values()}
+        for fuente in self.fuentes.values():
+            base = independencia(fuente)
+            raiz(base)
+            for clave, nombre in claves_editor(fuente):
+                nombres.setdefault(clave, nombre)
+                unir(base, clave)
+                if clave.startswith("editor:") and clave[7:] in por_nombre:  # --editor con el nombre de una fila
+                    unir(clave, "competidor:%s" % por_nombre[clave[7:]])
+        self._editores = {"raiz": {clave: raiz(clave) for clave in list(padre)}, "nombres": nombres}
+        return self._editores
+
+    def independencia(self, fuente):
+        """La clave de independencia de una fuente: la de siempre (`independencia`, el autor o el dominio), juntada
+        con las demás fuentes de su mismo editor (feedback #74). Dos fuentes con la misma clave cuentan como una."""
+        base = independencia(fuente)
+        return self.grupos_editor()["raiz"].get(base, base)
+
+    def editor_de(self, fuente):
+        """El editor que junta a una fuente con otras ('C-1 (BebéNombres)', '«Ejemplo Apps»', 'la app com.ejemplo
+        en Google Play'), o None si su grupo no tiene editor."""
+        grupos = self.grupos_editor()
+        clave = self.independencia(fuente)
+        claves = [c for c, r in grupos["raiz"].items() if r == clave and c in grupos["nombres"]]
+        for prefijo in ("competidor:", "editor:", "app:"):
+            elegidas = sorted(c for c in claves if c.startswith(prefijo))
+            if elegidas:
+                return grupos["nombres"][elegidas[0]]
+        return None
+
+    def juntas_por_editor(self, ids):
+        """Las fuentes vigentes de esos IDs que cuentan como un solo autor por su editor y no por la regla de siempre
+        (feedback #74): [(IDs, editor)], para que `hallazgo` y `triangulacion` lo digan."""
+        grupos = {}
+        for fuente in self.fuentes_de(ids):
+            if self.vigente(fuente):
+                grupos.setdefault(self.independencia(fuente), []).append(fuente)
+        return [([f["id"] for f in grupo], self.editor_de(grupo[0])) for grupo in grupos.values()
+                if len({independencia(f) for f in grupo}) > 1]
 
     def reglas(self, hallazgo):
         """Las líneas cuyas reglas de triangulación sigue un hallazgo: la suya, las de los hallazgos que reúne
@@ -498,7 +568,7 @@ class Registro:
         grupos = {}
         for fuente in self.fuentes_de(hallazgo.get("fuentes", [])):
             if fuente["peldano"] <= peldano and self.vigente(fuente) and not self.acumulada(hallazgo, fuente):
-                grupos.setdefault(independencia(fuente), []).append(fuente)
+                grupos.setdefault(self.independencia(fuente), []).append(fuente)
         if not grupos:
             return None
         cantidad = len(grupos)
@@ -542,7 +612,8 @@ class Registro:
         if mejor is None:
             mejor = {"nivel": 1 if favor else 0, "triangulado": False, "independientes": 0, "medido": False,
                      "reciente": False, "peldano": min([f["peldano"] for f in favor] or [6]), "oficial": []}
-        contra = {independencia(f) for f in self.fuentes_de(hallazgo.get("en_contra", [])) if self.vigente(f)}
+        contra = {self.independencia(f) for f in self.fuentes_de(hallazgo.get("en_contra", []))
+                  if self.vigente(f)}
         calculada = mejor["nivel"]
         if contra and calculada:
             calculada = 1 if len(contra) >= mejor["independientes"] else max(1, calculada - 1)
@@ -986,8 +1057,60 @@ class Registro:
 
 
 def independencia(fuente):
-    """Dos fuentes son independientes si son de autor distinto; sin autor, cuenta el dominio."""
+    """Dos fuentes son independientes si son de autor distinto; sin autor, cuenta el dominio. Es la regla de siempre:
+    `Registro.independencia` la junta además por editor (feedback #74)."""
     return normal(fuente.get("autor") or "") or fuente["dominio"]
+
+
+TIENDAS_APP = {"google-play": "Google Play", "app-store": "App Store"}
+
+
+def app_de_tienda(url):
+    """La app de una ficha de tienda, ('google-play', 'com.ejemplo.app') o ('app-store', '123456'), o None: el `id=`
+    de una ficha de Google Play (también su seguridad de los datos, `datasafety`), el `/id<n>` de una de App Store o
+    el `id=` de una sola app en su API pública (`itunes.apple.com/lookup`), en cualquier país. La página de un
+    desarrollador o una consulta de varias apps no es la de una app."""
+    try:
+        partes = urlsplit(str(url or ""))
+    except ValueError:
+        return None
+    dominio = partes.netloc.lower()
+    dominio = dominio[4:] if dominio.startswith("www.") else dominio
+    if dominio == "play.google.com" and re.search(r"/store/apps/(details|datasafety)\b", partes.path):
+        paquete = (parse_qs(partes.query).get("id") or [""])[0].strip()
+        if re.match(r"^[A-Za-z][\w]*(\.[\w]+)+$", paquete):
+            return "google-play", paquete.lower()
+    if dominio in ("apps.apple.com", "itunes.apple.com") and "/app/" in partes.path:
+        numero_app = re.search(r"/id(\d+)", partes.path)
+        if numero_app:
+            return "app-store", numero_app.group(1)
+    if dominio == "itunes.apple.com" and partes.path.rstrip("/").endswith("/lookup"):  # la API pública, de una app
+        consulta = (parse_qs(partes.query).get("id") or [""])[0].strip()
+        if consulta.isdigit():
+            return "app-store", consulta
+    return None
+
+
+def clave_app(app):
+    return "app:%s:%s" % app
+
+
+def claves_editor(fuente):
+    """Las claves de editor de una fuente, [(clave, nombre)] (feedback #74): `--editor` (un nombre o una fila de la
+    matriz, C-…) y la app de su URL de tienda. Una reseña de usuarios (`--tipo usuario`) no tiene: es la voz de sus
+    usuarios, no la del editor, aunque se lea en la ficha."""
+    if fuente.get("tipo") == "usuario":
+        return []
+    claves = []
+    editor = (fuente.get("editor") or "").strip()
+    if re.match(r"^C-\d+$", editor):
+        claves.append(("competidor:%s" % editor, editor))
+    elif editor and normal(editor):
+        claves.append(("editor:%s" % normal(editor), "«%s»" % editor))
+    app = app_de_tienda(fuente.get("url"))
+    if app:
+        claves.append((clave_app(app), "la app %s en %s" % (app[1], TIENDAS_APP[app[0]])))
+    return claves
 
 
 def nombre_fila(fila):
@@ -2152,8 +2275,9 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
                               numero(escenarios["base"]), numero(meta), producto["criterios"]["moneda"],
                               numero(escenarios["dau_meta"]) if escenarios.get("dau_meta") else "—"))
     for propuesta in propuestas_de(producto, numero_puerta):
-        avisos.append("· Propuesta %s (sesión %s): %s%s%s" % (
-            propuesta["id"], propuesta.get("sesion") or "?", propuesta["texto"],
+        avisos.append("· Propuesta %s (%s): %s%s%s" % (
+            propuesta["id"], "sesión %s" % propuesta["sesion"] if propuesta.get("sesion") else "registrada en la puerta",
+            propuesta["texto"],
             " → se aplica con Ajustar %s" % propuesta["ajustar"] if propuesta.get("ajustar") else "",
             texto_alcance(propuesta, " (%s)")))
     return avisos
@@ -2328,7 +2452,8 @@ def problema_documentado(registro):
     minimas = int(registro.criterios["fuentes_minimas"])
     for hallazgo in registro.hallazgos.values():
         fuentes = [f for f in registro.fuentes_de(hallazgo["fuentes"]) if f["peldano"] in (4, 5) and registro.vigente(f)]
-        if len({independencia(f) for f in fuentes}) >= minimas and any(registro.reciente(f) for f in fuentes):
+        if len({registro.independencia(f) for f in fuentes}) >= minimas \
+                and any(registro.reciente(f) for f in fuentes):
             return hallazgo["id"]
     return None
 
@@ -3335,8 +3460,8 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
         for otra in sesiones:  # una sesión recomendada sin ninguna razón a la vista: «Qué cambiaría» dice por qué
             if otra != sesion and not any(a[2] == otra for a in mostradas):
                 suyo = next(a for a in ajustes if a[2] == otra and a not in sin_salida)
-                cambiaria.append("A la vez, la %s (corre en paralelo con la %s; su ajuste no está entre las razones de "
-                                 "arriba): %s" % (otra, sesion, primera_minuscula(suyo[1])))
+                cambiaria.append("%s; su ajuste no está entre las razones de arriba): %s" % (
+                    texto_a_la_vez(otra, sesion), primera_minuscula(suyo[1])))
     # lo que el ajuste de cada sesión recomendada tiene que resolver (feedback #57): (si pide buscar, alcance, qué)
     por_sesion = {s: [(a[3], a[4], a[1]) for a in ajustes if len(a) > 4 and a[2] == s] for s in sesiones}
     por_resolver = por_sesion.get(sesion, [])
@@ -4434,6 +4559,7 @@ def cmd_fuente(args):
         raise Fallo("Una fuente nueva lleva --publicada, --tipo, --peldano y --resumen: falta%s %s" % (
             "" if len(faltan) == 1 else "n", y_lista(faltan)))
     lectura = misma_lectura(registro, linea, args, existente)
+    editor = editor_pedido(registro, args, existente)
     if existente:
         agregadas = []
         for dimension, valores in marcas.items():
@@ -4453,6 +4579,9 @@ def cmd_fuente(args):
         if reemplaza and not existente.get("reemplaza"):
             existente["reemplaza"] = reemplaza
             completado.append("reemplaza a %s" % reemplaza)
+        if editor and not existente.get("editor"):  # feedback #74
+            existente["editor"] = editor
+            completado.append("su editor es %s" % (editor if editor.startswith("C-") else "«%s»" % editor))
         leida = False  # el extracto pasa a ser una página leída: su resumen es el de la página (feedback #68)
         if lectura and not existente.get("lectura"):  # sale de una lectura ya contada (#68)
             leida = bool(existente.pop("extracto", None))
@@ -4478,8 +4607,10 @@ def cmd_fuente(args):
             print("· %s: %s." % (existente["id"], "vigente" if registro.vigente(existente) else
                                  "sin fecha o fuera de su ventana de vigencia: no cuenta"))
         identificador = existente["id"]
+        suma_lectura = leida and not existente.get("lectura")  # un extracto que se abrió cuenta ahora (feedback #74)
     else:
         identificador = "S-%s-%d" % (LINEAS[linea][0], len(datos["fuentes"]) + 1)
+        suma_lectura = not args.extracto and not lectura
         fuente = {"id": identificador, "linea": linea, "url": url, "dominio": dominio, "autor": autor,
                   "publicada": fecha, "consultada": consultada, "tipo": args.tipo, "peldano": args.peldano,
                   "resumen": resumen}
@@ -4500,6 +4631,8 @@ def cmd_fuente(args):
             fuente["extracto"] = True
         if lectura:
             fuente["lectura"] = lectura
+        if editor:
+            fuente["editor"] = editor
         datos["fuentes"].append(fuente)
         escribir_json(ruta_linea(carpeta, linea), datos)
         registro = Registro(carpeta, producto["criterios"])
@@ -4550,6 +4683,10 @@ def cmd_fuente(args):
         if otra:
             print("· La misma %s ya es %s en la línea %s: al triangular cuentan como una sola." % (
                 "fuente" if args.archivo else "URL", otra["id"], otra["linea"]))
+    aviso = aviso_editor(registro, registro.fuentes.get(identificador)) if not existente or (
+        editor and registro.fuentes.get(identificador, {}).get("editor") == editor) else None
+    if aviso:
+        print(aviso)
     cantidad = lecturas(datos["fuentes"])
     extractos = sum(1 for f in datos["fuentes"] if not f.get("anulado") and f.get("extracto"))
     juntas = de_misma_lectura(datos["fuentes"])
@@ -4566,7 +4703,7 @@ def cmd_fuente(args):
     else:
         print("Fuentes de la línea %s: %d (presupuesto de lecturas: %d)%s%s" % (
             linea, cantidad, limite, texto_extractos(extractos), texto_juntas(juntas)))
-    if cantidad >= 0.8 * limite:
+    if cantidad >= 0.8 * limite and suma_lectura:  # un extracto o una fuente de una lectura ya contada no gastan (#74)
         print("⚠ Llegaste al 80 % del presupuesto de lecturas de esta línea: dilo y cierra con lo que tienes.")
     print("Siguiente paso: cuando un hallazgo tenga sus fuentes, `hallazgo --linea %s --texto \"…\" --fuentes %s,…`"
           % (linea, identificador))
@@ -4609,6 +4746,63 @@ def misma_lectura(registro, linea, args, existente=None):
     if existente and existente["id"] == pedida:
         raise Fallo("%s es esta misma fuente: --misma-lectura apunta a otra fuente de la misma lectura" % pedida)
     return base.get("lectura") or pedida
+
+
+def editor_pedido(registro, args, existente=None):
+    """El editor de `fuente --editor` (feedback #74): un nombre o una fila de la matriz (C-…), o None. Las fuentes de
+    un mismo editor cuentan como un solo autor. No va con una reseña de usuarios (`--tipo usuario` o un CSV): son la
+    voz de sus usuarios, no la del editor. Una fuente ya registrada con otro editor no se pisa."""
+    pedido = (getattr(args, "editor", None) or "").strip()
+    if not pedido:
+        return None
+    if re.match(r"^[cC]-\d+$", pedido):
+        pedido = pedido.upper()
+        if pedido not in registro.competidores:
+            raise Fallo("--editor %s no es una fila vigente de la matriz: pasa el nombre del editor (la empresa o el "
+                        "desarrollador) o el ID de una fila que exista" % pedido)
+    elif not normal(pedido):
+        raise Fallo("--editor lleva el nombre del editor (la empresa o el desarrollador de la app) o una fila de la "
+                    "matriz (C-…)")
+    tipo = existente.get("tipo") if existente else args.tipo
+    if args.archivo or tipo == "usuario":
+        raise Fallo("--editor es para lo que publica el editor de un producto (su ficha, su etiqueta de privacidad, "
+                    "su web, su nota de prensa). Las reseñas de usuarios (--tipo usuario o un CSV) son la voz de sus "
+                    "usuarios, no la del editor: cuentan por su --autor, como siempre")
+    if existente and existente.get("editor") and normal(existente["editor"]) != normal(pedido):
+        raise Fallo("%s ya tiene el editor %s: no se pisa. Si estaba mal, `anular --id %s` y regístrala otra vez" % (
+            existente["id"], existente["editor"], existente["id"]))
+    return pedido
+
+
+def aviso_editor(registro, fuente):
+    """La línea de `fuente` sobre su editor (feedback #74): con qué otras fuentes cuenta como un solo autor, o que una
+    reseña leída en una ficha no se junta con ella; None si no aplica."""
+    if not fuente:
+        return None
+    if fuente.get("tipo") == "usuario":
+        app = app_de_tienda(fuente.get("url"))
+        if not app:
+            return None
+        return ("· Reseñas de usuarios en la ficha de la app %s (%s): son la voz de sus usuarios, no la del editor, así "
+                "que no se juntan con la ficha ni con lo que publica el editor; cuentan por su autor, como siempre."
+                % (app[1], TIENDAS_APP[app[0]]))
+    editor = registro.editor_de(fuente)
+    if not editor:
+        return None
+    clave = registro.independencia(fuente)
+    otras = [f["id"] for f in registro.fuentes.values() if f["id"] != fuente["id"]
+             and registro.independencia(f) == clave and independencia(f) != independencia(fuente)]
+    return ("· Editor: %s. Lo que publica el mismo editor (su ficha en otra tienda o país, su etiqueta de privacidad, "
+            "su web, su nota de prensa) cuenta como un solo autor%s." % (
+                editor, ": con %s" % y_lista(otras) if otras else ""))
+
+
+def textos_editor(registro, hallazgo):
+    """'S-DIF-2 y S-DIF-5 cuentan como un solo autor, su editor (C-1 (BebéNombres))…' por cada grupo de fuentes a
+    favor que se juntó por su editor y no por la regla de siempre (feedback #74)."""
+    return ["%s cuentan como un solo autor, su editor (%s): lo que publica un producto sobre sí mismo (su ficha en "
+            "cada tienda o país, su etiqueta de privacidad, su web, su nota de prensa) no son voces independientes" % (
+                y_lista(ids), editor) for ids, editor in registro.juntas_por_editor(hallazgo.get("fuentes", []))]
 
 
 def texto_extractos(cantidad):
@@ -4745,6 +4939,8 @@ def enlazar_hallazgo(carpeta, producto, registro, args):
                 "confianza ", ""), plural(evaluacion["independientes"], "fuente independiente y vigente",
                                           "fuentes independientes y vigentes"),
             " · %d en contra" % evaluacion["contra"] if evaluacion["contra"] else ""))
+        for texto in textos_editor(registro, hallazgo):
+            print("· %s." % texto)
         refutado = evaluacion["contra"] and evaluacion["contra"] >= evaluacion["independientes"]
         if contra_nuevas and refutado:
             print("⚠ Tiene tantas fuentes independientes en contra como a favor: queda refutado y en confianza baja.")
@@ -4848,6 +5044,8 @@ def cmd_hallazgo(args):
     if evaluacion["no_vigentes"]:
         print("· %s sin fecha o fuera de su ventana de vigencia: no %s para la confianza ni para triangular." % (
             ", ".join(evaluacion["no_vigentes"]), "cuenta" if len(evaluacion["no_vigentes"]) == 1 else "cuentan"))
+    for texto in textos_editor(registro, hallazgo):
+        print("· %s." % texto)
     if enlazados:
         print("· Cita a %s (por su ID en la matriz)." % ", ".join(enlazados))
     if sin_fila:
@@ -5494,8 +5692,15 @@ def cmd_propuesta(args):
     if desconocidos:
         raise Fallo("--hallazgos lleva hallazgos registrados: %s no %s" % (", ".join(desconocidos), "existe" if len(
             desconocidos) == 1 else "existen"))
-    sesion = args.sesion or next((s["id"] for s in reversed(SESIONES) if not cerrada(producto, s["id"])
-                                  and disponible(producto, decisiones(carpeta), s["id"])), "")
+    if args.sesion and args.sesion not in SESION:
+        raise Fallo("--sesion lleva una sesión: %s" % ", ".join(s["id"] for s in SESIONES))
+    abierta = next((s["id"] for s in reversed(SESIONES) if not cerrada(producto, s["id"])
+                    and disponible(producto, decisiones(carpeta), s["id"])), "")
+    # en la puerta, con todas cerradas, la última que cerró antes de ella (feedback #73 a), no una sesión vacía
+    orden = [s["id"] for s in SESIONES]  # con el mismo instante, la que va después
+    ultima = max((s for s in orden if cerrada(producto, s) and "P%d" % puerta in dependientes(s)),
+                 key=lambda x: (producto["sesiones"][x]["cerrada"], orden.index(x)), default="")
+    sesion = args.sesion or abierta or ultima
     propuesta = {"id": "PR-%d" % (len(producto.get("propuestas", [])) + 1), "puerta": puerta, "sesion": sesion,
                  "texto": args.texto.strip(), "ajustar": args.ajustar or "", "fecha": ahora(), "estado": "pendiente"}
     if ids:  # lo que resuelve (feedback #58): en la puerta se le aplica la regla de los vacíos de herramienta de #57
@@ -5506,6 +5711,9 @@ def cmd_propuesta(args):
     print("✔ %s registrada para la puerta %d: %s%s%s" % (propuesta["id"], puerta, propuesta["texto"],
                                                          " (se aplica con Ajustar %s)" % args.ajustar
                                                          if args.ajustar else "", texto_alcance(propuesta)))
+    if not args.sesion and not abierta and ultima:
+        print("· Sin una sesión abierta: queda como propuesta de la %s, la última que cerró antes de la puerta %d "
+              "(si la propone otra, `--sesion <id>`)." % (ultima, puerta))
     if ids and not args.ajustar:
         print("· Sin --ajustar es informativa: la puerta la muestra con sus hallazgos, pero no cuenta como un ajuste "
               "ni cambia el veredicto (por ejemplo, lo que depende de un vacío de herramienta y solo puede resolver un "
@@ -5712,7 +5920,7 @@ def cmd_triangulacion(args):
         print("No hay hallazgos clave registrados (los que llevan --critico).")
         print("Siguiente paso: marca con --critico los hallazgos de los que dependen el puntaje y las puertas.")
         return
-    incompletos = sin_busqueda = 0
+    incompletos = sin_busqueda = juntadas = 0
     extractos = set()
     for hallazgo in claves:
         evaluacion = registro.evaluar(hallazgo)
@@ -5726,6 +5934,10 @@ def cmd_triangulacion(args):
         print("    %s" % texto_corto(hallazgo["texto"], 160))
         for falta in evaluacion["faltan"]:
             print("    → %s" % falta)
+        por_editor = textos_editor(registro, hallazgo)
+        juntadas += 1 if por_editor else 0
+        for texto in por_editor:
+            print("    · %s" % texto)
         subir = detalle_confianza(registro, hallazgo)  # lo que triangular no resuelve, o lo que le falta (#70)
         subir = [f for f in subir if f not in evaluacion["faltan"]]
         if subir and evaluacion["nivel"] < 3:
@@ -5759,10 +5971,12 @@ def cmd_triangulacion(args):
         manual = hallazgo.get("confianza_manual")
         if manual:
             print("    · confianza bajada a %s: %s" % (manual["nivel"], manual["motivo"]))
-    print("\n%d de %d hallazgos clave triangulados (regla 2)%s%s." % (
+    print("\n%d de %d hallazgos clave triangulados (regla 2)%s%s%s." % (
         len(claves) - incompletos, len(claves), " · %d sin la búsqueda en contra (regla 4)" % sin_busqueda
         if sin_busqueda else "", " · %s" % plural(len(extractos), "fuente de extracto de búsqueda",
-                                                  "fuentes de extracto de búsqueda") if extractos else ""))
+                                                  "fuentes de extracto de búsqueda") if extractos else "",
+        " · %s con fuentes de un mismo editor contadas como un solo autor" % plural(juntadas, "hallazgo")
+        if juntadas else ""))
     print("La confianza y la triangulación usan la misma regla de vigencia: una fuente sin fecha o fuera de la ventana "
           "no cuenta para ninguna de las dos, y solo un hallazgo triangulado llega a confianza alta.")
     mapa = cobertura(producto, registro)
@@ -6327,13 +6541,29 @@ def motivo_descarte(resultado):
     return "No viable: %s" % "; ".join(resultado["razones"])
 
 
+PRIMERA_TANDA = ("1a", "1b")  # `siguiente` las da antes que la 1c, la 1d y la 1e (la 1a confirma el tipo de idea)
+
+
+def texto_a_la_vez(otra, sesion):
+    """Cómo se ajusta otra sesión recomendada junto con `sesion` (feedback #73 b), con el orden de `siguiente`, el
+    mismo de `texto_orden_ajuste`: 'A la vez, la 2 (corre en paralelo con la 3' en una misma tanda; 'Antes, la 1a (se
+    ajusta junto con la 1c, pero por tandas, como las da `siguiente`: primero la 1a, que confirma el tipo de idea, y
+    cuando cierre, la 1c' si una va en la primera tanda y la otra no. Sin cerrar el paréntesis."""
+    if (otra in PRIMERA_TANDA) == (sesion in PRIMERA_TANDA):
+        return "A la vez, la %s (corre en paralelo con la %s" % (otra, sesion)
+    primera, despues = (otra, sesion) if otra in PRIMERA_TANDA else (sesion, otra)
+    return "%s, la %s (se ajusta junto con la %s, pero por tandas, como las da `siguiente`: primero la %s%s y, cuando " \
+           "cierre, la %s" % ("Antes" if otra == primera else "Después", otra, sesion, primera,
+                              ", que confirma el tipo de idea" if primera == "1a" else "", despues)
+
+
 def texto_orden_ajuste(ajustar, reabiertas):
     """El orden real en que corren las sesiones que se ajustan a la vez (feedback #72 a), el de `siguiente`: la 1a y la
     1b van en una primera tanda (la 1a confirma el tipo de idea) y la 1c, la 1d y la 1e después, junto con la 1g si se
     reabre en cascada; las del mismo grupo y la misma tanda (la 2 y la 3, la 1c y la 1d) corren en paralelo."""
     if len(ajustar) < 2:
         return ""
-    primeras = [s for s in ajustar if s in ("1a", "1b")]
+    primeras = [s for s in ajustar if s in PRIMERA_TANDA]
     despues = [s for s in ajustar if s not in primeras]
     if not primeras or not despues:
         return "; %s corren en paralelo" % y_lista(ajustar)
@@ -8083,6 +8313,10 @@ def parser():
     sub.add_argument("--resumen", help="obligatorio en una fuente nueva; 3 líneas como máximo. Con una URL ya "
                                        "registrada, basta lo que se agrega (--mercados, --idiomas, --tiendas)")
     sub.add_argument("--autor", help="la app, la empresa o el medio que publica; nunca un nombre de usuario")
+    sub.add_argument("--editor", metavar="NOMBRE|C-…",
+                     help="el editor del producto que describe la fuente (su web, su nota de prensa, su ficha): las "
+                          "fuentes de un mismo editor cuentan como un solo autor. La misma app en la URL de la tienda "
+                          "y la fila de la matriz ya lo juntan solas; no va con reseñas de usuarios")
     sub.add_argument("--mercados", help="mercados del objetivo que cubre esta fuente (MX,ES)")
     sub.add_argument("--idiomas", help="idiomas del objetivo que cubre (es,pt)")
     sub.add_argument("--tiendas", help="tiendas del objetivo que cubre (google-play,app-store)")
@@ -8217,7 +8451,8 @@ def parser():
     sub = comando("propuesta", cmd_propuesta, "Deja un cambio a una sesión cerrada como propuesta para la puerta")
     sub.add_argument("--texto", required=True, help="qué cambiar y por qué")
     sub.add_argument("--ajustar", help="la sesión que habría que reabrir para aplicarla (por ejemplo, 1g)")
-    sub.add_argument("--sesion", help="la sesión que la propone (por defecto, la abierta)")
+    sub.add_argument("--sesion", help="la sesión que la propone (por defecto, la abierta; en la puerta, con todas "
+                                         "cerradas, la última que cerró antes de ella)")
     sub.add_argument("--hallazgos", help="lo que resuelve al ajustar: los hallazgos a triangular o confirmar, H-1,H-2; "
                                          "sin --ajustar, los hallazgos de los que habla (informativa: no cuenta como "
                                          "ajuste)")
