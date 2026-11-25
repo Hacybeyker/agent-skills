@@ -1,12 +1,12 @@
 # Repos relacionados y dependencias con código local
 
-Un proyecto puede depender de otros repos que se trabajan en local: un módulo compartido, una librería propia, un catálogo de versiones. `hb-implement` los lee (y a veces los cambia) en la misma tarea, así que `AGENTS.md` dice dónde están, cómo se incluyen y cómo pasar a su código.
+Un proyecto puede depender de otros repos que se trabajan en local: un módulo compartido, una librería propia, un catálogo de versiones. `hb-implement` los lee (y a veces los cambia) en la misma tarea, así que `AGENTS.md` dice dónde están, cómo se incluyen y cómo pasar a su código. Cada uno es una **unidad** de `## Estructura` ([estructura.md](estructura.md)); este documento detalla las preguntas 2 y 3: dónde está el fuente y cómo se pasa a él.
 
 ## Detectar
 
 No asumas ningún mecanismo: busca lo que el proyecto ya usa.
 
-1. `contexto.py estado`: los submódulos (`.gitmodules`) y los repos hermanos, en la carpeta padre, que algún archivo versionado nombra como `../<nombre>`.
+1. `contexto.py units`: los repos vecinos que nombra la configuración, **clonados o no** (un vecino sin clonar sale como "SIN CLONAR": pregunta la URL de su remoto), con su remoto y su rama principal. `contexto.py estado` suma los submódulos (`.gitmodules`).
 2. Las rutas locales en la configuración del proyecto: `git grep -n -E '\.\./[A-Za-z0-9._-]+'` y los archivos de configuración local que el proyecto documenta, aunque git los ignore (suelen guardar rutas de cada máquina).
 3. Las dependencias **publicadas** (un artifact compilado, un paquete, un catálogo o un BOM remoto) que el build puede reemplazar por su código local. Algunos lugares donde mirar:
 
@@ -25,23 +25,21 @@ No asumas ningún mecanismo: busca lo que el proyecto ya usa.
 
 ## Documentar
 
-En `## Arquitectura`, la subsección `### Repos relacionados` de la plantilla. Por ejemplo, para un repo principal que consume `modulo-a` como paquete publicado y lo puede pasar a código local con un archivo de configuración propio:
+Cada repo vecino y cada dependencia publicada con código local es una fila de la tabla de unidades de `## Estructura`. Por ejemplo, para un repo principal que consume `core-lib` como paquete publicado y lo puede pasar a código local con un archivo de configuración propio:
 
 ```markdown
-### Repos relacionados
-
-| Repo | Ruta | Qué contiene | Cómo se incluye en local |
-| --- | --- | --- | --- |
-| modulo-a | `../modulo-a` | Reglas de pagos compartidas; se publica como `modulo-a` 1.2.0 | `dependencias.local` (ignorado por git): `modulo-a=../modulo-a` |
-
-- El agente necesita acceso a estas carpetas además de la del proyecto (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene.
-- **modulo-a** (publicado): pasar a código local con `cp dependencias.local.ejemplo dependencias.local`; volver con `rm dependencias.local`. Es un cambio local: no se commitea.
+| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | Publica y versiona |
+| --- | --- | --- | --- | --- | --- | --- |
+| `core-lib` | `../core-lib` | Publicada: `core-lib` 1.2.0 en `dependencias.conf` | A fuente: `cp dependencias.local.ejemplo dependencias.local`; volver: `rm dependencias.local` | `cd <ruta del proyecto>/../core-lib && make check` | `https://git.example.com/team/core-lib.git`, `main` | la persona, con `hb-release` en ese repo |
 ```
 
 - La ruta es **relativa** a la raíz del proyecto: nada de rutas absolutas de una máquina.
-- "Cómo se incluye en local" describe lo que el proyecto ya usa, con el archivo y la línea, o el comando.
-- Por cada dependencia publicada con código local: qué se publica (coordenada o nombre), dónde está su repo, **cómo pasar a código local y cómo volver** (el comando o el cambio exacto) y que el cambio es local y no se commitea. Si ese cambio toca un archivo versionado, dilo: `hb-implement` lo trata como temporal.
-- Si `AGENTS.md` pide revertir el cambio al terminar cada tarea, anótalo en la misma línea.
+- "Cómo se consume" dice qué se publica (coordenada o nombre) y la versión fijada, con el archivo donde se fija.
+- "Pasar a fuente y volver" es el cambio exacto para cada sentido, con el archivo y la línea, o el comando. Si no hay ningún mecanismo, "sin mecanismo": `hb-implement` trabaja entonces solo en el repo de la unidad y avisa que el cambio llega a la app al publicarse.
+- Si ese cambio toca un archivo versionado y queda hecho en la máquina, va también en "Configuración local modificada a propósito": las skills no lo cuentan como cambio ajeno ni lo proponen para commit. Si `AGENTS.md` pide revertirlo al terminar cada tarea, anótalo en la misma celda.
+- Debajo de la tabla, la línea de acceso a las carpetas y la línea `Repos vecinos` (clonar y crear ramas, o no).
+
+Un `AGENTS.md` anterior lo tiene en `### Repos relacionados` de `## Arquitectura`: las skills lo siguen leyendo como respaldo, y al migrar sus filas pasan a esta tabla.
 
 ## Versiones que vienen de fuera
 

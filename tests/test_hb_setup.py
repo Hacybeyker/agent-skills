@@ -201,6 +201,163 @@ class StatusTest(Base):
         self.assertIn("Claude Code por defecto: no", result.stdout)
 
 
+class ModuleMapsTest(Base):
+    def test_versionado_deja_los_mapas_fuera_de_git_por_defecto_y_lo_dice(self):
+        result = self.prepare("--modo", "versionado")
+        self.assertIn("/docs/modules/", self.exclude())
+        self.assertIn("Mapas del módulo: En `docs/modules/<identificador>.md`, fuera de git", result.stdout)
+        self.assert_gitignore_intact()
+
+    def test_versionado_con_mapas_versionados_no_los_excluye(self):
+        result = self.prepare("--modo", "versionado", "--module-maps", "versioned")
+        self.assertNotIn("docs/modules", self.exclude())
+        self.assertIn("versionados con el código", result.stdout)
+
+    def test_local_los_deja_dentro_de_la_carpeta_de_contexto(self):
+        result = self.prepare("--modo", "local")
+        self.assertIn("En `contexto/modules/<identificador>.md`, fuera de git (dentro de `contexto/`)", result.stdout)
+        self.assertNotIn("modules", self.exclude())
+
+    def test_mapas_versionados_sin_contexto_versionado_falla_sin_cambiar_nada(self):
+        result = self.contexto("preparar", "--modo", "local", "--module-maps", "versioned")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("solo se versionan si el contexto se versiona", result.stderr)
+        self.assertFalse((self.repo / "contexto").exists())
+
+    def test_mapas_ya_versionados_y_pedidos_locales_se_detiene(self):
+        write(self.repo / "docs" / "modules" / "app.md", "# app\n")
+        commit_all(self.repo, "mapas")
+        result = self.contexto("preparar", "--modo", "versionado")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("docs/modules/ tiene archivos versionados", result.stderr)
+        self.assertNotIn("docs/modules", self.exclude())
+
+    def test_imprime_la_base_comun_de_reportes_y_la_fila_de_documentos(self):
+        result = self.prepare("--modo", "local")
+        self.assertIn("hb-implement en `contexto/reports/implementation/`", result.stdout)
+        self.assertIn("hb-performance en `contexto/reports/performance/`", result.stdout)
+        self.assertIn("hb-review en `contexto/reports/review/`", result.stdout)
+        self.assertIn("`contexto/reports/INDEX.md`", result.stdout)
+        self.assertIn("| `contexto/docs/arquitectura.md` |", result.stdout)
+
+    def test_con_marcadores_la_base_es_la_parte_fija(self):
+        result = self.prepare("--modo", "versionado", "--reportes", "reports/{fecha}/{slug}")
+        self.assertIn("hb-review en `reports/review/`", result.stdout)
+        self.assertIn("hb-implement usa la línea tal cual", result.stdout)
+
+
+class UnitsTest(Base):
+    """contexto.py units: el inventario de solo lectura para ## Estructura."""
+
+    def setUp(self):
+        super().setUp()
+        (self.base / "feature-payments").mkdir()
+        self.payments = init_repo(self.base / "feature-payments")
+        write(self.payments / "a.txt", "a\n")
+        commit_all(self.payments)
+        git(self.payments, "remote", "add", "origin", "https://usuario:secreto@git.example.com/team/feature-payments.git")
+        write(self.repo / "settings.gradle.kts", 'include(":app")\ninclude(\n  ":features:payments:impl",\n)\n'
+                                                   '// include(":comentado")\n')
+        write(self.repo / "app" / "build.gradle.kts", "\n")
+        write(self.repo / "features" / "payments" / "impl" / "build.gradle.kts", "\n")
+        write(self.repo / "local-modules.json",
+              '{"feature-payments": false, "core-lib": false, "paths": ["../feature-payments", "../core-lib"]}\n')
+        write(self.repo / "src" / "web" / "pantalla.ts", 'import { x } from "../comun"\n')
+        commit_all(self.repo, "modulos")
+
+    def units(self):
+        result = self.contexto("units")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_lista_los_modulos_y_los_repos_vecinos_clonados_y_sin_clonar(self):
+        out = self.units()
+        self.assertIn("  app  (módulo de Gradle :app", out)
+        self.assertIn("  features/payments/impl  (módulo de Gradle :features:payments:impl", out)
+        self.assertNotIn("comentado", out)
+        self.assertIn("../core-lib  SIN CLONAR: pregunta la URL de su remoto  (como ruta: local-modules.json)", out)
+        self.assertIn("../feature-payments  clonado; remoto: https://git.example.com/team/feature-payments.git; "
+                      "rama principal: main", out)
+        self.assertNotIn("secreto", out)
+        self.assertNotIn("../comun", out)  # un import del código no es un repo vecino
+
+    def test_el_archivo_modificado_que_nombra_vecinos_es_candidato_a_configuracion_local(self):
+        write(self.repo / "local-modules.json", '{"feature-payments": true, "paths": ["../feature-payments"]}\n')
+        write(self.repo / "app" / "build.gradle.kts", "// otro cambio\n")
+        out = self.units()
+        self.assertIn("«Configuración local modificada a propósito»", out)
+        line = next(l for l in out.splitlines() if "Configuración local" in l)
+        self.assertIn("local-modules.json", line)
+        self.assertNotIn("build.gradle.kts", line)
+
+    def test_no_cambia_nada(self):
+        before, excluded = self.status(), self.exclude()
+        self.units()
+        self.assertEqual(self.status(), before)
+        self.assertEqual(self.exclude(), excluded)
+
+    def test_compara_con_el_modelo_de_agents(self):
+        write(self.repo / "AGENTS.md", "# X\n\n## Estructura\n\n### Unidades\n\n"
+              "| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal "
+              "| Publica y versiona |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+              "| `app` | `app/` | Es la app | — | `cd x && ./gradlew :app:check` | este repo, `main` | con la app |\n"
+              "| `core-lib` | `../core-lib` | Publicada | A fuente: x; volver: y | `cd x && make` | `u`, `main` | su repo |\n"
+              "\n## Modernización\n")
+        out = self.units()
+        self.assertIn("En el modelo (estructura): app, core-lib", out)
+        self.assertIn("⚠ core-lib: la fuente ../core-lib no existe en disco", out)
+        missing = next(l for l in out.splitlines() if "Candidatos que no están en el modelo" in l)
+        self.assertIn("features/payments/impl", missing)
+        self.assertIn("../feature-payments", missing)
+        self.assertNotIn("app,", missing)
+
+    def test_lee_repos_relacionados_como_respaldo(self):
+        write(self.repo / "AGENTS.md", "## Arquitectura\n\n### Repos relacionados\n\n| Repo | Ruta | Qué contiene | "
+              "Cómo se incluye en local |\n| --- | --- | --- | --- |\n| feature-payments | `../feature-payments` | x | y |\n")
+        out = self.units()
+        self.assertIn("### Repos relacionados (formato anterior)", out)
+        self.assertIn("En el modelo (repos relacionados): feature-payments", out)
+
+    def test_espacio_de_trabajo_pnpm_y_carpetas_de_feature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp))
+            write(repo / "pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n  - '!packages/ignorado'\n")
+            write(repo / "packages" / "web" / "package.json", "{}\n")
+            write(repo / "packages" / "web" / "src" / "features" / "payments" / "index.ts", "\n")
+            write(repo / "packages" / "web" / "src" / "features" / "profile" / "index.ts", "\n")
+            write(repo / "packages" / "sin-paquete" / "README.md", "\n")
+            commit_all(repo)
+            result = run([sys.executable, "-I", SCRIPT, "units", "--repo", repo], repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("  packages/web  (paquete del espacio de trabajo (pnpm-workspace.yaml))", result.stdout)
+        self.assertNotIn("sin-paquete", result.stdout)
+        self.assertIn("packages/web/src/features/payments, packages/web/src/features/profile", result.stdout)
+
+
+class WorktreeTest(Base):
+    """H10: en un worktree enlazado, los enlaces del contexto (que no están en git) faltan; estado lo dice."""
+
+    def test_estado_dice_como_recrear_los_enlaces_que_faltan_sin_crearlos(self):
+        self.prepare("--modo", "externo", "--externa", str(self.base / "fuera"))
+        write(self.base / "fuera" / "AGENTS.md", "# X\n")
+        worktree = self.base / "otro-worktree"
+        git(self.repo, "worktree", "add", "-q", str(worktree), "-b", "trabajo")
+        result = run([sys.executable, "-I", SCRIPT, "estado", "--repo", worktree], worktree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Worktree enlazado", result.stdout)
+        self.assertIn("⚠ Falta AGENTS.md: en el principal es un enlace", result.stdout)
+        self.assertIn("⚠ Falta contexto: en el principal es un enlace", result.stdout)
+        self.assertIn("ln -s", result.stdout)
+        self.assertIn("git ya lo ignora", result.stdout)
+        self.assertFalse(os.path.lexists(str(worktree / "AGENTS.md")))
+        self.assertFalse(os.path.lexists(str(worktree / "contexto")))
+
+    def test_en_el_worktree_principal_no_dice_nada(self):
+        self.prepare("--modo", "externo", "--externa", str(self.base / "fuera"))
+        result = self.contexto("estado")
+        self.assertNotIn("Worktree enlazado", result.stdout)
+
+
 class TemplateTest(unittest.TestCase):
     """La plantilla de hb-setup escribe lo que hb-implement lee."""
 
@@ -218,11 +375,38 @@ class TemplateTest(unittest.TestCase):
         self.assertIn("- Carpeta de reportes: `reports`", rules)
         self.assertIn("Contexto de IA:", rules)
 
-    def test_arquitectura_trae_repos_relacionados_con_acceso_y_como_volver(self):
-        architecture = self.section("## Arquitectura")
-        self.assertIn("### Repos relacionados", architecture)
-        self.assertIn("acceso", architecture)
-        self.assertIn("volver", architecture)
+    def test_estructura_trae_las_unidades_con_acceso_y_como_volver(self):
+        structure = self.section("## Estructura")
+        self.assertNotIn("### Repos relacionados", self.text)
+        self.assertIn("| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | "
+                      "Repo y rama principal | Publica y versiona |", structure)
+        self.assertIn("acceso", structure)
+        self.assertIn("volver", structure)
+        for title in ("### Unidades", "### Variantes y entornos", "### Cliente HTTP",
+                      "### Configuración local modificada a propósito", "### Documentos", "### Mapas del módulo"):
+            self.assertIn(title, structure)
+        self.assertIn("- Repos vecinos: <clonar los que falten y crear ramas de trabajo | no clonar ni crear ramas>",
+                      structure)
+        self.assertIn("| Documento | Léelo cuando… |", structure)
+        self.assertIn("| Variante o entorno | Para qué sirve | Servicios funcionales | Para probar y medir |", structure)
+
+    def test_estructura_va_entre_arquitectura_y_modernizacion(self):
+        headings = re.findall(r"(?m)^## (.+)$", self.text)
+        self.assertEqual(headings.index("Estructura"), headings.index("Arquitectura") + 1)
+        self.assertEqual(headings.index("Modernización"), headings.index("Estructura") + 1)
+
+    def test_las_tablas_de_la_plantilla_tienen_las_columnas_de_su_cabecera(self):
+        for block in re.findall(r"(?m)((?:^\|.*\n)+)", self.text):
+            rows = [line for line in block.splitlines() if line.strip()]
+            widths = {len(re.sub(r"`[^`]*`", "x", row).strip().strip("|").split("|")) for row in rows}
+            self.assertEqual(len(widths), 1, block)
+
+    def test_la_plantilla_del_mapa_del_modulo_trae_el_commit_analizado(self):
+        module_map = (SKILL / "assets" / "module-map.md").read_text(encoding="utf-8")
+        self.assertIn("Commit analizado: `<sha completo>`", module_map)
+        self.assertIn("git -C <repo> diff <commit analizado>..HEAD -- <ruta de la unidad>", module_map)
+        self.assertTrue("references/estructura.md" in self.skill, "SKILL.md enlaza estructura.md")
+        self.assertTrue("contexto.py units" in self.skill, "SKILL.md usa contexto.py units")
 
     def test_report_py_lee_la_carpeta_de_la_plantilla(self):
         with tempfile.TemporaryDirectory() as tmp:
