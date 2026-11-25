@@ -18,7 +18,8 @@ Base de comparación de cada repo: --base (o "base" en "repos"); sin ella, el me
 Los archivos masivos o generados (goldens, fixtures) se explican en grupo, por carpeta o patrón,
 con "groups"; un archivo con su propia entrada en "files" se muestra aparte.
 Con "repos" en el meta, el mismo reporte cubre los repos relacionados (sus claves son "<nombre>:<ruta>"), y
-"temporary" deja fuera los cambios de configuración que no son de la tarea.
+"temporary" deja fuera los cambios de configuración que no son de la tarea. Los archivos de "### Configuración local
+modificada a propósito" (## Estructura de AGENTS.md) quedan fuera solos, aunque el meta no los nombre.
 En un worktree enlazado al que le faltan AGENTS.md (fuera de git en el principal) o el enlace simbólico por el que
 pasa la carpeta de reportes, se detiene y dice cómo recrearlos, sin escribir nada.
 
@@ -157,6 +158,40 @@ def agents_out(repo):
         if value and not value.startswith("<"):
             return value
     return None
+
+
+LOCAL_CONFIG_WHY = "Configuración local modificada a propósito (## Estructura de AGENTS.md): no es de la tarea."
+
+
+def markdown_section(text, title, level):
+    """El cuerpo de la primera sección "<# * level> <title>" de un Markdown, o None."""
+    body, inside = [], False
+    for line in text.splitlines():
+        heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$", line)
+        if inside and heading and len(heading.group(1)) <= level:
+            break
+        if inside:
+            body.append(line)
+        elif heading and len(heading.group(1)) == level and heading.group(2).strip().lower() == title.lower():
+            inside = True
+    return "\n".join(body) if inside else None
+
+
+def local_config(repo):
+    """Las rutas (relativas al repo principal, también ../<vecino>/…) de "### Configuración local modificada a
+    propósito" de ## Estructura: lo primero entre acentos graves de cada viñeta."""
+    try:
+        text = (repo / "AGENTS.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    structure = markdown_section(text, "Estructura", 2)
+    block = markdown_section(structure, "Configuración local modificada a propósito", 3) if structure else None
+    found = []
+    for line in (block or "").splitlines():
+        quoted = re.match(r"^[ \t]*[-*][ \t]+`([^`]+)`", line)
+        if quoted and not quoted.group(1).startswith("<"):
+            found.append(quoted.group(1).strip())
+    return found
 
 
 class Task:
@@ -982,7 +1017,8 @@ def temporary_section(items):
         revert = (f'<div class="temp-revert">Cómo revertirlo: <code>{e(str(item["revert"]))}</code></div>'
                   if item.get("revert") else "")
         rows.append(f'<div class="temp-item"><div class="file-path">{e(str(item["path"]))}</div>{why}{revert}</div>')
-    intro = '<p class="temp-intro">No son parte de la tarea: no se cuentan, no se commitean y se revierten al terminar.</p>'
+    intro = ('<p class="temp-intro">No son parte de la tarea: no se cuentan ni se commitean. Los que la tarea hizo '
+             'dicen cómo revertirlos.</p>')
     return plain_section("🔧", "Cambios temporales", intro + "".join(rows), len(items))
 
 
@@ -1077,8 +1113,9 @@ def main():
 
     infos = meta.get("files", {})
     group_defs = meta.get("groups", [])
-    temporary = meta.get("temporary", [])
+    temporary = list(meta.get("temporary", []))
     temporary_keys = {str(item["path"]) for item in temporary}
+    local = {os.path.realpath(os.path.join(str(repo), path)) for path in local_config(repo)}
     multi = len(repos) > 1
     files, temporary_found = [], set()
     for r in repos:
@@ -1089,6 +1126,9 @@ def main():
             aliases = (f["key"], f'{r["name"]}:{f["path"]}')
             if any(alias in temporary_keys for alias in aliases):
                 temporary_found.update(aliases)
+                continue
+            if os.path.realpath(os.path.join(str(r["root"]), f["path"])) in local:
+                temporary.append({"path": f["key"], "why": LOCAL_CONFIG_WHY})
                 continue
             f["info"] = next((infos[alias] for alias in aliases if alias in infos), None)
             f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None

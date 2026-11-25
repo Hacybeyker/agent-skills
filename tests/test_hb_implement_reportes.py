@@ -172,6 +172,37 @@ class TaskFolderTest(Base):
         self.assertFalse((self.repo / self.printed(result, "previews")).exists())
 
 
+class LocalConfigTest(Base):
+    """V1: la configuración local registrada en ## Estructura no es un cambio de la tarea, aunque el meta no la nombre."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.repo / "local-modules.json", '{"core-lib": false}\n')
+        write(self.repo / "AGENTS.md", "# P\n\n## Estructura\n\n### Unidades\n\n(tabla)\n\n"
+              "### Configuración local modificada a propósito\n\n"
+              "- `local-modules.json`: dice qué unidades van en fuente. No se commitea.\n\n## Git\n\n- x\n")
+        git(self.repo, "add", "local-modules.json", "AGENTS.md")
+        git(self.repo, "commit", "-q", "-m", "config")
+        write(self.repo / "local-modules.json", '{"core-lib": true}\n')
+
+    def test_queda_fuera_de_los_cambios_y_sale_en_cambios_temporales(self):
+        result = self.ok("--out", "reports")
+        html = next((self.repo / "reports").rglob("report.html")).read_text(encoding="utf-8")
+        self.assertNotIn("local-modules.json", result.stderr)
+        self.assertEqual(self.stat(html, "Archivos Modificados"), "1")  # solo a.txt
+        self.assertIn("Cambios temporales", html)
+        self.assertIn("local-modules.json", html)
+        self.assertIn("Configuración local modificada a propósito", html)
+
+    def test_si_el_meta_ya_la_trae_en_temporary_no_se_duplica(self):
+        self.with_meta(temporary=[{"path": "local-modules.json", "why": "Pasa core-lib a fuente.",
+                                   "revert": '"core-lib": false'}])
+        self.ok("--out", "reports")
+        html = next((self.repo / "reports").rglob("report.html")).read_text(encoding="utf-8")
+        self.assertEqual(html.count('<div class="file-path">local-modules.json</div>'), 1)
+        self.assertIn("Pasa core-lib a fuente.", html)
+
+
 class IndexTest(Base):
     """<base>/INDEX.md: una fila por tarea, clave hb-implement + slug; las demás filas y líneas no se tocan."""
 

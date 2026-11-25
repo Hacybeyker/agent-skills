@@ -44,7 +44,11 @@ Una fila por tarea. Cada skill agrega o actualiza solo sus filas (clave: Skill +
 | 2026-11-25 | hb-implement | perfil-de-usuario | feature | DoD PASS | [implementation/2026-11-25-perfil-de-usuario/report.html](implementation/2026-11-25-perfil-de-usuario/report.html) |
 ```
 
-- `--folder` deja la fila en `en curso` (con el `type` del meta si ya existe; si no, el de la fila o `—`). Al generar el reporte, el `type` del meta y `DoD PASS`, `DoD FAIL`, `DoD PARTIAL` o `sin DoD`.
+- `--folder` deja la fila en `en curso` (con el `type` del meta si ya existe; si no, el de la fila o `—`). Al generar el reporte, el `type` del meta y `DoD PASS`, `DoD FAIL`, `DoD PARTIAL` o `sin DoD`. Volver a pedir la carpeta de una tarea terminada la deja otra vez `en curso`: se retomó.
+
+## Configuración local
+
+Los archivos de "### Configuración local modificada a propósito" de `## Estructura` (rutas relativas a la raíz del proyecto, también `../<vecino>/…`) quedan fuera de los cambios del reporte aunque el meta no los nombre, y salen en "Cambios temporales" con ese motivo. Si la tarea además los cambió (por ejemplo, para pasar otra unidad a fuente), ponlos en `temporary` con cómo revertir ese cambio: manda esa entrada.
 - **Fecha**: la de la tarea (la de su carpeta), no la de la actualización.
 - **Ruta**: enlace relativo a la carpeta del índice, calculado con las dos rutas bajo la base tal como se escribió, así sirve aunque la base pase por un enlace. Los espacios van como `%20`.
 - Solo cambia su fila: si existe, la reemplaza en su lugar; si no, la agrega al final de la tabla. No toca otras filas ni otras líneas. Un `INDEX.md` sin esa cabecera recibe la tabla al final, sin borrar nada.

@@ -8,7 +8,9 @@ Si lo que encuentras no coincide con el modelo (una unidad que no está, una rut
 
 ## 1. Qué unidades toca la tarea
 
-Antes del plan, lista las unidades que la tarea **cambia** y las que solo **lee**, con su identificador. Para cada una que vas a cambiar, lee su mapa del módulo (sección 0 de `SKILL.md`).
+Antes del plan, lista las unidades que la tarea **cambia**, las que necesita **en fuente** sin cambiarlas (para compilar contra su código) y las que solo **lee**, con su identificador. Para cada una que vas a cambiar, lee su mapa del módulo (sección 0 de `SKILL.md`).
+
+- **Unidades anidadas.** Un archivo es de la unidad cuya "Fuente" es la ruta más larga que lo contiene (una carpeta de feature dentro de un paquete, un módulo dentro del repo). Lo que no cae en ninguna unidad (la configuración del build, el catálogo de versiones) es del proyecto.
 
 **Confirma que el código entra en el build.** Antes de editar un archivo, comprueba que es el código que la app compila:
 
@@ -42,6 +44,8 @@ Si la tarea cambia una unidad **publicada** y el modelo trae su mecanismo (colum
 - Si el archivo del mecanismo está en "Configuración local modificada a propósito", lo que ya tenía no es un cambio ajeno ni de esta tarea: no avises por él. Si la unidad ya estaba en fuente, no hay nada que hacer; si agregaste una, solo esa parte va en `temporary`.
 - Los cambios en el **código** de la unidad sí son de la tarea: su repo va en `repos` del meta y sus commits se proponen aparte.
 - Si solo necesitas **leer** una unidad publicada, lee su fuente en su repo; no hace falta pasarla a fuente. No deduzcas su comportamiento del artefacto compilado.
+- Si la tarea necesita una unidad publicada **en fuente sin cambiarla** (por ejemplo, para compilar contra un cambio de otra unidad que la usa), pásala igual: clona su repo si falta (sección 2), aplica "A fuente" y anótalo en `temporary`. No le crees rama de trabajo: no la modificas.
+- `temporary` deja fuera del reporte el **archivo entero**. Si ese archivo tiene además un cambio real de la tarea, sácalo de `temporary` y explícalo en `files`.
 
 ### Sin mecanismo
 
@@ -53,11 +57,11 @@ Si la columna dice `sin mecanismo` (o el modelo no trae ninguno), no inventes un
 
 ## 4. Versión fijada frente al fuente
 
-Para cada unidad publicada que pasaste a fuente, compara la versión que fija la app (columna "Cómo se consume") con lo que hay en su fuente: `git -C <fuente> describe --tags --always`. Si no coinciden (el fuente va por delante o por detrás del tag de esa versión), lo que pruebes puede no compilar o comportarse distinto con lo publicado: avísalo en la entrega y pon `pinned_version` en la entrada de `repos` (sección 7), para que el reporte lo muestre. No cambies de commit por tu cuenta para igualarlas: dilo y sigue.
+Para cada unidad publicada que está en fuente en la tarea (la pasaste tú o ya lo estaba por la configuración local), compara la versión que fija la app (columna "Cómo se consume") con lo que hay en su fuente: `git -C <fuente> describe --tags --always`. Si no coinciden (el fuente va por delante o por detrás del tag de esa versión), lo que pruebes puede no compilar o comportarse distinto con lo publicado: avísalo en la entrega y pon `pinned_version` en la entrada de `repos` (sección 7), para que el reporte lo muestre. No cambies de commit por tu cuenta para igualarlas: dilo y sigue.
 
 ## 5. Rama de trabajo en cada repo que modificas
 
-Antes de editar un repo (el principal o un vecino), crea la rama de trabajo desde su rama principal al día:
+Antes de editar un repo (el principal o un vecino), crea la rama de trabajo desde su rama principal al día (en el principal, como en un vecino: si está limpio y atrasado, `git pull --ff-only`; si no, desde donde está, y lo dices):
 
 - El nombre sigue `## Git`. Si no fija nada, `<tipo>/<slug>`: `feat` para feature y enhancement, `fix` para bugfix, `refactor` para refactor. **La misma rama** en cada repo que la tarea modifica.
 - Si el repo ya está en una rama que no es la principal, sigue en ella.
@@ -67,7 +71,7 @@ Antes de editar un repo (el principal o un vecino), crea la rama de trabajo desd
 ## 6. DoD de cada unidad tocada
 
 - Corre el **DoD de cada unidad que cambiaste**: la columna "DoD de la unidad", con su `cd`. Si dice `el ## DoD del proyecto`, ese.
-- Si cambiaste la app o pasaste unidades a fuente, corre además el `## DoD` del proyecto: es el que compila la app con ellas.
+- Corre además el `## DoD` del proyecto (el que compila la app con todo) si cambiaste la app, pasaste unidades a fuente, cambiaste algo que no es de ninguna unidad, cambiaste un contrato que otras unidades consumen (una API pública, una interfaz, un esquema) o la unidad no tiene build propio (una carpeta de feature, cuyo DoD solo filtra tests).
 - Una unidad sin DoD en el modelo: el `## DoD` del `AGENTS.md` de su repo. Si tampoco hay, dilo y propón agregarlo al modelo.
 - Cada paso entra al DoD del reporte con el nombre de la unidad (por ejemplo, `core-lib · Tests`).
 
@@ -107,6 +111,10 @@ En la entrega, por cada unidad **publicada** que cambiaste, en este orden:
 3. **PR de bump en la app**: sube la versión fijada al número nuevo y vuelve la unidad a publicada.
 
 - La configuración que pasa a fuente **nunca se commitea**, en ningún paso.
-- Las unidades "En fuente (módulo del build)" no tienen release propio: van en el PR del repo donde viven.
+- Las unidades "En fuente" (un módulo o una carpeta del repo) no tienen release propio: van en el PR del repo donde viven.
 - Los commits propuestos van **por repo**, en ese orden, cada uno con la rama de trabajo de su repo.
 - Cada cambio temporal con su forma de revertirlo, o "revertido".
+
+## 9. Mapa del módulo y cambios sin commit
+
+`Commit analizado` es el commit cuyo código describe el mapa. Si lo escribes con cambios de la tarea todavía sin commitear, deja el commit de la base y agrega "(incluye cambios sin commitear de `<slug>`)"; cuando se commiteen, pon ese commit y quita la nota. Si el mapa todavía no existe, su ruta real es la de su carpeta (`realpath` de la carpeta de mapas) más el identificador.

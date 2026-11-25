@@ -25,8 +25,9 @@ El flujo es el mismo para cualquier stack. La arquitectura, los comandos y las r
 4. **Mapa del módulo.** Antes de tocar o revisar una unidad, lee su mapa en la carpeta que dice la línea "Mapas del módulo" de `## Estructura` (`<carpeta de contexto>/modules/<identificador>.md`, con las subcarpetas del identificador). Si su `Commit analizado` no es el `HEAD` del repo de la unidad, mira solo `git -C <repo> diff <commit>..HEAD -- <ruta de la unidad>`. Si el mapa no existe o quedó atrás, créalo o actualízalo con lo que ya leíste, en su ruta real: arriba, `Commit analizado: <sha>` y la ruta de la unidad; después, Qué hace, Puntos de entrada, Flujos principales, Servicios que llama, Datos y persistencia, Patrones y convenciones, DoD de la unidad y Cuidado con. `hb-review` solo lo lee.
 5. Carga el perfil y **solo** las referencias que la tarea necesita.
 6. Clasifica la tarea: `feature`, `bugfix`, `enhancement` o `refactor`.
-7. **Unidades**, con el modelo (detalle en [unidades.md](references/unidades.md)). Antes del plan:
-   - Decide qué unidades **cambia** la tarea y cuáles solo lee, y confirma que el código que vas a editar entra en el build: con el modelo y, si no alcanza, con la herramienta de build del proyecto.
+7. **Antes de cambiar nada**, revisa `git status` de cada repo que vas a tocar. Los archivos de "Configuración local modificada a propósito" no son cambios ajenos: no avises por ellos. Si hay otros cambios que no son de esta tarea, avísalo antes de empezar. El reporte compara cada repo contra el `merge-base` con su rama principal, o contra la base que fije `AGENTS.md` (sección 6).
+8. **Unidades**, con el modelo (detalle en [unidades.md](references/unidades.md)). Antes del plan:
+   - Decide qué unidades **cambia** la tarea, cuáles necesita en fuente sin cambiarlas y cuáles solo lee, y confirma que el código que vas a editar entra en el build: con el modelo y, si no alcanza, con la herramienta de build del proyecto.
    - Deja listo cada repo vecino que vas a tocar: si no está, clónalo con la URL del modelo; si está limpio y atrasado, `git pull --ff-only`; **pregunta** solo si tiene cambios sin commit o está en otra rama. Si no puedes leer su carpeta, detente y di qué acceso falta.
    - Avisa si el fuente de una unidad publicada no coincide con la versión que fija la app.
 
@@ -35,7 +36,6 @@ El flujo es el mismo para cualquier stack. La arquitectura, los comandos y las r
    - Crea la **rama de trabajo** en cada repo que vas a modificar, con el nombre de `## Git` o `<tipo>/<slug>` (`feat`, `fix` o `refactor`), la misma en todos; si ya estás en una rama que no es la principal, sigue en ella.
 
    Con `Repos vecinos: no clonar ni crear ramas`, o si `## Git` dice que la IA no cambia de rama, no clones, no actualices ni crees ramas: propón los comandos y sigue.
-8. Revisa `git status` de cada repo que vas a tocar. Los archivos de "Configuración local modificada a propósito" no son cambios ajenos: no avises por ellos. Si hay otros cambios que no son de esta tarea, avísalo antes de empezar. El reporte compara cada repo contra el `merge-base` con su rama principal, o contra la base que fije `AGENTS.md` (sección 6).
 
 ## 1. Plan
 
@@ -107,7 +107,7 @@ El DoD no ve los fallos de diseño. Antes de correrlo, relee tu diff contra el *
 
 ### Definition of Done
 
-- Corre **el DoD de cada unidad que tocaste**: la columna "DoD de la unidad" del modelo, con su `cd`, y, si cambiaste la app o pasaste unidades a fuente, el `## DoD` del proyecto, que la compila con ellas. Sin modelo, los comandos de `## DoD`, en orden. En un repo vecino sin DoD en el modelo, el `## DoD` de su `AGENTS.md` ([unidades.md](references/unidades.md)).
+- Corre **el DoD de cada unidad que tocaste**: la columna "DoD de la unidad" del modelo, con su `cd`, y el `## DoD` del proyecto, que compila la app con todo, si cambiaste la app, pasaste unidades a fuente, cambiaste algo que no es de ninguna unidad o un contrato que otras consumen, o la unidad no tiene build propio (una carpeta de feature). Sin modelo, los comandos de `## DoD`, en orden. En un repo vecino sin DoD en el modelo, el `## DoD` de su `AGENTS.md` ([unidades.md](references/unidades.md)).
 - Si un paso falla, corrige y repite desde ese paso. **Si el mismo paso falla tres veces, detente** y reporta el error con tu diagnóstico.
 - Un paso que el entorno no permite (por ejemplo, compilar iOS sin macOS) se marca `skipped` con el motivo. Nunca cuenta como `pass`.
 - **Nunca debilites un gate para que pase**: nada de desactivar reglas, bajar umbrales de cobertura, `ignoreFailures`, `abortOnError = false` ni `@Suppress` sin motivo. Arregla la causa.
@@ -179,7 +179,7 @@ Se genera siempre, salvo que el usuario diga que no.
    - Los archivos masivos o generados (goldens, fixtures, snapshots) **no llevan una explicación cada uno**: se explican en grupo con `groups`. `match` es una carpeta (termina en `/`) o un patrón (`*.png`), y el grupo sale como una sola entrada con su lista de rutas. Un archivo con entrada propia en `files` se muestra aparte del grupo.
    - `previews` es opcional (sección 5). `image` es la ruta que devolvió `android preview render`: absoluta, relativa al repo o relativa a la carpeta de la tarea (`previews/<archivo>`). El script incrusta la imagen en el reporte.
    - **Análisis del cambio**, opcional: en un bugfix, `severity` y `root_cause`; si el cambio tiene un efecto que se puede contar, `impact`; si cambia un flujo o una arquitectura, un diagrama Mermaid en `diagrams`; y en los archivos que el revisor debe mirar con cuidado, `risk` (`critico`, `alto`, `medio`, `bajo`) con `pros` y `cons`. Solo se muestran si vienen ([reporte.md](references/reporte.md)).
-   - **Varios repos:** si la tarea cambió repos vecinos, lístalos en `repos` con su `main_branch` y, para una unidad publicada que pasaste a fuente, su `pinned_version`; explica sus archivos con la clave `<nombre>:<ruta>`. El cambio que pasa una unidad a fuente va en `temporary`, con cómo revertirlo: no cuenta como cambio ([unidades.md](references/unidades.md)).
+   - **Varios repos:** si la tarea cambió repos vecinos, lístalos en `repos` con su `main_branch` y, para cada unidad publicada que está en fuente, su `pinned_version`; explica sus archivos con la clave `<nombre>:<ruta>`. El cambio que pasa una unidad a fuente va en `temporary`, con cómo revertirlo: no cuenta como cambio. Los archivos de "Configuración local modificada a propósito" el script ya los deja fuera solo ([unidades.md](references/unidades.md)).
 3. Genera el reporte con el script de esta skill:
    ```bash
    python3 -I <carpeta-de-la-skill>/scripts/report.py --meta <ruta-del-meta> [--main-branch <rama>] [--base <base>]
