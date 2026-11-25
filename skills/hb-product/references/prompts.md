@@ -56,7 +56,7 @@ Las sesiones 1a a 1e se abren juntas, cada una con el tipo de idea que dejó la 
 
 ### Toda la idea desde un solo chat (modo orquestado)
 
-Un chat recorre la idea entera: lanza cada sesión como un subagente con el modelo de su sesión (las cinco líneas a la vez, la 1g apenas cierran 1a y 1b, la 2 y la 3 juntas), espera a que terminen todos, anota el consumo de cada uno y se detiene en cada puerta, donde decides tú en tu terminal ([orquestacion.md](orquestacion.md)). No abres chats ni pegas pasos. Necesita una herramienta con subagentes (Claude Code los tiene); sin ellos, la skill lo dice y sigue con un chat por sesión.
+Un chat recorre la idea entera: lanza cada sesión como un subagente con el modelo de su sesión, **en primer plano y en un mismo mensaje los que corren juntos** (1a y 1b; después 1c, 1d, 1e y la 1g, que arranca sin esperar a las demás; la 2 y la 3 juntas), espera a que terminen todos sin cerrar su turno, anota el consumo de cada uno con lo que trae su resultado y se detiene en cada puerta, donde decides tú en tu terminal ([orquestacion.md](orquestacion.md)). La regla del primer plano va en el texto que pegas: sin ella, el chat puede dejar un subagente en segundo plano, cerrar su turno y quedarse quieto. No abres chats ni pegas pasos. Necesita una herramienta con subagentes (Claude Code los tiene); sin ellos, la skill lo dice y sigue con un chat por sesión.
 
 **Dónde:** chat nuevo · Haiku 5.5, esfuerzo bajo (es el orquestador: cada sesión usa el modelo de su nivel)
 
@@ -65,13 +65,13 @@ Un chat recorre la idea entera: lanza cada sesión como un subagente con el mode
 Una idea nueva:
 
 ```text
-Usa hb-product en modo orquestado: tengo una idea de app. <La idea en tus palabras: qué problema resuelve, para quién, plataformas, países, idiomas, tiendas, cómo piensas ganar dinero y cuántas semanas tienes>. No hagas commit ni push.
+Usa hb-product en modo orquestado: tengo una idea de app. <La idea en tus palabras: qué problema resuelve, para quién, plataformas, países, idiomas, tiendas, cómo piensas ganar dinero y cuántas semanas tienes>. Lanza los subagentes siempre en primer plano, los que corren juntos en un mismo mensaje, y no cierres tu turno mientras corre uno. En cada parada, pon arriba el recordatorio de /cost con su comando armado. No hagas commit ni push.
 ```
 
 Una idea que ya empezó (retomar en modo orquestado):
 
 ```text
-Sigue hb-product con <ruta absoluta>/product/estado.md en modo orquestado. No hagas commit ni push.
+Sigue hb-product con <ruta absoluta>/product/estado.md en modo orquestado. Lanza los subagentes siempre en primer plano, los que corren juntos en un mismo mensaje, y no cierres tu turno mientras corre uno. En cada parada, pon arriba el recordatorio de /cost con su comando armado. No hagas commit ni push.
 ```
 
 La sesión 0 te hace sus preguntas en el mismo chat, en una sola tanda. En cada puerta, el orquestador te muestra el veredicto y los comandos de `decidir`, el recomendado primero, y se detiene: el orquestador nunca decide por ti. Corre el que elijas en tu terminal y después escribe en el mismo chat:
@@ -80,7 +80,13 @@ La sesión 0 te hace sus preguntas en el mismo chat, en una sola tanda. En cada 
 Continúa. No hagas commit ni push.
 ```
 
-Al llegar a una puerta o al final, te recuerda correr `/cost` en ese chat y te da el comando `producto.py consumo --sesion orquestador --incluye … --costo '<USD>'`: el total del chat, que incluye a los subagentes (el consumo de cada subagente ya quedó anotado por sesión).
+**Arriba de cada parada** (cada puerta y el mensaje final) te recuerda correr `/cost` en ese chat y te da el comando armado `producto.py consumo --sesion orquestador --incluye <las sesiones que lanzó ese chat> --costo '<USD>'`: el total del chat, que incluye a los subagentes (el consumo de cada subagente ya quedó anotado por sesión). Córrelo antes de decidir: si cierras el chat sin `/cost`, ese costo se pierde.
+
+Si el chat se quedó quieto con un subagente que ya terminó (o tras su aviso de fin), escribe en el mismo chat:
+
+```text
+Continúa en modo orquestado: anota el consumo de los subagentes que terminaron y sigue el ciclo. Lanza los subagentes siempre en primer plano, los que corren juntos en un mismo mensaje, y no cierres tu turno mientras corre uno. En cada parada, pon arriba el recordatorio de /cost con su comando armado. No hagas commit ni push.
+```
 
 ### Retomar donde quedó
 
@@ -172,7 +178,7 @@ Con `--intermedio "<modelo>"` y `--alto "<modelo>"` cambias los nombres ([modelo
 cd <raíz> && python3 -I <skill>/scripts/producto.py consumo --sesion <id> --costo '<USD>' --carpeta product
 ```
 
-Con un orquestador: `--sesion orquestador --incluye 1a,1b,1c,1d,1e,1g` y el total del chat (lo que muestre `/cost`), sin `--tokens`: los de cada subagente ya van por sesión; `siguiente` te lo recuerda, con el comando completo, al llegar a la puerta. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
+Con un orquestador: `--sesion orquestador --incluye <las sesiones que lanzó ese chat>` y el total del chat (lo que muestre `/cost`), sin `--tokens`: los de cada subagente ya van por sesión; el orquestador te lo recuerda arriba de cada parada, con el comando armado. Si ese mismo chat vuelve a anotar en otra parada, actualiza su fila (`/cost` es acumulado); otro chat orquestador va en otra fila. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
 
 ### Guardar una idea para después, o recuperarla
 

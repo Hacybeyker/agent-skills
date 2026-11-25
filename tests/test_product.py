@@ -43,6 +43,23 @@ PRD = """# PRD
 | F-02 | Recordatorios | sí | H-COM-1 | — | M-02 | 800 | 1 | 2 | — |
 | F-03 | Temas de color | no | H-COM-1 | — | M-01 | 100 | 0,5 | 1 | — |
 
+## Historias de usuario
+
+### F-01
+
+- **Historia:** como vecino, quiero ver a quién le toca regar, para no discutir por los turnos.
+- **Criterios de aceptación:**
+  - Dado un edificio con 4 vecinos, cuando abro la app, entonces veo el turno de esta semana.
+  - Dado que marqué mi turno como hecho, cuando lo abre otro vecino, entonces lo ve hecho.
+  - Dado que compré el pago único, cuando reinstalo la app, entonces sigue desbloqueada.
+
+### F-02
+
+- **Historia:** como vecino, quiero un recordatorio el día de mi turno, para no olvidarlo.
+- **Criterios de aceptación:**
+  - Dado que me toca hoy, cuando son las 9, entonces recibo un aviso.
+  - Dado que ya marqué el turno, cuando son las 9, entonces no recibo el aviso.
+
 ## Métricas HEART
 
 | ID | Dimensión | Métrica | Meta |
@@ -465,7 +482,7 @@ class HallazgoTest(Base):
         self.nuevo()
 
     def test_exige_fuentes_que_existan(self):
-        self.assertIn("No existe(n) la(s) fuente(s): S-COM-9", self.falla(
+        self.assertIn("No existe esta fuente: S-COM-9", self.falla(
             "hallazgo", "--linea", "competencia", "--texto", "x", "--fuentes", "S-COM-9"))
         self.falla("hallazgo", "--linea", "competencia", "--texto", "x")
 
@@ -520,7 +537,7 @@ class MatrizTest(Base):
         self.assertEqual((fila["descargas"], fila["nota"], fila["idiomas"], fila["funciones"]),
                          (1000000, 4.2, ["es", "en"], ["turnos", "recordatorios"]))
         self.assertEqual(fila["fuentes"], self.fuentes[:2])
-        self.assertIn("No existe(n) la(s) fuente(s)", self.falla("competidor", "--nombre", "Otra", "--peldano", 1,
+        self.assertIn("No existe esta fuente", self.falla("competidor", "--nombre", "Otra", "--peldano", 1,
                                                                  "--fuentes", "S-COM-9"))
 
     def test_la_traccion_sale_de_las_descargas_o_de_un_respaldo_institucional(self):
@@ -547,7 +564,9 @@ class MatrizTest(Base):
         salida = self.p("matriz")
         self.assertIn("| C-1 | RiegoFácil ★ | 1 | 1 000 000 |", salida)
         self.assertIn("H-VOZ-1, H-VOZ-2", salida)
-        self.assertIn("Competidor Desconocida: lo citan H-VOZ-1", salida)
+        self.assertIn("Competidor Desconocida: lo cita H-VOZ-1, pero no tiene fila en la matriz", salida)
+        self.assertEqual(self.datos("01-investigacion/voz-del-usuario.json")["hallazgos"][0]["competidores"],
+                         ["C-1", "Desconocida"])  # el nombre que ya tiene fila se guarda por su ID
 
 
 class DiferenciadorTest(Base):
@@ -602,7 +621,7 @@ class DiferenciadorTest(Base):
         principales = [d["id"] for d in self.datos("01-investigacion/diferenciacion.json")["diferenciadores"]
                        if d["principal"]]
         self.assertEqual(principales, ["D-2"])
-        self.assertIn("No existe(n)", self.falla("diferenciador", "--vector", "precio", "--texto", "x", "--hallazgos",
+        self.assertIn("No existe este hallazgo", self.falla("diferenciador", "--vector", "precio", "--texto", "x", "--hallazgos",
                                                  "H-COM-9", "--se-ve", "uso", "--copiable", "baja", "--motivo", "x",
                                                  "--semanas", 1))
         self.falla("diferenciador", "--vector", "magia", "--texto", "x", "--hallazgos", hallazgo, "--se-ve", "uso",
@@ -777,8 +796,8 @@ class FlujoTest(Base):
     def test_de_la_idea_al_prd_con_las_tres_puertas(self):
         salida = self.hasta_puerta1()
         self.assertIn("Puerta 1 · Oportunidad · idea existente · cumple 5 de 5 criterios", salida)
-        self.assertIn("✔ Los hallazgos del diferenciador principal están triangulados y supera a la alternativa "
-                      "gratis más fuerte · D-1: H-VOZ-1", salida)
+        self.assertIn("✔ Los hallazgos del diferenciador principal están triangulados y supera al rival C-2 "
+                      "(PlantaPlus) · D-1: H-VOZ-1", salida)
         self.assertNotIn("puerta --n", salida)  # el veredicto ya viene en siguiente: no hay paso aparte
         self.assertIn("el agente nunca corre este comando", salida)
         self.assertIn("decidir --puerta 1 --seguir --carpeta product", salida)
@@ -811,7 +830,7 @@ class FlujoTest(Base):
 
         self.assertIn("Sesión 4 · PRD", self.p("decidir", "--puerta", 2, "--seguir"))
         write(self.carpeta / "04-prd.md", PRD)
-        self.assertIn("Puerta 3 · Alcance · idea existente · cumple 5 de 5 criterios", self.cerrar("4"))
+        self.assertIn("Puerta 3 · Alcance · idea existente · cumple 6 de 6 criterios", self.cerrar("4"))
         salida = self.p("puerta", "--n", 3)
         for criterio in ("El MVP cabe en el presupuesto de semanas · 5 de 6 semanas",
                          "El diferenciador principal está en el MVP · D-1 en F-01",
@@ -823,7 +842,7 @@ class FlujoTest(Base):
         self.assertIn("hb-implement", salida)
         guardadas = self.datos("decisiones.json")
         self.assertEqual([(d["puerta"], d["decision"], d["cumple"], d["total"]) for d in guardadas],
-                         [(1, "seguir", 5, 5), (2, "seguir", 3, 3), (3, "seguir", 5, 5)])
+                         [(1, "seguir", 5, 5), (2, "seguir", 3, 3), (3, "seguir", 6, 6)])
         self.assertTrue(all(d["fecha"].startswith(HOY) and d["criterios"] for d in guardadas))
         estado = self.p("estado")
         self.assertIn("| P3 · Alcance | seguir el %s" % HOY, estado)
@@ -833,13 +852,13 @@ class FlujoTest(Base):
     def test_seguir_con_criterios_sin_cumplir_queda_anotado(self):
         self.investigacion()
         self.p("puntaje", "--valores", "2,2,2,2,2")
-        self.assertIn("antes cierra la(s) sesión(es) 1f", self.falla("decidir", "--puerta", 1, "--seguir"))
+        self.assertIn("antes cierra la sesión 1f", self.falla("decidir", "--puerta", 1, "--seguir"))
         self.cerrar("1f", "01-sintesis.md")
         self.assertIn("La skill recomienda descartar (veredicto: No viable; El puntaje es 10/25, bajo el mínimo de 17)",
                       self.falla("decidir", "--puerta", 1, "--seguir"))
         salida = self.p("decidir", "--puerta", 1, "--seguir", "--motivo", "Quiero probarlo igual con lo que hay")
         self.assertIn("cumplía 4 de 5 criterios", salida)
-        self.assertIn("Sigues con 1 criterio(s) sin cumplir", salida)
+        self.assertIn("Sigues con 1 criterio sin cumplir", salida)
 
     def test_la_decision_registra_desde_donde_se_corrio(self):
         self.hasta_puerta1()
@@ -995,10 +1014,10 @@ class IdeaDebilTest(Base):
         salida = self.p("puerta", "--n", 1)
         self.assertIn("✖ Puntaje de 17/25 o más · tiene 14/25", salida)
         self.assertIn("✔ Demanda con confianza media o alta", salida)
-        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere a la "
-                      "alternativa gratis más fuerte: C-2 (PlantaPlus) · 0 viables de 0 registrados", salida)
-        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados y supera a la alternativa "
-                      "gratis más fuerte · no hay un diferenciador principal registrado", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere al rival "
+                      "C-2 (PlantaPlus) · 0 viables de 0 registrados", salida)
+        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados y supera al rival C-2 "
+                      "(PlantaPlus) · no hay un diferenciador principal registrado", salida)
         self.assertIn("✖ Riesgo de políticas distinto de 1, o con una mitigación escrita · es 1", salida)
         self.assertIn("ni la saturación ni la falta de datos descartan una idea", salida)
         motivo = "Sin diferenciador viable y con riesgo de políticas 1: el sistema ya trae la función"
@@ -1023,7 +1042,7 @@ class ValidacionTest(Base):
     def test_marca_lo_que_le_falta_a_la_tabla(self):
         self.hasta_puerta1()
         self.p("decidir", "--puerta", 1, "--seguir")
-        self.assertIn("03-validacion.md todavía tiene 10 texto(s) de plantilla", self.falla("cerrar", "--sesion", "3"))
+        self.assertIn("03-validacion.md todavía tiene 10 textos de plantilla", self.falla("cerrar", "--sesion", "3"))
         write(self.carpeta / "03-validacion.md", "# Validación\n\nSin tabla todavía.\n")
         self.assertIn("no tiene filas", self.falla("cerrar", "--sesion", "3"))
         self.p("confianza", "--hallazgo", "H-VOZ-1", "--bajar", "baja", "--motivo", "Las reseñas son de un solo mes")
@@ -1073,12 +1092,13 @@ class TrazabilidadTest(Base):
         write(self.carpeta / "04-prd.md", PRD)
         salida = self.p("trazabilidad")
         # F-01: 1000 × 2 × 100 % / 3; F-02: 800 × 1 × 100 % / 2; F-03: 100 × 0,5 × 100 % / 1
-        self.assertIn("✔ F-01 (MVP) · RICE 666,67 · 3 semana(s)", salida)
-        self.assertIn("✔ F-02 (MVP) · RICE 400 · 2 semana(s)", salida)
-        self.assertIn("✔ F-03 · RICE 50 · 1 semana(s)", salida)
+        self.assertIn("✔ F-01 (MVP) · RICE 666,67 · 3 semanas · 3 criterios de aceptación", salida)
+        self.assertIn("✔ F-02 (MVP) · RICE 400 · 2 semanas · 2 criterios de aceptación", salida)
+        self.assertIn("✔ F-03 · RICE 50 · 1 semana · 0 criterios de aceptación", salida)
         self.assertLess(salida.index("F-01"), salida.index("F-02"))
-        self.assertIn("Trazabilidad del MVP: 2 de 2 funcionalidades (100 %) · 5 semana(s) de 6", salida)
+        self.assertIn("Trazabilidad del MVP: 2 de 2 funcionalidades (100 %) · 5 semanas de 6", salida)
         self.assertIn("✔ El diferenciador principal (D-1) está en el MVP", salida)
+        self.assertIn("✔ Criterios de aceptación: 2 de 2 funcionalidades del MVP · 5 criterios", salida)
         self.assertIn("`cerrar --sesion 4`", salida)
 
     def test_la_confianza_del_hallazgo_entra_en_el_rice(self):

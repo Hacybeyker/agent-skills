@@ -71,7 +71,7 @@ class VeredictoTest(Base):
         salida = self.p("puerta", "--n", 1)
         self.assertIn("🔴  PUERTA 1 · NO VIABLE  →  la skill recomienda: DESCARTAR", salida)
         self.assertIn("  1. El puntaje es 14/25, bajo el mínimo de 17.", salida)
-        self.assertIn("Ningún diferenciador supera a C-2 (PlantaPlus), la alternativa gratis más fuerte", salida)
+        self.assertIn("Ningún diferenciador supera al rival C-2 (PlantaPlus) con hallazgos triangulados", salida)
         razones = re.findall(r"^  \d\. ", salida, re.M)
         self.assertLessEqual(len(razones), 3)
         self.assertIn("Criterios: cumple 1 de 5.", salida)
@@ -258,8 +258,10 @@ class ReporteVeredictoTest(Base):
         decisivos = resumen[resumen.index("Los hallazgos que decidieron"):]
         self.assertNotIn("<details", decisivos)  # abiertos, no plegados
         self.assertTrue(3 <= decisivos.count("<li>") - decisivos.count("<li><a") <= 5)
-        self.assertIn("🔴 No viable", html)
-        self.assertIn("Decidiste descartar, como recomendaba la skill.", html)
+        self.assertIn("🔴 No viable", html)  # la puerta 1, recalculada hoy, como dato secundario
+        banner = html[html.index('<section class="veredicto'):html.index("Resumen ejecutivo")]
+        self.assertIn("✖ Descartada en la puerta 1</p>", banner)  # el estado final como titular (#45)
+        self.assertIn("P1 🔴 → descartada", banner)
 
     def test_plurales_reales_y_competidores_con_conteo(self):
         self.hasta_puerta1()
@@ -285,9 +287,9 @@ class ReporteVeredictoTest(Base):
         self.hasta_puerta1()
         salida = self.p("tablero", "--raiz", raiz)
         self.assertIn("✔ Tablero con 3 ideas", salida)
-        self.assertIn("· Riego en turnos (carpeta riego/product/archivo/riego-en-turnos · creada el %s) · Descartada · "
-                      "🔴 No viable (puerta 1), recomienda descartar" % HOY, salida)  # dos ideas con el mismo nombre
-        self.assertIn("· Linterna · Pausada · ", salida)
+        self.assertIn("· Riego en turnos (carpeta riego/product/archivo/riego-en-turnos · creada el %s) · Descartada "
+                      "en la puerta 1 · P1 🔴 → descartada · " % HOY, salida)  # dos ideas con el mismo nombre
+        self.assertIn("· Linterna · Pausada (archivada a mano) · ", salida)
         html = (raiz / "index.html").read_text(encoding="utf-8")
         conteo = dict((etiqueta, int(n)) for n, etiqueta in re.findall(
             r'<div class="cifra"><b>(\d+)</b><span>([^<]+)</span>', html))
@@ -297,7 +299,8 @@ class ReporteVeredictoTest(Base):
         self.assertIn("Cada idea está en un solo estado", html)
         self.assertIn('class="veredicto compacto mal"', html)
         self.assertIn('class="veredicto compacto bien"', html)
-        self.assertIn("la skill recomienda: descartar", html)
+        self.assertIn("P1 🔴 → descartada", html)  # el recorrido, no el veredicto suelto de la última puerta
+        self.assertIn("Pausada (archivada a mano)", html)
 
 
 # --- #18 · Consumo sin costo en USD y el del orquestador -----------------------------------------------------------
@@ -328,7 +331,13 @@ class ConsumoSinCostoTest(Base):
                       "muestra /cost>' --carpeta product", salida)  # sin --tokens: no se cuentan dos veces
         self.assertIn("cd %s && python3 -I " % self.tmp, salida)
         self.p("consumo", "--sesion", "orquestador", "--costo", "1.20", "--incluye", "1a")
+        # el orquestador solo dijo que corrió la 1a: las demás siguen sin un chat que las cubra (feedback #46)
+        self.assertIn("--incluye 0,1b,1c,1d,1e,1g,1f --costo", self.p("siguiente"))
+        self.p("consumo", "--sesion", "orquestador", "--costo", "1.80", "--incluye", "0,1a,1b,1c,1d,1e,1g,1f")
         self.assertNotIn("Consumo del chat orquestador", self.p("siguiente"))
+        filas = [f for f in self.datos()["consumo"] if f["sesion"] == "orquestador"]
+        self.assertEqual(len(filas), 1)  # el mismo chat (comparte la 1a): /cost es acumulado y actualiza su fila
+        self.assertEqual(filas[0]["costo"], 1.8)
 
     def test_mientras_hay_sesiones_abiertas_no_lo_pide(self):
         self.sesion0()

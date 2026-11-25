@@ -125,15 +125,16 @@ class RivalTest(Base):
         self.assertIn("✖ D-1: no viable (paridad: iguala al rival)", salida)
         self.assertIn("✖ Frente al rival: iguala a C-2 (PlantaPlus): no viable (paridad", salida)
         salida = self.cerrar("1g", "01-investigacion/diferenciacion.md")
-        self.assertIn("⚠ D-1 solo iguala a C-2 (PlantaPlus): es paridad", salida)
+        self.assertIn("⚠ D-1 solo iguala al rival C-2 (PlantaPlus): es paridad", salida)
         self.p("puntaje", "--valores", "4,4,4,4,1")
         salida = self.cerrar("1f", "01-sintesis.md")
         self.assertIn("🔴  PUERTA 1 · NO VIABLE  →  la skill recomienda: DESCARTAR", salida)
-        self.assertIn("Ningún diferenciador supera a C-2 (PlantaPlus), la alternativa gratis más fuerte, con hallazgos "
+        self.assertIn("Ningún diferenciador supera al rival C-2 (PlantaPlus) con hallazgos "
                       "triangulados: D-1 (no viable: paridad)", salida)
-        self.assertIn("El principal (D-1) iguala a C-2 (PlantaPlus): no viable (paridad, básico en Kano)", salida)
-        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados y supera a la alternativa "
-                      "gratis más fuerte · D-1: iguala a C-2 (PlantaPlus)", salida)
+        self.assertIn("El principal (D-1) iguala al rival C-2 (PlantaPlus): no viable (paridad, básico en Kano)",
+                      salida)
+        self.assertIn("✖ Los hallazgos del diferenciador principal están triangulados y supera al rival C-2 "
+                      "(PlantaPlus) · D-1: iguala a C-2 (PlantaPlus)", salida)
         self.p("reporte")
         html = (self.carpeta / "reporte.html").read_text(encoding="utf-8")
         self.assertIn("No viable · paridad", html)
@@ -143,7 +144,7 @@ class RivalTest(Base):
         voz = self.hasta_1g()
         salida = self.puerta1("--resultado", "supera", "--hallazgos", voz, "--texto", "Sin suscripción")
         self.assertIn("🟢  PUERTA 1 · VIABLE  →  la skill recomienda: SEGUIR", salida)
-        self.assertIn("El diferenciador principal (D-1) es viable y supera a C-2 (PlantaPlus), con prueba de "
+        self.assertIn("El diferenciador principal (D-1) es viable y supera al rival C-2 (PlantaPlus), con prueba de "
                       "elección", salida)
 
     def test_supera_con_un_hallazgo_en_media_es_viable_con_reservas(self):
@@ -151,7 +152,7 @@ class RivalTest(Base):
         media = self.comparacion_media()
         salida = self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción")
         self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1g", salida)
-        self.assertIn("D-1 supera a C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app (%s en confianza "
+        self.assertIn("D-1 supera al rival C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app (%s en confianza "
                       "media)" % media, salida)
         self.assertIn("Un hallazgo triangulado y en confianza alta que muestre que la gente elige por D-1", salida)
         self.assertIn("decidir --puerta 1 --ajustar 1g --carpeta product", salida)
@@ -169,7 +170,7 @@ class RivalTest(Base):
         salida = self.puerta1("--resultado", "supera", "--hallazgos", suelto, "--texto", "Lo dice una reseña",
                               valores="4,4,4,4,1")
         self.assertIn("🔴  PUERTA 1 · NO VIABLE", salida)
-        self.assertIn("Ningún diferenciador supera a C-2 (PlantaPlus), la alternativa gratis más fuerte, con hallazgos "
+        self.assertIn("Ningún diferenciador supera al rival C-2 (PlantaPlus) con hallazgos "
                       "triangulados", salida)
         self.assertIn("Frente al rival: supera a C-2 (PlantaPlus), pero ninguno de sus hallazgos (%s) está "
                       "triangulado" % suelto, self.texto_viabilidad())
@@ -198,7 +199,7 @@ class RivalTest(Base):
         self.assertIn("La sesión 1g ya se reabrió y usó su presupuesto (7 de 8 búsquedas y 4 de 5 lecturas en la "
                       "reapertura 1): "
                       "ajustarla otra vez no traería evidencia nueva", salida)
-        self.assertIn("D-1 supera a C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app", salida)
+        self.assertIn("D-1 supera al rival C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app", salida)
         self.assertNotIn("★ Recomendado · Ajustar 1g", salida)
         self.p("decidir", "--puerta", 1, "--ajustar", "1g", "--motivo", "Quiero buscar en otro vector")
         sesion = self.datos()["sesiones"]["1g"]

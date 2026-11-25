@@ -78,7 +78,7 @@ Las reseñas de Google Play y de la App Store, Reddit, los foros, TikTok y YouTu
 | En una idea nueva | Quejas sobre cómo se resuelve hoy (peldaño 4) y conversaciones sobre la necesidad de fondo (peldaño 5) |
 
 - Cuenta la **frecuencia por competidor**: en cuántas fuentes independientes aparece cada tema. No midas el tamaño del dolor con reseñas: exageran.
-- Enlaza cada hallazgo con sus competidores (`--competidores "App A,App B"`): la sesión 1g necesita saber qué queja es de quién, y un diferenciador pide un dolor triangulado en 2 competidores o más. Si 1a todavía no registró esa fila, usa el nombre tal como figura en la tienda.
+- Enlaza cada hallazgo con sus competidores **por su ID en la matriz** (`--competidor C-1,C-3`; `matriz` los lista): la sesión 1g necesita saber qué queja es de quién, y un diferenciador pide un dolor triangulado en 2 competidores o más. No los cites por nombre: la misma app aparece con nombres distintos según la tienda y el idioma ("Fakeit: Imposter Game" o "Fakeit"), y un nombre que no coincide queda sin enlazar. Si 1a todavía no registró esa fila, cita la URL de su ficha (o el nombre, como último recurso): el script la enlaza por la URL de la ficha cuando 1a la registra con esa misma fuente.
 - Busca también a los usuarios satisfechos: es la evidencia en contra de esta línea.
 
 ## 1c · Demanda

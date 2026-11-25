@@ -81,7 +81,7 @@ Repetir `consumo` con la misma `--sesion` actualiza su fila: lo nuevo reemplaza 
 
 | Herramienta | Dónde se ve | Por sesión con subagentes |
 | --- | --- | --- |
-| Claude Code | `/cost` (USD del chat) | El aviso de fin de cada subagente trae sus tokens y la cantidad de herramientas que usó: el orquestador espera a que terminen todos y anota cada uno con `consumo --sesion <id> --tokens <n> --pasos <n>`; al cerrar, el total del chat con `consumo --sesion orquestador --incluye <sesiones> --costo '<USD de /cost>'`, sin `--tokens` (ya van por sesión: el total no los cuenta dos veces). Por verificar en cada versión: el formato no está documentado como estable |
+| Claude Code | `/cost` (USD del chat) | El resultado de cada subagente en primer plano trae sus tokens y la cantidad de herramientas que usó: el orquestador espera a que terminen todos y anota cada uno con `consumo --sesion <id> --tokens <n> --pasos <n>`; en cada parada, arriba, el total del chat con `consumo --sesion orquestador --incluye <las sesiones que lanzó ese chat> --costo '<USD de /cost>'`, sin `--tokens` (ya van por sesión: el total no los cuenta dos veces). El mismo chat actualiza su fila en cada parada (`/cost` es acumulado); otro chat orquestador va en otra fila. Por verificar en cada versión: el formato no está documentado como estable |
 | GitHub Copilot CLI | `/usage` (AI Credits y tokens) | Solo el total del chat: `consumo --sesion orquestador --incluye <sesiones> --creditos <n>` |
 | Otra | Lo que muestre | Si no da el uso por subagente, el total con `--incluye` |
 

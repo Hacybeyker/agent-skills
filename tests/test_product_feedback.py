@@ -236,7 +236,7 @@ class ReglaUnicaTest(Base):
         self.assertIn("confianza alta · triangulado", salida)
         salida = self.p("triangulacion")
         self.assertIn("✔ %s · confianza alta · triangulado" % hallazgo, salida)
-        self.assertIn("no cuenta(n), y no hace falta", salida)
+        self.assertIn("no cuenta, y no hace falta", salida)
 
     def test_solo_fuentes_sin_fecha_queda_en_baja(self):
         fuentes = self.fuente("voz-del-usuario", 3, "usuario", publicada="sin-fecha")
@@ -407,7 +407,7 @@ class CoberturaTest(Base):
         self.p("cerrar", "--sesion", "1b")
         salida = self.p("cobertura", "--linea", "voz-del-usuario")
         self.assertIn("⚠ tienda google-play · vacío, límite de las herramientas (V-VOZ-1)", salida)
-        self.assertIn("vacío(s)", self.p("estado"))
+        self.assertIn("vacíos", self.p("estado"))
 
     def test_volver_a_registrar_la_url_agrega_su_cobertura(self):
         args = ["fuente", "--linea", "demanda", "--url", "https://datos.example/informe", "--publicada", "2026-06",
@@ -483,7 +483,7 @@ class CsvTest(Base):
         salida = self.registrar(ruta, "--autor", "RiegoFácil · Google Play", "--publicada", "auto", "--tiendas",
                                 "google-play")
         self.assertIn("✔ S-VOZ-1 registrada", salida)
-        self.assertIn("4 fila(s) · del 2026-08-01 al 2026-11-10 · 1–3★: 3 · idiomas: es (3), pt (1)", salida)
+        self.assertIn("4 filas · del 2026-08-01 al 2026-11-10 · 1–3★: 3 · idiomas: es (3), pt (1)", salida)
         self.assertIn("· Cobertura: idioma es, pt · tienda google-play", salida)
         fuente = self.datos("01-investigacion/voz-del-usuario.json")["fuentes"][0]
         self.assertEqual((fuente["publicada"], fuente["idiomas"], fuente["dominio"]),
@@ -498,7 +498,7 @@ class CsvTest(Base):
         tres = self.registrar(self.csv("c.csv"), "--autor", "PlantaPlus · Google Play", "--publicada", "auto")
         ids = [re.search(r"S-VOZ-\d+", texto).group(0) for texto in (uno, dos, tres)]
         _, salida = self.hallazgo("voz-del-usuario", ids)
-        self.assertIn("2 fuente(s) independiente(s) y vigente(s)", salida)
+        self.assertIn("2 fuentes independientes y vigentes", salida)
 
     def test_valida_la_url_o_el_archivo_y_la_fecha_automatica(self):
         comun = ["fuente", "--linea", "voz-del-usuario", "--tipo", "usuario", "--peldano", 1, "--resumen", "x"]
@@ -528,8 +528,8 @@ class CsvTest(Base):
                                   "- 2026-08-01 · 3★ · pt · Não tem lembrete por turno"])
         self.assertIn("Columnas usadas: fecha = Review Submit Date and Time", salida)
         salida = self.p("resenas", "--archivo", ruta, "--idioma", "pt", "--estrellas", "3")
-        self.assertIn("1 de 1 reseña(s)", salida)
-        self.assertIn("2 de 3 reseña(s) con esos filtros (sube --limite", self.p("resenas", "--archivo", ruta,
+        self.assertIn("1 de 1 reseña con esos filtros", salida)
+        self.assertIn("2 de 3 reseñas con esos filtros (sube --limite", self.p("resenas", "--archivo", ruta,
                                                                                   "--limite", 2))
         self.assertIn("1 de 1", self.p("resenas", "--archivo", ruta, "--desde", "2026-11-01"))
         self.assertIn("rango de 1 a 5", self.falla("resenas", "--archivo", ruta, "--estrellas", "0-9"))
@@ -686,13 +686,13 @@ class SustitutoTest(Base):
                         "El recordatorio del sistema ya avisa gratis")
         self.assertIn("✔ D-1 frente a C-3 (Recordatorio del sistema): no lo supera", salida)
         self.assertIn("✖ Frente al rival: no supera a C-3 (Recordatorio del sistema)", salida)
-        self.assertIn("Ningún diferenciador supera a C-3", self.cerrar("1g", "01-investigacion/diferenciacion.md"))
+        self.assertIn("Ningún diferenciador supera al sustituto C-3", self.cerrar("1g", "01-investigacion/diferenciacion.md"))
         self.assertIn("Diferenciación = 3 no corresponde", self.falla("puntaje", "--valores", "4,4,4,4,3"))
         self.p("puntaje", "--valores", "4,4,4,4,1")
         salida = self.cerrar("1f", "01-sintesis.md")
-        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere a la "
-                      "alternativa gratis más fuerte: C-3 (Recordatorio del sistema)", salida)
-        self.assertIn("ningún diferenciador supera a C-3", salida)
+        self.assertIn("✖ Al menos 1 diferenciador viable, con sus hallazgos triangulados y que supere al "
+                      "sustituto C-3 (Recordatorio del sistema)", salida)
+        self.assertIn("ningún diferenciador supera al sustituto C-3", salida)
 
     def test_lo_supera_con_un_hallazgo_triangulado_que_lo_nombra(self):
         self.investigar(supera=True)

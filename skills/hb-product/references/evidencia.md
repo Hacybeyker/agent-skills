@@ -47,7 +47,7 @@ python3 -I <skill>/scripts/producto.py hallazgo --linea demanda --texto "La gent
 
 - **`--critico`** marca un **hallazgo clave**: uno del que dependen el puntaje o una puerta. Solo los clave entran en `triangulacion` y en la confianza del puntaje, así que marca los que de verdad sostienen la decisión.
 - **`--en-contra S-…`** registra las fuentes que lo contradicen; **`--sin-contra "<qué buscaste>"`**, que buscaste y no apareció nada. Un hallazgo clave necesita una de las dos.
-- **`--competidores`** enlaza el hallazgo con filas de la matriz, por ID (`C-1`) o por nombre. Sirve para las quejas por competidor y para la viabilidad de un diferenciador.
+- **`--competidor C-1,C-3`** (o `--competidores`) enlaza el hallazgo con filas de la matriz **por su ID**. Sin fila todavía, por la URL de su ficha; un nombre que ya tiene fila se guarda como su ID. Un nombre que no coincide con la matriz se enlaza por la URL de la ficha si una fuente del hallazgo es esa ficha; si no, `matriz` lo avisa. Sirve para las quejas por competidor y para la viabilidad de un diferenciador.
 
 Si te equivocas, `producto.py anular --id <ID> --motivo "<por qué>"` deja el registro sin borrarlo. No edites los `.json` a mano.
 

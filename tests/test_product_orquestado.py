@@ -64,17 +64,37 @@ class OrquestadoTest(Base):
         self.assertEqual(datos["orquestador"]["modelo"], "Haiku 5.5")
         self.assertIn("claude --model claude-haiku-5-5 --effort low", datos["orquestador"]["abrir"])
 
-    def test_las_lineas_van_en_paralelo_con_el_modelo_de_cada_sesion(self):
+    def test_las_lineas_van_en_paralelo_en_primer_plano_y_por_tandas(self):
+        """#38: en primer plano, en un solo mensaje; 1a y 1b primero y, al cerrar las dos, la 1g junto con 1c–1e."""
         self.sesion0()
         datos = self.json()
-        self.assertEqual([p["sesion"] for p in datos["pasos"]], ["1a", "1b", "1c", "1d", "1e"])
+        self.assertEqual([p["sesion"] for p in datos["pasos"]], ["1a", "1b"])
         self.assertTrue(datos["en_paralelo"])
-        self.assertEqual(datos["esperan"], ["1g", "1f"])
+        self.assertEqual(datos["esperan"], ["1c", "1d", "1e", "1g", "1f"])
+        self.assertEqual(datos["plano"], "primero")
+        self.assertIn("en primer plano (nunca en segundo plano)", datos["motivo"])
         self.assertIn("espera a que terminen todos", datos["motivo"])
         for paso in datos["pasos"]:
             self.assertEqual(paso["subagente"], {"modelo": "sonnet", "esfuerzo": "medium"})
+            self.assertEqual(paso["plano"], "primero")
             self.assertIn("Idea existente (provisional: la confirma 1a)", paso["texto"])
         self.assertIn("```text\nSiguiente paso", (self.carpeta / "estado.md").read_text(encoding="utf-8"))
+        # en modo manual siguen siendo cinco chats a la vez
+        self.assertIn("5. Chat nuevo · Sesión 1e", self.p("siguiente"))
+        self.assertIn("Puedes abrir estos chats en paralelo, uno por sesión (o un subagente por sesión en el modo "
+                      "orquestado):", self.p("siguiente"))
+        fuentes = self.fuente("competencia", 3, "medido")
+        self.p("tipo", "--existente", "--motivo", "Hay dos apps directas con más de 100k descargas")
+        self.p("competidor", "--nombre", "PlantaPlus", "--peldano", 1, "--fuentes", fuentes[0], "--descargas", "500k",
+               "--rival")
+        self.sustituto(fuentes[1])
+        self.hallazgo("competencia", fuentes, "--critico", "--sin-contra", "Se buscó y no apareció")
+        self.cerrar("1a", "01-investigacion/competencia.md")
+        self.linea("1b", "voz-del-usuario", "usuario")
+        datos = self.json()
+        self.assertEqual([(p["sesion"], p["subagente"]["modelo"]) for p in datos["pasos"]],
+                         [("1c", "sonnet"), ("1d", "sonnet"), ("1e", "sonnet"), ("1g", "opus")])
+        self.assertEqual(datos["esperan"], ["1f"])
 
     def test_la_1g_se_lanza_con_su_modelo_apenas_cierran_1a_y_1b(self):
         self.hasta_1g()
@@ -377,9 +397,9 @@ class EstadosTest(Base):
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
         self.p("puntaje", "--valores", "4,4,4,4,2")
         salida = self.cerrar("1f", "01-sintesis.md")
-        self.assertIn("D-2 y D-3 superan a C-2 (PlantaPlus), pero son viables con confianza baja: H-DIF-1 y H-DIF-2 "
+        self.assertIn("D-2 y D-3 superan al rival C-2 (PlantaPlus), pero son viables con confianza baja: H-DIF-1 y H-DIF-2 "
                       "sin triangular", salida)
-        self.assertIn("El principal (D-1) iguala a C-2 (PlantaPlus): no viable (paridad", salida)
+        self.assertIn("El principal (D-1) iguala al rival C-2 (PlantaPlus): no viable (paridad", salida)
         self.assertIn("0 viables de 3 registrados: D-2 y D-3 (viables con confianza baja); D-1 (no viable: paridad)",
                       salida)
         self.assertNotIn("no son viables", salida)

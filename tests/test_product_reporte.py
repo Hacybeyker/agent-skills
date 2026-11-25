@@ -154,7 +154,7 @@ class TableroTest(Base):
         self.p("tablero", "--raiz", raiz)
         html = (raiz / "index.html").read_text(encoding="utf-8")
         self.assertIn("Lista para construir", html)
-        self.assertIn("Puerta 3: seguir, con 5 de 5 criterios cumplidos.", html)
+        self.assertIn("Puerta 3: seguir, con 6 de 6 criterios cumplidos.", html)
 
     def test_sin_ideas_lo_dice(self):
         self.assertIn("Tablero con 0 ideas", self.p("tablero", "--raiz", self.tmp))

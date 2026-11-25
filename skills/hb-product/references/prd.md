@@ -64,6 +64,8 @@ Cada métrica necesita la dimensión, qué se mide y una meta con valor y plazo.
 
 Una por funcionalidad del MVP: "como <usuario>, quiero <acción>, para <beneficio>", con criterios en formato "dado …, cuando …, entonces …". Son lo que `hb-implement` va a recibir: tienen que poder probarse.
 
+**Los cuenta el script** (`trazabilidad` y la puerta 3: "Cada funcionalidad del MVP tiene criterios de aceptación", X de Y). Respeta la forma de la plantilla: un título con el ID (`### F-01`) y, debajo de `- **Criterios de aceptación:**`, una viñeta por criterio. Una funcionalidad del MVP sin criterios deja la puerta 3 en 🟡 (ajustar 4).
+
 ## Plan de eventos de analítica
 
 Los eventos que alimentan cada métrica: nombre, cuándo se envía, parámetros y a qué métrica sirve. Sin datos personales en los parámetros. Si una métrica no tiene un evento que la alimente, no se va a poder medir.
