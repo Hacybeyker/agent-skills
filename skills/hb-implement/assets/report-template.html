@@ -124,6 +124,8 @@
           margin-bottom: 8px;
         }
         .hero-desc { color: var(--text-secondary); font-size: 15px; max-width: 720px; }
+        .hero-base { color: var(--text-muted); font-size: 13px; margin-top: 8px; overflow-wrap: anywhere; }
+        .hero-base code { color: var(--text-secondary); }
 
         /* ─── Stats Row ──────────────────────────────────────────── */
         .stats-row {
@@ -435,6 +437,8 @@
         .repos-table th, .repos-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
         .repos-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
         .repos-table code { color: var(--text-secondary); }
+        .version-mismatch { color: var(--accent-orange); white-space: nowrap; }
+        .version-warning { margin-bottom: 12px; }
 
         .note-block {
           background: var(--bg-secondary);
@@ -476,7 +480,7 @@
     </style>
 </head>
 <body>
-<!-- El contenido lo genera scripts/report.py: de este archivo solo se usan <style> y <script>. -->
+<!-- El contenido lo genera scripts/report.py: de este archivo solo se usan los bloques style y script. -->
 
 <script>
     /* Toggle collapsible file entries */

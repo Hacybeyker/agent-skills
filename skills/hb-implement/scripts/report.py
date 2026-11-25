@@ -4,17 +4,26 @@
 El código (antes, después y diff) sale de git: el agente solo escribe el meta.json
 con el contexto que git no sabe (título, tipo, por qué de cada archivo, resultado del DoD).
 
-Carpeta de salida: --out o, sin él, la línea "Carpeta de reportes: <ruta>" del AGENTS.md del repo; si no hay, reports.
-- Sin marcadores: un meta por tarea, <carpeta>/<fecha>-<slug>.meta.json, y el reporte <carpeta>/<fecha>-<slug>.html.
-- Con {fecha} y {slug} en la ruta: una carpeta por tarea, con <carpeta>/meta.json y <carpeta>/report.html. Si ya hay
-  una carpeta con ese slug en otra fecha, la tarea sigue ahí.
+Carpeta de reportes: --out o, sin él, la línea "Carpeta de reportes: <ruta>" del AGENTS.md del repo; si no hay,
+reports. Es la base común de las skills (hb-performance y hb-review escriben en sus propias subcarpetas).
+- Sin marcadores: una carpeta por tarea, <base>/implementation/<fecha>-<slug>/, con meta.json, report.html,
+  bitacora.md y previews/. Una tarea vieja en formato plano (<base>/<fecha>-<slug>.meta.json) sigue ahí, plana.
+- Con {fecha} y {slug} en la ruta: la ruta tal cual, con los mismos archivos; la base es la parte fija.
+Si ya hay una carpeta con ese slug en otra fecha, la tarea sigue ahí.
+Cada tarea tiene su fila en <base>/INDEX.md (clave: hb-implement + slug): "en curso" con --folder y el resultado del DoD
+al generar el reporte. Las demás filas y líneas del índice no se tocan; se escribe sobre la ruta real (un enlace
+simbólico sigue siendo enlace).
+Base de comparación de cada repo: --base (o "base" en "repos"); sin ella, el merge-base de HEAD con su rama principal
+(--main-branch o "main_branch"; si no, origin/HEAD, origin/main, origin/master, main o master).
 Los archivos masivos o generados (goldens, fixtures) se explican en grupo, por carpeta o patrón,
 con "groups"; un archivo con su propia entrada en "files" se muestra aparte.
 Con "repos" en el meta, el mismo reporte cubre los repos relacionados (sus claves son "<nombre>:<ruta>"), y
 "temporary" deja fuera los cambios de configuración que no son de la tarea.
+En un worktree enlazado al que le faltan AGENTS.md (fuera de git en el principal) o el enlace simbólico por el que
+pasa la carpeta de reportes, se detiene y dice cómo recrearlos, sin escribir nada.
 
 Uso:
-  python3 -I report.py --meta <meta.json> [--base HEAD] [--out <carpeta>] [--repo .]
+  python3 -I report.py --meta <meta.json> [--base <ref> | --main-branch <rama>] [--out <carpeta>] [--repo .]
   python3 -I report.py --folder <slug> [--date AAAA-MM-DD] [--out <carpeta>] [--repo .]
       (imprime y crea la carpeta de la tarea, sin generar el reporte)
 """
@@ -29,8 +38,10 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
+import urllib.parse
 
 HERE = pathlib.Path(__file__).resolve().parent
 TEMPLATE = HERE.parent / "assets" / "report-template.html"
@@ -55,6 +66,13 @@ MERMAID_SRI = "sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o
 MAX_LINES = 2000
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 DEFAULT_OUT = "reports"
+SKILL = "hb-implement"
+SUBFOLDER = "implementation"  # la subcarpeta de esta skill dentro de la base común
+INDEX_COLUMNS = ["Fecha", "Skill", "Slug", "Tipo", "Estado", "Ruta"]
+INDEX_INTRO = ("# Índice de reportes\n\n"
+               "Una fila por tarea. Cada skill agrega o actualiza solo sus filas (clave: Skill + Slug).\n\n")
+INDEX_TABLE = "| " + " | ".join(INDEX_COLUMNS) + " |\n|" + " --- |" * len(INDEX_COLUMNS) + "\n"
+MAIN_BRANCHES = ("origin/main", "origin/master", "main", "master")
 MARKER = re.compile(r"(\{fecha\}|\{slug\})")
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # "Carpeta de reportes: <ruta>" en AGENTS.md, con o sin viñeta, negrita o acentos graves (también en inglés).
@@ -94,10 +112,13 @@ def under(path, folder):
 def relative_in(path, repo):
     """La ruta relativa al repo sin seguir enlaces, o None si queda fuera."""
     path = lexical(path)
-    for base in (lexical(repo), pathlib.Path(os.path.realpath(str(repo)))):
+    real_repo = pathlib.Path(os.path.realpath(str(repo)))
+    for base in (lexical(repo), real_repo):
         if under(path, base):
             return path.relative_to(base)
-    return None
+    # La misma carpeta escrita por otro camino (/var frente a /private/var en macOS): se compara la ruta real.
+    real_path = pathlib.Path(os.path.realpath(str(path)))
+    return real_path.relative_to(real_repo) if under(real_path, real_repo) else None
 
 
 def shown(path, repo):
@@ -138,8 +159,29 @@ def agents_out(repo):
     return None
 
 
+class Task:
+    """La carpeta de una tarea y sus archivos. flat: el formato plano de antes, <base>/<fecha>-<slug>.<extensión>,
+    que se conserva para las tareas que ya estaban así."""
+    NAMES = {"report": "report.html", "meta": "meta.json", "bitacora": "bitacora.md"}
+    SUFFIXES = {"report": ".html", "meta": ".meta.json", "bitacora": ".bitacora.md"}
+
+    def __init__(self, folder, date, task_slug, flat=False, reused=False):
+        self.folder, self.date, self.slug, self.flat, self.reused = folder, date, task_slug, flat, reused
+
+    def file(self, kind):
+        """kind: "report", "meta" o "bitacora"."""
+        if self.flat:
+            return self.folder / f"{self.date}-{self.slug}{self.SUFFIXES[kind]}"
+        return self.folder / self.NAMES[kind]
+
+    @property
+    def previews(self):
+        return self.folder / "previews"
+
+
 class Layout:
-    """Dónde van el meta, el reporte y la bitácora de una tarea, según la carpeta de reportes configurada."""
+    """Dónde van el meta, el reporte, la bitácora y los previews de una tarea, según la carpeta de reportes configurada.
+    root es la base: la parte fija de la ruta, la que se deja fuera de git y donde va INDEX.md."""
 
     def __init__(self, repo, spec):
         expanded = os.path.expanduser(spec)
@@ -154,20 +196,25 @@ class Layout:
                              "(por ejemplo, reports/{fecha}/{slug})" % spec)
         fixed = pathlib.Path(*parts[:first]) if self.marked else pathlib.Path(expanded)
         self.root = lexical(fixed if fixed.is_absolute() else repo / fixed)
-        self.rest = parts[first:] if self.marked else ()
+        # Sin marcadores, la línea es la base común: esta skill escribe en <base>/implementation/<fecha>-<slug>/.
+        self.rest = parts[first:] if self.marked else (SUBFOLDER, "{fecha}-{slug}")
+        self.index = self.root / "INDEX.md"
 
     def _regex(self, task_slug=None):
-        def component(part):
-            pieces = []
-            for piece in MARKER.split(part):
-                if piece == "{fecha}":
-                    pieces.append(r"\d{4}-\d{2}-\d{2}")
-                elif piece == "{slug}":
-                    pieces.append(re.escape(task_slug) if task_slug else r"[^/]+")
-                else:
-                    pieces.append(re.escape(piece))
-            return "".join(pieces)
-        return re.compile("/".join(component(part) for part in self.rest))
+        """La ruta de una carpeta de tarea relativa a la base; la primera aparición de cada marcador queda como grupo
+        con nombre (fecha, slug) para saber de qué fecha y slug es una carpeta existente."""
+        seen = set()
+
+        def piece_regex(piece):
+            if piece not in ("{fecha}", "{slug}"):
+                return re.escape(piece)
+            name = piece[1:-1]
+            body = r"\d{4}-\d{2}-\d{2}" if name == "fecha" else (re.escape(task_slug) if task_slug else r"[^/]+")
+            if name in seen:
+                return body
+            seen.add(name)
+            return "(?P<%s>%s)" % (name, body)
+        return re.compile("/".join("".join(piece_regex(piece) for piece in MARKER.split(part)) for part in self.rest))
 
     def _fill(self, date, task_slug):
         return self.root.joinpath(*(p.replace("{fecha}", date).replace("{slug}", task_slug) for p in self.rest))
@@ -186,31 +233,44 @@ class Layout:
                 found.append(path)
         return sorted(found)
 
-    def task_dir(self, task_slug, date, meta_path=None):
-        """(carpeta de la tarea, carpeta reutilizada o None). Con marcadores: la del meta si ya vive en una carpeta
-        de tarea; si no, una existente con el mismo slug (aunque sea de otra fecha); si no, la de hoy."""
-        if not self.marked:
-            return self.root, None
-        if not DATE.match(date):
-            raise ValueError("la fecha %r no es AAAA-MM-DD: la carpeta de reportes usa {fecha}" % date)
+    def flat_dates(self, task_slug):
+        """Fechas de una tarea vieja en formato plano (<base>/<fecha>-<slug>.meta.json, .html o .bitacora.md)."""
+        pattern = re.compile(r"(\d{4}-\d{2}-\d{2})-%s(?:\.meta\.json|\.html|\.bitacora\.md)" % re.escape(task_slug))
+        dates = set()
+        for candidate in glob.glob(os.path.join(glob.escape(str(self.root)), "*-%s.*" % glob.escape(task_slug))):
+            found = pattern.fullmatch(os.path.basename(candidate))
+            if found and os.path.isfile(candidate):
+                dates.add(found.group(1))
+        return sorted(dates)
+
+    def task(self, task_slug, date, meta_path=None):
+        """La tarea, en este orden: (1) la carpeta de tarea donde ya vive el meta (sin marcadores, un meta suelto en la
+        base es del formato plano); (2) una carpeta existente con el mismo slug, aunque sea de otra fecha; (3) sin
+        marcadores, una tarea vieja en formato plano con ese slug, que sigue plana; (4) la carpeta nueva de hoy."""
         if meta_path is not None:
-            parent = meta_path.parent
-            for base, candidate in ((self.root, lexical(parent)), (self.root.resolve(), parent.resolve())):
-                if under(candidate, base) and candidate != base and \
-                        self._regex().fullmatch(candidate.relative_to(base).as_posix()):
-                    return self.root / candidate.relative_to(base), None
+            real_root = pathlib.Path(os.path.realpath(str(self.root)))
+            real_parent = pathlib.Path(os.path.realpath(str(meta_path.parent)))
+            for base, candidate in ((self.root, lexical(meta_path.parent)), (real_root, real_parent)):
+                if candidate == base and not self.marked:
+                    return Task(self.root, date, task_slug, flat=True)
+                if under(candidate, base) and candidate != base:
+                    found = self._regex().fullmatch(candidate.relative_to(base).as_posix())
+                    if found:
+                        groups = found.groupdict()
+                        return Task(self.root / candidate.relative_to(base), groups.get("fecha") or date,
+                                    groups.get("slug") or task_slug)
         today = self._fill(date, task_slug)
         found = self.existing(task_slug)
         if found:
-            return found[-1], (found[-1] if found[-1] != today else None)
-        return today, None
-
-    def file(self, task_dir, date, task_slug, kind):
-        """kind: "report", "meta" o "bitacora"."""
-        if self.marked:
-            return task_dir / {"report": "report.html", "meta": "meta.json", "bitacora": "bitacora.md"}[kind]
-        suffix = {"report": ".html", "meta": ".meta.json", "bitacora": ".bitacora.md"}[kind]
-        return task_dir / f"{date}-{task_slug}{suffix}"
+            groups = self._regex(task_slug).fullmatch(found[-1].relative_to(self.root).as_posix()).groupdict()
+            return Task(found[-1], groups.get("fecha") or date, task_slug, reused=found[-1] != today)
+        if not self.marked:
+            dates = self.flat_dates(task_slug)
+            if dates:
+                return Task(self.root, dates[-1], task_slug, flat=True, reused=True)
+        if any("{fecha}" in part for part in self.rest) and not DATE.match(date):
+            raise ValueError("la fecha %r no es AAAA-MM-DD: va en el nombre de la carpeta de la tarea" % date)
+        return Task(today, date, task_slug)
 
     def is_output(self, path):
         """Si la ruta de un archivo cambiado pertenece a la carpeta de reportes (o es el enlace que la contiene)."""
@@ -263,6 +323,174 @@ def ensure_ignored(repo, root, target):
     return None
 
 
+def real(path):
+    """La ruta real donde se escribe: así un enlace simbólico (AGENTS.md, la carpeta de contexto, INDEX.md) sigue
+    siendo enlace después de escribir."""
+    return pathlib.Path(os.path.realpath(str(path)))
+
+
+# ── Índice de reportes (<base>/INDEX.md) ─────────────────────────────────────
+def index_cell(text):
+    return re.sub(r"[\r\n]+", " ", str(text)).replace("|", "\\|").strip()
+
+
+def index_cells(line):
+    """Las celdas de una fila de tabla Markdown, sin espacios alrededor (un \\| no separa), o None si no es fila."""
+    body = line.strip()
+    if not body.startswith("|"):
+        return None
+    body = body[1:]
+    if body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", body)]
+
+
+def index_row(layout, task, kind, state):
+    """La fila de la tarea. La ruta es relativa a la carpeta del índice y se calcula con las dos rutas en la misma
+    forma léxica (bajo la base tal como se escribió), para que sirva aunque la carpeta pase por un enlace."""
+    report = task.file("report")
+    try:
+        relative = report.relative_to(layout.root).as_posix()
+    except ValueError:
+        relative = pathlib.Path(os.path.relpath(str(report), str(layout.root))).as_posix()
+    link = "[%s](%s)" % (index_cell(relative).replace("[", "\\[").replace("]", "\\]"),
+                         urllib.parse.quote(relative, safe="/"))
+    cells = [task.date, SKILL, task.slug, kind, state]
+    return "| " + " | ".join(index_cell(cell) for cell in cells) + " | " + link + " |"
+
+
+def update_index(layout, task, kind, state):
+    """Agrega la fila de la tarea a <base>/INDEX.md o reemplaza la que ya tiene (clave: hb-implement + slug), sin
+    tocar otras filas ni otras líneas. kind None conserva el tipo de la fila que ya estaba. Escribe sobre la ruta real.
+    Devuelve un aviso para stderr, o None."""
+    target = real(layout.index)
+    try:
+        text = target.read_text(encoding="utf-8") if target.is_file() else None
+        if text is None:
+            row = index_row(layout, task, kind or "—", state)
+            new = INDEX_INTRO + INDEX_TABLE + row + "\n"
+        else:
+            lines = text.splitlines(keepends=True)
+            header = next((i for i in range(len(lines) - 1) if index_cells(lines[i]) == INDEX_COLUMNS
+                           and re.fullmatch(r"\s*\|(\s*:?-+:?\s*\|)+\s*", lines[i + 1])), None)
+            if header is None:  # sin la cabecera exacta: la tabla va al final, sin borrar nada
+                row = index_row(layout, task, kind or "—", state)
+                new = text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + \
+                    INDEX_TABLE + row + "\n"
+            else:
+                end, position = header + 2, None
+                while end < len(lines) and lines[end].lstrip().startswith("|"):
+                    cells = index_cells(lines[end]) or []
+                    if position is None and len(cells) >= 3 and cells[1] == SKILL and cells[2] == index_cell(task.slug):
+                        position = end
+                    end += 1
+                if position is not None:
+                    cells = index_cells(lines[position])
+                    keep = kind or (cells[3] if len(cells) > 3 and cells[3] else "—")
+                    lines[position] = index_row(layout, task, keep, state) + \
+                        ("\n" if lines[position].endswith("\n") else "")
+                else:
+                    if not lines[end - 1].endswith("\n"):
+                        lines[end - 1] += "\n"
+                    lines.insert(end, index_row(layout, task, kind or "—", state) + "\n")
+                new = "".join(lines)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(new, encoding="utf-8")
+    except (OSError, ValueError) as err:
+        return f"⚠️  No pude actualizar el índice {target}: {err}"
+    return None
+
+
+# ── Worktrees enlazados (lo que el principal tiene fuera de git) ─────────────
+def home(path):
+    """La ruta con ~ si está dentro de la carpeta personal (más corta y sin el nombre de usuario), lista para un shell."""
+    text, user = str(path), os.path.expanduser("~")
+    if user not in ("", "~") and (text == user or text.startswith(user + "/")):
+        rest = text[len(user):]
+        return "~" + (rest if shlex.quote(rest) == rest else "'" + rest.replace("'", "'\\''") + "'")
+    return shlex.quote(text)
+
+
+def tracked(repo, name):
+    result = subprocess.run(["git", "-C", str(repo), "ls-files", "--", name], capture_output=True, text=True)
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def main_worktree(repo):
+    """La carpeta del worktree principal si el repo es un worktree enlazado; si no, None."""
+    try:
+        git_dir = git(repo, "rev-parse", "--absolute-git-dir").decode().strip()
+        common = git(repo, "rev-parse", "--git-common-dir").decode().strip()
+        listing = git(repo, "worktree", "list", "--porcelain").decode()
+    except RuntimeError:
+        return None
+    common = common if os.path.isabs(common) else os.path.join(str(repo), common)
+    if not git_dir or os.path.realpath(git_dir) == os.path.realpath(common):
+        return None
+    main = next((pathlib.Path(line[len("worktree "):]) for line in listing.splitlines()
+                 if line.startswith("worktree ")), None)
+    if main is None or os.path.realpath(str(main)) == os.path.realpath(str(repo)):
+        return None
+    return main
+
+
+def gap(repo, main, name, links_only=False):
+    """(nombre, qué es en el principal, destino) si el principal lo tiene fuera de git (un enlace o un archivo o
+    carpeta local) y este worktree no; si no, None. Lo versionado lo trae el checkout: no es un hueco. Con links_only,
+    solo cuenta un enlace: una carpeta de reportes local (reports/) se crea en el worktree, como siempre."""
+    there = main / name
+    if os.path.lexists(str(repo / name)) or not os.path.lexists(str(there)) or tracked(main, name):
+        return None
+    if links_only and not there.is_symlink():
+        return None
+    kind = "un enlace" if there.is_symlink() else "una carpeta local" if there.is_dir() else "un archivo local"
+    return name, kind, os.path.realpath(str(there))
+
+
+def base_prefixes(repo, root):
+    """Las carpetas de la base dentro del repo, de la de más arriba a la base, hasta la primera que falta aquí."""
+    relative = relative_in(root, repo)
+    names, current = [], pathlib.PurePosixPath()
+    for part in relative.parts if relative is not None else ():
+        current = current / part
+        names.append(current.as_posix())
+        if not os.path.lexists(str(repo / current)):
+            break
+    return names
+
+
+def check_worktree(repo, layout, with_agents):
+    """H10: en un worktree enlazado, si faltan AGENTS.md (cuando no se pasó --out) o la carpeta de reportes que el
+    principal tiene fuera de git, se detiene antes de escribir: no crea un reports/ nuevo que se perdería con el
+    worktree, ni el enlace por su cuenta."""
+    main = main_worktree(repo)
+    if main is None:
+        return
+    agents = gap(repo, main, "AGENTS.md") if with_agents else None
+    root = layout.root
+    if agents:  # sin AGENTS.md aquí, la base que vale es la del AGENTS.md del principal
+        try:
+            root = Layout(repo, agents_out(main) or DEFAULT_OUT).root
+        except ValueError:
+            pass
+    missing = [agents] if agents else []
+    missing += [found for found in (gap(repo, main, name, links_only=True) for name in base_prefixes(repo, root))
+                if found]
+    if not missing:
+        return
+    lines = [f"Este worktree no tiene lo que el worktree principal ({home(main)}) guarda fuera de git, y un worktree "
+             "nuevo no lo trae:"]
+    for name, kind, target in missing:
+        covered = ("git ya lo ignora: .git/info/exclude es común a los worktrees" if check_ignore(repo, name)
+                   else f"agrega /{name} a .git/info/exclude")
+        lines.append(f"  - {name}: en el principal es {kind} ({home(target)}). Para recrearlo: "
+                     f"cd {home(repo)} && ln -s {home(target)} {shlex.quote(name)} ({covered}).")
+    lines.append("No escribo nada para no crear aquí una carpeta de reportes nueva, que se perdería al borrar el "
+                 "worktree. Recréalo solo si el usuario o el proyecto lo piden, o pasa --out con la carpeta de "
+                 "reportes del proyecto.")
+    raise RuntimeError("\n".join(lines))
+
+
 # ── Repos y archivos cambiados ───────────────────────────────────────────────
 def toplevel(path):
     return pathlib.Path(git(path, "rev-parse", "--show-toplevel").decode().strip())
@@ -275,10 +503,93 @@ def branch(repo):
     return name
 
 
-def load_repos(main, main_base, entries):
-    """El repo principal primero y después los relacionados de "repos" del meta: [{root, name, base, main}].
-    Una entrada que apunta al principal solo le pone nombre o base."""
-    repos = [{"root": main, "name": main.name, "base": main_base, "main": True}]
+def ref_exists(root, ref):
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", ref + "^{commit}"],
+                          capture_output=True).returncode == 0
+
+
+def main_branch_ref(root, preferred):
+    """La ref de la rama principal del repo, o None: la del modelo (mejor origin/<rama> que <rama>), si no origin/HEAD,
+    origin/main, origin/master, main o master."""
+    candidates = ["origin/" + preferred, preferred] if preferred else []
+    head = subprocess.run(["git", "-C", str(root), "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+                          capture_output=True, text=True)
+    if head.returncode == 0 and head.stdout.strip():
+        candidates.append(head.stdout.strip())
+    return next((ref for ref in candidates + list(MAIN_BRANCHES) if ref_exists(root, ref)), None)
+
+
+def resolve_base(repo):
+    """Fija la base de comparación del repo: la explícita (--base o "base") manda; si no, el merge-base de HEAD con su
+    rama principal; sin rama principal, HEAD con un aviso. Deja en el repo base (la ref para git), base_label (None si
+    es explícita, (rama, commit corto) si es el merge-base o ("HEAD", motivo)) y warnings."""
+    repo["warnings"] = []
+    if repo["base"]:
+        repo["base"], repo["base_label"] = str(repo["base"]), None
+        return
+    preferred = repo.get("main_branch")
+    if preferred and not (ref_exists(repo["root"], "origin/" + preferred) or ref_exists(repo["root"], preferred)):
+        repo["warnings"].append(f'⚠️  {repo["name"]}: la rama principal "{preferred}" no existe (ni origin/{preferred}): '
+                                "busco origin/HEAD, origin/main, origin/master, main y master.")
+    ref = main_branch_ref(repo["root"], preferred)
+    sha = None
+    if ref:
+        try:
+            sha = git(repo["root"], "merge-base", "HEAD", ref).decode().strip()
+        except RuntimeError:
+            sha = None
+    if not sha:
+        repo["base"], repo["base_label"] = "HEAD", ("HEAD", "sin merge-base con " + ref if ref else "sin rama principal")
+        repo["warnings"].append(
+            f'⚠️  {repo["name"]}: ' + (f"HEAD no tiene historia en común con {ref}" if ref else
+                                       "no encontré su rama principal (origin/HEAD, origin/main, origin/master, main "
+                                       "ni master)") +
+            ": comparo contra HEAD, así que lo ya commiteado en la rama no sale en el reporte. Pasa la rama principal "
+            '(--main-branch, o "main_branch" en "repos") o la base (--base, o "base").')
+        return
+    short = git(repo["root"], "rev-parse", "--short", sha).decode().strip()
+    repo["base"], repo["base_label"] = sha, (ref, short)
+
+
+def base_text(repo):
+    """La base usada, en palabras: la ref explícita, "merge-base con <rama> (<commit>)" o "HEAD (<motivo>)"."""
+    label = repo["base_label"]
+    if label is None:
+        return repo["base"]
+    if label[0] == "HEAD":
+        return f"HEAD ({label[1]})"
+    return f"merge-base con {label[0]} ({label[1]})"
+
+
+def base_html(repo):
+    label = repo["base_label"]
+    if label is None:
+        return f'<code>{e(repo["base"])}</code>'
+    if label[0] == "HEAD":
+        return f"<code>HEAD</code> · {e(label[1])}"
+    return f"merge-base con <code>{e(label[0])}</code> · <code>{e(label[1])}</code>"
+
+
+def describe(root, ref):
+    try:
+        return git(root, "describe", "--tags", "--always", ref).decode().strip()
+    except RuntimeError:
+        return None
+
+
+def same_version(pinned, source):
+    def clean(version):
+        version = str(version).strip()
+        return version[1:] if version[:1] in ("v", "V") and version[1:2].isdigit() else version
+    return clean(pinned) == clean(source)
+
+
+def load_repos(main, main_base, main_branch, entries):
+    """El repo principal primero y después los relacionados de "repos" del meta:
+    [{root, name, base, base_label, main, pinned, source, warnings}]. Una entrada que apunta al principal solo le pone
+    nombre, base o rama principal (--base y --main-branch mandan sobre ella)."""
+    repos = [{"root": main, "name": main.name, "base": main_base, "main_branch": main_branch, "main": True,
+              "pinned": None, "source": None}]
     for entry in entries:
         path = pathlib.Path(os.path.expanduser(str(entry["path"])))
         path = path if path.is_absolute() else main / path
@@ -292,15 +603,26 @@ def load_repos(main, main_base, entries):
         if root.resolve() == main.resolve():
             repos[0]["name"] = name
             repos[0]["base"] = repos[0]["base"] or entry.get("base")
+            repos[0]["main_branch"] = repos[0]["main_branch"] or entry.get("main_branch")
             continue
-        repos.append({"root": root, "name": name, "base": entry.get("base") or "HEAD", "main": False})
-    repos[0]["base"] = repos[0]["base"] or "HEAD"
+        repos.append({"root": root, "name": name, "base": entry.get("base"), "main_branch": entry.get("main_branch"),
+                      "main": False, "pinned": entry.get("pinned_version"), "source": entry.get("source_version")})
     names = [r["name"] for r in repos]
     for name in names:
         if not name or ":" in name or "/" in name:
             raise ValueError(f'el nombre de repo "{name}" no sirve como prefijo: sin ":" ni "/"')
         if names.count(name) > 1:
             raise ValueError(f'dos repos se llaman "{name}": ponles "name" distintos en "repos" del meta')
+    for repo in repos:
+        resolve_base(repo)
+        if repo["pinned"] and not repo["source"]:  # lo que había en el fuente al empezar: la base, no lo de la tarea
+            repo["source"] = describe(repo["root"], repo["base"])
+        repo["version_mismatch"] = bool(repo["pinned"] and repo["source"]
+                                        and not same_version(repo["pinned"], repo["source"]))
+        if repo["version_mismatch"]:
+            repo["warnings"].append(
+                f'⚠️  {repo["name"]}: el fuente ({repo["source"]}) no coincide con la versión que fija la app '
+                f'({repo["pinned"]}): lo probado en fuente puede no compilar o comportarse distinto con lo publicado.')
     return repos
 
 
@@ -384,7 +706,10 @@ def validate(meta):
         raise ValueError('"slug" debe ser un texto')
     entries(meta, "impact", ("label",))
     entries(meta, "diagrams", ("mermaid",))
-    entries(meta, "repos", ("path",))
+    for repo in entries(meta, "repos", ("path",)):
+        for field in ("base", "main_branch", "pinned_version", "source_version"):
+            if field in repo and repo[field] is not None and not isinstance(repo[field], str):
+                raise ValueError(f'"{field}" de "repos" debe ser un texto')
     entries(meta, "temporary", ("path",))
 
 
@@ -545,9 +870,18 @@ def dod_section(steps):
             f'{"".join(outputs)}</div>')
 
 
-def preview_figure(repo, preview, missing):
-    path = pathlib.Path(preview.get("image", ""))
-    path = path if path.is_absolute() else repo / path
+def preview_path(repo, task, image):
+    """La imagen de un preview: absoluta, relativa al repo (la ruta previews: que imprime --folder, aunque pase por un
+    enlace simbólico) o relativa a la carpeta de la tarea (previews/<archivo>)."""
+    path = pathlib.Path(os.path.expanduser(str(image)))
+    if path.is_absolute():
+        return path
+    candidates = [repo / path] + ([task.folder / path] if task is not None else [])
+    return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
+
+
+def preview_figure(repo, preview, missing, task=None):
+    path = preview_path(repo, task, preview.get("image", ""))
     name, note = e(preview.get("name", path.stem)), e(preview.get("note", ""))
     caption = f'<figcaption style="margin-top:8px;color:var(--text-secondary)"><strong>{name}</strong>{" · " + note if note else ""}</figcaption>'
     mime = IMAGE_TYPES.get(path.suffix.lower())
@@ -561,27 +895,54 @@ def preview_figure(repo, preview, missing):
     return f'<figure style="margin:0">{body}{caption}</figure>'
 
 
-def previews_section(repo, previews, missing):
+def previews_section(repo, previews, missing, task=None):
     """Imágenes incrustadas en base64: el reporte sigue siendo un solo archivo que se puede compartir."""
     if not previews:
         return ""
-    figures = "".join(preview_figure(repo, p, missing) for p in previews)
+    figures = "".join(preview_figure(repo, p, missing, task) for p in previews)
     return (f'<div class="section"><div class="section-header"><span class="section-icon">🖼️</span>'
             f'<span class="section-title">Previews de UI</span><span class="section-count">{len(previews)}</span></div>'
             f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px">{figures}</div></div>')
 
 
+def version_cell(repo):
+    """La versión que fija la app frente a la del fuente, con un aviso si no coinciden."""
+    parts = []
+    if repo["pinned"]:
+        parts.append(f'fijada <code>{e(repo["pinned"])}</code>')
+    if repo["source"]:
+        parts.append(f'fuente <code>{e(repo["source"])}</code>')
+    flag = ' <span class="version-mismatch">⚠️ no coinciden</span>' if repo["version_mismatch"] else ""
+    return " · ".join(parts) + flag if parts else "—"
+
+
 def repos_section(repos, files):
-    """Con más de un repo: nombre, rama, base usada y conteos de cada uno."""
+    """Con más de un repo: nombre, rama, base usada y conteos de cada uno; si alguno trae versiones, la fijada y la
+    del fuente, con un aviso arriba cuando no coinciden."""
     if len(repos) < 2:
         return ""
-    rows = ['<tr><th>Repo</th><th>Rama</th><th>Base</th><th>Nuevos</th><th>Modificados</th><th>Eliminados</th></tr>']
+    versions = any(repo["pinned"] or repo["source"] for repo in repos)
+    rows = ['<tr><th>Repo</th><th>Rama</th><th>Base</th>' + ("<th>Versión</th>" if versions else "") +
+            '<th>Nuevos</th><th>Modificados</th><th>Eliminados</th></tr>']
     for repo in repos:
         counts = [sum(1 for f in files if f["repo"] is repo and f["status"] == k) for k in "AMD"]
         rows.append(f'<tr><td><span class="repo-tag">{e(repo["name"])}</span></td><td>{e(repo["branch"])}</td>'
-                    f'<td><code>{e(repo["base"])}</code></td>' + "".join(f"<td>{n}</td>" for n in counts) + "</tr>")
-    return plain_section("🗂️", "Repositorios", f'<div class="table-wrap"><table class="repos-table">{"".join(rows)}</table></div>',
-                         len(repos))
+                    f'<td>{base_html(repo)}</td>' + (f"<td>{version_cell(repo)}</td>" if versions else "") +
+                    "".join(f"<td>{n}</td>" for n in counts) + "</tr>")
+    warnings = "".join(
+        f'<div class="note-block version-warning">⚠️ {e(repo["name"])}: el fuente ({e(repo["source"])}) no coincide '
+        f'con la versión que fija la app ({e(repo["pinned"])}). Lo probado en fuente puede no compilar o comportarse '
+        "distinto con lo publicado: revísalo antes de publicar.</div>"
+        for repo in repos if repo["version_mismatch"])
+    return plain_section("🗂️", "Repositorios", warnings + f'<div class="table-wrap"><table class="repos-table">'
+                         f'{"".join(rows)}</table></div>', len(repos))
+
+
+def base_line(repos):
+    """Con un solo repo no hay tabla de repositorios: la base usada va bajo la descripción."""
+    if len(repos) > 1:
+        return ""
+    return f'<p class="hero-base">Comparado con {base_html(repos[0])}</p>'
 
 
 def root_cause_section(meta):
@@ -645,27 +1006,50 @@ def dod_stat(steps):
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+def meta_type(path):
+    """El "type" de un meta que ya existe, o None."""
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    kind = meta.get("type") if isinstance(meta, dict) else None
+    return kind if isinstance(kind, str) and kind.strip() else None
+
+
 def print_folder(repo, layout, args):
     task_slug = safe_slug(args.folder)
     date = args.date or datetime.date.today().isoformat()
-    task_dir, reused = layout.task_dir(task_slug, date)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    meta_file = layout.file(task_dir, date, task_slug, "meta")
-    warning = ensure_ignored(repo, layout.root, meta_file)
-    print(f"📁 Carpeta de la tarea: {shown(task_dir, repo)}" + (" (la tarea ya existía: sigue ahí)" if reused else ""))
+    task = layout.task(task_slug, date)
+    real(task.folder).mkdir(parents=True, exist_ok=True)
+    meta_file = task.file("meta")
+    warnings = [ensure_ignored(repo, layout.root, meta_file),
+                update_index(layout, task, meta_type(real(meta_file)), "en curso")]
+    print(f"📁 Carpeta de la tarea: {shown(task.folder, repo)}" + (" (la tarea ya existía: sigue ahí)" if task.reused else ""))
     print(f"   meta: {shown(meta_file, repo)}")
-    print(f"   bitácora, si hace falta: {shown(layout.file(task_dir, date, task_slug, 'bitacora'), repo)}")
-    if warning:
-        print(warning, file=sys.stderr)
+    print(f"   bitácora, si hace falta: {shown(task.file('bitacora'), repo)}")
+    print(f"   previews: {shown(task.previews, repo)}")
+    print(f"   índice: {shown(layout.index, repo)}")
+    for warning in warnings:
+        if warning:
+            print(warning, file=sys.stderr)
+
+
+def dod_state(steps):
+    value = dod_stat(steps)[0]
+    return "sin DoD" if value == "—" else "DoD " + value
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    task = ap.add_mutually_exclusive_group(required=True)
-    task.add_argument("--meta", help="JSON con título, tipo, explicaciones por archivo y DoD")
-    task.add_argument("--folder", metavar="SLUG", help="imprime y crea la carpeta de la tarea, sin generar el reporte")
-    ap.add_argument("--base", help="ref del repo principal contra la que se compara (por defecto HEAD)")
-    ap.add_argument("--out", help="carpeta de salida, relativa al repo; puede usar {fecha} y {slug} "
+    task_group = ap.add_mutually_exclusive_group(required=True)
+    task_group.add_argument("--meta", help="JSON con título, tipo, explicaciones por archivo y DoD")
+    task_group.add_argument("--folder", metavar="SLUG",
+                            help="imprime y crea la carpeta de la tarea, sin generar el reporte")
+    ap.add_argument("--base", help="ref del repo principal contra la que se compara (manda sobre --main-branch; por "
+                                   "defecto, el merge-base de HEAD con la rama principal)")
+    ap.add_argument("--main-branch", help="la rama principal del repo principal, la del modelo de AGENTS.md (por "
+                                          "defecto, origin/HEAD, origin/main, origin/master, main o master)")
+    ap.add_argument("--out", help="carpeta de reportes, relativa al repo; puede usar {fecha} y {slug} "
                                   "(por defecto, la de AGENTS.md o reports)")
     ap.add_argument("--repo", default=".", help="raíz del repositorio principal")
     ap.add_argument("--date", help="con --folder: la fecha AAAA-MM-DD (por defecto, hoy)")
@@ -673,6 +1057,7 @@ def main():
 
     repo = toplevel(args.repo)
     layout = Layout(repo, args.out or agents_out(repo) or DEFAULT_OUT)
+    check_worktree(repo, layout, with_agents=not args.out)
     if args.folder:
         print_folder(repo, layout, args)
         return
@@ -682,12 +1067,13 @@ def main():
     validate(meta)
     date = meta.get("date") or datetime.date.today().isoformat()
     task_slug = safe_slug(meta["slug"]) if meta.get("slug") else slug(meta.get("title", "reporte"))
-    task_dir, reused = layout.task_dir(task_slug, date, meta_path)
-    out = layout.file(task_dir, date, task_slug, "report")
-    repos = load_repos(repo, args.base, meta.get("repos", []))
+    task = layout.task(task_slug, date, meta_path)
+    out = task.file("report")
+    repos = load_repos(repo, args.base, args.main_branch, meta.get("repos", []))
     template = TEMPLATE.read_text(encoding="utf-8")
-    style = re.search(r"<style>.*?</style>", template, re.S).group(0)
-    script = re.search(r"<script>.*?</script>", template, re.S).group(0)
+    # Los bloques que empiezan una línea: una mención en un comentario de la plantilla no cuenta.
+    style = re.search(r"^[ \t]*(<style>.*?</style>)", template, re.S | re.M).group(1)
+    script = re.search(r"^[ \t]*(<script>.*?</script>)", template, re.S | re.M).group(1)
 
     infos = meta.get("files", {})
     group_defs = meta.get("groups", [])
@@ -731,7 +1117,7 @@ def main():
     severity = (f'<span class="badge severity severity-{meta["severity"]}">{SEVERITY_LABELS[meta["severity"]]}</span>'
                 if meta.get("severity") else "")
     missing_previews = []
-    previews = previews_section(repo, meta.get("previews", []), missing_previews)
+    previews = previews_section(repo, meta.get("previews", []), missing_previews, task)
     diagrams = meta.get("diagrams", [])
 
     page = f"""<!DOCTYPE html>
@@ -744,6 +1130,7 @@ def main():
 <div class="container">
 <div class="hero"><div class="hero-eyebrow"><span class="badge {badge_cls}">{badge_label}</span>{severity}{scope}</div>
 <h1 class="hero-title">{e(meta.get("title", ""))}</h1><p class="hero-desc">{e(meta.get("description", ""))}</p>
+{base_line(repos)}
 <div class="stats-row">
 <div class="stat-card"><div class="stat-label">Archivos Nuevos</div><div class="stat-value green">{counts["A"]}</div></div>
 <div class="stat-card"><div class="stat-label">Archivos Modificados</div><div class="stat-value" style="color:var(--accent-blue)">{counts["M"]}</div></div>
@@ -767,14 +1154,20 @@ def main():
 {mermaid_scripts(diagrams)}
 </body></html>
 """
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(page, encoding="utf-8")
+    real(out.parent).mkdir(parents=True, exist_ok=True)
+    real(out).write_text(page, encoding="utf-8")
     print(f"📄 Reporte generado: {shown(out, repo)}")
-    if reused:
-        print(f"ℹ️  Ya había una carpeta para «{task_slug}»: la tarea sigue en {shown(reused, repo)}")
-    warning = ensure_ignored(repo, layout.root, out)
-    if warning:
-        print(warning, file=sys.stderr)
+    if task.reused:
+        print(f"ℹ️  Ya había una carpeta para «{task.slug}»: la tarea sigue en {shown(task.folder, repo)}"
+              + (" (formato plano de antes)" if task.flat else ""))
+    for r in repos:
+        print(f"🔀 Base de {r['name']}: {base_text(r)}")
+    warnings = [ensure_ignored(repo, layout.root, out), update_index(layout, task, meta.get("type") or "feature",
+                                                                     dod_state(dod))]
+    print(f"🗂️  Índice: {shown(layout.index, repo)}")
+    for warning in warnings + [w for r in repos for w in r["warnings"]]:
+        if warning:
+            print(warning, file=sys.stderr)
     for path in missing_previews:
         print(f"⚠️  Preview sin imagen: {path}", file=sys.stderr)
     missing = [f["key"] for f in files if f["info"] is None and f["group"] is None]
@@ -789,13 +1182,13 @@ def main():
     for key in sorted(temporary_keys - temporary_found):
         print(f'ℹ️  El cambio temporal "{key}" no aparece entre los cambios de git (si git lo ignora, está bien).',
               file=sys.stderr)
-    if layout.marked and task_dir.resolve() != meta_path.parent.resolve():
-        print(f"ℹ️  Con una carpeta por tarea, el meta va en {shown(layout.file(task_dir, date, task_slug, 'meta'), repo)}.",
+    if not task.flat and real(task.folder) != real(meta_path.parent):
+        print(f"ℹ️  Con una carpeta por tarea, el meta va en {shown(task.file('meta'), repo)} "
+              f"(report.py --folder {task.slug} te la da).", file=sys.stderr)
+    if task.flat and meta_path.name == "meta.json" and real(meta_path.parent) == real(layout.root):
+        print(f"ℹ️  {shown(meta_path, repo)} lo pisa la siguiente tarea: usa un meta por tarea, en la carpeta que da "
+              f"report.py --folder <slug> ({shown(layout.root / SUBFOLDER, repo)}/<fecha>-<slug>/meta.json).",
               file=sys.stderr)
-    if not layout.marked and meta_path.name == "meta.json" and meta_path.parent.resolve() == layout.root.resolve():
-        print("ℹ️  reports/meta.json lo pisa la siguiente tarea: usa un meta por tarea, "
-              "reports/<fecha>-<slug>.meta.json.", file=sys.stderr)
-
 
 if __name__ == "__main__":
     try:

@@ -412,7 +412,7 @@ class TemplateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = init_repo(Path(tmp))
             write(repo / "a.txt", "uno\n")
-            for value, expected in (("reports", "reports/2026-01-02-x.html"),
+            for value, expected in (("reports", "reports/implementation/2026-01-02-x/report.html"),
                                     ("contexto/reports/{fecha}/{slug}", "contexto/reports/2026-01-02/x/report.html")):
                 write(repo / "AGENTS.md", self.text.replace("- Carpeta de reportes: `reports`",
                                                             "- Carpeta de reportes: `%s`" % value))

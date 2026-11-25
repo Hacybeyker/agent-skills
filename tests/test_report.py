@@ -38,7 +38,7 @@ class ReportTest(unittest.TestCase):
         (self.repo / "c.txt").unlink()  # eliminado
         self.meta = base / "meta.json"  # fuera del repo, para que no cuente como cambio
         self.meta.write_text(json.dumps(META), encoding="utf-8")
-        self.out = self.repo / "reports" / "2026-01-02-prueba-x.html"
+        self.out = self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -54,11 +54,12 @@ class ReportTest(unittest.TestCase):
     def stat(self, html, label):
         return re.search(r"%s</div><div class=\"stat-value[^\"]*\"[^>]*>([^<]+)<" % label, html).group(1)
 
-    def test_genera_el_reporte_con_la_fecha_y_el_titulo_en_el_nombre(self):
+    def test_genera_el_reporte_en_la_carpeta_de_la_tarea_con_la_fecha_y_el_titulo(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.out.is_file())
-        self.assertIn("reports/2026-01-02-prueba-x.html", result.stdout)
+        self.assertIn("reports/implementation/2026-01-02-prueba-x/report.html", result.stdout)
+        self.assertIn("el meta va en reports/implementation/2026-01-02-prueba-x/meta.json", result.stderr)
 
     def test_cuenta_los_archivos_por_estado(self):
         html = self.html()
@@ -270,14 +271,23 @@ class ReportTest(unittest.TestCase):
         shared.write_text(json.dumps(META), encoding="utf-8")
         result = run([sys.executable, "-I", SCRIPT, "--meta", shared, "--repo", self.repo], self.repo)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(self.out.is_file())
-        self.assertIn("reports/<fecha>-<slug>.meta.json", result.stderr)
+        self.assertTrue((reports / "2026-01-02-prueba-x.html").is_file())  # sigue plano, junto al meta
+        self.assertFalse((reports / "implementation").exists())
+        self.assertIn("reports/meta.json lo pisa la siguiente tarea", result.stderr)
+        self.assertIn("--folder <slug> (reports/implementation/<fecha>-<slug>/meta.json)", result.stderr)
 
     def test_un_meta_invalido_termina_con_error(self):
         self.meta.write_text("{no es json", encoding="utf-8")
         result = self.generate()
         self.assertEqual(result.returncode, 1)
         self.assertIn("✖", result.stderr)
+
+    def test_copia_el_script_de_la_plantilla_entero_y_no_el_comentario(self):
+        html = self.html()
+        self.assertEqual(html.count("<script>"), 1)
+        self.assertNotIn("<script>. -->", html)
+        self.assertRegex(html, r"<script>\s*/\* Toggle collapsible file entries \*/")
+        self.assertEqual(html.count("<style>"), 1)
 
     def test_un_meta_de_antes_no_agrega_secciones_nuevas_ni_carga_nada_remoto(self):
         html = self.html()
@@ -345,25 +355,25 @@ class ReportFolderTest(Base):
     def test_toma_la_carpeta_de_agents_sin_marcadores(self):
         self.agents("- Carpeta de reportes: `salidas/ia`")
         result = self.ok()
-        self.assertTrue((self.repo / "salidas" / "ia" / "2026-01-02-prueba-x.html").is_file())
-        self.assertIn("salidas/ia/2026-01-02-prueba-x.html", result.stdout)
+        self.assertTrue((self.repo / "salidas" / "ia" / "implementation" / "2026-01-02-prueba-x" / "report.html").is_file())
+        self.assertIn("salidas/ia/implementation/2026-01-02-prueba-x/report.html", result.stdout)
         self.assertIn("/salidas/ia/\n", self.exclude())
         self.assertFalse((self.repo / "reports").exists())
 
     def test_lee_la_linea_sin_acentos_graves_y_en_negrita(self):
         self.agents("**Carpeta de reportes:** salidas.")
         self.ok()
-        self.assertTrue((self.repo / "salidas" / "2026-01-02-prueba-x.html").is_file())
+        self.assertTrue((self.repo / "salidas" / "implementation" / "2026-01-02-prueba-x" / "report.html").is_file())
 
     def test_ignora_la_linea_dentro_de_un_bloque_de_codigo_y_los_placeholders(self):
         self.agents("```\nCarpeta de reportes: `codigo`\n```\n- Carpeta de reportes: `<ruta>`")
         self.ok()
-        self.assertTrue((self.repo / "reports" / "2026-01-02-prueba-x.html").is_file())
+        self.assertTrue((self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").is_file())
 
     def test_out_manda_sobre_agents(self):
         self.agents("- Carpeta de reportes: `salidas`")
         self.ok("--out", "otra")
-        self.assertTrue((self.repo / "otra" / "2026-01-02-prueba-x.html").is_file())
+        self.assertTrue((self.repo / "otra" / "implementation" / "2026-01-02-prueba-x" / "report.html").is_file())
 
     def test_con_marcadores_crea_una_carpeta_por_tarea_e_ignora_la_parte_fija(self):
         self.agents("- Carpeta de reportes: `reports/{fecha}/{slug}`")
@@ -383,7 +393,7 @@ class ReportFolderTest(Base):
     def test_el_slug_del_meta_tambien_vale_sin_marcadores(self):
         self.with_meta(slug="TICKET-1")
         self.ok()
-        self.assertTrue((self.repo / "reports" / "2026-01-02-TICKET-1.html").is_file())
+        self.assertTrue((self.repo / "reports" / "implementation" / "2026-01-02-TICKET-1" / "report.html").is_file())
 
     def test_el_meta_dentro_de_la_carpeta_de_la_tarea_no_cuenta_ni_avisa(self):
         self.agents("- Carpeta de reportes: `reports/{fecha}/{slug}`")
@@ -428,11 +438,31 @@ class ReportFolderTest(Base):
         self.assertIn("ya existía", later.stdout)
         self.assertFalse((self.repo / "reports" / "2026-01-09").exists())
 
-    def test_folder_sin_marcadores_da_el_meta_con_fecha_y_slug(self):
+    def test_folder_sin_marcadores_da_la_carpeta_de_la_tarea_dentro_de_implementation(self):
         result = self.folder("pagos", "--date", "2026-01-03")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("reports/2026-01-03-pagos.meta.json", result.stdout)
-        self.assertIn("reports/2026-01-03-pagos.bitacora.md", result.stdout)
+        task = "reports/implementation/2026-01-03-pagos"
+        self.assertIn("\n".join([
+            "📁 Carpeta de la tarea: %s" % task,
+            "   meta: %s/meta.json" % task,
+            "   bitácora, si hace falta: %s/bitacora.md" % task,
+            "   previews: %s/previews" % task,
+            "   índice: reports/INDEX.md",
+        ]) + "\n", result.stdout)
+        self.assertTrue((self.repo / task).is_dir())
+        self.assertIn("/reports/\n", self.exclude())
+        later = self.folder("pagos", "--date", "2026-01-09")
+        self.assertIn("📁 Carpeta de la tarea: %s (la tarea ya existía: sigue ahí)" % task, later.stdout)
+        self.assertFalse((self.repo / "reports" / "implementation" / "2026-01-09-pagos").exists())
+
+    def test_folder_con_marcadores_imprime_previews_e_indice_en_la_parte_fija(self):
+        self.agents("- Carpeta de reportes: `contexto/reports/{fecha}/{slug}`")
+        result = self.folder("pagos", "--date", "2026-01-03")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("   previews: contexto/reports/2026-01-03/pagos/previews\n", result.stdout)
+        self.assertIn("   índice: contexto/reports/INDEX.md\n", result.stdout)
+        self.assertTrue((self.repo / "contexto" / "reports" / "INDEX.md").is_file())
+        self.assertFalse((self.repo / "contexto" / "reports" / "implementation").exists())  # la línea, tal cual
 
     def test_marcadores_sin_slug_o_sin_carpeta_fija_fallan_con_un_error_claro(self):
         for spec, message in (("reports/{fecha}", "sin {slug}"), ("{fecha}/{slug}", "carpeta fija")):
@@ -474,7 +504,8 @@ class SymlinkOutputTest(Base):
     def test_enlace_ignorado_sin_marcadores_tampoco_avisa(self):
         self.set_exclude("/contexto\n")
         result = self.ok("--out", "contexto/reports")
-        self.assertTrue((self.base / "fuera" / "contexto" / "reports" / "2026-01-02-prueba-x.html").is_file())
+        self.assertTrue((self.base / "fuera" / "contexto" / "reports" / "implementation" / "2026-01-02-prueba-x" /
+                         "report.html").is_file())
         self.assertNotIn("⚠️", result.stderr)
         self.assertEqual(self.exclude(), "/contexto\n")
 
@@ -515,12 +546,14 @@ class MultiRepoTest(Base):
     def test_dos_repos_con_bases_distintas_y_archivos_sin_rastrear(self):
         self.with_meta(repos=self.repos, files={"a.txt": {"why": "principal"}, "modulo-a:x.txt": {"why": "del modulo"}})
         result = self.ok()
-        html = (self.repo / "reports" / "2026-01-02-prueba-x.html").read_text(encoding="utf-8")
+        html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
         self.assertIn("Repositorios", html)
         self.assertIn('<td><span class="repo-tag">modulo-a</span></td><td>trabajo</td><td><code>main</code></td>'
                       "<td>1</td><td>2</td><td>0</td>", html)
-        self.assertIn('<td><span class="repo-tag">repo-principal</span></td><td>main</td><td><code>HEAD</code></td>'
-                      "<td>1</td><td>1</td><td>0</td>", html)
+        head = git(self.repo, "rev-parse", "--short", "HEAD").strip()  # sin --base: el merge-base con main
+        self.assertIn('<td><span class="repo-tag">repo-principal</span></td><td>main</td>'
+                      "<td>merge-base con <code>main</code> · <code>%s</code></td><td>1</td><td>1</td><td>0</td>" % head,
+                      html)
         self.assertEqual(self.stat(html, "Archivos Nuevos"), "2")  # b.txt y modulo-a:y.txt
         self.assertEqual(self.stat(html, "Archivos Modificados"), "3")  # a.txt, x.txt (commit) y config.txt
         self.assertIn("commit de la rama", html)  # el diff contra main incluye lo commiteado en la rama
@@ -534,7 +567,7 @@ class MultiRepoTest(Base):
         self.with_meta(repos=self.repos, files={"config.txt": {"why": "nuevo en el principal"},
                                                 "modulo-a:config.txt": {"why": "cambia en el modulo"}})
         self.ok()
-        html = (self.repo / "reports" / "2026-01-02-prueba-x.html").read_text(encoding="utf-8")
+        html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
         self.assertIn("nuevo en el principal", html)
         self.assertIn("cambia en el modulo", html)
         self.assertEqual(html.count('class="file-path">config.txt'), 2)
@@ -557,7 +590,7 @@ class MultiRepoTest(Base):
                       "revert": "modulo-a = publicado:1.2.0 <de nuevo>"}]
         self.with_meta(repos=self.repos, temporary=temporary)
         result = self.ok()
-        html = (self.repo / "reports" / "2026-01-02-prueba-x.html").read_text(encoding="utf-8")
+        html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
         self.assertIn("Cambios temporales", html)
         self.assertIn("modulo-a = publicado:1.2.0 &lt;de nuevo&gt;", html)
         self.assertNotIn("local:../modulo-a", html)  # sin diff: no es un cambio de la tarea
@@ -574,7 +607,7 @@ class MultiRepoTest(Base):
         write(self.repo / "a.txt", "tres\n")
         self.with_meta(repos=[{"path": ".", "name": "principal", "base": "HEAD~1"}] + self.repos)
         self.ok()
-        html = (self.repo / "reports" / "2026-01-02-prueba-x.html").read_text(encoding="utf-8")
+        html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
         self.assertIn('<span class="repo-tag">principal</span></td><td>main</td><td><code>HEAD~1</code>', html)
         self.assertIn("b.txt", html)  # commiteado después de HEAD~1: entra por la base
 
@@ -602,7 +635,7 @@ class AnalysisTest(Base):
     }
 
     def html(self):
-        return (self.repo / "reports" / "2026-01-02-prueba-x.html").read_text(encoding="utf-8")
+        return (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
 
     def test_muestra_los_campos_nuevos(self):
         self.with_meta(**self.FULL)
