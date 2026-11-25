@@ -98,7 +98,27 @@ def add_exclude(repo, line):
 
 
 def exists(path):
-    return path.exists() or path.is_symlink()
+    """Si la ruta existe (también un enlace roto). Una carpeta sin permiso de lectura cuenta como que no existe: la
+    carpeta padre del proyecto puede tener carpetas ajenas (por ejemplo, /tmp)."""
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return False
+
+
+def is_directory(path):
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def child_folders(folder):
+    """Las carpetas hijas que se pueden listar; [] si la carpeta no se puede leer."""
+    try:
+        return [child for child in folder.iterdir() if is_directory(child)]
+    except OSError:
+        return []
 
 
 def uses_claude(repo, choice):
@@ -153,8 +173,8 @@ def siblings(repo):
     """Repos hermanos (en la carpeta padre) que algún archivo versionado del proyecto nombra: por ruta (../<nombre>)
     o por nombre (una dependencia publicada con el mismo nombre que el repo). {nombre: {"ruta": [...], "nombre": [...]}}.
     Por nombre son candidatos: se confirman con el usuario."""
-    names = sorted(d.name for d in repo.parent.iterdir() if d != repo and d.is_dir() and exists(d / ".git")
-                   and not same_repository(repo, d)) if repo.parent.is_dir() else []
+    names = sorted(d.name for d in child_folders(repo.parent) if d != repo and exists(d / ".git")
+                   and not same_repository(repo, d))
     found = {}
 
     def note(name, how, file):

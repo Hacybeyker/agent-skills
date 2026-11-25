@@ -396,6 +396,23 @@ class UnitsModelTest(UnitsTest):
         self.assertNotIn("docs/modules", result.stdout)
 
 
+class UnreadableSiblingTest(Base):
+    """CI: la carpeta padre del proyecto puede tener carpetas ajenas sin permiso (como /tmp en Linux)."""
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "como root no hay carpetas sin permiso")
+    def test_estado_y_units_siguen_con_una_carpeta_hermana_sin_permiso(self):
+        locked = self.base / "ajena"
+        (locked / "dentro").mkdir(parents=True)
+        os.chmod(str(locked), 0)
+        try:
+            for command in ("estado", "units"):
+                result = self.contexto(command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("ajena", result.stdout)
+        finally:
+            os.chmod(str(locked), 0o755)
+
+
 class WorktreeTest(Base):
     """H10: en un worktree enlazado, los enlaces del contexto (que no están en git) faltan; estado lo dice."""
 
