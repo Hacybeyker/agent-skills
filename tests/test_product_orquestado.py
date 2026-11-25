@@ -477,8 +477,8 @@ class PresupuestoReaperturaTest(Base):
         salida = self.p("cerrar", "--sesion", "1c", "--busquedas", 9, "--lecturas", 3)
         self.assertIn("9 de 8 búsquedas y 3 de 5 lecturas en la reapertura 1", salida)
         self.assertIn("⚠ Esta pasada se pasó de su presupuesto", salida)
-        self.assertIn("Presupuesto excedido: 1c usó 9 de 8 búsquedas", self.p("estado"))
-        self.assertIn("⚠ Presupuesto excedido: 1c usó 9 de 8 búsquedas", self.cerrar("1f"))
+        self.assertIn("Presupuesto excedido: 1c: reapertura 1 con 9 de 8 búsquedas", self.p("estado"))
+        self.assertIn("⚠ Presupuesto excedido: 1c: reapertura 1 con 9 de 8 búsquedas", self.cerrar("1f"))
 
 
 # --- #36 · El rival es el del mismo usuario y la misma necesidad ----------------------------------------------------

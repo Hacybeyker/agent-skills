@@ -206,7 +206,8 @@ class RivalTest(Base):
         self.assertEqual(self.datos()["sesiones"]["1g"]["reaperturas"], 1)
         self.assertIn("lo que usó la línea en esta pasada", self.falla("cerrar", "--sesion", "1g", "--busquedas",
                                                                        "muchas"))
-        self.assertIn("son de una sesión de investigación", self.falla("cerrar", "--sesion", "1f", "--lecturas", "2"))
+        self.assertIn("son de una sesión que busca con presupuesto",
+                      self.falla("cerrar", "--sesion", "1f", "--lecturas", "2"))
         salida = self.p("cerrar", "--sesion", "1g", "--busquedas", 7, "--lecturas", 4)
         # cada reapertura tiene su propio presupuesto: la mitad del original (feedback #34)
         self.assertIn("· Presupuesto usado por la línea diferenciacion: 7 de 8 búsquedas y 4 de 5 lecturas en la "

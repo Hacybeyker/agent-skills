@@ -77,12 +77,13 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py consumo --sesion 1a --costo
 | `--tokens`, `--pasos`, `--modelo` | Lo que informe la herramienta (`45k`, `1.2M`) |
 | `--incluye 1a,1b,…` | En la fila del `orquestador`: las sesiones que corrieron como sus subagentes, cada una en su pasada vigente |
 | `--pasada <n>` | Otra pasada de la sesión que la vigente: `0` es la primera y `n`, la reapertura `n` (para anotar una que quedó sin anotar) |
+| `--chat <id>` | En la fila del `orquestador`: qué chat anota (`orq-1`). El mismo chat usa siempre el mismo y actualiza su fila (`/cost` es acumulado); un chat que no anotó antes usa uno nuevo (`siguiente --json`: `costo.chat_nuevo`). Una fila anotada sin `--chat` es `orq-<n>`, por su orden |
 
 Cada pasada de una sesión (la primera y cada reapertura) va en su fila: `consumo --sesion 1c` anota la pasada vigente y el total, el reporte y `siguiente` las suman. Repetir `consumo` con la misma `--sesion` en la misma pasada actualiza su fila: lo nuevo reemplaza lo mismo y lo demás se conserva. Una fila anotada sin pasada (antes de que se anotaran) cuenta como la primera, y una reapertura cerrada sin consumo aparece como sin anotar (`1c (reapertura 1)`).
 
 | Herramienta | Dónde se ve | Por sesión con subagentes |
 | --- | --- | --- |
-| Claude Code | `/cost` (USD del chat) | El resultado de cada subagente en primer plano trae sus tokens y la cantidad de herramientas que usó: el orquestador espera a que terminen todos y anota cada uno con `consumo --sesion <id> --tokens <n> --pasos <n>`; en cada parada, arriba, el total del chat con `consumo --sesion orquestador --incluye <las sesiones que lanzó ese chat> --costo '<USD de /cost>'`, sin `--tokens` (ya van por sesión: el total no los cuenta dos veces). El mismo chat actualiza su fila en cada parada (`/cost` es acumulado); otro chat orquestador va en otra fila. Por verificar en cada versión: el formato no está documentado como estable |
+| Claude Code | `/cost` (USD del chat) | El resultado de cada subagente en primer plano trae sus tokens y la cantidad de herramientas que usó: el orquestador espera a que terminen todos y anota cada uno con `consumo --sesion <id> --tokens <n> --pasos <n>`; en cada parada, arriba, el total del chat con `consumo --sesion orquestador --incluye <las sesiones que lanzó ese chat> --costo '<USD de /cost>'`, sin `--tokens` (ya van por sesión: el total no los cuenta dos veces). El mismo chat actualiza su fila en cada parada con el mismo `--chat` (`/cost` es acumulado); otro chat orquestador va en otra fila, con otro `--chat`. Por verificar en cada versión: el formato no está documentado como estable |
 | GitHub Copilot CLI | `/usage` (AI Credits y tokens) | Solo el total del chat: `consumo --sesion orquestador --incluye <sesiones> --creditos <n>` |
 | Otra | Lo que muestre | Si no da el uso por subagente, el total con `--incluye` |
 

@@ -13,7 +13,7 @@ Pone a prueba la idea **antes de construir**, con documentos: por cada hipótesi
 5. Completa la tabla de `03-validacion.md` y el apartado de abogado del diablo de cada hipótesis.
 6. Marca la hipótesis más riesgosa, con su métrica y su umbral.
 7. `producto.py validacion`: revisa la tabla y calcula la confianza de cada fila.
-8. `producto.py cerrar --sesion 3` y pega la salida.
+8. `producto.py cerrar --sesion 3 --busquedas <n> --lecturas <n>` (lo que usaste **en esta pasada**, contra el presupuesto de arriba) y pega la salida.
 
 Tus notas van en "Para la puerta 2" de tu archivo, no en `estado.md`: la sesión 2 corre al mismo tiempo.
 
@@ -39,7 +39,7 @@ Una afirmación que, si es falsa, tumba el producto. Salen de la síntesis; esta
 
 - **Hallazgos:** los IDs a favor. La **confianza** de la fila es la menor de ellos y la calcula el script: no se escribe.
 - **En contra:** los IDs de las fuentes en contra o, si no apareció nada, qué buscaste. Nunca vacía.
-- **Diferenciador:** el ID si la hipótesis lo pone a prueba.
+- **Diferenciador:** el ID si la hipótesis lo pone a prueba. La de diferenciador siempre lo lleva. **Una de canal o de pago lo lleva cuando pone a prueba el valor de ese diferenciador**: si fuera falsa, el diferenciador dejaría de ser una razón para elegir la app o para pagar (por ejemplo, la de pago de un pago único cuando el diferenciador es el precio, o la de canal cuando lo que atrae las instalaciones es justo ese diferenciador). Si se sostiene o cae sin importar el diferenciador (las búsquedas de la categoría en la tienda, los anuncios que pagan la versión gratis), va con «—». Cada hipótesis con el ID cuenta para «sobrevive» (abajo).
 - **Veredicto:**
   - *sostenida:* evidencia a favor con confianza media o alta, y lo que hay en contra no la contradice. Con confianza baja, el script no acepta "sostenida".
   - *débil:* poca evidencia a favor, o evidencia en contra que no alcanza para refutarla.
@@ -56,7 +56,7 @@ Por cada hipótesis, búsquedas pensadas para **perder**: "por qué fallaría <i
 
 Lo que aparece se registra y se enlaza: un hallazgo nuevo en la línea `validacion`, o `--en-contra` en un hallazgo propio. Si no aparece nada, se anota qué se buscó. "No busqué" no es lo mismo que "no hay".
 
-El diferenciador principal **sobrevive** si sus hipótesis quedan sostenidas, con confianza media o alta. Si queda débil o refutado, se dice, y si otro diferenciador lo sostendría mejor, se deja como propuesta, nunca como un comando suelto: `producto.py propuesta --texto "<qué cambiar y por qué>" --ajustar 1g`. La puerta 2 la muestra y el usuario decide si reabre 1g.
+El diferenciador principal **sobrevive** si todas sus hipótesis (las que lo llevan en la columna Diferenciador) quedan sostenidas, con confianza media o alta; sin ninguna, no sobrevive, porque nada lo puso a prueba. **Otro diferenciador viable pasa la misma regla con sus propias hipótesis**: la puerta 2 solo recomienda llevarlo a principal si sobrevive, así que pon a prueba también a los que podrían reemplazarlo. Si el principal queda débil o refutado, se dice, y si otro diferenciador lo sostendría mejor, se deja como propuesta, nunca como un comando suelto: `producto.py propuesta --texto "<qué cambiar y por qué>" --ajustar 1g`. La puerta 2 la muestra y el usuario decide si reabre 1g.
 
 ## La hipótesis más riesgosa
 

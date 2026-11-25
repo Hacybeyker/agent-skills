@@ -80,7 +80,7 @@ La sesión 0 te hace sus preguntas en el mismo chat, en una sola tanda. En cada 
 Continúa. No hagas commit ni push.
 ```
 
-**Arriba de cada parada** (cada puerta y el mensaje final) te recuerda correr `/cost` en ese chat y te da el comando armado `producto.py consumo --sesion orquestador --incluye <las sesiones que lanzó ese chat> --costo '<USD>'`: el total del chat, que incluye a los subagentes (el consumo de cada subagente ya quedó anotado por sesión). Córrelo antes de decidir: si cierras el chat sin `/cost`, ese costo se pierde.
+**Arriba de cada parada** (cada puerta y el mensaje final) te recuerda correr `/cost` en ese chat y te da el comando armado `producto.py consumo --sesion orquestador --incluye <las sesiones que lanzó ese chat> --costo '<USD>' --chat <id>` (`--chat`: la fila de ese chat, que se actualiza en cada parada): el total del chat, que incluye a los subagentes (el consumo de cada subagente ya quedó anotado por sesión). Córrelo antes de decidir: si cierras el chat sin `/cost`, ese costo se pierde.
 
 Si el chat se quedó quieto con un subagente que ya terminó (o tras su aviso de fin), escribe en el mismo chat:
 
@@ -194,7 +194,7 @@ Con `--intermedio "<modelo>"` y `--alto "<modelo>"` cambias los nombres ([modelo
 cd <raíz> && python3 -I <skill>/scripts/producto.py consumo --sesion <id> --costo '<USD>' --carpeta product
 ```
 
-Con un orquestador: `--sesion orquestador --incluye <las sesiones que lanzó ese chat>` y el total del chat (lo que muestre `/cost`), sin `--tokens`: los de cada subagente ya van por sesión; el orquestador te lo recuerda arriba de cada parada, con el comando armado. Si ese mismo chat vuelve a anotar en otra parada, actualiza su fila (`/cost` es acumulado); otro chat orquestador va en otra fila. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
+Con un orquestador: `--sesion orquestador --incluye <las sesiones que lanzó ese chat>` y el total del chat (lo que muestre `/cost`), sin `--tokens`: los de cada subagente ya van por sesión; el orquestador te lo recuerda arriba de cada parada, con el comando armado. Cada chat orquestador anota con su `--chat` (el comando armado ya lo trae): si ese mismo chat vuelve a anotar en otra parada, con el mismo `--chat` actualiza su fila (`/cost` es acumulado) y no la cuenta dos veces; otro chat orquestador usa uno nuevo y va en otra fila. Con GitHub Copilot CLI, `--creditos <AI Credits>` en vez de `--costo`. Si solo anotas tokens, el total dice "sin dato en USD", nunca 0.
 
 ### Guardar una idea para después, o recuperarla
 

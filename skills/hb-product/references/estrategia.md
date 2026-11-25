@@ -13,7 +13,7 @@ Convierte la síntesis en una estrategia y en un modelo de negocio con números.
 5. Lean Canvas y PR/FAQ.
 6. Completa `escenarios.json` y corre `producto.py escenarios --entrada escenarios.json`.
 7. Completa `02-estrategia.md` con la tabla y los rótulos que imprime el script.
-8. `producto.py cerrar --sesion 2` y pega la salida.
+8. `producto.py cerrar --sesion 2 --busquedas <n> --lecturas <n>` (lo que usaste **en esta pasada**, contra el presupuesto de arriba) y pega la salida.
 
 Tus notas van en "Para la puerta 2" de tu archivo, no en `estado.md`: la sesión 3 corre al mismo tiempo. Si la propuesta de valor pide otro diferenciador principal, no lo cambies ni des un comando para hacerlo: `producto.py propuesta --texto "…" --ajustar 1g` lo deja para la puerta.
 

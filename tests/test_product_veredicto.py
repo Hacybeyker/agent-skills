@@ -328,7 +328,7 @@ class ConsumoSinCostoTest(Base):
         salida = self.p("siguiente")
         self.assertIn("Consumo del chat orquestador (si lo usaste): al terminar, anota lo que muestre /cost", salida)
         self.assertIn("producto.py consumo --sesion orquestador --incluye 0,1a,1b,1c,1d,1e,1g,1f --costo '<USD que "
-                      "muestra /cost>' --carpeta product", salida)  # sin --tokens: no se cuentan dos veces
+                      "muestra /cost>' --chat orq-1 --carpeta product", salida)  # sin --tokens: no se cuentan dos veces
         self.assertIn("cd %s && python3 -I " % self.tmp, salida)
         self.p("consumo", "--sesion", "orquestador", "--costo", "1.20", "--incluye", "1a")
         # el orquestador solo dijo que corrió la 1a: las demás siguen sin un chat que las cubra (feedback #46)

@@ -99,6 +99,7 @@ CRITERIOS_DEFECTO = {
     "dias_descarte": 60,           # Viable para probar: días después del lanzamiento para el criterio de descarte
 }
 PRESUPUESTO = {"busquedas": 15, "lecturas": 10}
+MAXIMO_RESUMEN = 400  # caracteres del resumen de una fuente (3 líneas como máximo)
 PRESUPUESTO_NUEVA = {"busquedas": 20, "lecturas": 12}
 REAPERTURA = 0.5  # cada reapertura de una línea tiene su propio presupuesto: la mitad del original (feedback #34)
 AMPLITUD_ANALOGIA = 0.5  # un escenario por analogía abre el rango: pesimista × 0,5 y optimista × 1,5
@@ -162,6 +163,9 @@ SESIONES = [
 ]
 SESION = {s["id"]: s for s in SESIONES}
 INVESTIGACION = ("1a", "1b", "1c", "1d", "1e", "1g")  # las líneas de investigación, con su presupuesto
+# las sesiones que anotan sus búsquedas y lecturas al cerrar: las de investigación, la 2 (estrategia) y la 3
+# (validación), con el mismo presupuesto (references/estrategia.md y validacion.md; feedback #62)
+CON_PRESUPUESTO = INVESTIGACION + ("2", "3")
 # de qué depende cada sesión y cada puerta (P1, P2, P3)
 DEPENDE = {
     "0": [], "1a": ["0"], "1b": ["0"], "1c": ["0"], "1d": ["0"], "1e": ["0"], "1g": ["1a", "1b"],
@@ -1438,6 +1442,45 @@ def hipotesis(carpeta, registro):
     return resultado
 
 
+def sobrevive_abogado(filas, diferenciador, descarte=None):
+    """La regla de «sobrevive al abogado del diablo» de la puerta 2, la misma para el principal y para la alternativa
+    que se recomendaría en su lugar (feedback #61): todas sus hipótesis de 03-validacion.md (las que lo llevan en la
+    columna Diferenciador) sostenidas con confianza media o alta. Con un criterio de descarte vigente (la puerta 1 fue
+    Viable para probar), la más riesgosa débil no cuenta: es la prueba de elección, que se mide después del
+    lanzamiento. Sin ninguna hipótesis, no sobrevive: nada lo puso a prueba. (sobrevive, detalle)."""
+    suyas = [fila for fila in filas or [] if fila["diferenciador"] == diferenciador["id"]]
+    diferidas = [f for f in suyas if descarte and f["riesgosa"] and f["veredicto"] == "débil"]
+    sobrevive = bool(suyas) and all(f["veredicto"] == "sostenida" and f["nivel"] >= 2
+                                    for f in suyas if f not in diferidas)
+    return sobrevive, ", ".join(
+        "%s %s (confianza %s%s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]],
+                                    "; es la más riesgosa: se prueba después del lanzamiento" if f in diferidas else "")
+        for f in suyas) or "ninguna hipótesis lo pone a prueba en 03-validacion.md"
+
+
+def alternativas_validadas(filas, registro, principal, descarte=None):
+    """Los otros diferenciadores viables, con la regla de «sobrevive» (feedback #61): {sobreviven: [ID], no: [(ID,
+    detalle)]}. Son los que la puerta puede recomendar como principal; uno que no sobrevive no se recomienda."""
+    resultado = {"sobreviven": [], "no": []}
+    for diferenciador in registro.viables():
+        if principal and diferenciador["id"] == principal["id"]:
+            continue
+        sobrevive, detalle = sobrevive_abogado(filas, diferenciador, descarte)
+        if sobrevive:
+            resultado["sobreviven"].append(diferenciador["id"])
+        else:
+            resultado["no"].append((diferenciador["id"], detalle))
+    return resultado
+
+
+def texto_alternativas(alternativas):
+    """' · otros viables: D-2 sobrevive; D-3 no sobrevive: HIP-04 débil (confianza media)', o ''."""
+    if not alternativas or not (alternativas["sobreviven"] or alternativas["no"]):
+        return ""
+    return " · otros viables: %s" % "; ".join(["%s sobrevive" % i for i in alternativas["sobreviven"]] + [
+        "%s no sobrevive: %s" % par for par in alternativas["no"]])
+
+
 def problemas_validacion(filas):
     """Lo que le falta a la tabla de hipótesis para poder cerrar la sesión 3."""
     if not filas:
@@ -1599,8 +1642,8 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
     nueva = tipo_de(producto) == "nueva"
     resultado = []
 
-    def agregar(clave, cumple, texto, detalle=""):
-        resultado.append({"clave": clave, "cumple": bool(cumple), "texto": texto, "detalle": detalle})
+    def agregar(clave, cumple, texto, detalle="", **extra):
+        resultado.append(dict(extra, clave=clave, cumple=bool(cumple), texto=texto, detalle=detalle))
 
     if numero_puerta == 1:
         puntaje = producto.get("puntaje")
@@ -1754,18 +1797,15 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
             principal = registro.principal()
             texto = "El diferenciador principal sobrevive al abogado del diablo, con confianza media o alta"
             if not principal:
-                agregar("sobrevive", False, texto, "no hay un diferenciador principal registrado")
+                alternativas = alternativas_validadas(filas, registro, None, descarte)
+                agregar("sobrevive", False, texto, "no hay un diferenciador principal registrado%s" % texto_alternativas(
+                    alternativas), alternativas=alternativas)
             else:
-                suyas = [fila for fila in filas or [] if fila["diferenciador"] == principal["id"]]
-                # la hipótesis más riesgosa sobre él puede quedar débil: es la prueba de elección que se mide después
-                diferidas = [f for f in suyas if descarte and f["riesgosa"] and f["veredicto"] == "débil"]
-                sobrevive = suyas and all(f["veredicto"] == "sostenida" and f["nivel"] >= 2
-                                          for f in suyas if f not in diferidas)
-                agregar("sobrevive", sobrevive, texto, "%s: %s" % (principal["id"], ", ".join(
-                    "%s %s (confianza %s%s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]],
-                                                "; es la más riesgosa: se prueba después del lanzamiento"
-                                                if f in diferidas else "")
-                    for f in suyas) or "ninguna hipótesis lo pone a prueba en 03-validacion.md"))
+                sobrevive, propio = sobrevive_abogado(filas, principal, descarte)
+                # la alternativa que se recomendaría como principal pasa la misma regla (feedback #61)
+                alternativas = None if sobrevive else alternativas_validadas(filas, registro, principal, descarte)
+                agregar("sobrevive", sobrevive, texto, "%s: %s%s" % (principal["id"], propio, texto_alternativas(
+                    alternativas)), alternativas=alternativas, propio=propio)
 
     else:
         datos = prd(carpeta, registro)
@@ -1780,10 +1820,14 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
                 else "04-prd.md no tiene funcionalidades marcadas como MVP")
         principal = registro.principal()
         dentro = principal and [f["id"] for f in mvp if principal["id"] in f["diferenciadores"]]
+        # sin principal, el que se elija también tiene que sobrevivir a la validación de la puerta 2 (feedback #61)
+        alternativas = None if principal or nueva else alternativas_validadas(
+            hipotesis(carpeta, registro), registro, None, criterio_descarte_vigente(carpeta))
         agregar("principal_mvp", dentro, "El diferenciador principal está en el MVP",
                 "%s en %s" % (principal["id"], ", ".join(dentro)) if dentro
                 else "ninguna funcionalidad del MVP lo cita" if principal
-                else "no hay un diferenciador principal registrado")
+                else "no hay un diferenciador principal registrado%s" % texto_alternativas(alternativas),
+                alternativas=alternativas)
         trazadas = [f for f in mvp if not f["faltas"]]
         agregar("trazabilidad", mvp and len(trazadas) == len(mvp),
                 "100 % de las funcionalidades del MVP con trazabilidad", "%d de %d" % (len(trazadas), len(mvp)))
@@ -1871,10 +1915,9 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
         revisar_rival = rival_a_revisar(registro)
         if revisar_rival:
             avisos.append("⚠ Revisar el rival: %s." % texto_rival_a_revisar(registro, revisar_rival))
-        excedidas = pasadas_excedidas(producto)
+        excedidas = pasadas_excedidas(producto, INVESTIGACION)
         if excedidas:
-            avisos.append("⚠ Presupuesto excedido: %s. La síntesis lo dice." % "; ".join(
-                "%s usó %s" % par for par in excedidas))
+            avisos.append("⚠ Presupuesto excedido: %s. La síntesis lo dice." % texto_excedidas(excedidas))
         exigido = modelo_exigido(producto, registro)
         if exigido:
             avisos.append("· El puntaje depende del modelo de monetización: alcanza el mínimo solo con %s, que se "
@@ -1902,6 +1945,9 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
                               "lo que dice el vacío sigue sin leerse): %s. No cambian la cobertura ni el veredicto; "
                               "con las mismas herramientas, ajustar esas líneas no los resuelve." % texto_parciales(
                                   parciales))
+    excedidas = pasadas_excedidas(producto, ("2", "3")) if numero_puerta == 2 else []
+    if excedidas:  # la estrategia y la validación también anotan lo que usaron (feedback #62)
+        avisos.append("⚠ Presupuesto excedido: %s. Dilo en la decisión." % texto_excedidas(excedidas))
     descarte = criterio_descarte_vigente(carpeta) if numero_puerta in (2, 3) else None
     if descarte:
         avisos.append("· La puerta 1 fue Viable para probar: la prueba de elección se mide después del lanzamiento. "
@@ -2160,22 +2206,39 @@ def registrar_pasada(producto, sesion, uso):
     return pasada
 
 
-def pasadas_excedidas(producto):
-    """Las pasadas de las líneas que se pasaron de su presupuesto: [(sesión, texto)]. Un registro anterior, sin
+def estado_pasada(pasada):
+    """'primera pasada con 11 de 10 lecturas' (solo lo excedido) o 'reapertura 1 dentro del presupuesto'."""
+    nombre = "reapertura %d" % pasada["reapertura"] if pasada["reapertura"] else "primera pasada"
+    excedido = [(clave, pasada.get(clave, 0), pasada["presupuesto"][clave]) for clave in ("busquedas", "lecturas")
+                if pasada.get(clave, 0) > pasada["presupuesto"][clave]]
+    if not excedido:
+        return "%s dentro del presupuesto" % nombre
+    return "%s con %s" % (nombre, " y ".join("%d de %d %s" % (usado, limite, "búsquedas" if clave == "busquedas"
+                                                            else "lecturas") for clave, usado, limite in excedido))
+
+
+def pasadas_excedidas(producto, sesiones=CON_PRESUPUESTO):
+    """Las sesiones con alguna pasada que se pasó de su presupuesto, con el estado de cada pasada (feedback #62):
+    [(sesión, 'primera pasada con 11 de 10 lecturas; reapertura 1 dentro del presupuesto')]. Un registro anterior, sin
     pasadas, compara el total con el presupuesto original."""
     resultado = []
-    for sesion in ("1a", "1b", "1c", "1d", "1e", "1g"):
+    for sesion in sesiones:
         datos = producto["sesiones"].get(sesion) or {}
-        pasadas = datos.get("pasadas") or []
-        for pasada in pasadas:
-            if any(pasada.get(clave, 0) > pasada["presupuesto"][clave] for clave in ("busquedas", "lecturas")):
-                resultado.append((sesion, texto_pasada(pasada)))
+        pasadas = sorted(datos.get("pasadas") or [], key=lambda p: p["reapertura"])
+        if any(pasada.get(clave, 0) > pasada["presupuesto"][clave] for pasada in pasadas
+               for clave in ("busquedas", "lecturas")):
+            resultado.append((sesion, "; ".join(estado_pasada(pasada) for pasada in pasadas)))
         uso, limites = datos.get("uso") or {}, presupuesto_de(producto)
         if not pasadas and any(int(uso.get(clave) or 0) > limites[clave] for clave in ("busquedas", "lecturas")):
             resultado.append((sesion, "%d de %d búsquedas y %d de %d lecturas en total" % (
                 int(uso.get("busquedas") or 0), limites["busquedas"], int(uso.get("lecturas") or 0),
                 limites["lecturas"])))
     return resultado
+
+
+def texto_excedidas(excedidas):
+    """'1d: primera pasada con 11 de 10 lecturas; reapertura 1 dentro del presupuesto · 3: …'."""
+    return " · ".join("%s: %s" % par for par in excedidas)
 
 
 def presupuesto_agotado(producto, registro, sesion="1g"):
@@ -2393,6 +2456,25 @@ def motivo_sin_principal(numero_puerta, producto, registro):
                             " que supere %s" % a_los_rivales(rivales) if rivales else ""), None, ids)
 
 
+def motivo_elegir_principal(numero_puerta, criterio, producto, registro):
+    """Sin diferenciador principal en las puertas 2 y 3: el que se elija entre los viables tiene que sobrevivir al
+    abogado del diablo (la regla de la puerta 2, feedback #61). Si alguno sobrevive, elegirlo (1g, sin búsquedas); si
+    hay viables y ninguno sobrevive, No viable, como el principal que no sobrevive sin otro viable; sin viables, la
+    regla de siempre (`motivo_sin_principal`)."""
+    alternativas = criterio.get("alternativas")
+    if not alternativas or not (alternativas["sobreviven"] or alternativas["no"]):
+        return motivo_sin_principal(numero_puerta, producto, registro)
+    sobreviven = alternativas["sobreviven"]
+    if sobreviven:
+        nombres = y_lista(sobreviven)
+        return (False, "No hay un diferenciador principal elegido, pero %s %s al abogado del diablo" % (
+            nombres, "sobrevive" if len(sobreviven) == 1 else "sobreviven"),
+            "Elegir el principal entre los que sobreviven (%s) en la 1g" % nombres, "1g", [], False)
+    return (True, "No hay un diferenciador principal y ningún viable sobrevive al abogado del diablo (%s)" % "; ".join(
+        "%s: %s" % (i, llano(texto)) for i, texto in alternativas["no"]),
+            "Un diferenciador viable que quede sostenido con confianza media o alta", None, [])
+
+
 def criterios_sin_aceptacion(mvp):
     """Las funcionalidades del MVP sin criterios de aceptación en sus historias (feedback #44)."""
     return [f["id"] for f in mvp if not f.get("aceptacion")]
@@ -2606,18 +2688,26 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
                 "Marcarla en la validación documental (sesión 3)", "3", [])
     if clave == "sobrevive":
         if not principal:
-            return motivo_sin_principal(numero_puerta, producto, registro)
-        otros = [d["id"] for d in viables if d["id"] != principal["id"]]
+            return motivo_elegir_principal(numero_puerta, criterio, producto, registro)
+        alternativas = criterio.get("alternativas") or {"sobreviven": [], "no": []}
+        sobreviven = alternativas["sobreviven"]
         ids = list(principal.get("hallazgos", []))
-        if otros:
-            return (False, "El principal (%s) no sobrevive al abogado del diablo, pero %s sí es viable" % (
-                principal["id"], ", ".join(otros)), "Llevar %s a principal (1g)" % ", ".join(otros), "1g", ids, False)
+        if sobreviven:  # la alternativa pasa la misma regla que el principal (feedback #61)
+            return (False, "El principal (%s) no sobrevive al abogado del diablo, pero %s sí %s" % (
+                principal["id"], y_lista(sobreviven), "sobrevive" if len(sobreviven) == 1 else "sobreviven"),
+                "Llevar %s a principal (1g)" % y_lista(sobreviven, "o"), "1g", ids, False)
+        propio = llano(criterio.get("propio") or detalle.split(": ", 1)[-1])
+        if alternativas["no"]:
+            return (True, "El diferenciador principal (%s) no sobrevive al abogado del diablo (%s) y ningún otro "
+                          "viable sobrevive (%s)" % (principal["id"], propio, "; ".join(
+                              "%s: %s" % (i, llano(texto)) for i, texto in alternativas["no"])),
+                    "Un diferenciador viable que quede sostenido con confianza media o alta", None, ids)
         return (True, "El diferenciador principal (%s) no sobrevive al abogado del diablo y no hay otro viable (%s)" % (
-            principal["id"], detalle.split(": ", 1)[-1]),
-                "Un diferenciador viable que quede sostenido con confianza media o alta", None, ids)
+            principal["id"], propio), "Un diferenciador viable que quede sostenido con confianza media o alta", None,
+                ids)
     if clave == "principal_mvp":  # sin principal, lo mismo que en las puertas 1 y 2; con él, se completa el PRD (#44)
         if not principal:
-            return motivo_sin_principal(numero_puerta, producto, registro)
+            return motivo_elegir_principal(numero_puerta, criterio, producto, registro)
         return (False, "El diferenciador principal (%s) no está en ninguna funcionalidad del MVP" % principal["id"],
                 "Llevar %s a una funcionalidad del MVP en el PRD (sesión 4)" % principal["id"], "4", [])
     if clave == "aceptacion":
@@ -3161,7 +3251,35 @@ def nombre_pasada(sesion, pasada):
 
 
 def nombre_consumo(fila):
-    return "orquestador" if fila["sesion"] == "orquestador" else nombre_pasada(fila["sesion"], pasada_de(fila))
+    if fila["sesion"] == "orquestador":
+        return "orquestador (%s)" % fila["chat"] if fila.get("chat") else "orquestador"
+    return nombre_pasada(fila["sesion"], pasada_de(fila))
+
+
+def chats_orquestador(filas):
+    """Las filas del chat orquestador por su chat, {chat: fila} (feedback #60). Una fila anotada antes de `--chat` es
+    orq-<n>, por su orden entre las del orquestador: así se puede actualizar sin migrar el registro."""
+    resultado, orden_ = {}, 0
+    for fila in filas:
+        if fila["sesion"] == "orquestador":
+            orden_ += 1
+            resultado.setdefault(fila.get("chat") or "orq-%d" % orden_, fila)
+    return resultado
+
+
+def chat_nuevo(filas):
+    """El --chat de un chat orquestador que todavía no anotó: orq-<n> libre."""
+    usados = chats_orquestador(filas)
+    numero_ = len(usados) + 1
+    while "orq-%d" % numero_ in usados:
+        numero_ += 1
+    return "orq-%d" % numero_
+
+
+def chat_anterior(filas):
+    """El --chat de la última fila del orquestador que se anotó (la del chat que sigue al leer «continúa»), o None."""
+    chats = list(chats_orquestador(filas).items())  # con la misma fecha (al minuto), la que se anotó después
+    return max(enumerate(chats), key=lambda par: (par[1][1].get("fecha") or "", par[0]))[1][0] if chats else None
 
 
 def cubre(fila, solo_incluye=False):
@@ -3225,17 +3343,25 @@ def sin_orquestador(producto):
 def comando_orquestador(carpeta, producto, sesiones=None):
     """El `consumo` del chat orquestador, armado: el total de /cost (incluye a sus subagentes), sin tokens para no
     contarlos dos veces, con --incluye de las sesiones que corrió ese chat. Sin lista, las que ningún orquestador
-    anotó todavía (`sin_orquestador`): el orquestador deja solo las que lanzó él."""
+    anotó todavía (`sin_orquestador`): el orquestador deja solo las que lanzó él. --chat identifica la fila del chat
+    (feedback #60): la del último que anotó, que lo más común es que sea este mismo (/cost es acumulado y la
+    actualiza); un chat que no anotó antes cambia a `chat_nuevo`."""
+    filas = producto.get("consumo") or []
     hechas = sin_orquestador(producto) if sesiones is None else list(sesiones)
-    return orden("consumo --sesion orquestador%s --costo '<USD que muestra /cost>'" % (
-        " --incluye %s" % ",".join(hechas) if hechas else ""), carpeta)
+    return orden("consumo --sesion orquestador%s --costo '<USD que muestra /cost>' --chat %s" % (
+        " --incluye %s" % ",".join(hechas) if hechas else "", chat_anterior(filas) or chat_nuevo(filas)), carpeta)
 
 
 def recordatorio_costo(carpeta, producto):
-    """El recordatorio de /cost que el orquestador pone arriba en cada parada y en el mensaje final (feedback #46)."""
+    """El recordatorio de /cost que el orquestador pone arriba en cada parada y en el mensaje final (feedback #46), con
+    la fila del chat (feedback #60)."""
+    filas = producto.get("consumo") or []
+    anterior = chat_anterior(filas)
     return ("Antes de decidir o de cerrar este chat: corre /cost aquí (el total incluye a los subagentes) y anótalo "
-            "con este comando, con --incluye solo de las sesiones que lanzó este chat: %s" % comando_orquestador(
-                carpeta, producto))
+            "con este comando, con --incluye solo de las sesiones que lanzó este chat: %s%s" % (
+                comando_orquestador(carpeta, producto),
+                " (--chat %s es la fila del último chat que anotó: si fue este, /cost es acumulado y la actualiza; si "
+                "este chat no anotó antes, usa --chat %s)" % (anterior, chat_nuevo(filas)) if anterior else ""))
 
 
 def avisos_siguiente(carpeta, producto, registro):
@@ -3319,7 +3445,7 @@ def texto_resumen(carpeta, producto, registro):
         lineas.append("- **A revisar por cambio de tipo:** %s" % texto_revisar(revisar))
     excedidas = pasadas_excedidas(producto)
     if excedidas:
-        lineas.append("- **Presupuesto excedido:** %s" % "; ".join("%s usó %s" % par for par in excedidas))
+        lineas.append("- **Presupuesto excedido:** %s" % texto_excedidas(excedidas))
     puntaje = producto.get("puntaje")
     if puntaje:
         modelos = puntajes_por_modelo(producto, registro)
@@ -3751,9 +3877,11 @@ def cmd_fuente(args):
         raise Fallo("Una fuente lleva --url (una página pública) o --archivo (un CSV de reseñas que aportó el "
                     "usuario), una de las dos")
     resumen = args.resumen.strip()
-    if len(resumen.splitlines()) > 3 or len(resumen) > 400:
-        raise Fallo("El resumen de una fuente tiene 3 líneas como máximo (400 caracteres): tiene %d líneas y %d "
-                    "caracteres" % (len(resumen.splitlines()), len(resumen)))
+    if len(resumen) > MAXIMO_RESUMEN:  # dice el límite que se pasó, no el que se cumple (feedback #62)
+        raise Fallo("El resumen de una fuente tiene %d caracteres como máximo (y 3 líneas): este tiene %d, sobran %d. "
+                    "Acórtalo a lo que dice la fuente" % (MAXIMO_RESUMEN, len(resumen), len(resumen) - MAXIMO_RESUMEN))
+    if len(resumen.splitlines()) > 3:
+        raise Fallo("El resumen de una fuente tiene 3 líneas como máximo: este tiene %d" % len(resumen.splitlines()))
     autor = (args.autor or "").strip()
     if re.match(r"^(@|u/|/u/)", autor):
         raise Fallo("--autor no puede ser un nombre de usuario: es la app, la empresa o el medio que publica")
@@ -4806,6 +4934,11 @@ def cmd_consumo(args):
             pasada = int(args.pasada)
     elif args.pasada is not None:
         raise Fallo("--pasada va con una sesión: el orquestador anota con --incluye la pasada vigente de cada una")
+    chat = (args.chat or "").strip() or None
+    if args.chat is not None and args.sesion != "orquestador":
+        raise Fallo("--chat va con --sesion orquestador: identifica la fila de ese chat")
+    if chat and not re.match(r"^[\w.-]{1,40}$", chat):
+        raise Fallo("--chat es un nombre corto, sin espacios (como orq-1)")
     incluye = lista(args.incluye)
     desconocidas = [s for s in incluye if s not in SESION]
     if desconocidas:
@@ -4820,9 +4953,14 @@ def cmd_consumo(args):
     if all(valores[c] is None for c in ("costo", "creditos", "tokens")):
         raise Fallo("Anota al menos --costo (USD), --creditos (AI Credits de GitHub Copilot) o --tokens")
     pasadas_incluye = None
-    if args.sesion == "orquestador" and incluye:
-        # /cost es acumulado: el mismo chat que vuelve a anotar (comparte alguna sesión) actualiza su fila y suma sus
-        # sesiones nuevas; un chat orquestador nuevo, con otras sesiones, va en una fila aparte (feedback #46)
+    if chat:
+        # /cost es acumulado: el mismo chat (el mismo --chat) actualiza su fila y suma sus sesiones nuevas, aunque no
+        # comparta ninguna con lo que anotó antes; otro chat va en una fila aparte (feedback #60)
+        fila = chats_orquestador(filas).get(chat)
+        if fila is not None and incluye:
+            valores["incluye"] = list(dict.fromkeys((fila.get("incluye") or []) + incluye))
+    elif args.sesion == "orquestador" and incluye:
+        # sin --chat (como antes de #60): el que comparte alguna sesión es el mismo chat (feedback #46)
         fila = next((f for f in filas if f["sesion"] == "orquestador" and set(f.get("incluye") or []) & set(incluye)),
                     None)
         if fila is None and any(f["sesion"] == "orquestador" and not f.get("incluye") for f in filas):
@@ -4831,6 +4969,10 @@ def cmd_consumo(args):
             valores["incluye"] = list(dict.fromkeys((fila.get("incluye") or []) + incluye))
     else:
         fila = next((f for f in filas if f["sesion"] == args.sesion and pasada_de(f) == (pasada or 0)), None)
+    if args.sesion == "orquestador":  # cada fila del orquestador queda con su chat, para la anotación siguiente
+        if fila is not None:
+            chat = next((c for c, f in chats_orquestador(filas).items() if f is fila), None) or fila.get("chat")
+        valores["chat"] = chat or chat_nuevo(filas)
     if incluye:  # cada sesión de --incluye cubre su pasada vigente, sumada a las que la fila ya cubría (feedback #59)
         pares = (cubre(fila, solo_incluye=True) if fila is not None else set()) | {
             (s, pasada_vigente(producto, s)) for s in incluye}
@@ -5354,8 +5496,9 @@ def cmd_cerrar(args):
     for clave in ("busquedas", "lecturas"):
         valor = getattr(args, clave)
         if valor is not None:
-            if args.sesion not in ("1a", "1b", "1c", "1d", "1e", "1g"):
-                raise Fallo("--busquedas y --lecturas son de una sesión de investigación (1a a 1e y 1g)")
+            if args.sesion not in CON_PRESUPUESTO:
+                raise Fallo("--busquedas y --lecturas son de una sesión que busca con presupuesto (1a a 1e, 1g, 2 y "
+                            "3)")
             if not re.match(r"^\d+$", valor.strip()):
                 raise Fallo("--%s es un número entero: lo que usó la línea en esta pasada (desde que se abrió o se "
                             "reabrió la sesión)" % clave)
@@ -5378,8 +5521,8 @@ def cmd_cerrar(args):
     if pasada:
         print("· Presupuesto usado por la línea %s: %s." % (linea, texto_pasada(pasada)))
         if any(pasada[clave] > pasada["presupuesto"][clave] for clave in ("busquedas", "lecturas")):
-            print("⚠ Esta pasada se pasó de su presupuesto: la síntesis (1f) y la puerta 1 lo muestran; dilo en el "
-                  "entregable.")
+            print("⚠ Esta pasada se pasó de su presupuesto: %s lo muestra%s; dilo en el entregable." % (
+                ("la puerta 2", "") if args.sesion in ("2", "3") else ("la síntesis (1f) y la puerta 1", "n")))
         if args.sesion == "1g" and presupuesto_agotado(producto, registro, "1g"):
             print("· La 1g ya se reabrió y usó su presupuesto: si la puerta pide más evidencia de diferenciación, la "
                   "skill no recomendará ajustar la 1g otra vez.")
@@ -5737,6 +5880,8 @@ def siguiente_json(carpeta):
              "sin_orquestador": sin_orquestador(producto),
              "comando_orquestador": comando_orquestador(carpeta, producto),
              "recordatorio": recordatorio_costo(carpeta, producto),
+             "chat": chat_anterior(producto.get("consumo") or []) or chat_nuevo(producto.get("consumo") or []),
+             "chat_nuevo": chat_nuevo(producto.get("consumo") or []),
              "orquestador_anotado": any(f["sesion"] == "orquestador" for f in producto.get("consumo") or [])}
     base.update(titulo="%s (idea %s)" % (producto["nombre"], texto_tipo(producto)), avisos=avisos, costo=costo,
                 reporte=str(carpeta / REPORTE), orquestador=datos_orquestador(carpeta, producto))
@@ -7316,7 +7461,7 @@ def parser():
 
     sub = comando("cerrar", cmd_cerrar, "Cierra una sesión si su entregable está completo")
     sub.add_argument("--sesion", required=True, help=", ".join(SESION))
-    sub.add_argument("--busquedas", help="sesiones de investigación: búsquedas usadas en esta pasada")
+    sub.add_argument("--busquedas", help="sesiones que buscan (1a a 1e, 1g, 2 y 3): búsquedas usadas en esta pasada")
     sub.add_argument("--lecturas", help="sesiones de investigación: lecturas usadas en esta pasada")
     agregar_raiz(sub)
 
@@ -7352,6 +7497,9 @@ def parser():
     sub.add_argument("--modelo")
     sub.add_argument("--incluye", help="sesiones que cubre una fila del orquestador, en su pasada vigente: 1a,1b,…")
     sub.add_argument("--pasada", help="0 (la primera) o el número de una reapertura; por defecto, la vigente")
+    sub.add_argument("--chat", help="la fila del chat orquestador (orq-1): el mismo chat la actualiza con su /cost "
+                                    "acumulado; un chat que no anotó antes usa una nueva (`siguiente --json`: "
+                                    "costo.chat_nuevo)")
 
     sub = comando("siguiente", cmd_siguiente, "El paso siguiente o los carriles paralelos, con el texto para cada chat")
     sub.add_argument("--json", action="store_true",
