@@ -56,6 +56,7 @@ Corre el DoD de **cada unidad que toca el cambio** y reporta cada paso por unida
 
 - **De qué unidad es cada archivo:** de la unidad cuya "Fuente" es la ruta más larga que lo contiene (`features/payments/impl/…` es de `features/payments/impl`, no de la app; `../core-lib/…`, de `core-lib`). Lo que no cae en ninguna es de la unidad que es la app o, si no hay, del repo.
 - **Qué corres:** su columna "DoD de la unidad"; si dice "el `## DoD` del proyecto" o no hay, el `## DoD` del `AGENTS.md` del repo de la unidad (en un repo vecino, el suyo). Si ese repo no tiene `## DoD`, márcalo `skipped` con ese motivo. Un mismo comando, una sola vez.
+- **Además, el `## DoD` del proyecto** (el que compila la app con todo) si el cambio toca la app, pasa unidades a fuente, cambia algo que no es de ninguna unidad o un contrato que otras unidades consumen (una API pública, una interfaz, un esquema), o una unidad sin build propio (una carpeta de feature, cuyo DoD solo filtra tests): la misma regla de `hb-implement`.
 - Sin modelo, el `## DoD` de `AGENTS.md`.
 - Si el usuario pidió una revisión rápida o solo de lectura, marca el DoD como `skipped`. El modo rápido para orquestadores (ver abajo) también lo salta siempre.
 

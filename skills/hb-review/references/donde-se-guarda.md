@@ -7,7 +7,7 @@ Lo que escribe `hb-review` al terminar: un `review.md` por revisión y su fila e
 1. **La base**, la misma de `hb-implement` y `hb-performance`: el valor de la línea `Carpeta de reportes: <ruta>` de `AGENTS.md`, en cualquier parte del archivo (también `Carpeta de los reportes` o `Reports folder`); es lo primero entre acentos graves. Sin la línea, `reports`.
    - Con `{fecha}` o `{slug}`, la base es la parte fija antes del primer marcador (`contexto/reports/{fecha}/{slug}` → `contexto/reports`).
    - Relativa a la raíz del repo principal, o absoluta.
-2. **La carpeta de la revisión:** `<base>/review/<fecha>-<slug>/`, con la fecha de hoy (`AAAA-MM-DD`). Si ya existe una con ese slug de otro día (una segunda ronda de la misma tarea: `ls -d <base>/review/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-<slug>/`), sigue en esa.
+2. **La carpeta de la revisión:** `<base>/review/<fecha>-<slug>/`, con la fecha de hoy (`AAAA-MM-DD`). Si ya existe una con ese slug de otro día (una segunda ronda de la misma tarea: `find <base>/review -maxdepth 1 -type d -name '????-??-??-<slug>'`, que no falla en zsh si no hay ninguna), sigue en esa.
 3. **El slug:** el de la convención de `AGENTS.md`; si no hay, el de la tarea que revisas (el mismo de su fila de `hb-implement` en el índice), `pr-<número>` para un PR, o el título del cambio en minúsculas con guiones. Sin `|` ni `/`.
 
 ## `review.md`
