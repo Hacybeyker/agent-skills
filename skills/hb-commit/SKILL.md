@@ -1,11 +1,11 @@
 ---
 name: hb-commit
-description: 'Crea commits, hace push, abre PRs y limpia ramas siguiendo las reglas git del proyecto (AGENTS.md): Conventional Commits sin emoji por defecto y en el idioma del proyecto. Úsala cuando el usuario pida hacer un commit o solo el mensaje, subir cambios, crear o actualizar un pull request, o limpiar ramas ("haz commit", "commitea", "dame el mensaje del commit", "sube los cambios", "crea el PR", "limpia las ramas", "commit", "push", "pull request", "/hb-commit").'
+description: 'Crea commits, hace push, abre PRs y limpia ramas siguiendo las reglas git del proyecto (AGENTS.md): Conventional Commits sin emoji por defecto y en el idioma del proyecto. Con varios repos, commitea por repo y ordena los PR (el del módulo, su release y el bump en la app), sin la configuración local ni los cambios temporales de la tarea. Úsala cuando el usuario pida hacer un commit o solo el mensaje, subir cambios, crear o actualizar un pull request, o limpiar ramas ("haz commit", "commitea", "dame el mensaje del commit", "sube los cambios", "crea el PR", "limpia las ramas", "commit", "push", "pull request", "/hb-commit").'
 license: MIT
 allowed-tools: Bash
 metadata:
   author: hacybeyker
-  version: "1.0.0"
+  version: "1.1.0"
   category: flow
   origin: "basada en git-commit (comunidad)"
 ---
@@ -24,6 +24,17 @@ Antes de tocar git, busca en `AGENTS.md` (y en `CLAUDE.md` si existe) lo que dig
 - **Formato e idioma** de los mensajes.
 - **Verificaciones antes de commit** (por ejemplo `./gradlew formatAndAnalyze`, `npm test`). Córrelas; si fallan, no commitees y reporta.
 - **Ramas y aprobaciones:** rama principal, si se trabaja con PR, si hay que pedir permiso antes de `git push`.
+
+**Modelo de estructura.** Lee `## Estructura` de `AGENTS.md` y, si no existe, `### Repos relacionados` de `## Arquitectura` (el formato anterior). De ahí salen las unidades (su identificador, dónde está su fuente, cómo se consume, cómo pasarla a fuente y volver, su DoD, su repo y rama principal, y quién la publica y versiona), las variantes y entornos, el cliente HTTP, la configuración local modificada a propósito (no es un cambio ajeno, no se revisa como hallazgo y nunca se propone para commit), la línea `Repos vecinos` y la tabla "Documentos": lee solo los documentos cuya fila "Léelo cuando…" corresponde a la tarea, por su ruta exacta. Si lo que encuentras no coincide con el modelo, dilo en la entrega con la corrección; `hb-implement` y `hb-performance` la aplican en `## Estructura`, sobre la ruta real de `AGENTS.md` (`realpath AGENTS.md`). Sin modelo, sigue con lo que haya y ofrece `hb-setup`.
+
+Antes de commitear, junta:
+
+- **Los repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios; si la tarea viene de `hb-implement`, los de `repos` en su meta. Sin modelo, el repo actual.
+- **Lo que nunca entra en un commit**, aunque `git status` lo muestre modificado:
+  - la configuración local modificada a propósito (su subsección de `## Estructura`);
+  - los cambios temporales de la tarea: `temporary` del meta de `hb-implement` (`<base>/implementation/<fecha>-<slug>/meta.json`, donde `<base>` es la línea `Carpeta de reportes:`, por defecto `reports`; la fila de la tarea en `<base>/INDEX.md` lleva a su carpeta) o la lista "cambios temporales" de su entrega. Sus rutas son relativas al repo principal; las de un repo vecino van como `<nombre>:<ruta>`.
+
+  No son cambios ajenos: no preguntes por ellos ni los propongas para commit. Al final, nómbralos en una línea ("quedan fuera a propósito").
 
 ## 2. Formato del mensaje
 
@@ -62,9 +73,9 @@ Si el proyecto no define otro, usa **Conventional Commits sin emoji**:
 
 ## 3. Hacer el commit
 
-1. Mira el estado: `git status --porcelain`, `git diff --staged` y `git diff`.
-2. **Agrupa por unidad funcional, no por archivo.** Un commit = algo que funciona por sí solo (una capa, un sub-objetivo, un fix) y que compila y pasa las verificaciones. Si los cambios mezclan varias unidades, propón cómo dividirlos antes de commitear.
-3. Agrega archivos concretos (`git add <rutas>`, o `git add -p` para separar). Evita `git add -A` sin revisar. **Nunca** agregues secretos: `.env`, keystores, credenciales, `local.properties`.
+1. Mira el estado de **cada repo de la tarea**: `git status --porcelain`, `git diff --staged` y `git diff` (en un repo vecino, con `git -C <repo>`).
+2. **Agrupa por unidad funcional, no por archivo.** Un commit = algo que funciona por sí solo (una capa, un sub-objetivo, un fix) y que compila y pasa las verificaciones. Si los cambios mezclan varias unidades funcionales, propón cómo dividirlos antes de commitear. **Cada repo lleva sus propios commits:** uno nunca junta archivos de dos repos.
+3. Agrega archivos concretos (`git add <rutas>`, o `git add -p` para separar). **Nunca** agregues secretos (`.env`, keystores, credenciales, `local.properties` y lo que marque `## Seguridad`), la configuración local modificada a propósito ni los cambios temporales de la tarea; si uno de esos archivos trae además cambios de la tarea, agrega solo esos con `git add -p`. Nada de `git add -A`, `git add .` ni `git commit -a` sin revisar antes esas listas. Antes de commitear, comprueba que ninguno quedó en `git diff --staged --name-only`.
 4. Si el proyecto lleva un `CHANGELOG.md` con `[Unreleased]` y el cambio aún no tiene su entrada, agrégala en el mismo commit (ver sección 4).
 5. Commitea con heredoc para conservar el formato:
    ```bash
@@ -99,7 +110,8 @@ Usa el idioma y el estilo del archivo. Una línea por cambio, en lenguaje claro.
 ## 5. Push y pull request
 
 - **Pide confirmación antes de `git push`**, salvo que el usuario ya lo haya pedido en este mismo mensaje.
-- Si el proyecto trabaja con PR, no hagas push a la rama principal: crea una rama de vida corta `<type>/<issue>-<descripcion>` (`feat/123-login-biometrico`, o sin número si no hay issue).
+- **Rama:** la convención de `## Git`. Si no fija ninguna y el proyecto trabaja con PR, no hagas push a la rama principal: crea una rama de vida corta `<type>/<issue>-<descripcion>` (`feat/123-login-biometrico`, o sin número si no hay issue). Si ya estás en una rama de trabajo (por ejemplo, la que creó `hb-implement`), sigue en ella. Con varios repos, la misma rama en cada repo que la tarea modifica.
+- **Sin crear ramas:** con `Repos vecinos: no clonar ni crear ramas` en `## Estructura`, o si `## Git` dice que la IA no cambia de rama, no crees ninguna en ningún repo de la tarea: propón el comando y sigue. Si eso te deja en la rama principal de un proyecto que integra por PR, no hagas push ahí: dilo.
 - **PRs pequeños y de un solo propósito.** Si superan unas 400 líneas cambiadas o mezclan objetivos, propón dividirlos.
 - **El título del PR sigue Conventional Commits**: al hacer *squash and merge* se convierte en el commit de la rama principal. Usa *squash and merge* salvo que el proyecto diga otra cosa.
 - Si aún no está listo para revisión, ábrelo como borrador (`--draft`).
@@ -122,6 +134,19 @@ Usa el idioma y el estilo del archivo. Una línea por cambio, en lenguaje claro.
   )"
   ```
 - Para actualizar un PR, haz push a la misma rama. Para ver su estado: `gh pr view` / `gh pr checks`.
+
+### Varios repos: un PR por repo, en orden
+
+Cada repo de la tarea lleva su PR. Por cada **unidad publicada** que cambió (en el modelo, "Cómo se consume" dice `Publicada: …`), el orden es:
+
+1. **PR del módulo**, en el repo de la unidad.
+2. **Release del módulo**, con `hb-release` en su repo, cuando su PR esté integrado. Quién publica y versiona lo dice la columna "Publica y versiona".
+3. **PR de bump en la app:** sube la versión fijada (en el archivo que nombra "Cómo se consume") a la recién publicada. Los cambios de la app que necesitan esa versión van en este PR, nunca antes del release. Lo propone `hb-release` al terminar.
+
+- **La configuración que pasa a fuente no se commitea**, ni en el PR del módulo ni en el de bump: el bump cambia solo la versión fijada.
+- Una unidad que la app compila siempre en fuente no tiene release ni bump: su PR va antes que el de la app que la usa (o es el mismo, si viven en el mismo repo).
+- Cada PR enlaza los demás: el del módulo dice qué cambio de la app lo espera; el de bump, el PR y la versión del módulo.
+- Haz ahora solo lo que se puede hacer ahora (casi siempre, el paso 1) y deja los demás como pendientes en la entrega, en su orden.
 
 ## 6. Limpiar ramas
 
