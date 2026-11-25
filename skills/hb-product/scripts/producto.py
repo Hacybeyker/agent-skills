@@ -485,6 +485,38 @@ class Registro:
         uno que reúna uno suyo o uno con la mayoría de sus fuentes de la demanda)."""
         return bool(fuente.get("acumulado")) and "demanda" in self.reglas(hallazgo)
 
+    def hasta_peldano(self, hallazgo, peldano, reglas=None):
+        """La triangulación y la confianza de un hallazgo contando solo sus fuentes a favor vigentes (sin datos
+        acumulados) de ese peldaño o de uno más cercano, o None si no tiene ninguna: la base de `evaluar`, que se queda
+        con el mejor peldaño, y de `para_subir`, que mira el peldaño que permite el nivel buscado. `reglas`: las líneas
+        cuyas reglas sigue, si ya se calcularon."""
+        reglas = self.reglas(hallazgo) if reglas is None else reglas
+        minimo = int(self.criterios["fuentes_minimas"])
+        exige = next((linea for linea in reglas if linea in EXIGEN_MEDIDO), None)
+        basta_oficial = any(linea in BASTA_OFICIAL for linea in reglas)
+        grupos = {}
+        for fuente in self.fuentes_de(hallazgo.get("fuentes", [])):
+            if fuente["peldano"] <= peldano and self.vigente(fuente) and not self.acumulada(hallazgo, fuente):
+                grupos.setdefault(independencia(fuente), []).append(fuente)
+        if not grupos:
+            return None
+        cantidad = len(grupos)
+        fuertes = sum(1 for grupo in grupos.values() if any(f["tipo"] != "opinion" for f in grupo))
+        medido = any(f["tipo"] == "medido" for grupo in grupos.values() for f in grupo)
+        reciente = any(self.reciente(f) for grupo in grupos.values() for f in grupo)
+        oficiales = [f["id"] for grupo in grupos.values() for f in grupo if f["tipo"] == "oficial"]
+        por_oficial = basta_oficial and bool(oficiales)
+        triangulado = (cantidad >= minimo and (medido or not exige) and reciente) or por_oficial
+        if (triangulado and fuertes >= 2) or por_oficial:
+            nivel = 3
+        elif cantidad >= 2 and (fuertes >= 1 or cantidad >= minimo):
+            nivel = 2
+        else:
+            nivel = 1
+        return {"nivel": min(nivel, PELDANOS[peldano][1]), "triangulado": triangulado, "peldano": peldano,
+                "independientes": cantidad, "fuertes": fuertes, "medido": medido, "reciente": reciente,
+                "oficial": oficiales if por_oficial else [], "exige": exige}
+
     def evaluar(self, hallazgo):
         """La confianza de un hallazgo y su triangulación (reglas 2 y 3), con una sola regla de vigencia: las fuentes
         sin fecha o fuera de la ventana no cuentan para ninguna de las dos. Un hallazgo que solo tiene fuentes así queda
@@ -492,33 +524,18 @@ class Registro:
         fuente oficial y vigente basta sola: es la norma misma."""
         favor = self.fuentes_de(hallazgo.get("fuentes", []))
         minimo = int(self.criterios["fuentes_minimas"])
-        exige = next((linea for linea in self.reglas(hallazgo) if linea in EXIGEN_MEDIDO), None)
-        basta_oficial = any(linea in BASTA_OFICIAL for linea in self.reglas(hallazgo))
+        reglas = self.reglas(hallazgo)
+        exige = next((linea for linea in reglas if linea in EXIGEN_MEDIDO), None)
+        basta_oficial = any(linea in BASTA_OFICIAL for linea in reglas)
         mejor = None
         for peldano in range(1, 7):
-            grupos = {}
-            for fuente in favor:
-                if fuente["peldano"] <= peldano and self.vigente(fuente) and not self.acumulada(hallazgo, fuente):
-                    grupos.setdefault(independencia(fuente), []).append(fuente)
-            if not grupos:
+            hasta = self.hasta_peldano(hallazgo, peldano, reglas)
+            if hasta is None:
                 continue
-            cantidad = len(grupos)
-            fuertes = sum(1 for grupo in grupos.values() if any(f["tipo"] != "opinion" for f in grupo))
-            medido = any(f["tipo"] == "medido" for grupo in grupos.values() for f in grupo)
-            reciente = any(self.reciente(f) for grupo in grupos.values() for f in grupo)
-            oficiales = [f["id"] for grupo in grupos.values() for f in grupo if f["tipo"] == "oficial"]
-            por_oficial = basta_oficial and bool(oficiales)
-            triangulado = (cantidad >= minimo and (medido or not exige) and reciente) or por_oficial
-            if (triangulado and fuertes >= 2) or por_oficial:
-                nivel = 3
-            elif cantidad >= 2 and (fuertes >= 1 or cantidad >= minimo):
-                nivel = 2
-            else:
-                nivel = 1
-            nivel = min(nivel, PELDANOS[peldano][1])
+            nivel, triangulado = hasta["nivel"], hasta["triangulado"]
             if mejor is None or (nivel, triangulado) > (mejor["nivel"], mejor["triangulado"]):
-                mejor = {"nivel": nivel, "triangulado": triangulado, "peldano": peldano, "independientes": cantidad,
-                         "medido": medido, "reciente": reciente, "oficial": oficiales if por_oficial else []}
+                mejor = {clave: hasta[clave] for clave in ("nivel", "triangulado", "peldano", "independientes",
+                                                           "medido", "reciente", "oficial")}
         no_vigentes = [f["id"] for f in favor if not self.vigente(f)]
         acumuladas = [f["id"] for f in favor if self.vigente(f) and self.acumulada(hallazgo, f)]
         if mejor is None:
@@ -560,6 +577,77 @@ class Registro:
                      no_vigentes=no_vigentes, acumuladas=acumuladas, faltan=faltan, sin_busqueda=sin_busqueda,
                      confianza=NIVELES[nivel])
         return mejor
+
+    def para_subir(self, hallazgo, objetivo=None):
+        """Lo que le falta a un hallazgo para llegar a una confianza (por defecto, la siguiente), con la regla de
+        `evaluar` (feedback #70): [(clase, texto)], donde clase es 'manual', 'contra' o 'peldano' (lo que triangular no
+        resuelve) o 'fuentes' (las que faltan en el peldaño que permite ese nivel). [] si ya llega. Los extractos de
+        búsqueda cuentan para la confianza como cualquier fuente, así que no aparecen aquí."""
+        evaluacion = self.evaluar(hallazgo)
+        objetivo = min(3, evaluacion["nivel"] + 1) if objetivo is None else objetivo
+        if evaluacion["nivel"] >= objetivo:
+            return []
+        faltan = []
+        manual = hallazgo.get("confianza_manual")
+        if manual and NIVELES.index(manual["nivel"]) < objetivo:
+            faltan.append(("manual", "la confianza está bajada a mano a %s" % manual["nivel"]))
+        contra = evaluacion["contra"]
+        base = objetivo + (1 if contra else 0)  # la evidencia en contra le baja un nivel a la que dan las fuentes
+        if contra:
+            faltan.append(("contra", "%s en contra le baja un nivel%s" % (
+                plural(contra, "fuente independiente", "fuentes independientes"),
+                ": no llega a alta mientras pese" if base > 3 else ", así que para %s necesita confianza %s en las "
+                "fuentes a favor" % (NIVELES[objetivo], NIVELES[base]))))
+            base = min(base, 3)
+        peldano = max(p for p in PELDANOS if PELDANOS[p][1] >= base)  # el más lejano que permite ese nivel
+        cercanos = "1 o 2" if peldano == 2 else "1 a %d" % peldano
+        if PELDANOS[evaluacion["peldano"]][1] < base:
+            faltan.append(("peldano", "el peldaño %d, %s, llega como mucho a confianza %s: %s pide fuentes de peldaño "
+                                      "%s" % (evaluacion["peldano"], PELDANOS[evaluacion["peldano"]][0],
+                                              NIVELES[PELDANOS[evaluacion["peldano"]][1]], NIVELES[base], cercanos)))
+        hasta = self.hasta_peldano(hallazgo, peldano) or {"independientes": 0, "fuertes": 0, "medido": False,
+                                                          "reciente": False, "triangulado": False, "oficial": []}
+        exige = next((linea for linea in self.reglas(hallazgo) if linea in EXIGEN_MEDIDO), None)
+        lejanas = any(f["peldano"] > peldano and self.vigente(f) for f in self.fuentes_de(hallazgo.get("fuentes", [])))
+        de_peldano = " de peldaño %s" % cercanos if lejanas else ""
+        minimo = int(self.criterios["fuentes_minimas"])
+        cantidad, fuertes = hasta["independientes"], hasta["fuertes"]
+        meses = self.criterios["vigencia_meses"]
+        if base == 3 and not hasta["oficial"]:  # alta: triangulado y con 2 fuentes que no son solo opinión
+            medido = exige and not hasta["medido"] and not hasta["triangulado"]
+            reciente = cantidad and not hasta["reciente"] and not hasta["triangulado"]
+            if cantidad < minimo:
+                con = (["una de tipo medido"] if medido else []) + (["una de los últimos %s meses" % meses]
+                                                                    if reciente else []) + (
+                    ["al menos 2 en total que no sean solo opinión (tiene %d)" % fuertes] if fuertes < 2 else [])
+                faltan.append(("fuentes", "%s %s%s (tiene %d de %d)%s" % (
+                    "falta" if minimo - cantidad == 1 else "faltan", plural(
+                        minimo - cantidad, "fuente independiente y vigente", "fuentes independientes y vigentes"),
+                    de_peldano, cantidad, minimo, ", con %s" % y_lista(con) if con else "")))
+            else:
+                if medido:
+                    faltan.append(("fuentes", "falta una fuente de tipo medido%s (línea %s)" % (de_peldano, exige)))
+                if reciente:
+                    faltan.append(("fuentes", "falta una fuente%s de los últimos %s meses" % (de_peldano, meses)))
+                if fuertes < 2:
+                    faltan.append(("fuentes", "falta%s %s que no %s solo opinión (tiene %d de 2)" % (
+                        "" if fuertes == 1 else "n", plural(2 - fuertes, "fuente independiente",
+                                                            "fuentes independientes"),
+                        "sea" if fuertes == 1 else "sean", fuertes)))
+        elif base == 2 and cantidad < 2:
+            faltan.append(("fuentes", "%s %s%s (tiene %d de 2)" % (
+                "falta" if cantidad == 1 else "faltan", plural(2 - cantidad, "fuente independiente y vigente",
+                                                               "fuentes independientes y vigentes"), de_peldano,
+                cantidad)))
+        elif base == 2 and fuertes < 1 and cantidad < minimo:
+            faltan.append(("fuentes", "falta una fuente que no sea solo opinión, o llegar a %d fuentes independientes"
+                           % minimo))
+        elif base == 1 and not cantidad:
+            faltan.append(("fuentes", "falta una fuente vigente a favor"))
+        if contra and contra >= max(cantidad, minimo):  # con tantas en contra como a favor, queda en baja
+            faltan.append(("contra", "más fuentes independientes a favor que en contra (tiene %d a favor y %d en "
+                                     "contra)" % (cantidad, contra)))
+        return faltan
 
     def etiqueta(self, hallazgo):
         """'confianza media · sin triangular': la confianza siempre con su triangulación, para que nunca se lean por
@@ -2409,8 +2497,9 @@ def que_fortalecer(registro, impide):
         bajos = [registro.hallazgos[i] for i in fila["hallazgos"] if i in registro.hallazgos
                  and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
         if bajos:
-            partes.append("%s, triangulando %s" % (fila["id"], "; ".join(falta_triangular(registro, h, "3")
-                                                                        for h in bajos)))
+            partes.append("%s, %s %s" % (fila["id"], {"Triangular": "triangulando"}.get(
+                subir_o_triangular(registro, bajos), "llevando a confianza media"), "; ".join(
+                    falta_confianza(registro, h, "3") for h in bajos)))
             ids += [h["id"] for h in bajos]
         else:
             partes.append("%s, con evidencia a favor nueva que la sostenga frente a lo que tiene en contra (sus "
@@ -2497,6 +2586,53 @@ def falta_triangular(registro, hallazgo, sesion=None):
     return "%s (%s)" % (hallazgo["id"], detalle) if detalle else hallazgo["id"]
 
 
+def detalle_confianza(registro, hallazgo, objetivo=None):
+    """Lo que le falta a un hallazgo para llegar a una confianza (por defecto, la siguiente), la misma lógica en
+    `triangulacion` y en «Qué cambiaría» (feedback #70): a uno sin triangular, lo que le falta para triangular (regla 2)
+    más lo que triangular no resuelve (la evidencia en contra, un peldaño lejano, una confianza bajada a mano); a uno ya
+    triangulado, todo lo que le falta para subir. [] si ya llega."""
+    evaluacion = registro.evaluar(hallazgo)
+    faltan = registro.para_subir(hallazgo, objetivo)
+    if evaluacion["triangulado"]:
+        return [texto for _, texto in faltan]
+    return [f for f in evaluacion["faltan"] if not f.startswith("o una sola fuente oficial")] + [
+        texto for clase, texto in faltan if clase != "fuentes"]
+
+
+def falta_confianza(registro, hallazgo, sesion=None, objetivo=2):
+    """'H-DEM-4 (faltan 2 fuentes independientes y vigentes, tiene 1 de 3)' para uno sin triangular, como
+    `falta_triangular`, o 'H-DEM-1 (ya triangulado, en confianza baja: …)' para uno ya triangulado que no llega a esa
+    confianza por otro motivo (feedback #70). Con la sesión que lo completaría, si el hallazgo es de otra."""
+    detalle = "; ".join(re.sub(r" \((tiene \d+(?: de \d+)?)\)", r", \1", f)
+                        for f in detalle_confianza(registro, hallazgo, objetivo))
+    evaluacion = registro.evaluar(hallazgo)
+    if evaluacion["triangulado"]:
+        detalle = "ya triangulado, en confianza %s: %s" % (evaluacion["confianza"], detalle) if detalle else \
+            "ya triangulado"
+    duena = LINEAS.get(hallazgo["linea"], ("", sesion))[1]
+    if sesion and duena != sesion:
+        detalle = "de la %s: %s" % (duena, detalle) if detalle else "de la %s" % duena
+    return "%s (%s)" % (hallazgo["id"], detalle) if detalle else hallazgo["id"]
+
+
+def subir_o_triangular(registro, hallazgos, objetivo=2):
+    """'Triangular' si ninguno de esos hallazgos está triangulado; si alguno ya lo está, 'Subir a confianza media'
+    (feedback #70): pedir triangular lo que ya está triangulado no dice lo que falta."""
+    if any(registro.evaluar(h)["triangulado"] for h in hallazgos):
+        return "Subir a confianza %s" % NIVELES[objetivo]
+    return "Triangular"
+
+
+def confirmar_criterio(registro, criterio, ids):
+    """Qué cambiaría una confianza global baja: confirmar con 3 fuentes recientes los hallazgos del criterio más débil
+    o, si alguno ya está triangulado y sigue en baja por otro motivo, subirlos a confianza media (feedback #70)."""
+    hallazgos = [registro.hallazgos[i] for i in ids if i in registro.hallazgos]
+    if subir_o_triangular(registro, hallazgos) == "Triangular":
+        return "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio]
+    return "Subir a confianza media los hallazgos de %s que siguen en baja (%s): `triangulacion` dice qué le falta a " \
+           "cada uno" % (NOMBRES_CRITERIO[criterio], y_lista(h["id"] for h in hallazgos))
+
+
 def texto_reunir(registro, hallazgos, sesion):
     """El camino para fortalecer, desde la sesión que se reabre, hallazgos de otra sesión, ya cerrada (feedback #66):
     `hallazgo --id --fuentes` pide la sesión dueña abierta, así que va un hallazgo nuevo en la línea de la sesión
@@ -2538,10 +2674,10 @@ def motivo_demanda(numero_puerta, producto, registro):
              and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
     meses = producto["criterios"]["vigencia_meses"]
     if bajos:
-        falta = "Triangular %s en la 1c con una señal medida y reciente de demanda (tendencias de búsqueda, descargas " \
-                "o búsquedas de los últimos %s meses)%s" % ("; ".join(falta_triangular(registro, h, "1c")
-                                                                       for h in bajos[:3]), meses,
-                                                            texto_reunir(registro, bajos[:3], "1c"))
+        falta = "%s %s en la 1c con una señal medida y reciente de demanda (tendencias de búsqueda, descargas o " \
+                "búsquedas de los últimos %s meses)%s" % (subir_o_triangular(registro, bajos[:3]), "; ".join(
+                    falta_confianza(registro, h, "1c") for h in bajos[:3]), meses,
+                                                          texto_reunir(registro, bajos[:3], "1c"))
         alcance = {"hallazgos": [h["id"] for h in bajos[:3]]}  # los que nombra: lo que el ajuste resuelve (#57)
     else:
         falta = "Registrar en la 1c un hallazgo clave de demanda (`hallazgo --linea demanda --critico`) con %s " \
@@ -3023,7 +3159,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                 sesion = sesion_ajustable(1, sesion_de(registro, por_confirmar, "1g"), "1g")
             ajustes.append(("La confianza global es baja: %s se apoya%s en evidencia sin confirmar" % (
                 ", ".join(NOMBRES_CRITERIO[c] for _, c in debiles), "n" if len(debiles) > 1 else ""),
-                "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion, True,
+                confirmar_criterio(registro, criterio, por_confirmar), sesion, True,
                 alcance_hallazgos(por_confirmar)))
             hallazgos += ids
     de_propuesta = []  # una propuesta trae algo nuevo (un navegador, un dato): no es «ajustar otra vez lo mismo»
@@ -3037,12 +3173,13 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             if alcance:  # con alcance (feedback #58), la regla de #57: no cuenta solo si depende entero de los vacíos
                 bloqueo = bloqueo_herramienta(producto, registro, sesion, [(True, alcance, propuesta["texto"])])
                 if not (bloqueo and bloqueo["detener"]):
-                    de_propuesta.append((razon, "Aplicarla al ajustar la sesión %s (resuelve %s)" % (
-                        sesion, y_lista(alcance["hallazgos"])), sesion, True, alcance))
+                    de_propuesta.append((razon, "Aplicar la propuesta %s al ajustar la sesión %s (resuelve %s)" % (
+                        propuesta["id"], sesion, y_lista(alcance["hallazgos"])), sesion, True, alcance))
                     ajustes.append(de_propuesta[-1])
                     hallazgos += alcance["hallazgos"]
             elif not vacios_de_sesion(producto, registro, sesion):  # sin alcance, lo seguro: se puede cerrar
-                ajustes.append((razon, "Aplicarla al ajustar la sesión %s" % sesion, sesion, False, None))
+                ajustes.append((razon, "Aplicar la propuesta %s al ajustar la sesión %s" % (propuesta["id"], sesion), sesion,
+                                False, None))
     # La 1g que ya se reabrió y usó su presupuesto, y la 1c que ya se reabrió (feedback #55), no se recomiendan otra
     # vez para buscar más evidencia: si no queda ningún otro ajuste que lo resuelva, el veredicto es No viable.
     agotadas = {s: t for s, t in (("1g", presupuesto_agotado(producto, registro, "1g")),
@@ -3116,14 +3253,20 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                                               puntajes_por_modelo(producto, registro)[0])), None, None, False))
     razones = [motivo[0] for motivo in elegidas][:MAXIMO_RAZONES]
     cambiaria = list(dict.fromkeys(motivo[1] for motivo in cambios if motivo[1]))[:MAXIMO_RAZONES]
-    # Las otras sesiones del mismo grupo paralelo con un ajuste entre las razones que se muestran (feedback #65): se
-    # recomiendan junto con la primera (`sesion`, la de siempre), para no gastar una vuelta por sesión. No entra una ya
+    # Las otras sesiones del mismo grupo paralelo con un ajuste (feedback #65) se recomiendan junto con la primera
+    # (`sesion`, la de siempre), para no gastar una vuelta por sesión: todos los ajustes que la puerta considera, también
+    # los que quedan fuera de las razones que se muestran, como una propuesta con alcance (feedback #69). No entra una ya
     # reabierta sin salida (la 1g agotada, la 1c ya reabierta).
     sesiones = [sesion] if nivel == "reservas" else []
     if nivel == "reservas":
-        sesiones += [a[2] for a in elegidas[:MAXIMO_RAZONES] if a in ajustes and len(a) > 4 and a[2] != sesion
-                     and a[2] in grupo_paralelo(sesion) and a not in sin_salida]
+        sesiones += [a[2] for a in ajustes if a[2] != sesion and a[2] in grupo_paralelo(sesion) and a not in sin_salida]
         sesiones = sorted(set(sesiones), key=[x["id"] for x in SESIONES].index)  # «2 y 3», no «3 y 2»
+        mostradas = [a for a in elegidas[:MAXIMO_RAZONES] if a in ajustes]
+        for otra in sesiones:  # una sesión recomendada sin ninguna razón a la vista: «Qué cambiaría» dice por qué
+            if otra != sesion and not any(a[2] == otra for a in mostradas):
+                suyo = next(a for a in ajustes if a[2] == otra and a not in sin_salida)
+                cambiaria.append("A la vez, la %s (corre en paralelo con la %s; su ajuste no está entre las razones de "
+                                 "arriba): %s" % (otra, sesion, primera_minuscula(suyo[1])))
     # lo que el ajuste de cada sesión recomendada tiene que resolver (feedback #57): (si pide buscar, alcance, qué)
     por_sesion = {s: [(a[3], a[4], a[1]) for a in ajustes if len(a) > 4 and a[2] == s] for s in sesiones}
     por_resolver = por_sesion.get(sesion, [])
@@ -3149,6 +3292,11 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
 
 def primera_mayuscula(texto):
     return texto[:1].upper() + texto[1:]
+
+
+def primera_minuscula(texto):
+    """'Aplicar …' → 'aplicar …'; un ID o una sigla ('D-1 …', 'MVP …') quedan igual."""
+    return texto[:1].lower() + texto[1:] if texto[1:2].islower() else texto
 
 
 def texto_recomendacion(resultado):
@@ -5399,9 +5547,15 @@ def cmd_triangulacion(args):
             evaluacion["peldano"], PELDANOS[evaluacion["peldano"]][0], evaluacion["independientes"],
             producto["criterios"]["fuentes_minimas"], " · en contra: %d" % evaluacion["contra"]
             if evaluacion["contra"] else ""))
-        print("    %s" % hallazgo["texto"][:160])
+        print("    %s" % texto_corto(hallazgo["texto"], 160))
         for falta in evaluacion["faltan"]:
             print("    → %s" % falta)
+        subir = detalle_confianza(registro, hallazgo)  # lo que triangular no resuelve, o lo que le falta (#70)
+        subir = [f for f in subir if f not in evaluacion["faltan"]]
+        if subir and evaluacion["nivel"] < 3:
+            print("    ↑ %spara subir a confianza %s: %s" % (
+                "triangulado, pero " if evaluacion["triangulado"] else "además de triangular, ",
+                NIVELES[evaluacion["nivel"] + 1], "; ".join(subir)))
         if evaluacion["oficial"]:
             print("    · triangulado por la fuente oficial %s: en políticas, la norma misma basta" % ", ".join(
                 evaluacion["oficial"]))

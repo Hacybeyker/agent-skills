@@ -145,7 +145,7 @@ Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo,
 | `diferenciador` · `principal` · `frente` | Registra un diferenciador (`D-1`) y dice si es viable, viable con confianza baja, paridad o no viable: `--vector --texto --hallazgos --se-ve --copiable --motivo --semanas [--principal]` · elige el principal · registra si supera, iguala o no al rival: `--id --resultado supera\|iguala\|no --hallazgos --texto [--rival]`. Los tres, solo con la sesión 1g abierta |
 | `propuesta` | Deja un cambio a una sesión cerrada como propuesta para la puerta siguiente: `--texto [--ajustar <sesión>] [--hallazgos H-…]` |
 | `anular` | Anula una fuente, un hallazgo, un competidor o un diferenciador: deja de contar, sin borrarse |
-| `triangulacion` | Lista los hallazgos clave y lo que le falta a cada uno |
+| `triangulacion` | Lista los hallazgos clave y lo que le falta a cada uno para triangular y para subir de confianza |
 | `puntaje` | Total, confianza global y comparación con la puerta 1: `--valores d,m,f,r,x [--mitigacion] [--modelo "<base>" --alternativo "<modelo>=d,m,f,r,x"]` (el puntaje con cada modelo de monetización) |
 | `escenarios` | Casos pesimista, base y optimista, y usuarios activos diarios para la meta: `--entrada escenarios.json` (cada compra con `tipo`: el pago único va sobre las instalaciones nuevas del mes y la suscripción, sobre los usuarios del mes) |
 | `validacion` · `trazabilidad` | Revisan las tablas de `03-validacion.md` y de `04-prd.md` (esta calcula el RICE) |

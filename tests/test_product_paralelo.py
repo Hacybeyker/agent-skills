@@ -44,7 +44,7 @@ class ParaleloTest(Base):
         salida = self.puerta_2_y_3()
         self.assertIn("🟡  PUERTA 2 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 2 y 3", salida)
         self.assertIn("Ajustar la sesión 3, una sola vez, para fortalecer las hipótesis de D-1", salida)
-        self.assertIn("Aplicarla al ajustar la sesión 2", salida)
+        self.assertIn("Aplicar la propuesta PR-1 al ajustar la sesión 2", salida)
         self.assertIn("★ Recomendado · Ajustar 2 y 3: ", salida)
         self.assertIn("decidir --puerta 2 --ajustar 2 3 --carpeta", salida)
         paso = self.json()["pasos"][0]
@@ -73,10 +73,10 @@ class ParaleloTest(Base):
         self.assertEqual(decision["recomendacion"]["sesiones"], ["2", "3"])
         # lo que tiene que conseguir cada una: la 3, solo lo suyo
         self.assertTrue(decision["resolver_sesiones"]["3"][0].startswith("Ajustar la sesión 3, una sola vez"))
-        self.assertEqual(decision["resolver_sesiones"]["2"], ["Aplicarla al ajustar la sesión 2"])
+        self.assertEqual(decision["resolver_sesiones"]["2"], ["Aplicar la propuesta PR-1 al ajustar la sesión 2"])
         texto = producto.texto_sesion(self.carpeta, datos, "3")
         self.assertIn("Lo que tiene que conseguir, según la puerta: «Ajustar la sesión 3", texto)
-        self.assertNotIn("Aplicarla", texto)
+        self.assertNotIn("Aplicar la propuesta", texto)
         self.assertIn("ajustar las sesiones 2 y 3", (self.carpeta / "estado.md").read_text(encoding="utf-8"))
 
     def test_con_comas_tambien(self):

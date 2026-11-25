@@ -51,7 +51,7 @@ class PropuestaConAlcanceTest(veredicto.Base):
         salida = self.p("puerta", "--n", 2)
         self.assertIn("🟡  PUERTA 2 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1b", salida)
         self.assertIn("Hay una propuesta pendiente (PR-1): Releer las reseñas con un navegador", salida)
-        self.assertIn("Aplicarla al ajustar la sesión 1b (resuelve %s)" % self.voz, salida)
+        self.assertIn("Aplicar la propuesta PR-1 al ajustar la sesión 1b (resuelve %s)" % self.voz, salida)
         self.assertIn("→ se aplica con Ajustar 1b (resuelve %s)" % self.voz, salida)
         # el vacío queda como aviso: el ajuste no depende de él (la regla de #57)
         self.assertIn("pero el ajuste no depende de él (%s tiene fuentes de tienda google-play)" % self.voz, salida)

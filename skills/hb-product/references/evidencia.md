@@ -95,6 +95,8 @@ Después se aplican tres límites:
 2. **La evidencia en contra:** una fuente vigente en contra baja un nivel; si hay tantas en contra como a favor, queda en baja.
 3. **Tu criterio, solo hacia abajo:** `producto.py confianza --hallazgo H-… --bajar <media|baja> --motivo "<por qué>"`. Subirla no existe.
 
+Un hallazgo triangulado puede seguir en baja o en media por uno de esos límites, o por tener solo opinión. `triangulacion` lo dice debajo del hallazgo (`↑ triangulado, pero para subir a confianza media: …`), y a uno sin triangular le suma lo que triangular no resuelve (`↑ además de triangular, …`, por ejemplo un peldaño 6). «Qué cambiaría» de la puerta usa la misma regla: a un hallazgo ya triangulado no le pide triangular, sino lo que de verdad le falta (fuentes de un peldaño más cercano, fuentes que no sean solo opinión, más fuentes a favor que en contra). Los extractos de búsqueda cuentan para la confianza como cualquier fuente, así que no aparecen en esa lista.
+
 ## Sesgos que hay que nombrar
 
 Cuando uno aplica, se escribe en el entregable junto al hallazgo.
