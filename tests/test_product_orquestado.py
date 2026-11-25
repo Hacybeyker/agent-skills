@@ -199,7 +199,7 @@ class TipoProvisionalTest(Base):
         self.assertEqual(producto.a_revisar_por_tipo(self.datos(), producto.Registro(
             self.carpeta, self.datos()["criterios"])), [])
 
-    def test_el_problema_no_buscado_pide_ajustar_1c_y_el_buscado_sin_resultado_descarta(self):
+    def test_el_problema_no_buscado_pide_ajustar_1c_y_el_buscado_sin_resultado_tambien_una_vez(self):
         self.nueva_con_lineas(problema=False)
         self.p("puntaje", "--valores", "3,3,4,4,1")
         salida = self.cerrar("1f", "01-sintesis.md")
@@ -218,8 +218,17 @@ class TipoProvisionalTest(Base):
                                                   "--motivo", "presupuesto", "--texto", "x"))
         salida = self.cerrar("1f")
         self.assertIn("buscado: ningún hallazgo reúne 3 fuentes independientes y vigentes", salida)
+        # buscado sin resultado en la primera pasada de la 1c: se ajusta una vez (feedback #55)
+        self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1c", salida)
+        self.assertIn("Se buscó el problema en los peldaños 4 y 5 y ningún hallazgo reúne 3 fuentes independientes y "
+                      "vigentes (una de los últimos 18 meses), pero no hay evidencia en contra: es la primera pasada",
+                      salida)
+        self.p("decidir", "--puerta", 1, "--ajustar", "1c")
+        self.cerrar("1c")
+        salida = self.cerrar("1f")
         self.assertIn("🔴  PUERTA 1 · NO VIABLE", salida)
-        self.assertIn("Se buscó el problema en los peldaños 4 y 5", salida)
+        self.assertIn("Se buscó el problema en los peldaños 4 y 5, también al reabrir la 1c (reabierta una vez)",
+                      salida)
 
 
 # --- #32 · Conteo de hallazgos por peldaño -------------------------------------------------------------------------

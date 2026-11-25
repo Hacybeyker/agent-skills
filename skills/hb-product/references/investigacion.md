@@ -6,12 +6,19 @@ Cada línea es una sesión en su propio chat (o en su propio subagente) y pueden
 
 **Presupuesto por línea:** 15 búsquedas y 10 lecturas; 20 y 12 si la idea es nueva (`producto.py tipo` lo dice). **Cada reapertura** (un ajuste en una puerta) tiene su propio presupuesto, la mitad del original (8 y 5; 10 y 6 en una idea nueva): el texto para pegar lo dice, y `fuente` cuenta las lecturas de esa pasada. Al llegar al 80 %, dilo en el chat y cierra con lo que tienes; si te pasas, `cerrar` lo avisa y la síntesis y la puerta 1 lo muestran. Una lectura es una página abierta y resumida, no un resultado de búsqueda.
 
+**Extractos de búsqueda (`fuente --extracto`).** A veces el dato está entero en el extracto que muestra el buscador y no hace falta abrir la página. Regístralo con `--extracto`: no cuenta como lectura (ya cuenta la búsqueda que lo trajo), así `--lecturas` y el aviso del 80 % miden páginas abiertas, y la fuente queda marcada en el registro, en `triangulacion` y en el reporte. Para la confianza y la triangulación cuenta como cualquier fuente, así que úsalo solo cuando:
+
+- el dato es **puntual y verificable en el extracto**: una cifra con su fecha y su autor, el precio o la nota de una ficha, el título y la fecha de un artículo que dice lo que citas;
+- y el extracto trae la **fecha de publicación** (si no, `--publicada desconocida`, que no cuenta para la confianza).
+
+**Abre la página** (y regístrala sin `--extracto`) cuando el dato depende del contexto (una reseña, una opinión, un hilo), cuando el extracto está cortado o no muestra la fecha, cuando es una política (`--tipo oficial` no admite `--extracto`: la norma se lee en su página) o cuando el hallazgo es clave y es su única fuente de ese tipo. Si después abres una página que registraste como extracto, repite `fuente` con la misma URL y sin `--extracto`: pasa a contar como lectura en esa pasada.
+
 1. Primera línea: `Sesión 1c · Demanda (<motivo>)`.
 2. Lee `00-idea.md` y `criterios.md`. No leas los archivos de las otras líneas: están a medias.
 3. `producto.py tipo`: el tipo de idea y tu presupuesto. La sesión 0 deja un tipo provisional antes de abrir las líneas y la 1a lo confirma; trabaja con él desde el inicio (si es nueva, por analogía: [analogia.md](analogia.md)). Vuelve a consultarlo antes de cerrar: si cambió y tu línea no tiene fuentes de los peldaños que pide el tipo nuevo, la puerta la marca "a revisar por cambio de tipo" y recomienda ajustarla.
 4. `producto.py cobertura --linea <tu línea>`: los mercados, idiomas y tiendas que te tocan. Busca según la tabla de tu línea **en cada uno**, no solo en el que más resultados da.
 5. Por cada página útil, `producto.py fuente` con la cobertura que aporta (`--mercados`, `--idiomas`, `--tiendas`). Nunca copies la página: 3 líneas en `--resumen`.
-6. Cuando una afirmación tiene sus fuentes, `producto.py hallazgo`; los que sostienen el puntaje o una puerta llevan `--critico`.
+6. Cuando una afirmación tiene sus fuentes, `producto.py hallazgo`; los que sostienen el puntaje o una puerta llevan `--critico`. Si después encuentras otra fuente para un hallazgo tuyo, súmala con `producto.py hallazgo --id H-… --fuentes S-…` (mismo ID, la confianza se recalcula; solo con tu sesión abierta).
 7. **Abogado del diablo:** por cada hallazgo clave, una búsqueda en contra, registrada con `--en-contra` o `--sin-contra`.
 8. Lo que quedó sin fuentes, regístralo como vacío con su motivo (`producto.py vacio`, abajo). La línea no cierra con huecos sin registrar.
 9. Completa tu `.md` con los IDs, tu lectura y la salida de `cobertura`. Lo que no tiene fuente va en "⚠ Sin evidencia". Tus notas para las otras sesiones van en "Para la síntesis", no en `estado.md`.

@@ -115,12 +115,13 @@ class ParaProbarTest(Base):
         self.assertNotIn("PARA PROBAR", salida)
         self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1g", salida)
 
-    def test_con_la_demanda_baja_sigue_no_viable(self):
+    def test_con_la_demanda_baja_no_es_para_probar_y_pide_ajustar_1c(self):
+        # sin evidencia en contra y en la primera pasada de la 1c, la demanda baja se ajusta (feedback #55)
         self.hasta_1g()
         self.p("confianza", "--hallazgo", "H-DEM-1", "--bajar", "baja", "--motivo", "Las fuentes se contradicen")
         media = self.comparacion_media()
         salida = self.puerta1("--resultado", "supera", "--hallazgos", media, "--texto", "Turnos sin suscripción")
-        self.assertIn("🔴  PUERTA 1 · NO VIABLE", salida)
+        self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1c", salida)
         self.assertNotIn("PARA PROBAR", salida)
 
     def test_con_un_principal_en_paridad_recomienda_elegir_el_que_se_puede_probar(self):
