@@ -1917,9 +1917,10 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
                               numero(escenarios["base"]), numero(meta), producto["criterios"]["moneda"],
                               numero(escenarios["dau_meta"]) if escenarios.get("dau_meta") else "—"))
     for propuesta in propuestas_de(producto, numero_puerta):
-        avisos.append("· Propuesta %s (sesión %s): %s%s" % (
+        avisos.append("· Propuesta %s (sesión %s): %s%s%s" % (
             propuesta["id"], propuesta.get("sesion") or "?", propuesta["texto"],
-            " → se aplica con Ajustar %s" % propuesta["ajustar"] if propuesta.get("ajustar") else ""))
+            " → se aplica con Ajustar %s" % propuesta["ajustar"] if propuesta.get("ajustar") else "",
+            " (resuelve %s)" % y_lista(propuesta["hallazgos"]) if propuesta.get("hallazgos") else ""))
     return avisos
 
 
@@ -2147,7 +2148,7 @@ def registrar_pasada(producto, sesion, uso):
     """Anota lo que usó una línea en esta pasada (`cerrar --busquedas --lecturas`) con el presupuesto de la pasada: el
     original la primera vez y la mitad en cada reapertura (feedback #34). `uso` queda como la suma de las pasadas."""
     datos = producto["sesiones"].setdefault(sesion, {})
-    reapertura = int(datos.get("reaperturas") or (1 if datos.get("reabierta") else 0))
+    reapertura = pasada_vigente(producto, sesion)
     pasadas = datos.setdefault("pasadas", [])
     if not pasadas and datos.get("uso") and reapertura:  # un registro anterior: el uso de la primera pasada
         pasadas.append(dict(datos["uso"], reapertura=0, presupuesto=presupuesto_de(producto)))
@@ -2719,17 +2720,28 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                 "Confirmar con 3 fuentes recientes los hallazgos de %s" % NOMBRES_CRITERIO[criterio], sesion, True,
                 alcance_hallazgos(por_confirmar)))
             hallazgos += ids
+    de_propuesta = []  # una propuesta trae algo nuevo (un navegador, un dato): no es «ajustar otra vez lo mismo»
     if not fatales:
         for propuesta in propuestas_de(producto, numero_puerta):
             sesion = propuesta.get("ajustar")
-            if sesion and not vacios_de_sesion(producto, registro, sesion):  # se puede cerrar
-                ajustes.append(("Hay una propuesta pendiente (%s): %s" % (propuesta["id"], llano(propuesta["texto"])),
-                                "Aplicarla al ajustar la sesión %s" % sesion, sesion, False, None))
+            if not sesion:
+                continue
+            razon = "Hay una propuesta pendiente (%s): %s" % (propuesta["id"], llano(propuesta["texto"]))
+            alcance = alcance_hallazgos(propuesta.get("hallazgos") or [])
+            if alcance:  # con alcance (feedback #58), la regla de #57: no cuenta solo si depende entero de los vacíos
+                bloqueo = bloqueo_herramienta(producto, registro, sesion, [(True, alcance, propuesta["texto"])])
+                if not (bloqueo and bloqueo["detener"]):
+                    de_propuesta.append((razon, "Aplicarla al ajustar la sesión %s (resuelve %s)" % (
+                        sesion, y_lista(alcance["hallazgos"])), sesion, True, alcance))
+                    ajustes.append(de_propuesta[-1])
+                    hallazgos += alcance["hallazgos"]
+            elif not vacios_de_sesion(producto, registro, sesion):  # sin alcance, lo seguro: se puede cerrar
+                ajustes.append((razon, "Aplicarla al ajustar la sesión %s" % sesion, sesion, False, None))
     # La 1g que ya se reabrió y usó su presupuesto, y la 1c que ya se reabrió (feedback #55), no se recomiendan otra
     # vez para buscar más evidencia: si no queda ningún otro ajuste que lo resuelva, el veredicto es No viable.
     agotadas = {s: t for s, t in (("1g", presupuesto_agotado(producto, registro, "1g")),
                                   ("1c", reapertura_gastada(producto, "1c"))) if t}
-    sin_salida = [a for a in ajustes if a[2] in agotadas and a[3]]
+    sin_salida = [a for a in ajustes if a[2] in agotadas and a[3] and a not in de_propuesta]
     if not fatales and sin_salida:
         posibles = [a for a in ajustes if a not in sin_salida]
         if posibles:
@@ -3132,13 +3144,55 @@ def pasos(carpeta, producto, registro):
     return lineas
 
 
+def pasada_vigente(producto, sesion):
+    """La pasada en curso o la última de una sesión: 0 la primera y n la reapertura n (feedback #34 y #59)."""
+    datos = producto["sesiones"].get(sesion) or {}
+    return int(datos.get("reaperturas") or (1 if datos.get("reabierta") else 0))
+
+
+def pasada_de(fila):
+    """La pasada de una fila de consumo: una fila anotada antes de #59, sin pasada, es la primera."""
+    return int(fila.get("pasada") or 0)
+
+
+def nombre_pasada(sesion, pasada):
+    """'1c' para la primera pasada y '1c (reapertura 1)' para una reapertura."""
+    return "%s (reapertura %d)" % (sesion, pasada) if pasada else sesion
+
+
+def nombre_consumo(fila):
+    return "orquestador" if fila["sesion"] == "orquestador" else nombre_pasada(fila["sesion"], pasada_de(fila))
+
+
+def cubre(fila, solo_incluye=False):
+    """Las pasadas que cubre una fila de consumo, {(sesión, pasada)}: la suya (si es de una sesión) y las de
+    --incluye. Una sesión de --incluye sin pasadas anotadas (`pasadas_incluye`, antes de #59) es la primera."""
+    pares = set() if solo_incluye or fila["sesion"] == "orquestador" else {(fila["sesion"], pasada_de(fila))}
+    extra = fila.get("pasadas_incluye") or {}
+    for sesion in fila.get("incluye") or []:
+        pares.update((sesion, int(p)) for p in extra.get(sesion) or [0])
+    return pares
+
+
+def pasadas_cerradas(producto):
+    """Las pasadas cerradas de cada sesión, [(sesión, pasada)]: las anteriores a una reapertura (solo se reabre lo
+    cerrado) y la vigente si volvió a cerrar (feedback #59)."""
+    resultado = []
+    for sesion in SESIONES:
+        vigente_ = pasada_vigente(producto, sesion["id"])
+        resultado += [(sesion["id"], p) for p in range(vigente_)]
+        if cerrada(producto, sesion["id"]):
+            resultado.append((sesion["id"], vigente_))
+    return resultado
+
+
 def sin_consumo(producto):
-    """Las sesiones cerradas que no tienen su consumo anotado (ni lo cubre una fila con --incluye)."""
+    """Las pasadas cerradas que no tienen su consumo anotado (ni las cubre una fila con --incluye): '1c' para la
+    primera pasada y '1c (reapertura 1)' para una reapertura (feedback #59)."""
     anotadas = set()
     for fila in producto.get("consumo", []):
-        anotadas.add(fila["sesion"])
-        anotadas.update(fila.get("incluye", []))
-    return [s["id"] for s in SESIONES if cerrada(producto, s["id"]) and s["id"] not in anotadas]
+        anotadas |= cubre(fila)
+    return [nombre_pasada(s, p) for s, p in pasadas_cerradas(producto) if (s, p) not in anotadas]
 
 
 def texto_sesiones(sesiones):
@@ -3160,9 +3214,12 @@ def texto_siguiente(carpeta, producto, registro=None):
 def sin_orquestador(producto):
     """Las sesiones cerradas que ningún chat orquestador anotó todavía (`consumo --sesion orquestador --incluye`) y
     que no tienen su propio costo en USD: las que puede haber corrido el chat orquestador de ahora (feedback #46)."""
-    cubiertas = {s for f in producto.get("consumo") or [] if f["sesion"] == "orquestador" for s in f.get("incluye") or []}
-    con_usd = {f["sesion"] for f in producto.get("consumo") or [] if f["sesion"] != "orquestador" and con_costo(f)}
-    return [s["id"] for s in SESIONES if cerrada(producto, s["id"]) and s["id"] not in cubiertas | con_usd]
+    filas = producto.get("consumo") or []
+    cubiertas = set().union(*[cubre(f) for f in filas if f["sesion"] == "orquestador"])
+    con_usd = {(f["sesion"], pasada_de(f)) for f in filas if f["sesion"] != "orquestador" and con_costo(f)}
+    # en su pasada vigente: es la que --incluye anota (feedback #59)
+    return [s["id"] for s in SESIONES if cerrada(producto, s["id"])
+            and (s["id"], pasada_vigente(producto, s["id"])) not in cubiertas | con_usd]
 
 
 def comando_orquestador(carpeta, producto, sesiones=None):
@@ -3277,8 +3334,8 @@ def texto_resumen(carpeta, producto, registro):
     consumo = producto.get("consumo", [])
     if consumo:
         lineas.append("- **Consumo anotado:** %s · total %s%s" % (
-            " · ".join("%s: %s" % ("orquestador" if fila["sesion"] == "orquestador" else "sesión %s" % fila["sesion"],
-                                   texto_consumo(fila)) for fila in consumo),
+            " · ".join("%s: %s" % ("orquestador" if fila["sesion"] == "orquestador" else "sesión %s" % nombre_consumo(
+                fila), texto_consumo(fila)) for fila in consumo),
             texto_total(consumo), " (sin anotar: %s)" % texto_sesiones(sin_consumo(producto))
             if sin_consumo(producto) else ""))
     cambios = producto.get("criterios_cambios", [])
@@ -4595,16 +4652,26 @@ def cmd_propuesta(args):
     if args.ajustar and (args.ajustar not in SESION or "P%d" % puerta not in dependientes(args.ajustar)):
         raise Fallo("--ajustar lleva una sesión anterior a la puerta %d: %s" % (puerta, ", ".join(
             s["id"] for s in SESIONES if "P%d" % puerta in dependientes(s["id"]))))
+    ids = list(dict.fromkeys(lista(args.hallazgos)))
+    if ids and not args.ajustar:
+        raise Fallo("--hallazgos va con --ajustar: es lo que resuelve la propuesta al ajustar esa sesión")
+    desconocidos = [i for i in ids if i not in registro.hallazgos]
+    if desconocidos:
+        raise Fallo("--hallazgos lleva hallazgos registrados: %s no %s" % (", ".join(desconocidos), "existe" if len(
+            desconocidos) == 1 else "existen"))
     sesion = args.sesion or next((s["id"] for s in reversed(SESIONES) if not cerrada(producto, s["id"])
                                   and disponible(producto, decisiones(carpeta), s["id"])), "")
     propuesta = {"id": "PR-%d" % (len(producto.get("propuestas", [])) + 1), "puerta": puerta, "sesion": sesion,
                  "texto": args.texto.strip(), "ajustar": args.ajustar or "", "fecha": ahora(), "estado": "pendiente"}
+    if ids:  # lo que resuelve (feedback #58): en la puerta se le aplica la regla de los vacíos de herramienta de #57
+        propuesta["hallazgos"] = ids
     producto.setdefault("propuestas", []).append(propuesta)
     guardar(carpeta, producto)
     actualizar_estado(carpeta, producto)
-    print("✔ %s registrada para la puerta %d: %s%s" % (propuesta["id"], puerta, propuesta["texto"],
-                                                       " (se aplica con Ajustar %s)" % args.ajustar
-                                                       if args.ajustar else ""))
+    print("✔ %s registrada para la puerta %d: %s%s%s" % (propuesta["id"], puerta, propuesta["texto"],
+                                                         " (se aplica con Ajustar %s)" % args.ajustar
+                                                         if args.ajustar else "",
+                                                         "; resuelve %s" % y_lista(ids) if ids else ""))
     print("Siguiente paso: no la apliques tú. La puerta %d la muestra junto a los comandos de la decisión, que corre "
           "el usuario." % puerta)
 
@@ -4659,7 +4726,9 @@ def texto_consumo(fila):
     if fila.get("pasos"):
         partes.append("%d pasos" % fila["pasos"])
     if fila.get("incluye"):
-        partes.append("incluye %s" % ", ".join(fila["incluye"]))
+        extra = fila.get("pasadas_incluye") or {}
+        partes.append("incluye %s" % ", ".join(nombre_pasada(s, int(p)) for s in fila["incluye"]
+                                               for p in extra.get(s) or [0]))
     return ", ".join(partes) or "sin datos"
 
 
@@ -4677,13 +4746,14 @@ def texto_total(filas):
     costeadas = [f for f in filas if con_costo(f)]
     if costeadas:
         texto = "%s USD" % numero(total_usd(costeadas))
-        sin_dato = [f["sesion"] for f in filas if not con_costo(f)]
+        sin_dato = [nombre_consumo(f) for f in filas if not con_costo(f)]
         if sin_dato:
             texto += " (sin dato en USD: %s)" % ", ".join(sin_dato)
     else:
         texto = "sin dato en USD"
-    cubiertas = {s for f in filas if f.get("tokens") for s in f.get("incluye") or []}
-    tokens = sum(f.get("tokens") or 0 for f in filas if f["sesion"] not in cubiertas)  # sin contar dos veces
+    cubiertas = set().union(*[cubre(f, solo_incluye=True) for f in filas if f.get("tokens")])
+    tokens = sum(f.get("tokens") or 0 for f in filas  # sin contar dos veces, pasada por pasada (feedback #59)
+                 if f["sesion"] == "orquestador" or (f["sesion"], pasada_de(f)) not in cubiertas)
     return texto + (" · %s tokens" % numero(tokens) if tokens else "")
 
 
@@ -4712,9 +4782,10 @@ def cmd_consumo(args):
     if not args.sesion:
         if not filas:
             print("Sin consumo anotado.")
+        ancho = max([12] + [len(nombre_consumo(f)) for f in filas])
         for fila in filas:
-            print("%-12s %s%s" % (fila["sesion"], texto_consumo(fila), " · %s" % fila["modelo"] if fila.get("modelo")
-                                  else ""))
+            print("%s %s%s" % (nombre_consumo(fila).ljust(ancho), texto_consumo(fila), " · %s" % fila["modelo"]
+                               if fila.get("modelo") else ""))
         if filas:
             print("Total: %s (los AI Credits, a %s USD)" % (texto_total(filas), numero(USD_POR_CREDITO)))
         pendientes = sin_consumo(producto)
@@ -4723,6 +4794,18 @@ def cmd_consumo(args):
         return
     if args.sesion not in SESION and args.sesion != "orquestador":
         raise Fallo("--sesion es una de %s, u orquestador (el chat que lanzó los subagentes)" % ", ".join(SESION))
+    pasada = None
+    if args.sesion != "orquestador":  # cada pasada en su fila (feedback #59): por defecto, la vigente
+        vigente_ = pasada_vigente(producto, args.sesion)
+        pasada = vigente_
+        if args.pasada is not None:
+            if not re.match(r"^\d+$", str(args.pasada).strip()) or int(args.pasada) > vigente_:
+                raise Fallo("--pasada es 0 (la primera)%s: la sesión %s va en la %s" % (
+                    " o el número de una reapertura, hasta %d" % vigente_ if vigente_ else "", args.sesion,
+                    "reapertura %d" % vigente_ if vigente_ else "primera pasada"))
+            pasada = int(args.pasada)
+    elif args.pasada is not None:
+        raise Fallo("--pasada va con una sesión: el orquestador anota con --incluye la pasada vigente de cada una")
     incluye = lista(args.incluye)
     desconocidas = [s for s in incluye if s not in SESION]
     if desconocidas:
@@ -4736,6 +4819,7 @@ def cmd_consumo(args):
                "incluye": incluye or None}
     if all(valores[c] is None for c in ("costo", "creditos", "tokens")):
         raise Fallo("Anota al menos --costo (USD), --creditos (AI Credits de GitHub Copilot) o --tokens")
+    pasadas_incluye = None
     if args.sesion == "orquestador" and incluye:
         # /cost es acumulado: el mismo chat que vuelve a anotar (comparte alguna sesión) actualiza su fila y suma sus
         # sesiones nuevas; un chat orquestador nuevo, con otras sesiones, va en una fila aparte (feedback #46)
@@ -4746,15 +4830,24 @@ def cmd_consumo(args):
         if fila is not None:
             valores["incluye"] = list(dict.fromkeys((fila.get("incluye") or []) + incluye))
     else:
-        fila = next((f for f in filas if f["sesion"] == args.sesion), None)
+        fila = next((f for f in filas if f["sesion"] == args.sesion and pasada_de(f) == (pasada or 0)), None)
+    if incluye:  # cada sesión de --incluye cubre su pasada vigente, sumada a las que la fila ya cubría (feedback #59)
+        pares = (cubre(fila, solo_incluye=True) if fila is not None else set()) | {
+            (s, pasada_vigente(producto, s)) for s in incluye}
+        pasadas_incluye = {s: sorted(p for x, p in pares if x == s) for s in valores["incluye"]}
+        pasadas_incluye = {s: p for s, p in pasadas_incluye.items() if p != [0]} or None
     if fila is None:
         fila = {"sesion": args.sesion}
+        if pasada is not None:
+            fila["pasada"] = pasada
         filas.append(fila)
     fila.update((clave, valor) for clave, valor in valores.items() if valor is not None)
+    if pasadas_incluye:
+        fila["pasadas_incluye"] = pasadas_incluye
     fila["fecha"] = ahora()
     guardar(carpeta, producto)
     actualizar_estado(carpeta, producto)
-    print("✔ Consumo de %s: %s · total anotado: %s" % (args.sesion, texto_consumo(fila), texto_total(filas)))
+    print("✔ Consumo de %s: %s · total anotado: %s" % (nombre_consumo(fila), texto_consumo(fila), texto_total(filas)))
     pendientes = sin_consumo(producto)
     print("Siguiente paso: %s" % ("falta anotar %s (opcional)." % ", ".join(pendientes) if pendientes
                                   else "`siguiente` muestra por dónde seguir."))
@@ -6671,7 +6764,7 @@ def seccion_costo(producto):
     consumo = producto.get("consumo") or []
     if not consumo:
         return tarjeta("Costo", '<p class="vacio">Sin consumo anotado: es opcional, y se anota con el comando consumo.</p>')
-    filas = "".join("<tr><td>%s</td><td>%s</td></tr>" % (escape(f["sesion"]), escape(texto_consumo(f)))
+    filas = "".join("<tr><td>%s</td><td>%s</td></tr>" % (escape(nombre_consumo(f)), escape(texto_consumo(f)))
                     for f in consumo)
     return tarjeta("Costo", "<p><b>Total anotado:</b> %s%s</p><div class=\"tabla\"><table><thead><tr><th>Sesión"
                             "</th><th>Consumo</th></tr></thead><tbody>%s</tbody></table></div>" % (
@@ -7200,6 +7293,7 @@ def parser():
     sub.add_argument("--texto", required=True, help="qué cambiar y por qué")
     sub.add_argument("--ajustar", help="la sesión que habría que reabrir para aplicarla (por ejemplo, 1g)")
     sub.add_argument("--sesion", help="la sesión que la propone (por defecto, la abierta)")
+    sub.add_argument("--hallazgos", help="lo que resuelve al ajustar: los hallazgos a triangular o confirmar, H-1,H-2")
 
     sub = comando("anular", cmd_anular, "Anula una fuente, un hallazgo, un competidor o un diferenciador")
     sub.add_argument("--id", required=True)
@@ -7256,7 +7350,8 @@ def parser():
     sub.add_argument("--tokens", help="tokens totales, como 45k")
     sub.add_argument("--pasos")
     sub.add_argument("--modelo")
-    sub.add_argument("--incluye", help="sesiones que cubre una fila del orquestador: 1a,1b,…")
+    sub.add_argument("--incluye", help="sesiones que cubre una fila del orquestador, en su pasada vigente: 1a,1b,…")
+    sub.add_argument("--pasada", help="0 (la primera) o el número de una reapertura; por defecto, la vigente")
 
     sub = comando("siguiente", cmd_siguiente, "El paso siguiente o los carriles paralelos, con el texto para cada chat")
     sub.add_argument("--json", action="store_true",

@@ -122,7 +122,14 @@ Un modelo es viable con evidencia si genera ingresos en el caso base de `escenar
 
 ## Propuestas
 
-Lo que una sesión descubre y cambiaría algo ya cerrado (el diferenciador principal, una línea de investigación) **no se aplica con un comando suelto**: se registra con `producto.py propuesta --texto "<qué y por qué>" [--ajustar <sesión>]`. Queda para la puerta siguiente, que la muestra junto a los comandos de la decisión; con `--ajustar`, el comando de ajustar esa sesión ya viene listo. La decisión del usuario en esa puerta la resuelve (queda anotada en `decisiones.json`).
+Lo que una sesión descubre y cambiaría algo ya cerrado (el diferenciador principal, una línea de investigación) **no se aplica con un comando suelto**: se registra con `producto.py propuesta --texto "<qué y por qué>" [--ajustar <sesión>] [--hallazgos H-1,H-2]`. Queda para la puerta siguiente, que la muestra junto a los comandos de la decisión; con `--ajustar`, el comando de ajustar esa sesión ya viene listo. La decisión del usuario en esa puerta la resuelve (queda anotada en `decisiones.json`).
+
+Una propuesta con `--ajustar` cuenta como ajuste en el veredicto (🟡 Ajustar esa sesión), salvo por los vacíos por límite de las herramientas de la sesión:
+
+- **Con `--hallazgos`** (lo que resuelve: los hallazgos a triangular o confirmar), la misma regla del ajuste que depende entero de un vacío de herramienta (arriba): no cuenta solo si lo que resuelve cae entero en esos vacíos (cada hallazgo tiene todas sus fuentes, en alguna dimensión, en un mercado, idioma, tienda o peldaño con un vacío así). Si algo queda fuera (por ejemplo, H-DEM-4 tiene fuentes de US y el vacío es de PE), cuenta, y el vacío queda como aviso en "Qué cambiaría el veredicto".
+- **Sin `--hallazgos`**, la puerta no sabe qué resuelve: lo seguro, no cuenta si la sesión tiene vacíos de herramienta sin fuentes. Igual si un hallazgo no tiene fuentes o sus fuentes no dicen de qué mercado, idioma o tienda son.
+
+Pasa `--hallazgos` cuando la propuesta es triangular o confirmar hallazgos concretos (por ejemplo, reabrir la 1c con un navegador para triangular H-DEM-4). Una propuesta trae algo nuevo: aunque la 1c ya se haya reabierto, no cuenta como "ajustar otra vez lo mismo".
 
 ## Seguir, ajustar o descartar
 

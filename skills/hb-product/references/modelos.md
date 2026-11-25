@@ -75,9 +75,10 @@ cd <raíz> && python3 -I <skill>/scripts/producto.py consumo --sesion 1a --costo
 | `--costo` | USD, **entre comillas simples**: entre dobles, el shell expande `$` y `"$0.40"` llega mutilado (`consumo` lo rechaza) |
 | `--creditos` | AI Credits de GitHub Copilot (`/usage`); el total los suma a 0,01 USD cada uno |
 | `--tokens`, `--pasos`, `--modelo` | Lo que informe la herramienta (`45k`, `1.2M`) |
-| `--incluye 1a,1b,…` | En la fila del `orquestador`: las sesiones que corrieron como sus subagentes |
+| `--incluye 1a,1b,…` | En la fila del `orquestador`: las sesiones que corrieron como sus subagentes, cada una en su pasada vigente |
+| `--pasada <n>` | Otra pasada de la sesión que la vigente: `0` es la primera y `n`, la reapertura `n` (para anotar una que quedó sin anotar) |
 
-Repetir `consumo` con la misma `--sesion` actualiza su fila: lo nuevo reemplaza lo mismo y lo demás se conserva.
+Cada pasada de una sesión (la primera y cada reapertura) va en su fila: `consumo --sesion 1c` anota la pasada vigente y el total, el reporte y `siguiente` las suman. Repetir `consumo` con la misma `--sesion` en la misma pasada actualiza su fila: lo nuevo reemplaza lo mismo y lo demás se conserva. Una fila anotada sin pasada (antes de que se anotaran) cuenta como la primera, y una reapertura cerrada sin consumo aparece como sin anotar (`1c (reapertura 1)`).
 
 | Herramienta | Dónde se ve | Por sesión con subagentes |
 | --- | --- | --- |
