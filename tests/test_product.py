@@ -530,7 +530,7 @@ class MatrizTest(Base):
         # una nota de tracción es contexto: no cuenta (feedback #30)
         salida = self.p("competidor", "--nombre", "Servicio de jardineros", "--peldano", 4, "--fuentes",
                         self.fuentes[1], "--traccion", "2 000 clientes al mes")
-        self.assertIn("sin tracción: sin descargas ni respaldo registrados", salida)
+        self.assertIn("sin tracción: sin descargas, valoraciones ni respaldo registrados", salida)
         self.assertIn("La nota de tracción («2 000 clientes al mes») es contexto y no cuenta", salida)
         salida = self.p("competidor", "--nombre", "Servicio de jardineros", "--peldano", 4, "--fuentes",
                         self.fuentes[1], "--respaldo", "Programa municipal de huertos")

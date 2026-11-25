@@ -67,7 +67,7 @@ Sin ningún registro, la puerta 1 de una idea nueva no se cumple.
 En una idea nueva se triangula **el peldaño más cercano a lo directo que tenga evidencia**, no la solución exacta: que el problema existe (peldaños 4 y 5) y que el mecanismo funciona en otra categoría (peldaño 3). La puerta 1 pide:
 
 - el problema o la necesidad de fondo documentados con 3 fuentes independientes y vigentes de los peldaños 4 o 5, una de ellas de los últimos 18 meses (los censos, las encuestas nacionales y los estudios académicos valen 5 años: [evidencia.md](evidencia.md));
-- al menos 2 análogos con tracción (peldaños 2 o 3) en la matriz: con 100 000 descargas o más o con un respaldo institucional (`--respaldo`), nunca por una nota;
+- al menos 2 análogos con tracción (peldaños 2 o 3) en la matriz: con 100 000 descargas o más, con 2 000 valoraciones o más si la fuente no da descargas (tracción estimada por valoraciones) o con un respaldo institucional (`--respaldo`), nunca por una nota;
 - la búsqueda de intentos anteriores registrada, sin un fracaso por falta de demanda.
 
 ## Falsa analogía

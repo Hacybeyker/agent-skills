@@ -300,8 +300,43 @@ class TraccionTest(Base):
         self.p("puntaje", "--valores", "3,3,4,4,1")
         salida = self.cerrar("1f", "01-sintesis.md")
         self.assertIn("✔ Al menos 2 análogos con tracción (peldaño 2 o 3) · 2 de 2: C-2 (250 000 descargas); C-4 "
-                      "(respaldo institucional: Ministerio de ejemplo) · sin tracción (bajo 100 000 descargas y sin "
-                      "respaldo institucional): C-1", salida)
+                      "(respaldo institucional: Ministerio de ejemplo) · sin tracción (bajo 100 000 descargas o 2 000 "
+                      "valoraciones, y sin respaldo institucional): C-1", salida)
+
+
+# --- #37 · Tracción estimada por valoraciones ---------------------------------------------------------------------
+
+class TraccionValoracionesTest(Base):
+    def test_sin_descargas_las_valoraciones_estiman_la_traccion_y_la_puerta_lo_dice(self):
+        self.nueva_con_lineas()
+        self.assertEqual(self.datos()["criterios"]["traccion_valoraciones"], 2000)
+        fuente = self.fuente("competencia", 1, "medido", peldano=3)[0]
+        salida = self.p("competidor", "--nombre", "Turnos de limpieza 0", "--peldano", 3, "--fuentes", fuente,
+                        "--descargas", "40k", "--valoraciones", "9000")
+        self.assertIn("sin tracción: 40 000 descargas, bajo el umbral", salida)
+        self.assertIn("Con descargas registradas, las valoraciones no cuentan", salida)
+        salida = self.p("competidor", "--nombre", "Turnos en tienda iOS", "--peldano", 3, "--fuentes", fuente,
+                        "--valoraciones", "1500")
+        self.assertIn("sin tracción: 1 500 valoraciones, bajo el umbral de 2 000", salida)
+        salida = self.p("competidor", "--nombre", "Turnos en tienda iOS", "--peldano", 3, "--fuentes", fuente,
+                        "--valoraciones", "3200")
+        self.assertIn("con tracción: tracción estimada por valoraciones: 3 200, sin descargas publicadas (umbral "
+                      "2 000)", salida)
+        self.assertNotIn("descargas", salida.split("Columnas sin dato:")[-1].splitlines()[0])
+        self.p("puntaje", "--valores", "3,3,4,4,1")
+        salida = self.cerrar("1f", "01-sintesis.md")
+        self.assertIn("✔ Al menos 2 análogos con tracción (peldaño 2 o 3) · 2 de 2: C-2 (250 000 descargas); C-4 "
+                      "(tracción estimada por valoraciones: 3 200, sin descargas publicadas (umbral 2 000)) · sin "
+                      "tracción (bajo 100 000 descargas o 2 000 valoraciones, y sin respaldo institucional): C-1",
+                      salida)
+
+    def test_el_umbral_se_cambia_con_criterio(self):
+        self.nuevo()
+        self.p("criterio", "--clave", "traccion_valoraciones", "--valor", 5000)
+        self.assertEqual(self.datos()["criterios"]["traccion_valoraciones"], 5000)
+        self.assertIn("| `traccion_valoraciones` | 5000 |", (self.carpeta / "criterios.md").read_text(encoding="utf-8"))
+        self.assertIn("tracción estimada por valoraciones",
+                      (REFERENCIAS / "puertas.md").read_text(encoding="utf-8"))
 
 
 # --- #29 · El puntaje según el modelo de monetización ---------------------------------------------------------------

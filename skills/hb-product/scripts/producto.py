@@ -91,6 +91,7 @@ CRITERIOS_DEFECTO = {
     "fuentes_minimas": 3,          # fuentes independientes de un hallazgo clave
     "analogos_minimos": 2,         # análogos con tracción (peldaño 2 o 3) de una idea nueva
     "traccion_descargas": 100000,  # descargas desde las que un competidor o un análogo tiene tracción (o `--respaldo`)
+    "traccion_valoraciones": 2000,  # sin descargas publicadas (App Store): valoraciones desde las que se estima tracción
     "meta_ingresos_mes": 0,        # meta de ingresos netos al mes (opcional; 0 = sin meta)
     "meta_obligatoria": "no",      # "si": la meta es criterio de la puerta 2; "no": solo referencia
     "moneda": "USD",
@@ -536,10 +537,18 @@ class Registro:
         return None
 
     def con_traccion(self, competidor):
-        """Tracción (feedback #30): descargas desde `traccion_descargas`, con la fuente de la fila, o un respaldo
-        institucional marcado (`competidor --respaldo`). La nota de `--traccion` es contexto y no cuenta."""
+        """Tracción (feedback #30 y #37): descargas desde `traccion_descargas`, con la fuente de la fila, un respaldo
+        institucional marcado (`competidor --respaldo`) o, si la fuente da valoraciones y no descargas (en App Store es
+        la única señal pública), valoraciones desde `traccion_valoraciones`: tracción estimada. La nota de `--traccion`
+        es contexto y no cuenta."""
         return bool(competidor.get("respaldo")) or (competidor.get("descargas") or 0) >= int(
-            self.criterios["traccion_descargas"])
+            self.criterios["traccion_descargas"]) or self.por_valoraciones(competidor)
+
+    def por_valoraciones(self, competidor):
+        """True si la tracción se estima por valoraciones: la fila no tiene descargas y sus valoraciones llegan al
+        umbral."""
+        return not competidor.get("descargas") and (competidor.get("valoraciones") or 0) >= int(
+            self.criterios["traccion_valoraciones"])
 
     def motivo_traccion(self, competidor):
         """Por qué una fila tiene tracción o no, en pocas palabras."""
@@ -549,9 +558,15 @@ class Registro:
             return "%s descargas" % numero(descargas)
         if competidor.get("respaldo"):
             return "respaldo institucional: %s" % competidor["respaldo"]
+        valoraciones, minimo = competidor.get("valoraciones"), int(self.criterios["traccion_valoraciones"])
+        if self.por_valoraciones(competidor):
+            return "tracción estimada por valoraciones: %s, sin descargas publicadas (umbral %s)" % (
+                numero(valoraciones), numero(minimo))
         if descargas:
             return "%s descargas, bajo el umbral de %s" % (numero(descargas), numero(umbral))
-        return "sin descargas ni respaldo registrados"
+        if valoraciones:
+            return "%s valoraciones, bajo el umbral de %s" % (numero(valoraciones), numero(minimo))
+        return "sin descargas, valoraciones ni respaldo registrados"
 
     def viabilidad(self, diferenciador):
         """Los cuatro criterios de viabilidad de un diferenciador: [(cumple, texto)]."""
@@ -1256,8 +1271,9 @@ def evaluar_puerta(numero_puerta, carpeta, producto, registro):
                     "Al menos %d análogos con tracción (peldaño 2 o 3)" % pedidos,
                     "%d de %d%s%s" % (len(con), pedidos, ": " + "; ".join(
                         "%s (%s)" % (c["id"], registro.motivo_traccion(c)) for c in con) if con else "",
-                        " · sin tracción (bajo %s descargas y sin respaldo institucional): %s" % (
-                            numero(float(criterios["traccion_descargas"])), ", ".join(sin)) if sin else ""))
+                        " · sin tracción (bajo %s descargas o %s valoraciones, y sin respaldo institucional): %s" % (
+                            numero(float(criterios["traccion_descargas"])),
+                            numero(float(criterios["traccion_valoraciones"])), ", ".join(sin)) if sin else ""))
             intentos = producto.get("intentos", [])
             fracasos = [i for i in intentos if i["resultado"] == "fracaso-demanda"]
             texto = "Sin evidencia de que se probó y fracasó por falta de demanda"
@@ -3195,6 +3211,7 @@ def cmd_competidor(args):
     fila.update(peldano=args.peldano, fuentes=sorted(set(fila.get("fuentes", [])) | set(fuentes)))
     valores = {
         "descargas": int(a_numero(args.descargas)) if args.descargas else None,
+        "valoraciones": int(a_numero(args.valoraciones)) if args.valoraciones else None,
         "nota": a_numero(args.nota) if args.nota else None, "actualizada": args.actualizada,
         "precio": args.precio, "modelo": args.modelo, "anuncios": args.anuncios,
         "tamano_mb": a_numero(args.tamano_mb) if args.tamano_mb else None, "idiomas": lista(args.idiomas),
@@ -3220,15 +3237,20 @@ def cmd_competidor(args):
         datos.pop("sin_rival", None)
     escribir_json(ruta_linea(carpeta, "competencia"), datos)
     registro = Registro(carpeta, producto["criterios"])
-    vacias = [c for c in COLUMNAS_MATRIZ if c != "traccion" and fila.get(c) in (None, "", [])]
+    vacias = [c for c in COLUMNAS_MATRIZ if c != "traccion" and fila.get(c) in (None, "", [])
+              and not (c == "descargas" and fila.get("valoraciones"))]
     print("✔ %s %s: %s (peldaño %d, %s · %s)" % (fila["id"], "registrado" if nueva else "actualizado", fila["nombre"],
                                               args.peldano, PELDANOS[args.peldano][0], "con tracción: %s" %
                                               registro.motivo_traccion(fila) if registro.con_traccion(fila) else
                                               "sin tracción: %s" % registro.motivo_traccion(fila)))
     if fila.get("traccion") and not registro.con_traccion(fila):
-        print("· La nota de tracción («%s») es contexto y no cuenta: cuenta --descargas desde %s (con su fuente) o "
-              "--respaldo \"<institución que la respalda>\"." % (fila["traccion"], numero(
-                  float(producto["criterios"]["traccion_descargas"]))))
+        print("· La nota de tracción («%s») es contexto y no cuenta: cuenta --descargas desde %s (con su fuente), "
+              "--valoraciones desde %s si la fuente no da descargas o --respaldo \"<institución que la respalda>\"." % (
+                  fila["traccion"], numero(float(producto["criterios"]["traccion_descargas"])),
+                  numero(float(producto["criterios"]["traccion_valoraciones"]))))
+    if fila.get("valoraciones") and fila.get("descargas"):
+        print("· Con descargas registradas, las valoraciones no cuentan para la tracción: solo se usan cuando la "
+              "fuente no da descargas.")
     if vacias:
         print("· Columnas sin dato: %s" % ", ".join(vacias))
     if args.rival:
@@ -3283,8 +3305,10 @@ def cmd_matriz(args):
             texto(fila.get("anuncios")), texto(fila.get("tamano_mb")), texto(fila.get("idiomas")),
             texto(fila.get("permisos")), texto(fila.get("sin_conexion")), texto(fila.get("accesibilidad")),
             texto(fila.get("plataformas")), texto(fila.get("funciones")), texto(quejas.get(fila["id"]))]))
-    print("\n★ = con tracción (%s descargas o más, o respaldo institucional con --respaldo; una nota de --traccion es "
-          "contexto y no cuenta)." % numero(float(producto["criterios"]["traccion_descargas"])))
+    print("\n★ = con tracción (%s descargas o más; sin descargas publicadas, %s valoraciones o más, tracción estimada; "
+          "o respaldo institucional con --respaldo; una nota de --traccion es contexto y no cuenta)." % (
+              numero(float(producto["criterios"]["traccion_descargas"])),
+              numero(float(producto["criterios"]["traccion_valoraciones"]))))
     rivales = registro.rivales()
     if rivales:
         print("⚠ Rival a superar (la alternativa gratis más fuerte o un sustituto gratuito o nativo que ya resuelve la "
@@ -5113,8 +5137,8 @@ def seccion_competidores(registro):
             '<details><summary>%s</summary><p class="ref">%s</p></details>' % (
                 plural(len(quejas[fila["id"]]), "hallazgo"), escape(", ".join(quejas[fila["id"]])))
             if quejas.get(fila["id"]) else "—"))
-    return tarjeta("Competidores y sustitutos", '<p class="nota">★ = con tracción (descargas sobre el umbral o '
-                   'respaldo institucional). Las descargas son acumuladas desde el lanzamiento: sirven de contexto, no '
+    return tarjeta("Competidores y sustitutos", '<p class="nota">★ = con tracción (descargas sobre el umbral, '
+                   'valoraciones sobre el umbral cuando no hay descargas publicadas, o respaldo institucional). Las descargas son acumuladas desde el lanzamiento: sirven de contexto, no '
                    'miden la demanda de hoy.</p><div class="tabla"><table>'
                    '<thead><tr><th>Nombre</th><th>Qué es</th><th>Descargas</th><th>Nota</th><th>Precio y modelo</th>'
                    '<th>Hallazgos que lo nombran</th></tr></thead><tbody>%s</tbody></table></div>' % "".join(filas))
@@ -5543,6 +5567,8 @@ def parser():
     sub.add_argument("--sin-rival", dest="sin_rival", metavar="MOTIVO",
                      help="en vez de una fila: por qué ninguna alternativa gratis resuelve la necesidad")
     sub.add_argument("--descargas", help="número, 100k o 1M")
+    sub.add_argument("--valoraciones", help="cantidad de valoraciones, cuando la fuente no da descargas (App Store): "
+                                            "tracción estimada desde `traccion_valoraciones`")
     sub.add_argument("--nota")
     sub.add_argument("--actualizada", help="fecha de la última actualización (AAAA-MM)")
     sub.add_argument("--precio")

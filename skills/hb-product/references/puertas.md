@@ -85,6 +85,7 @@ Un modelo es viable con evidencia si genera ingresos en el caso base de `escenar
 | `fuentes_minimas` | 3 | Fuentes independientes de un hallazgo clave |
 | `analogos_minimos` | 2 | Análogos con tracción que pide la puerta 1 de una idea nueva |
 | `traccion_descargas` | 100000 | Descargas desde las que un competidor o un análogo tiene tracción |
+| `traccion_valoraciones` | 2000 | Sin descargas publicadas (App Store), valoraciones desde las que la tracción se estima: la puerta dice "tracción estimada por valoraciones" |
 | `meta_ingresos_mes` | 0 (sin meta) | Meta de ingresos netos al mes: opcional y referencial |
 | `meta_obligatoria` | no | `si` la vuelve criterio de la puerta 2 |
 | `moneda` | USD | Moneda de la meta |
