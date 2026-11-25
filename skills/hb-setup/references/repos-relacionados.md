@@ -30,11 +30,11 @@ Cada repo vecino y cada dependencia publicada con código local es una fila de l
 ```markdown
 | Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | Publica y versiona |
 | --- | --- | --- | --- | --- | --- | --- |
-| `core-lib` | `../core-lib` | Publicada: `core-lib` 1.2.0 en `dependencias.conf` | A fuente: `cp dependencias.local.ejemplo dependencias.local`; volver: `rm dependencias.local` | `cd <ruta del proyecto>/../core-lib && make check` | `https://git.example.com/team/core-lib.git`, `main` | la persona, con `hb-release` en ese repo |
+| `core-lib` | `../core-lib` | Publicada: `core-lib`, versión fijada en `dependencias.conf` | A fuente: `cp dependencias.local.ejemplo dependencias.local`; volver: `rm dependencias.local` | `cd <ruta del proyecto>/../core-lib && make check` | `https://git.example.com/team/core-lib.git`, `main` | la persona, con `hb-release` en ese repo |
 ```
 
 - La ruta es **relativa** a la raíz del proyecto: nada de rutas absolutas de una máquina.
-- "Cómo se consume" dice qué se publica (coordenada o nombre) y la versión fijada, con el archivo donde se fija.
+- "Cómo se consume" dice qué se publica (coordenada o nombre) y el archivo donde se fija su versión, sin el número: cambia con cada bump.
 - "Pasar a fuente y volver" es el cambio exacto para cada sentido, con el archivo y la línea, o el comando. Si no hay ningún mecanismo, "sin mecanismo": `hb-implement` trabaja entonces solo en el repo de la unidad y avisa que el cambio llega a la app al publicarse.
 - Si ese cambio toca un archivo versionado y queda hecho en la máquina, va también en "Configuración local modificada a propósito": las skills no lo cuentan como cambio ajeno ni lo proponen para commit. Si `AGENTS.md` pide revertirlo al terminar cada tarea, anótalo en la misma celda.
 - Debajo de la tabla, la línea de acceso a las carpetas y la línea `Repos vecinos` (clonar y crear ramas, o no).

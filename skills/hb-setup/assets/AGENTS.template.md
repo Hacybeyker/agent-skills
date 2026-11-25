@@ -47,7 +47,7 @@ Las unidades del proyecto y cómo se trabaja con cada una. Las skills lo leen an
 
 | Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | Publica y versiona |
 | --- | --- | --- | --- | --- | --- | --- |
-| `<identificador: ruta desde la raíz de su repo, o la carpeta del repo vecino>` | `<ruta relativa: . o app/ o ../core-lib>` | <Es la app / En fuente (módulo del build) / Publicada: `<coordenada>` <versión> en `<archivo>`> | <— / A fuente: <cambio exacto>; volver: <cambio exacto> / sin mecanismo> | `cd <ruta del proyecto> && <comando acotado a la unidad>` | <este repo / `<URL del remoto>`>, `<rama principal>` | <con la app / la persona, con `hb-release` / el workflow `<nombre>` al crear el tag> |
+| `<identificador: ruta desde la raíz de su repo, o la carpeta del repo vecino>` | `<ruta relativa: . o app/ o ../core-lib>` | <Es la app / En fuente (módulo del build) / Publicada: `<coordenada>`, versión fijada en `<archivo>`> | <— / A fuente: <cambio exacto>; volver: <cambio exacto> / sin mecanismo> | `cd <ruta del proyecto> && <comando acotado a la unidad>` | <este repo / `<URL del remoto>`>, `<rama principal>` | <con la app / la persona, con `hb-release` / el workflow `<nombre>` al crear el tag> |
 
 - El agente necesita **acceso a la carpeta** de cada unidad que está fuera del repo (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene. <Quita la línea si todas están en el repo.>
 - Repos vecinos: <clonar los que falten y crear ramas de trabajo | no clonar ni crear ramas>.

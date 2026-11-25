@@ -43,8 +43,8 @@ Va entre `## Arquitectura` y `## Modernización`, con estas subsecciones y en es
 | Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | Publica y versiona |
 | --- | --- | --- | --- | --- | --- | --- |
 | `app-shell` | `.` | Es la app | — | `cd <ruta del proyecto> && ./gradlew :app:check` | este repo, `main` | la persona, con `hb-release` |
-| `feature-payments` | `../feature-payments` | Publicada: `com.example:feature-payments` 1.4.0 en `gradle/libs.versions.toml` | A fuente: `"feature-payments": true` en `local-modules.json`; volver: `false` | `cd <ruta del proyecto>/../feature-payments && ./gradlew check` | `https://git.example.com/team/feature-payments.git`, `main` | su repo: el workflow `publish` al crear el tag `vX.Y.Z` |
-| `core-lib` | `../core-lib` | Publicada: `com.example:core-lib` 2.3.1 en `gradle/libs.versions.toml` | A fuente: `"core-lib": true` en `local-modules.json`; volver: `false` | `cd <ruta del proyecto>/../core-lib && ./gradlew check` | `https://git.example.com/team/core-lib.git`, `main` | su repo: el workflow `publish` al crear el tag `vX.Y.Z` |
+| `feature-payments` | `../feature-payments` | Publicada: `com.example:feature-payments`, versión fijada en `gradle/libs.versions.toml` | A fuente: `"feature-payments": true` en `local-modules.json`; volver: `false` | `cd <ruta del proyecto>/../feature-payments && ./gradlew check` | `https://git.example.com/team/feature-payments.git`, `main` | su repo: el workflow `publish` al crear el tag `vX.Y.Z` |
+| `core-lib` | `../core-lib` | Publicada: `com.example:core-lib`, versión fijada en `gradle/libs.versions.toml` | A fuente: `"core-lib": true` en `local-modules.json`; volver: `false` | `cd <ruta del proyecto>/../core-lib && ./gradlew check` | `https://git.example.com/team/core-lib.git`, `main` | su repo: el workflow `publish` al crear el tag `vX.Y.Z` |
 
 - El agente necesita **acceso a la carpeta** de cada unidad que está fuera del repo (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene.
 - Repos vecinos: clonar los que falten y crear ramas de trabajo.
@@ -81,7 +81,7 @@ Va entre `## Arquitectura` y `## Modernización`, con estas subsecciones y en es
 
 - **Unidad:** el identificador, entre acentos graves. Es la ruta de la unidad desde la raíz de su repo, con sus subcarpetas (`features/payments/impl`, sin aplanar). Un repo vecino entero se identifica por el nombre de su carpeta (`core-lib`); un módulo dentro de él, por `<carpeta del repo>/<ruta>`. El repo principal entero, cuando es una sola unidad, por el nombre de su carpeta.
 - **Fuente:** la ruta relativa a la raíz del proyecto (`.`, `app/`, `../core-lib`). Nunca absoluta.
-- **Cómo se consume:** "Es la app", "En fuente (módulo del build)", o "Publicada: `<coordenada>` <versión fijada> en `<archivo>`".
+- **Cómo se consume:** "Es la app", "En fuente (módulo del build)", o "Publicada: `<coordenada>`, versión fijada en `<archivo>`". El número de la versión no se escribe: cambia con cada bump y se lee del archivo.
 - **Pasar a fuente y volver:** el cambio exacto para cada sentido, o "—" si la unidad siempre está en fuente, o "sin mecanismo" si es publicada y el proyecto no tiene forma de usar su código local.
 - **DoD de la unidad:** el comando acotado, con `cd` a su repo. Si no se puede acotar, "el `## DoD` del proyecto".
 - **Repo y rama principal:** "este repo" o la URL del remoto (sirve para clonarlo), y la rama principal.
@@ -110,7 +110,7 @@ Un mapa por unidad, con lo que un agente necesita saber antes de tocarla: qué h
 `## Estructura` describe cómo es el proyecto. Nunca escribas:
 
 - salidas de `git status`, ramas actuales ni "hoy está modificado";
-- versiones del momento de una unidad en fuente (la versión fijada en el archivo de dependencias sí va);
+- números de versión que cambian con cada release (de una unidad en fuente o de la versión fijada: el modelo nombra el archivo donde se fija, no el número);
 - fechas de "hoy", seriales de dispositivos ni rutas de la máquina.
 
 Un archivo que queda modificado a propósito va en su subsección, con el motivo.

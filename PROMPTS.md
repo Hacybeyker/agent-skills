@@ -12,7 +12,7 @@ Una regla para todas: **un pedido por chat**. Al terminar una tarea, abre otro c
 | Ya tiene uno, pasarlo al estándar | `Usa hb-setup: migra el AGENTS.md al estándar sin perder lo propio del proyecto.` |
 | Solo refrescar el stack o los comandos | `Usa hb-setup: actualiza la sección Stack (y Comandos) del AGENTS.md con lo que tiene el proyecto hoy.` |
 | Sin subir el contexto de IA al repo | `Usa hb-setup: configura este proyecto para los agentes con el contexto fuera del repo, en <carpeta externa>.` |
-| Documentar los repos relacionados | `Usa hb-setup: documenta en el AGENTS.md los repos relacionados (<rutas>) y cómo pasar <dependencia> a código local y volver.` |
+| Documentar la estructura (unidades y repos vecinos) | `Usa hb-setup: documenta en ## Estructura del AGENTS.md las unidades del proyecto, los repos vecinos (<rutas>) y cómo pasar <dependencia> a fuente y volver.` |
 | Decidir una modernización | `Agrega a ## Modernización del AGENTS.md: <qué se migra, con qué alcance: "las pantallas nuevas van en Compose">.` |
 
 El `AGENTS.md` describe el proyecto tal como es (también si usa Views, MVP o RxJava). Nadie migra nada hasta que lo anotes en `## Modernización`.

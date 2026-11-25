@@ -20,9 +20,9 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 
 | Skill | Tipo | Qué hace |
 | --- | --- | --- |
-| [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack, las convenciones y los repos relacionados del proyecto y crea o migra su `AGENTS.md` al estándar, con el contexto de IA versionado, local o en una carpeta externa |
-| [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD, previews de UI (Compose) y reporte HTML (también de varios repos, con análisis y diagramas) |
-| [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments |
+| [`hb-setup`](skills/hb-setup) | Flujo | Detecta el stack, las convenciones y la estructura del proyecto (unidades, repos vecinos y variantes) y crea o migra su `AGENTS.md` al estándar, con el contexto de IA versionado, local o en una carpeta externa |
+| [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD por unidad, previews de UI (Compose) y reporte HTML (también de varios repos, con análisis y diagramas); pasa a fuente, clona y prepara las ramas de las unidades que toca |
+| [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments, de cada repo de la tarea; guarda el review en la carpeta de reportes |
 | [`hb-performance`](skills/hb-performance) | Flujo | Investiga problemas de rendimiento en apps Android con cualquier stack (arranque en frío, jank, hilo principal, red, memoria): mide antes y después con scripts, arma el diagnóstico con consultas listas sobre las trazas, propone un plan que decides tú y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens; con el modo orquestado, un solo chat la recorre entera con un subagente por sesión |
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
@@ -146,6 +146,9 @@ Son los mismos pasos del DoD de `AGENTS.md` y del workflow.
 ## Proyectos
 
 Cada proyecto necesita un `AGENTS.md` con las secciones `Stack` y `DoD` (lo crea `hb-setup`) y, si usas Claude Code, un `CLAUDE.md` con la línea `@AGENTS.md`. El `AGENTS.md` puede versionarse con el código, quedarse local o vivir en una carpeta fuera del repo. Las skills no se copian dentro de los proyectos.
+
+- **`## Estructura`** describe las unidades del proyecto (módulos, paquetes, carpetas de feature o repos vecinos): dónde está el fuente de cada una, cómo se consume y se pasa a fuente, su DoD, su repo y quién la publica. Todas las skills lo leen antes de tocar código. Cada unidad puede tener un **mapa del módulo** en `<carpeta de contexto>/modules/<identificador>.md`, fuera de git por defecto.
+- **Reportes:** la línea `Carpeta de reportes:` es la base común. `hb-implement` escribe en `<base>/implementation/<fecha>-<slug>/`, `hb-performance` en `<base>/performance/` y `hb-review` en `<base>/review/<fecha>-<slug>/`, y cada una deja su fila en `<base>/INDEX.md`. Las tareas viejas en formato plano y una `Carpeta de investigaciones:` ya escrita siguen funcionando donde están.
 
 ## Licencia
 
