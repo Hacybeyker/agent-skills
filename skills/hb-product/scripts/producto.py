@@ -172,6 +172,10 @@ DEPENDE = {
     "1f": ["1a", "1b", "1c", "1d", "1e", "1g"], "P1": ["1f"], "2": ["P1"], "3": ["P1"], "P2": ["2", "3"],
     "4": ["P2"], "P3": ["4"],
 }
+# Sesiones que corren en paralelo (dependen de lo mismo): si una puerta pide ajustar varias del mismo grupo, las
+# recomienda juntas y `decidir --ajustar` las reabre a la vez (feedback #65). La 1g no entra: lee la 1a y la 1b, así que
+# se reabre en cascada al ajustar una de ellas, y sola tiene su propio presupuesto de reapertura (#30).
+GRUPOS_PARALELOS = (("1a", "1b", "1c", "1d", "1e"), ("2", "3"))
 PUERTAS = {1: "Oportunidad", 2: "Viabilidad", 3: "Alcance"}
 ARCHIVOS_PLANTILLA = [
     ("estado.md", "estado.md"), ("criterios.md", "criterios.md"), ("00-idea.md", "00-idea.md"),
@@ -440,10 +444,16 @@ class Registro:
         return [self.fuentes[i] for i in ids if i in self.fuentes]
 
     @staticmethod
+    def reglas(hallazgo):
+        """Las líneas cuyas reglas de triangulación sigue un hallazgo: la suya y las de los hallazgos que reúne
+        (`hallazgo --reune`, feedback #66), para que reunir las fuentes en otra línea no esquive ninguna."""
+        return [hallazgo.get("linea")] + list(hallazgo.get("reglas") or [])
+
+    @staticmethod
     def acumulada(hallazgo, fuente):
         """En la demanda, un dato acumulado (descargas o valoraciones desde el lanzamiento) es contexto, no una señal
-        actual: no cuenta para la confianza ni para triangular un hallazgo de esa línea."""
-        return hallazgo.get("linea") == "demanda" and bool(fuente.get("acumulado"))
+        actual: no cuenta para la confianza ni para triangular un hallazgo de esa línea (ni uno que reúna uno suyo)."""
+        return "demanda" in Registro.reglas(hallazgo) and bool(fuente.get("acumulado"))
 
     def evaluar(self, hallazgo):
         """La confianza de un hallazgo y su triangulación (reglas 2 y 3), con una sola regla de vigencia: las fuentes
@@ -452,8 +462,8 @@ class Registro:
         fuente oficial y vigente basta sola: es la norma misma."""
         favor = self.fuentes_de(hallazgo.get("fuentes", []))
         minimo = int(self.criterios["fuentes_minimas"])
-        exige = hallazgo.get("linea") in EXIGEN_MEDIDO
-        basta_oficial = hallazgo.get("linea") in BASTA_OFICIAL
+        exige = next((linea for linea in self.reglas(hallazgo) if linea in EXIGEN_MEDIDO), None)
+        basta_oficial = any(linea in BASTA_OFICIAL for linea in self.reglas(hallazgo))
         mejor = None
         for peldano in range(1, 7):
             grupos = {}
@@ -499,7 +509,7 @@ class Registro:
                                                                   "fuentes independientes y vigentes"),
                     mejor["independientes"], minimo))
             if exige and not mejor["medido"]:
-                faltan.append("falta una fuente de tipo medido (línea %s)" % hallazgo["linea"])
+                faltan.append("falta una fuente de tipo medido (línea %s)" % exige)
             if mejor["independientes"] and not mejor["reciente"]:
                 faltan.append("falta una fuente de los últimos %s meses: las de vigencia larga (estadística oficial o "
                               "estudio académico) cuentan, pero una tiene que ser reciente" % self.criterios[
@@ -515,7 +525,8 @@ class Registro:
             if basta_oficial:
                 faltan.append("o una sola fuente oficial y vigente (la política o la ley misma, `--tipo oficial`)")
         sin_busqueda = not hallazgo.get("en_contra") and not hallazgo.get("sin_contra")
-        mejor.update(nivel=nivel, calculada=calculada, exige_medido=exige, contra=len(contra), vencidas=len(no_vigentes),
+        mejor.update(nivel=nivel, calculada=calculada, exige_medido=bool(exige), contra=len(contra),
+                     vencidas=len(no_vigentes),
                      no_vigentes=no_vigentes, acumuladas=acumuladas, faltan=faltan, sin_busqueda=sin_busqueda,
                      confianza=NIVELES[nivel])
         return mejor
@@ -1420,7 +1431,8 @@ def leer_md(carpeta, relativo):
 
 
 def hipotesis(carpeta, registro):
-    """La tabla de hipótesis críticas de 03-validacion.md, con la confianza que calcula el script."""
+    """La tabla de hipótesis críticas de 03-validacion.md, con la confianza que calcula el script: la menor de sus
+    hallazgos clave o, si no cita ninguno, de todos."""
     filas = tabla(leer_md(carpeta, "03-validacion.md"), "id", "hipotesis", "hallazgos", "veredicto")
     if filas is None:
         return None
@@ -1430,11 +1442,15 @@ def hipotesis(carpeta, registro):
         if not identificador:
             continue
         hallazgos = re.findall(r"H-[A-Z]{3}-\d+", celda(fila, "hallazgos"))
+        # la confianza de la fila es la de sus hallazgos clave (`--critico`; feedback #66): un hallazgo que solo
+        # complementa no la baja. Sin ninguno clave, la menor de todos.
+        claves = [h for h in hallazgos if (registro.hallazgos.get(h) or {}).get("critico")]
         veredicto = normal(celda(fila, "veredicto"))
         resultado.append({
             "id": identificador, "texto": celda(fila, "hipotesis"), "hallazgos": hallazgos,
             "desconocidos": [h for h in hallazgos if h not in registro.hallazgos],
-            "nivel": registro.confianza_minima(hallazgos), "contra": celda(fila, "encontra"),
+            "nivel": registro.confianza_minima(claves or hallazgos), "claves": claves,
+            "contra": celda(fila, "encontra"),
             "diferenciador": (re.findall(r"D-\d+", celda(fila, "diferenciador")) or [""])[0],
             "veredicto": {"sostenida": "sostenida", "debil": "débil", "refutada": "refutada"}.get(veredicto, ""),
             "riesgosa": afirmativo(celda(fila, "masriesgosa")), "metrica": celda(fila, "metrica"),
@@ -2307,7 +2323,7 @@ def reapertura_validacion(carpeta, producto):
     el texto de esa pasada; si no, None (feedback #64). La skill recomienda reabrirla una sola vez para fortalecer las
     hipótesis, como la 1c (#55). Una reapertura en cascada (al ajustar la 1g, por ejemplo) no cuenta: no se reabrió
     para eso."""
-    if not any(d.get("decision") == "ajustar" and d.get("sesion") == "3" for d in decisiones(carpeta)):
+    if not any(d.get("decision") == "ajustar" and "3" in sesiones_de(d) for d in decisiones(carpeta)):
         return None
     return reapertura_gastada(producto, "3")
 
@@ -2332,7 +2348,8 @@ def que_fortalecer(registro, impide):
         bajos = [registro.hallazgos[i] for i in fila["hallazgos"] if i in registro.hallazgos
                  and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
         if bajos:
-            partes.append("%s, triangulando %s" % (fila["id"], "; ".join(falta_triangular(registro, h) for h in bajos)))
+            partes.append("%s, triangulando %s" % (fila["id"], "; ".join(falta_triangular(registro, h, "3")
+                                                                        for h in bajos)))
             ids += [h["id"] for h in bajos]
         else:
             partes.append("%s, con evidencia a favor nueva que la sostenga frente a lo que tiene en contra (sus "
@@ -2378,7 +2395,8 @@ def motivo_fortalecer(criterio, registro, candidatos, sin_principal=False):
                 quien, detalle, "ninguna está refutada" if len(fortalecibles) == len(candidatos)
                 else "%s no tiene%s ninguna refutada" % (y_lista(c["id"] for c in fortalecibles),
                                                         "" if len(fortalecibles) == 1 else "n"))
-    cambiaria = "Ajustar la sesión 3, una sola vez, para %s" % " · o ".join(grupos)
+    cambiaria = "Ajustar la sesión 3, una sola vez, para %s%s" % (" · o ".join(grupos), texto_reunir(
+        registro, [registro.hallazgos[i] for i in dict.fromkeys(ids)], "3"))
     alcance = {"hallazgos": ids} if solo and ids else {"linea": "validacion"}  # lo que el ajuste resuelve (#57)
     return False, razon, cambiaria, "3", ids, True, alcance
 
@@ -2405,11 +2423,35 @@ def mas_cercano(registro, ids):
     return max(candidatos, key=lambda h: (registro.evaluar(h)["nivel"], registro.evaluar(h)["independientes"]))
 
 
-def falta_triangular(registro, hallazgo):
-    """'H-DEM-4 (faltan 2 fuentes independientes y vigentes, tiene 1 de 3; falta una fuente de tipo medido)'."""
+def falta_triangular(registro, hallazgo, sesion=None):
+    """'H-DEM-4 (faltan 2 fuentes independientes y vigentes, tiene 1 de 3; falta una fuente de tipo medido)'. Con la
+    sesión que lo completaría, si el hallazgo es de otra: 'H-VOZ-1 (de la 1b: faltan …)' (feedback #66)."""
     faltan = [re.sub(r" \((tiene \d+ de \d+)\)", r", \1", f) for f in registro.evaluar(hallazgo)["faltan"]
               if not f.startswith("o una sola fuente oficial")]
-    return "%s (%s)" % (hallazgo["id"], "; ".join(faltan)) if faltan else hallazgo["id"]
+    duena = LINEAS.get(hallazgo["linea"], ("", sesion))[1]
+    origen_ = "de la %s" % duena if sesion and duena != sesion else ""
+    detalle = "; ".join(faltan)
+    if origen_:
+        detalle = "%s: %s" % (origen_, detalle) if detalle else origen_
+    return "%s (%s)" % (hallazgo["id"], detalle) if detalle else hallazgo["id"]
+
+
+def texto_reunir(registro, hallazgos, sesion):
+    """El camino para fortalecer, desde la sesión que se reabre, hallazgos de otra sesión, ya cerrada (feedback #66):
+    `hallazgo --id --fuentes` pide la sesión dueña abierta, así que va un hallazgo nuevo en la línea de la sesión
+    reabierta que los reúna con las fuentes nuevas (`--reune`: lleva sus fuentes a favor y en contra y sus reglas de
+    triangulación) y se cita en su lugar. '' si todos son de esa sesión."""
+    ajenos = [h["id"] for h in hallazgos if LINEAS.get(h["linea"], ("", sesion))[1] != sesion]
+    linea = next((nombre for nombre, (_, de_sesion) in LINEAS.items() if de_sesion == sesion), None)
+    if not ajenos or not linea:
+        return ""
+    return (". %s %s de otra sesión, ya cerrada: en la %s se %s con un hallazgo nuevo de la línea %s que %s reúna con "
+            "las fuentes nuevas (`hallazgo --linea %s --reune %s --fuentes S-… --texto \"…\"`); ese hallazgo nuevo se "
+            "cita en su lugar%s" % (
+                y_lista(ajenos), "es" if len(ajenos) == 1 else "son", "sesión 3" if sesion == "3" else sesion,
+                "fortalece" if len(ajenos) == 1 else "fortalecen", linea, "lo" if len(ajenos) == 1 else "los", linea,
+                ",".join(ajenos), " (en la columna Hallazgos de su hipótesis, en 03-validacion.md)" if sesion == "3"
+                else ""))
 
 
 def motivo_demanda(numero_puerta, producto, registro):
@@ -2436,8 +2478,9 @@ def motivo_demanda(numero_puerta, producto, registro):
     meses = producto["criterios"]["vigencia_meses"]
     if bajos:
         falta = "Triangular %s en la 1c con una señal medida y reciente de demanda (tendencias de búsqueda, descargas " \
-                "o búsquedas de los últimos %s meses)" % ("; ".join(falta_triangular(registro, h) for h in bajos[:3]),
-                                                          meses)
+                "o búsquedas de los últimos %s meses)%s" % ("; ".join(falta_triangular(registro, h, "1c")
+                                                                       for h in bajos[:3]), meses,
+                                                            texto_reunir(registro, bajos[:3], "1c"))
         alcance = {"hallazgos": [h["id"] for h in bajos[:3]]}  # los que nombra: lo que el ajuste resuelve (#57)
     else:
         falta = "Registrar en la 1c un hallazgo clave de demanda (`hallazgo --linea demanda --critico`) con %s " \
@@ -2477,7 +2520,8 @@ def motivo_problema(numero_puerta, producto, registro):
     return (False, "%s y ningún hallazgo reúne %s fuentes independientes y vigentes (una de los últimos %s meses), pero "
                    "no hay evidencia en contra: es la primera pasada" % (
                        buscado, minimas, producto["criterios"]["vigencia_meses"]),
-            "Triangular %s en la %s con fuentes de peldaño 4 o 5" % (falta_triangular(registro, cercano), sesion)
+            "Triangular %s en la %s con fuentes de peldaño 4 o 5%s" % (falta_triangular(registro, cercano, sesion),
+                                                                       sesion, texto_reunir(registro, [cercano], sesion))
             if cercano else "Documentar el problema en la %s con %s fuentes independientes y vigentes de peldaño 4 o 5"
             % (sesion, minimas), sesion, ids, True,
             {"hallazgos": [cercano["id"]]} if cercano else {"peldanos": [4, 5]})
@@ -3010,25 +3054,35 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                                               puntajes_por_modelo(producto, registro)[0])), None, None, False))
     razones = [motivo[0] for motivo in elegidas][:MAXIMO_RAZONES]
     cambiaria = list(dict.fromkeys(motivo[1] for motivo in cambios if motivo[1]))[:MAXIMO_RAZONES]
-    # lo que el ajuste de la sesión recomendada tiene que resolver (feedback #57): (si pide buscar, alcance, qué)
-    por_resolver = [(a[3], a[4], a[1]) for a in ajustes if a[2] == sesion] if nivel == "reservas" else []
+    # Las otras sesiones del mismo grupo paralelo con un ajuste entre las razones que se muestran (feedback #65): se
+    # recomiendan junto con la primera (`sesion`, la de siempre), para no gastar una vuelta por sesión. No entra una ya
+    # reabierta sin salida (la 1g agotada, la 1c ya reabierta).
+    sesiones = [sesion] if nivel == "reservas" else []
+    if nivel == "reservas":
+        sesiones += [a[2] for a in elegidas[:MAXIMO_RAZONES] if a in ajustes and len(a) > 4 and a[2] != sesion
+                     and a[2] in grupo_paralelo(sesion) and a not in sin_salida]
+        sesiones = sorted(set(sesiones), key=[x["id"] for x in SESIONES].index)  # «2 y 3», no «3 y 2»
+    # lo que el ajuste de cada sesión recomendada tiene que resolver (feedback #57): (si pide buscar, alcance, qué)
+    por_sesion = {s: [(a[3], a[4], a[1]) for a in ajustes if len(a) > 4 and a[2] == s] for s in sesiones}
+    por_resolver = por_sesion.get(sesion, [])
+    bloqueos = {}
     if nivel == "reservas":
         if not any("Viable para probar" in c for c in cambiaria):
             despues = probar or (numero_puerta == 1 and candidatos_para_probar(  # con la demanda ajustada (#55)
                 carpeta, producto, registro, filas_hipotesis, con_demanda=False))
             cambiaria.append("Con eso, el veredicto pasaría a %s" % ("Viable para probar" if despues else "Viable"))
-        bloqueo = bloqueo_herramienta(producto, registro, sesion, por_resolver)  # solo la línea dueña (#44 y #57)
-        if bloqueo:
-            cambiaria.append(texto_bloqueo(sesion, bloqueo))
-    else:
-        bloqueo = None
+        for de_sesion in sesiones:  # solo la línea dueña de cada sesión (#44 y #57)
+            bloqueos[de_sesion] = bloqueo_herramienta(producto, registro, de_sesion, por_sesion[de_sesion])
+            if bloqueos[de_sesion]:
+                cambiaria.append(texto_bloqueo(de_sesion, bloqueos[de_sesion]))
+    bloqueo = bloqueos.get(sesion)
     abiertas = [s for s in DEPENDE["P%d" % numero_puerta] if not cerrada(producto, s)]
     return {"puerta": numero_puerta, "nivel": nivel, "titulo": VEREDICTOS[nivel]["titulo"],
-            "recomienda": VEREDICTOS[nivel]["recomienda"], "sesion": sesion, "razones": razones,
+            "recomienda": VEREDICTOS[nivel]["recomienda"], "sesion": sesion, "sesiones": sesiones, "razones": razones,
             "cambiaria": cambiaria, "provisional": abiertas, "hallazgos": list(dict.fromkeys(hallazgos)),
             "incoherencias": (vigente_ or {}).get("incoherencias", []),
             "diferidos": diferidos if nivel in ("probar", "reservas") else [], "descarte": descarte,
-            "por_resolver": por_resolver, "bloqueo": bloqueo}
+            "por_resolver": por_resolver, "por_sesion": por_sesion, "bloqueo": bloqueo, "bloqueos": bloqueos}
 
 
 def primera_mayuscula(texto):
@@ -3036,9 +3090,9 @@ def primera_mayuscula(texto):
 
 
 def texto_recomendacion(resultado):
-    """'descartar', 'ajustar la sesión 1c' o 'seguir'."""
+    """'descartar', 'ajustar la sesión 1c', 'ajustar las sesiones 2 y 3' o 'seguir'."""
     if resultado["recomienda"] == "ajustar":
-        return "ajustar la sesión %s" % resultado["sesion"]
+        return "ajustar" + texto_ajuste(resultado)
     return resultado["recomienda"]
 
 
@@ -3047,7 +3101,8 @@ def lineas_banner(resultado):
     cambiaría el veredicto. El color va en la marca (y, en una terminal, también en el texto)."""
     datos = VEREDICTOS[resultado["nivel"]]
     raya = "━" * 72
-    recomienda = resultado["recomienda"].upper() + (" %s" % resultado["sesion"] if resultado["sesion"] else "")
+    recomienda = resultado["recomienda"].upper() + (" %s" % y_lista(sesiones_de(resultado)) if resultado["sesion"]
+                                                    else "")
     lineas = [raya, "%s  PUERTA %d · %s  →  la skill recomienda: %s" % (
         datos["marca"], resultado["puerta"], datos["titulo"].upper(), recomienda), raya]
     if resultado["provisional"]:
@@ -3090,25 +3145,26 @@ def opciones_decision(numero_puerta, carpeta, producto, resultado):
     [{nombre, comando, recomendado}]."""
     recomienda = resultado["recomienda"]
     contra = ' --motivo "<por qué decides distinto de la recomendación>"'
+    recomendadas = sesiones_de(resultado)  # varias, si corren en paralelo (feedback #65)
 
-    def comando(tipo, resto, sesion=None):
-        distinta = tipo == "ajustar" and recomienda == "ajustar" and sesion != resultado["sesion"]
+    def comando(tipo, resto, sesiones=None):
+        distinta = tipo == "ajustar" and recomienda == "ajustar" and set(sesiones or []) != set(recomendadas)
         return orden("decidir --puerta %d %s%s" % (numero_puerta, resto, contra if tipo != recomienda or distinta
                                                    else ""), carpeta)
 
     motivo = motivo_descarte(resultado)
     recomendado = {"seguir": ("Seguir", "--seguir"),
-                   "ajustar": ("Ajustar %s" % resultado["sesion"], "--ajustar %s" % resultado["sesion"]),
+                   "ajustar": ("Ajustar %s" % y_lista(recomendadas), "--ajustar %s" % " ".join(recomendadas)),
                    "descartar": ("Descartar", "--descartar %s" % shlex.quote(motivo))}[recomienda]
     opciones = [{"nombre": recomendado[0], "recomendado": True,
-                 "comando": comando(recomienda, recomendado[1], resultado["sesion"])}]
+                 "comando": comando(recomienda, recomendado[1], recomendadas)}]
     if recomienda != "seguir":
         opciones.append({"nombre": "Seguir", "recomendado": False, "comando": comando("seguir", "--seguir")})
     sesiones = [p["ajustar"] for p in propuestas_de(producto, numero_puerta) if p.get("ajustar")]
     for sesion in dict.fromkeys(sesiones):
-        if not (recomienda == "ajustar" and sesion == resultado["sesion"]):
+        if not (recomienda == "ajustar" and sesion in recomendadas):
             opciones.append({"nombre": "Ajustar %s" % sesion, "recomendado": False,
-                             "comando": comando("ajustar", "--ajustar %s" % sesion, sesion)})
+                             "comando": comando("ajustar", "--ajustar %s" % sesion, [sesion])})
     opciones.append({"nombre": "Ajustar", "recomendado": False, "comando": comando("ajustar", "--ajustar <sesión>")})
     if recomienda != "descartar":
         opciones.append({"nombre": "Descartar", "recomendado": False,
@@ -3132,6 +3188,23 @@ def comandos_decision(numero_puerta, carpeta, producto, resultado):
 
 def decisiones(carpeta):
     return leer_json(carpeta / "decisiones.json", []) or []
+
+
+def grupo_paralelo(sesion):
+    """Las sesiones que corren en paralelo con esa (ella incluida), o solo ella (feedback #65)."""
+    return next((grupo for grupo in GRUPOS_PARALELOS if sesion in grupo), (sesion,))
+
+
+def sesiones_de(decision):
+    """Las sesiones de un ajuste (o de una recomendación): `sesiones` si reabrió varias a la vez (feedback #65), si
+    no `sesion`; [] si no ajusta ninguna."""
+    return list(decision.get("sesiones") or ([decision["sesion"]] if decision.get("sesion") else []))
+
+
+def texto_ajuste(decision):
+    """' la sesión 2' o ' las sesiones 2 y 3' de un ajuste, o '' si no ajusta ninguna."""
+    sesiones = sesiones_de(decision)
+    return " " + texto_sesiones(sesiones) if sesiones else ""
 
 
 def vigente(lista_decisiones, numero_puerta):
@@ -3273,8 +3346,8 @@ def texto_sesion(carpeta, producto, sesion):
         partes.append("Reapertura %d: el presupuesto de esta pasada es de %d búsquedas y %d lecturas." % (
             reapertura, limites["busquedas"], limites["lecturas"]))
         ajustes = [d for d in decisiones(carpeta) if d.get("decision") == "ajustar"]
-        if sesion == "3" and ajustes and ajustes[-1].get("sesion") == "3":  # la reabrió un ajuste suyo (#64)
-            resolver = ajustes[-1].get("resolver") or []
+        if sesion == "3" and ajustes and "3" in sesiones_de(ajustes[-1]):  # la reabrió un ajuste suyo (#64)
+            resolver = (ajustes[-1].get("resolver_sesiones") or {}).get("3", ajustes[-1].get("resolver") or [])
             partes.append("Es la reapertura de la validación%s. Es la única: si al cerrar el principal (y cada otro "
                           "diferenciador viable) sigue sin sobrevivir al abogado del diablo, la puerta no recomienda "
                           "reabrirla otra vez." % (". Lo que tiene que conseguir, según la puerta: %s" % "; ".join(
@@ -3341,8 +3414,9 @@ def pasos(carpeta, producto, registro):
             lineas += bloque_
             previa = vigente(lista_decisiones, numero_puerta)
             if previa and previa["decision"] == "ajustar":
-                lineas += ["", "La puerta %d se ajustó (sesión %s) y hay que volver a decidirla." % (
-                    numero_puerta, previa.get("sesion"))]
+                lineas += ["", "La puerta %d se ajustó (%s) y hay que volver a decidirla." % (
+                    numero_puerta, ("sesión %s" if len(sesiones_de(previa)) < 2 else "sesiones %s") % y_lista(
+                        sesiones_de(previa)))]
             lineas += ["", "Terminal · La skill recomienda; la decisión es tuya (el agente nunca corre este comando). "
                            "Elige uno:"] + comandos_decision(numero_puerta, carpeta, producto, resultado)
             return lineas
@@ -3603,7 +3677,7 @@ def texto_resumen(carpeta, producto, registro):
                 decision["decision"], decision["fecha"].replace("T", " "),
                 " (%s)" % decision["desde"] if decision.get("desde") else "", decision["cumple"], decision["total"])
             if decision.get("sesion"):
-                detalle += " · sesión %s" % decision["sesion"]
+                detalle += " ·" + texto_ajuste(decision)
             recomendacion = decision.get("recomendacion")
             if recomendacion:
                 detalle += " · la skill recomendaba %s" % texto_recomendacion(recomendacion)
@@ -4178,6 +4252,9 @@ def cmd_fuente(args):
     sesion_linea = producto["sesiones"].get(LINEAS[linea][1]) or {}
     if sesion_linea.get("reaperturas") and not sesion_linea.get("cerrada"):  # una reapertura tiene su presupuesto
         cantidad -= int(sesion_linea.get("fuentes_base") or 0)
+        if "extractos_base" in sesion_linea:  # los extractos de las pasadas anteriores no son de esta (feedback #66)
+            extractos = sum(1 for f in datos["fuentes"] if not f.get("anulado") and f.get("extracto")
+                            and f["id"] not in sesion_linea["extractos_base"])
         limite = presupuesto_reapertura(producto)["lecturas"]
         print("Fuentes de la línea %s en esta reapertura: %d (presupuesto de lecturas de la reapertura: %d)%s"
               % (linea, cantidad, limite, texto_extractos(extractos)))
@@ -4224,7 +4301,8 @@ def enlazar_hallazgo(carpeta, producto, registro, args):
       puerta evalúa sin pasar por ella (y fuera del presupuesto de la línea); va como propuesta para la puerta."""
     sobra = [opcion for opcion, valor in (("--linea", args.linea), ("--texto", args.texto),
                                          ("--en-contra", args.en_contra), ("--sin-contra", args.sin_contra),
-                                         ("--critico", args.critico), ("--bloquea", args.bloquea)) if valor]
+                                         ("--critico", args.critico), ("--bloquea", args.bloquea),
+                                         ("--reune", args.reune)) if valor]
     if sobra:
         raise Fallo("Con --id solo se agregan competidores (--competidor C-…) o fuentes (--fuentes S-…): %s no va. Para "
                     "cambiar el texto o lo demás de un hallazgo, anúlalo y regístralo otra vez" % ", ".join(sobra))
@@ -4312,6 +4390,22 @@ def enlazar_hallazgo(carpeta, producto, registro, args):
         else "`matriz` muestra qué hallazgos tiene cada competidor"))
 
 
+def reunir_hallazgos(registro, linea, texto):
+    """Los hallazgos que un hallazgo nuevo reúne (`hallazgo --reune H-…`, feedback #66): fortalecer uno de una sesión
+    cerrada desde la que se reabrió (por ejemplo, H-DEM-5 de la 1c desde la sesión 3). Tienen que existir y ser de otra
+    línea: en la suya, las fuentes se suman con `--id H-… --fuentes`."""
+    ids = list(dict.fromkeys(lista(texto)))
+    faltan = [i for i in ids if i not in registro.hallazgos]
+    if faltan:
+        raise Fallo("--reune lleva hallazgos registrados y vigentes: %s no %s" % (
+            ", ".join(faltan), "existe" if len(faltan) == 1 else "existen"))
+    propios = [i for i in ids if registro.hallazgos[i]["linea"] == linea]
+    if propios:
+        raise Fallo("%s ya %s de la línea %s: súmale las fuentes con `hallazgo --id %s --fuentes S-…` (pide su sesión "
+                    "abierta)" % (", ".join(propios), "es" if len(propios) == 1 else "son", linea, propios[0]))
+    return [registro.hallazgos[i] for i in ids]
+
+
 def cmd_hallazgo(args):
     carpeta, producto, registro = abrir(args)
     if args.id:
@@ -4327,6 +4421,10 @@ def cmd_hallazgo(args):
         raise Fallo("Un hallazgo necesita al menos una fuente (--fuentes S-…): sin fuente va como ⚠ Sin evidencia "
                     "en el texto, no en el registro")
     contra = ids_existentes(lista(args.en_contra), registro.fuentes, "esta fuente en contra")
+    reunidos = reunir_hallazgos(registro, linea, args.reune)
+    for original in reunidos:  # lleva todo lo del original: sus fuentes a favor, en contra y su confianza bajada
+        fuentes = list(dict.fromkeys(original.get("fuentes", []) + fuentes))
+        contra = list(dict.fromkeys(original.get("en_contra", []) + contra))
     repetidas = sorted(set(fuentes) & set(contra))
     if repetidas:
         raise Fallo("Una fuente no puede estar a favor y en contra a la vez: %s" % ", ".join(repetidas))
@@ -4345,9 +4443,18 @@ def cmd_hallazgo(args):
     for referencia in lista(args.competidores):
         fila = registro.competidor(referencia)
         citados.append(fila["id"] if fila else referencia)
+    citados += [c for original in reunidos for c in original.get("competidores", [])]
     hallazgo = {"id": identificador, "linea": linea, "texto": args.texto.strip(), "fuentes": fuentes,
-                "en_contra": contra, "sin_contra": (args.sin_contra or "").strip(), "critico": bool(args.critico),
+                "en_contra": contra, "sin_contra": (args.sin_contra or "").strip() or next(
+                    (o["sin_contra"] for o in reunidos if o.get("sin_contra")), ""),
+                "critico": bool(args.critico) or any(o.get("critico") for o in reunidos),
                 "competidores": list(dict.fromkeys(citados)), "fecha": ahora()}
+    if reunidos:
+        hallazgo.update(reune=[o["id"] for o in reunidos], reglas=list(dict.fromkeys(
+            linea_ for o in reunidos for linea_ in Registro.reglas(o) if linea_ != linea)))
+        manuales = [o["confianza_manual"] for o in reunidos if o.get("confianza_manual")]
+        if manuales:
+            hallazgo["confianza_manual"] = min(manuales, key=lambda m: NIVELES.index(m["nivel"]))
     if bloquea:
         hallazgo["bloquea"] = bloquea
     datos["hallazgos"].append(hallazgo)
@@ -4380,6 +4487,13 @@ def cmd_hallazgo(args):
         print("⚠ Bloqueante en %s: esa tienda nombra o rechaza la categoría, así que el riesgo de políticas es 1 en "
               "ella. La puerta 1 solo lo da por cumplido con una mitigación escrita y creíble (`puntaje … "
               "--mitigacion \"…\"`), por ejemplo, no lanzar en esa tienda." % ", ".join(bloquea))
+    if reunidos:
+        print("· Reúne %s: sus fuentes a favor y en contra%s, con las reglas de triangulación de %s. %s sigue "
+              "registrado; donde lo citabas para esto (en la sesión 3, la columna Hallazgos de la hipótesis), cita "
+              "ahora %s en su lugar: la confianza de una fila es la menor de sus hallazgos." % (
+                  y_lista(o["id"] for o in reunidos), " y su confianza bajada a mano" if hallazgo.get(
+                      "confianza_manual") else "", y_lista(["la línea %s" % de for de in Registro.reglas(hallazgo)]),
+                  y_lista(o["id"] for o in reunidos), identificador))
     print("Siguiente paso: cítalo como %s en tu archivo; `triangulacion` lista lo que les falta a los hallazgos "
           "clave." % identificador)
 
@@ -5687,29 +5801,35 @@ def cmd_puerta(args):
 
 
 def ajustes_previos(lista_decisiones, numero_puerta, sesion):
-    """Cuántas veces se decidió ajustar esa sesión en esa puerta (vigentes o no)."""
+    """Cuántas veces se decidió ajustar esa sesión en esa puerta (vigentes o no). Un ajuste que reabrió varias a la
+    vez cuenta para cada una (feedback #65)."""
     return sum(1 for d in lista_decisiones if d["puerta"] == numero_puerta and d.get("decision") == "ajustar"
-               and d.get("sesion") == sesion)
+               and sesion in sesiones_de(d))
 
 
 def parada_autonoma(numero_puerta, carpeta, producto, registro, resultado):
     """Por qué el modo autónomo se detiene en esta puerta y le pregunta al usuario, o None (feedback #49): la puerta
     pide ajustar la misma sesión por tercera vez, o lo que el ajuste de esa sesión tiene que resolver depende entero de
     sus vacíos por límite de las herramientas (feedback #57; un navegador o un CSV de reseñas solo los puede dar el
-    usuario: ajustarla otra vez da lo mismo). Un vacío del que el ajuste no depende no lo detiene."""
+    usuario: ajustarla otra vez da lo mismo). Un vacío del que el ajuste no depende no lo detiene. Con varias sesiones
+    recomendadas a la vez (feedback #65), cada una cuenta para su tope y se detiene si alguna lo pide."""
     if resultado["recomienda"] != "ajustar":
         return None
-    sesion = resultado["sesion"]
-    previos = ajustes_previos(decisiones(carpeta), numero_puerta, sesion)
-    if previos >= 2:
-        return ("la puerta %d pide ajustar la sesión %s por tercera vez (ya se ajustó %s): otra vuelta automática no "
-                "promete nada nuevo" % (numero_puerta, sesion, plural(previos, "vez", "veces")))
-    bloqueo = resultado["bloqueo"] if "bloqueo" in resultado else bloqueo_herramienta(producto, registro, sesion, [])
-    if bloqueo and bloqueo["detener"]:  # solo si el ajuste depende entero de esos vacíos (feedback #57)
-        return "%s: antes de ajustarla hace falta un navegador en el agente o un CSV de reseñas que aporte el usuario%s" % (
-            texto_vacios_sesion(sesion, bloqueo["vacios"]), " (lo que el ajuste tiene que resolver depende solo de %s: "
-            "%s)" % ("ese vacío" if len(bloqueo["vacios"]) == 1 else "esos vacíos", bloqueo["motivo"])
-            if bloqueo["motivo"] else "")
+    lista_decisiones = decisiones(carpeta)
+    for sesion in sesiones_de(resultado):
+        previos = ajustes_previos(lista_decisiones, numero_puerta, sesion)
+        if previos >= 2:
+            return ("la puerta %d pide ajustar la sesión %s por tercera vez (ya se ajustó %s): otra vuelta automática "
+                    "no promete nada nuevo" % (numero_puerta, sesion, plural(previos, "vez", "veces")))
+    for sesion in sesiones_de(resultado):
+        bloqueo = (resultado["bloqueos"].get(sesion) if "bloqueos" in resultado else resultado["bloqueo"]
+                   if "bloqueo" in resultado else bloqueo_herramienta(producto, registro, sesion, []))
+        if bloqueo and bloqueo["detener"]:  # solo si el ajuste depende entero de esos vacíos (feedback #57)
+            return "%s: antes de ajustarla hace falta un navegador en el agente o un CSV de reseñas que aporte el " \
+                   "usuario%s" % (texto_vacios_sesion(sesion, bloqueo["vacios"]), " (lo que el ajuste tiene que "
+                                  "resolver depende solo de %s: %s)" % (
+                                      "ese vacío" if len(bloqueo["vacios"]) == 1 else "esos vacíos", bloqueo["motivo"])
+                                  if bloqueo["motivo"] else "")
     return None
 
 
@@ -5763,11 +5883,14 @@ def cmd_decidir(args):
         raise Fallo("Antes hay que decidir seguir en la puerta %s." % sin_decidir[0][1])
     evaluados = evaluar_puerta(args.puerta, carpeta, producto, registro)
     resultado = veredicto(args.puerta, carpeta, producto, registro, evaluados)
+    recomendadas = sesiones_de(resultado)
+    # `--ajustar 2 3` (o `2,3`): varias sesiones a la vez, si corren en paralelo (feedback #65)
+    ajustar = list(dict.fromkeys(s.strip() for valor in args.ajustar or [] for s in valor.split(",") if s.strip()))
     if args.automatico:  # modo autónomo (feedback #49): solo la recomendación de la skill, nunca en contra
         recomendada = resultado["recomienda"]
-        pedida = "seguir" if args.seguir else "ajustar" if args.ajustar else "descartar" if \
+        pedida = "seguir" if args.seguir else "ajustar" if ajustar else "descartar" if \
             args.descartar is not None else None
-        if pedida and (pedida != recomendada or (pedida == "ajustar" and args.ajustar != resultado["sesion"])):
+        if pedida and (pedida != recomendada or (pedida == "ajustar" and set(ajustar) != set(recomendadas))):
             raise Fallo("--automatico solo aplica la recomendación de la skill: %s (veredicto: %s). Decidir otra cosa "
                         "es una decisión del usuario, sin --automatico y con --motivo." % (
                             texto_recomendacion(resultado), resultado["titulo"]))
@@ -5776,7 +5899,7 @@ def cmd_decidir(args):
             raise Fallo("Modo autónomo: aquí se detiene y le pregunta al usuario, porque %s. La decisión la toma el "
                         "usuario en su terminal, sin --automatico." % parada)
         args.seguir = recomendada == "seguir"
-        args.ajustar = resultado["sesion"] if recomendada == "ajustar" else None
+        ajustar = recomendadas if recomendada == "ajustar" else []
         args.descartar = motivo_descarte(resultado) if recomendada == "descartar" else None
     diferidos = resultado.get("diferidos") or []
     cumplidos = sum(1 for c in evaluados if c["cumple"])
@@ -5790,28 +5913,36 @@ def cmd_decidir(args):
     abiertas = [s for s in DEPENDE[nodo] if not cerrada(producto, s)]
     if args.seguir and abiertas:
         raise Fallo("Para seguir, antes cierra %s (`cerrar --sesion <id>`)." % texto_sesiones(abiertas))
-    if args.ajustar and (args.ajustar not in SESION or nodo not in dependientes(args.ajustar)):
+    if any(s not in SESION or nodo not in dependientes(s) for s in ajustar):
         raise Fallo("--ajustar lleva una sesión anterior a la puerta %d: %s" % (args.puerta, ", ".join(
             s["id"] for s in SESIONES if nodo in dependientes(s["id"]))))
+    if len(ajustar) > 1 and any(s not in grupo_paralelo(ajustar[0]) for s in ajustar):
+        raise Fallo("Solo se reabren a la vez sesiones que corren en paralelo (%s): %s no. Ajusta una y, al volver a "
+                    "la puerta, la otra." % ("; ".join(y_lista(g) for g in GRUPOS_PARALELOS), y_lista(ajustar)))
     if args.descartar is not None and len(args.descartar.strip()) < 10:
         raise Fallo("--descartar lleva el motivo completo (qué evidencia en contra hay, o qué camino no "
                     "existe): es lo que queda como aprendizaje")
-    tomada = "seguir" if args.seguir else "ajustar" if args.ajustar else "descartar"
-    # ajustar otra sesión que la recomendada también va en contra: el registro dice por qué (feedback #26)
-    contra = tomada != resultado["recomienda"] or (tomada == "ajustar" and args.ajustar != resultado["sesion"])
+    tomada = "seguir" if args.seguir else "ajustar" if ajustar else "descartar"
+    # ajustar otras sesiones que las recomendadas también va en contra: el registro dice por qué (feedback #26 y #65)
+    contra = tomada != resultado["recomienda"] or (tomada == "ajustar" and set(ajustar) != set(recomendadas))
     motivo_usuario = (args.motivo or "").strip()
     if contra and len(motivo_usuario) < 10:
         raise Fallo("La skill recomienda %s (veredicto: %s; %s). Para %s en contra de la recomendación, agrega "
                     "--motivo \"<por qué decides distinto>\" (al menos 10 caracteres): queda registrado como decisión "
                     "contra la recomendación." % (texto_recomendacion(resultado), resultado["titulo"],
-                                                  "; ".join(resultado["razones"]), "ajustar la sesión %s" % args.ajustar
+                                                  "; ".join(resultado["razones"]), "ajustar %s" % texto_sesiones(ajustar)
                                                   if tomada == "ajustar" else tomada))
     registro_decision["recomendacion"] = {
         "veredicto": resultado["nivel"], "recomienda": resultado["recomienda"], "sesion": resultado["sesion"],
         "razones": resultado["razones"], "cambiaria": resultado["cambiaria"]}
+    if len(recomendadas) > 1:
+        registro_decision["recomendacion"]["sesiones"] = recomendadas
     registro_decision["contra_recomendacion"] = contra
-    if tomada == "ajustar" and args.ajustar == resultado["sesion"]:  # lo que la reapertura tiene que conseguir (#64)
-        registro_decision["resolver"] = [que for _, _, que in resultado.get("por_resolver") or []]
+    if tomada == "ajustar" and not contra:  # lo que la reapertura tiene que conseguir (#64), por sesión (#65)
+        por_sesion = resultado.get("por_sesion") or {resultado["sesion"]: resultado.get("por_resolver") or []}
+        registro_decision["resolver"] = list(dict.fromkeys(que for s in ajustar for _, _, que in por_sesion.get(s, [])))
+        if len(ajustar) > 1:
+            registro_decision["resolver_sesiones"] = {s: [que for _, _, que in por_sesion.get(s, [])] for s in ajustar}
     if motivo_usuario:
         registro_decision["motivo_decision"] = motivo_usuario
     if args.automatico:
@@ -5833,7 +5964,7 @@ def cmd_decidir(args):
         print("· Coincide con la recomendación de la skill (veredicto: %s)." % resultado["titulo"])
     resueltas = []
     for propuesta in propuestas_de(producto, args.puerta):  # la decisión de la puerta responde a sus propuestas
-        propuesta.update(estado="seguir" if args.seguir else "ajustar %s" % args.ajustar if args.ajustar
+        propuesta.update(estado="seguir" if args.seguir else "ajustar %s" % y_lista(ajustar) if ajustar
                          else "descartar", resuelta=ahora())
         resueltas.append(propuesta["id"])
     if resueltas:
@@ -5856,16 +5987,16 @@ def cmd_decidir(args):
         regenerar_reporte(carpeta)
         actualizar_tablero(carpeta, producto)
         print("\n" + con_color(siguiente))
-    elif args.ajustar:
-        sesion = args.ajustar
-        reabiertas = [sesion] if cerrada(producto, sesion) else []
-        for otro in dependientes(sesion):
-            if otro.startswith("P"):
-                for decision in lista_decisiones:
-                    if decision["puerta"] == int(otro[1]):
-                        decision["vigente"] = False
-            elif cerrada(producto, otro):
-                reabiertas.append(otro)
+    elif ajustar:
+        reabiertas = [s for s in ajustar if cerrada(producto, s)]
+        for sesion in ajustar:
+            for otro in dependientes(sesion):
+                if otro.startswith("P"):
+                    for decision in lista_decisiones:
+                        if decision["puerta"] == int(otro[1]):
+                            decision["vigente"] = False
+                elif cerrada(producto, otro) and otro not in reabiertas:
+                    reabiertas.append(otro)
         for reabierta in reabiertas:
             anterior = producto["sesiones"].get(reabierta) or {}
             producto["sesiones"][reabierta] = {"reabierta": ahora(), "reaperturas": int(anterior.get(
@@ -5874,24 +6005,28 @@ def cmd_decidir(args):
                 if anterior.get(clave):
                     producto["sesiones"][reabierta][clave] = anterior[clave]
             linea_reabierta = next((n for n, (_, s) in LINEAS.items() if s == reabierta), None)
-            if linea_reabierta:  # las fuentes de antes no cuentan para las lecturas de esta pasada
-                producto["sesiones"][reabierta]["fuentes_base"] = sum(
-                    1 for f in registro.fuentes.values() if f["linea"] == linea_reabierta and not f.get("extracto"))
-        registro_decision.update(decision="ajustar", sesion=sesion)
+            if linea_reabierta:  # las fuentes de antes no cuentan para las lecturas ni los extractos de esta pasada
+                de_linea = [f for f in registro.fuentes.values() if f["linea"] == linea_reabierta]
+                producto["sesiones"][reabierta]["fuentes_base"] = sum(1 for f in de_linea if not f.get("extracto"))
+                producto["sesiones"][reabierta]["extractos_base"] = [f["id"] for f in de_linea if f.get("extracto")]
+        registro_decision.update(decision="ajustar", sesion=ajustar[0])
+        if len(ajustar) > 1:
+            registro_decision["sesiones"] = ajustar
         lista_decisiones.append(registro_decision)
         escribir_json(carpeta / "decisiones.json", lista_decisiones)
         guardar(carpeta, producto)
         siguiente = actualizar_estado(carpeta, producto)
-        print("✔ Puerta %d · %s: ajustar la sesión %s" % (args.puerta, PUERTAS[args.puerta], sesion))
-        print("· Se reabren: %s. Lo ya escrito se conserva: cada sesión corrige lo suyo y vuelve a cerrar." % (
-            ", ".join(sorted(reabiertas, key=lambda s: [x["id"] for x in SESIONES].index(s))) or "ninguna"))
+        print("✔ Puerta %d · %s: ajustar %s" % (args.puerta, PUERTAS[args.puerta], texto_sesiones(ajustar)))
+        print("· Se reabren: %s. Lo ya escrito se conserva: cada sesión corrige lo suyo y vuelve a cerrar%s." % (
+            ", ".join(sorted(reabiertas, key=lambda s: [x["id"] for x in SESIONES].index(s))) or "ninguna",
+            "; %s corren en paralelo" % y_lista(ajustar) if len(ajustar) > 1 else ""))
         lineas_sesion = lineas_de(reabiertas)
         herramienta = vacios_de_herramienta(producto, registro, lineas_sesion) if lineas_sesion else []
-        bloqueo = resultado.get("bloqueo") if (resultado["recomienda"], resultado["sesion"]) == ("ajustar", sesion) \
-            else None
-        if bloqueo and not bloqueo["detener"]:  # el ajuste recomendado no depende de ellos (feedback #57): un aviso
-            print("· %s." % texto_bloqueo(sesion, bloqueo))
-            herramienta = [v for v in herramienta if v not in bloqueo["vacios"]]
+        for sesion in ajustar if resultado["recomienda"] == "ajustar" else []:
+            bloqueo = (resultado.get("bloqueos") or {}).get(sesion)
+            if bloqueo and not bloqueo["detener"]:  # el ajuste recomendado no depende de ellos (feedback #57): un aviso
+                print("· %s." % texto_bloqueo(sesion, bloqueo))
+                herramienta = [v for v in herramienta if v not in bloqueo["vacios"]]
         if herramienta:
             print("⚠ %s tiene vacíos por límite de las herramientas (%s). Con las mismas herramientas, el ajuste da lo "
                   "mismo: antes, dale al agente un navegador o consigue un CSV de reseñas (references/investigacion.md "
@@ -5957,12 +6092,14 @@ def datos_orquestador(carpeta, producto=None):
 def datos_automatico(numero_puerta, carpeta, producto, registro, resultado):
     """Lo que necesita el modo autónomo en una puerta (feedback #49), determinista: el comando `decidir --automatico`
     listo (aplica la recomendación de la skill), la decisión que tomaría, cuántas veces se ajustó ya esa sesión en esa
-    puerta y si hay que detenerse (el tercer ajuste de la misma sesión, o algo que solo el usuario puede dar)."""
+    puerta y si hay que detenerse (el tercer ajuste de la misma sesión, o algo que solo el usuario puede dar). Con varias
+    sesiones a la vez (feedback #65), `sesiones` las lista y `ajustes_previos` es el mayor de ellas."""
     parada = parada_autonoma(numero_puerta, carpeta, producto, registro, resultado)
-    sesion = resultado["sesion"] if resultado["recomienda"] == "ajustar" else None
+    sesiones = sesiones_de(resultado) if resultado["recomienda"] == "ajustar" else []
+    lista_decisiones = decisiones(carpeta)
     return {"comando": orden("decidir --puerta %d --automatico" % numero_puerta, carpeta),
-            "decision": resultado["recomienda"], "sesion": sesion,
-            "ajustes_previos": ajustes_previos(decisiones(carpeta), numero_puerta, sesion) if sesion else 0,
+            "decision": resultado["recomienda"], "sesion": sesiones[0] if sesiones else None, "sesiones": sesiones,
+            "ajustes_previos": max([ajustes_previos(lista_decisiones, numero_puerta, s) for s in sesiones] or [0]),
             "detener": bool(parada), "motivo": parada}
 
 
@@ -6034,7 +6171,8 @@ def siguiente_json(carpeta):
             paso = {"tipo": "puerta", "quien": "usuario", "requiere_persona": True, "donde": "terminal",
                     "puerta": numero_puerta, "nombre": PUERTAS[numero_puerta], "cumple": cumplidos, "total": total,
                     "veredicto": {clave: resultado[clave] for clave in ("nivel", "titulo", "recomienda", "sesion",
-                                                                        "razones", "cambiaria", "provisional")},
+                                                                        "sesiones", "razones", "cambiaria",
+                                                                        "provisional")},
                     "recomendacion": texto_recomendacion(resultado),
                     "opciones": opciones_decision(numero_puerta, carpeta, producto, resultado),
                     "automatico": datos_automatico(numero_puerta, carpeta, producto, registro, resultado),
@@ -6380,7 +6518,7 @@ def recorrido(carpeta):
         if decision.get("decision") not in DECISIONES_LLANO:
             continue
         nivel = (decision.get("recomendacion") or {}).get("veredicto")
-        hecho = {"seguir": "seguir", "ajustar": "ajustar %s" % (decision.get("sesion") or ""),
+        hecho = {"seguir": "seguir", "ajustar": "ajustar %s" % y_lista(sesiones_de(decision)),
                  "descartar": "descartada"}[decision["decision"]]
         if decision.get("contra_recomendacion"):
             hecho += " contra la recomendación"
@@ -6458,8 +6596,7 @@ def seccion_veredicto(info, compacto=False, estado=None, pasos=None):
         partes.append("<h3>Criterio de descarte después del lanzamiento</h3><p>%s.</p>" % escape(primera_mayuscula(
             resultado["descarte"]["texto"])))
     if decision:
-        tomada = DECISIONES_LLANO[decision["decision"]].lower() + (
-            " la sesión %s" % decision["sesion"] if decision.get("sesion") else "")
+        tomada = DECISIONES_LLANO[decision["decision"]].lower() + texto_ajuste(decision)
         if decision.get("automatica"):
             partes.append("<p>%s La skill decidió %s, su propia recomendación, en el modo autónomo que pediste. "
                           "Revísala: si no la compartes, reábrela y decide tú (<code>decidir --puerta %d --reabrir"
@@ -6540,8 +6677,7 @@ def seccion_resumen(carpeta, producto, registro, estado, info=None):
     elif ultima:
         partes.append("<p><b>Última decisión:</b> puerta %d · %s, %s el %s (cumplía %d de %d criterios).</p>" % (
             ultima["puerta"], escape(PUERTAS[ultima["puerta"]]), escape(DECISIONES_LLANO[ultima["decision"]].lower()
-                                                                       + (" la sesión %s" % ultima["sesion"]
-                                                                          if ultima.get("sesion") else "")),
+                                                                       + texto_ajuste(ultima)),
             escape(fecha_corta(ultima["fecha"])), ultima.get("cumple", 0), ultima.get("total", 0)))
     else:
         partes.append("<p><b>Decisión:</b> todavía ninguna puerta decidida.</p>")
@@ -6635,8 +6771,7 @@ def seccion_puertas(carpeta, producto, registro):
         criterios, cuando = None, ""
         if decision:
             tono = {"seguir": "bien", "ajustar": "aviso", "descartar": "mal"}[decision["decision"]]
-            estado = chip(DECISIONES_LLANO[decision["decision"]] + (" la sesión %s" % decision["sesion"]
-                                                                    if decision.get("sesion") else ""), tono)
+            estado = chip(DECISIONES_LLANO[decision["decision"]] + texto_ajuste(decision), tono)
             linea = "Decidida el %s · cumplía %d de %d criterios." % (
                 fecha_corta(decision["fecha"]), decision.get("cumple", 0), decision.get("total", 0))
             recomendacion = decision.get("recomendacion")
@@ -6677,7 +6812,7 @@ def seccion_puertas(carpeta, producto, registro):
             detalle += "<details><summary>Historial (%d decisiones)</summary><ul>%s</ul></details>" % (
                 len(historial), "".join("<li>%s · %s%s</li>" % (
                     escape(fecha_corta(d["fecha"])), escape(DECISIONES_LLANO[d["decision"]]),
-                    escape(" la sesión %s" % d["sesion"]) if d.get("sesion") else "") for d in historial))
+                    escape(texto_ajuste(d))) for d in historial))
         items.append('<li><div class="fila"><h3>Puerta %d · %s</h3>%s</div><p class="nota">%s</p><p>%s</p>%s</li>' % (
             numero_puerta, escape(nombre), estado, escape(PUERTAS_LLANO[numero_puerta]), escape(linea), detalle))
     pendientes = [p for p in producto.get("propuestas", []) if p.get("estado") == "pendiente"]
@@ -7460,6 +7595,9 @@ def parser():
                           "la URL de su ficha o su nombre")
     sub.add_argument("--bloquea", help="línea politicas: tiendas del objetivo que nombran la categoría o la rechazan "
                                        "(google-play,app-store)")
+    sub.add_argument("--reune", metavar="H-…", help="sin --id: hallazgos de otra línea (de una sesión cerrada) que el "
+                                                    "nuevo reúne con sus fuentes nuevas para fortalecerlos: lleva sus "
+                                                    "fuentes a favor y en contra y sigue sus reglas de triangulación")
 
     sub = comando("confianza", cmd_confianza, "Baja la confianza de un hallazgo, con su motivo (nunca la sube)")
     sub.add_argument("--hallazgo", required=True)
@@ -7592,7 +7730,8 @@ def parser():
     sub.add_argument("--puerta", required=True, type=int, choices=(1, 2, 3))
     grupo = sub.add_mutually_exclusive_group()
     grupo.add_argument("--seguir", action="store_true")
-    grupo.add_argument("--ajustar", metavar="SESIÓN")
+    grupo.add_argument("--ajustar", metavar="SESIÓN", nargs="+",
+                       help="la sesión que se reabre; varias a la vez (`--ajustar 2 3`) solo si corren en paralelo")
     grupo.add_argument("--descartar", metavar="MOTIVO")
     grupo.add_argument("--reabrir", action="store_true", help="deshace la decisión vigente de la puerta")
     sub.add_argument("--motivo", help="por qué decides distinto de la recomendación de la skill (obligatorio en ese "
