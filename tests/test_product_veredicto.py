@@ -109,7 +109,9 @@ class VeredictoTest(Base):
         self.p("puntaje", "--valores", "4,4,4,4,3")
         salida = self.cerrar("1f", "01-sintesis.md")
         self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1d", salida)
-        self.assertIn("La confianza global es baja: monetización se apoya en evidencia sin confirmar", salida)
+        # H-MON-1 está triangulado y bajado a mano: la razón lo dice en vez de «sin confirmar» (feedback #71)
+        self.assertIn("La confianza global es baja: monetización se apoya en evidencia en confianza baja: H-MON-1 está "
+                      "triangulado, pero en confianza baja por una bajada a mano (Las fuentes se contradicen)", salida)
         self.assertIn("Con eso, el veredicto pasaría a Viable", salida)
         self.assertIn("   ★ Recomendado · Ajustar 1d: cd ", salida)
         self.assertIn("decidir --puerta 1 --ajustar 1d --carpeta product", salida)

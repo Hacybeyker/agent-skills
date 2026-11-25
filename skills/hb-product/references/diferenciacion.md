@@ -105,7 +105,7 @@ Son tres estados (viable, viable con confianza baja y no viable; la paridad es u
 
 Un vector medible comprobado en la matriz cumple el criterio de evidencia, pero si el hallazgo que lo sostiene no está triangulado, el diferenciador queda con confianza baja. `producto.py triangulacion` dice qué le falta a cada hallazgo.
 
-Un diferenciador que no es viable queda registrado igual, con lo que le falta. Si consigues la evidencia (por ejemplo, una tercera fuente vigente del mismo hallazgo), el estado se recalcula solo; si cambia el diferenciador, vuelve a registrarlo y anula el anterior (`producto.py anular --id D-1 --motivo "…"`).
+Un diferenciador que no es viable queda registrado igual, con lo que le falta. Si consigues la evidencia (por ejemplo, una tercera fuente vigente del mismo hallazgo), el estado se recalcula solo; si cambia lo que se puede corregir (el motivo, la copiabilidad, dónde se ve o las semanas), corrígelo con el mismo ID: `producto.py diferenciador --id D-1 [--motivo "…"] [--copiable baja|media|alta] [--se-ve ficha|uso] [--semanas <n>]` recalcula su estado y deja la traza (solo con la 1g abierta). Si cambia el diferenciador mismo (el vector, el texto o el dolor), vuelve a registrarlo y anula el anterior (`producto.py anular --id D-1 --motivo "…"`).
 
 ## El diferenciador principal
 

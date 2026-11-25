@@ -80,7 +80,6 @@ class PropuestaConAlcanceTest(veredicto.Base):
         self.assertIn("🟢  PUERTA 2 · VIABLE", self.p("puerta", "--n", 2))
 
     def test_valida_los_hallazgos(self):
-        self.assertIn("--hallazgos va con --ajustar", self.falla("propuesta", "--texto", "x", "--hallazgos", self.voz))
         self.assertIn("H-VOZ-99 no existe", self.falla("propuesta", "--texto", "x", "--ajustar", "1b", "--hallazgos",
                                                        "H-VOZ-99"))
         self.assertEqual(self.datos()["propuestas"], [])

@@ -19,7 +19,7 @@ El ejemplo es inventado: una app que organiza turnos para regar las plantas de u
 
 ## Clasificar la idea
 
-**Antes de abrir las líneas.** Si las líneas arrancan sin saber que la idea es nueva, investigan como si hubiera competencia y nadie sube a los peldaños 4 y 5. Por eso la sesión 0 hace un triaje corto (en las tiendas del objetivo, 3 búsquedas como máximo: ¿hay apps que hagan lo mismo?) y registra un **tipo provisional** (`producto.py tipo --nueva --provisional --motivo "<lo que dio el triaje>"`); cada línea lo lee al empezar (viene en su texto para pegar) y la sesión 1a lo confirma con `producto.py tipo`, apenas lo sabe:
+**Antes de abrir las líneas.** Si las líneas arrancan sin saber que la idea es nueva, investigan como si hubiera competencia y nadie sube a los peldaños 4 y 5. Por eso la sesión 0 hace un triaje corto (en las tiendas del objetivo, 3 búsquedas como máximo: ¿hay apps que hagan lo mismo?; `cerrar --sesion 0 --busquedas <n> --lecturas <n>` las anota) y registra un **tipo provisional** (`producto.py tipo --nueva --provisional --motivo "<lo que dio el triaje>"`); cada línea lo lee al empezar (viene en su texto para pegar) y la sesión 1a lo confirma con `producto.py tipo`, apenas lo sabe:
 
 - **Existente:** hay competidores directos con tracción.
 - **Variante:** hay directos, pero la idea cambia algo relevante.
