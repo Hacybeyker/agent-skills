@@ -54,6 +54,12 @@ class Base(base.Base):
                                          "--competidores", "PlantaPlus", "--sin-contra", "Se buscó y no apareció")
         return identificador
 
+    def comparacion_alta(self):
+        """Un hallazgo de la comparación distinto del dolor, triangulado y en confianza alta: la prueba de elección."""
+        identificador, _ = self.hallazgo("diferenciacion", self.fuente("diferenciacion", 3, "terceros"),
+                                         "--competidores", "PlantaPlus", "--sin-contra", "Se buscó y no apareció")
+        return identificador
+
     def sin_triangular(self):
         identificador, _ = self.hallazgo("diferenciacion", self.fuente("diferenciacion", 1, "usuario"),
                                          "--competidores", "PlantaPlus", "--sin-contra", "Se buscó y no apareció")
@@ -144,7 +150,8 @@ class RivalTest(Base):
 
     def test_supera_con_prueba_de_eleccion_es_viable(self):
         voz = self.hasta_1g()
-        salida = self.puerta1("--resultado", "supera", "--hallazgos", voz, "--texto", "Sin suscripción")
+        salida = self.puerta1("--resultado", "supera", "--hallazgos", "%s,%s" % (voz, self.comparacion_alta()),
+                              "--texto", "Sin suscripción")
         self.assertIn("🟢  PUERTA 1 · VIABLE  →  la skill recomienda: SEGUIR", salida)
         self.assertIn("El diferenciador principal (D-1) es viable y supera al rival C-2 (PlantaPlus), con prueba de "
                       "elección", salida)
@@ -168,13 +175,15 @@ class RivalTest(Base):
         self.assertIn("🟡  PUERTA 1 · VIABLE CON RESERVAS  →  la skill recomienda: AJUSTAR 1g", salida)
         self.assertIn("D-1 supera al rival C-2 (PlantaPlus), pero sin prueba de que eso haga elegir la app (%s en confianza "
                       "media)" % media, salida)
-        self.assertIn("Un hallazgo triangulado y en confianza alta que muestre que la gente elige por D-1", salida)
+        self.assertIn("Un hallazgo de la comparación (`frente`), distinto del dolor, triangulado y en confianza alta, "
+                      "que muestre que la gente elige por D-1", salida)
         self.assertIn("decidir --puerta 1 --ajustar 1g --carpeta product", salida)
 
     def test_una_hipotesis_debil_sobre_el_diferenciador_quita_la_prueba_de_eleccion(self):
         voz = self.hasta_1g()
         write(self.carpeta / "03-validacion.md", base.HIPOTESIS.replace("| D-1 | sostenida |", "| D-1 | débil |"))
-        salida = self.puerta1("--resultado", "supera", "--hallazgos", voz, "--texto", "Sin suscripción")
+        salida = self.puerta1("--resultado", "supera", "--hallazgos", "%s,%s" % (voz, self.comparacion_alta()),
+                              "--texto", "Sin suscripción")
         self.assertIn("🟡  PUERTA 1 · VIABLE PARA PROBAR", salida)
         self.assertIn("(la hipótesis HIP-02 quedó débil)", salida)
         # una hipótesis refutada sobre él no es falta de prueba: es evidencia en contra

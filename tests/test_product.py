@@ -184,7 +184,10 @@ class Base(unittest.TestCase):
             self.p("diferenciador", "--vector", "precio", "--texto", "Pago único en vez de suscripción",
                    "--hallazgos", voz, "--se-ve", "ficha", "--copiable", "media", "--motivo",
                    "Cambiar de modelo les cuesta ingresos recurrentes", "--semanas", 2, "--principal")
-            self.p("frente", "--id", "D-1", "--resultado", "supera", "--hallazgos", voz, "--texto",
+            # la prueba de elección: un hallazgo de la comparación distinto del dolor (feedback #68)
+            eleccion, _ = self.hallazgo("diferenciacion", self.fuente("diferenciacion", 3), "--critico",
+                                        "--sin-contra", "Se buscó y no apareció")
+            self.p("frente", "--id", "D-1", "--resultado", "supera", "--hallazgos", "%s,%s" % (voz, eleccion), "--texto",
                    "PlantaPlus es gratis, pero con anuncios que sus usuarios piden quitar")
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
 

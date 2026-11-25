@@ -11,7 +11,9 @@ Cada línea es una sesión en su propio chat (o en su propio subagente) y pueden
 - el dato es **puntual y verificable en el extracto**: una cifra con su fecha y su autor, el precio o la nota de una ficha, el título y la fecha de un artículo que dice lo que citas;
 - y el extracto trae la **fecha de publicación** (si no, `--publicada desconocida`, que no cuenta para la confianza).
 
-**Abre la página** (y regístrala sin `--extracto`) cuando el dato depende del contexto (una reseña, una opinión, un hilo), cuando el extracto está cortado o no muestra la fecha, cuando es una política (`--tipo oficial` no admite `--extracto`: la norma se lee en su página) o cuando el hallazgo es clave y es su única fuente de ese tipo. Si después abres una página que registraste como extracto, repite `fuente` con la misma URL y sin `--extracto`: pasa a contar como lectura en esa pasada.
+**Abre la página** (y regístrala sin `--extracto`) cuando el dato depende del contexto (una reseña, una opinión, un hilo), cuando el extracto está cortado o no muestra la fecha, cuando es una política (`--tipo oficial` no admite `--extracto`: la norma se lee en su página) o cuando el hallazgo es clave y es su única fuente de ese tipo. Si después abres una página que registraste como extracto, repite `fuente` con la misma URL y sin `--extracto`: pasa a contar como lectura en esa pasada, y el resumen que pases reemplaza al del extracto.
+
+**Varias fuentes de una sola lectura (`fuente --misma-lectura S-…`).** Si una sola lectura trae varias fuentes (una API pública que devuelve la ficha de cada mercado, un listado con varias apps), registra la primera como siempre y las demás con `--misma-lectura <ID de la primera>`: todas cuentan como una lectura en el aviso de `fuente`, en `--lecturas` y en el presupuesto de la reapertura. Tiene que ser de tu misma línea y una lectura (no un extracto). No cambia la independencia ni la confianza: cada fuente sigue contando por su autor o su dominio.
 
 1. Primera línea: `Sesión 1c · Demanda (<motivo>)`.
 2. Lee `00-idea.md` y `criterios.md`. No leas los archivos de las otras líneas: están a medias.

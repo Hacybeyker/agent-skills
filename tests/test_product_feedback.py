@@ -698,7 +698,9 @@ class SustitutoTest(Base):
         self.investigar(supera=True)
         salida = self.p("frente", "--id", "D-1", "--resultado", "supera", "--hallazgos", "H-VOZ-1", "--texto",
                         "El recordatorio no reparte turnos entre vecinos")
-        self.assertIn("· Con prueba de elección", salida)
+        # H-VOZ-1 es el dolor de D-1: cuenta para superar, no como prueba de elección (feedback #68)
+        self.assertIn("· Sin prueba de elección (la comparación con C-3 (Recordatorio del sistema) solo cita el dolor, "
+                      "H-VOZ-1, que muestra que el rival falla y no que la gente elija la app por eso)", salida)
         self.assertIn("✔ D-1: viable", salida)
         self.assertIn("✔ Frente al rival: supera a C-3 (Recordatorio del sistema) con H-VOZ-1", salida)
         self.cerrar("1g", "01-investigacion/diferenciacion.md")
