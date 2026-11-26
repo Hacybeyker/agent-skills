@@ -64,8 +64,10 @@ VERSION = "0.21.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
+# 0.18.0 a 0.21.0 no tocan las configuraciones de Perfetto, las consultas ni cómo se mide cada corrida (las métricas de
+# una traza de ejemplo siguen siendo las de 0.17.0); el interceptor de red de 0.19.0 solo escribe en la corrida de prueba.
 SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0", "0.15.1", "0.16.0", "0.17.0",
-                "0.20.0", VERSION)  # 0.21.0 solo cambia cómo se elige la rama de una unidad en fuente
+                "0.18.0", "0.19.0", "0.20.0", VERSION)
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]

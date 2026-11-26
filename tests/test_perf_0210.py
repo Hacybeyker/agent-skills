@@ -9,6 +9,7 @@ from test_perf import perf
 from test_perf_0140 import ModulesBase
 
 SKILL_DIR = ROOT / "skills" / "hb-performance"
+CAPTURE_ASSETS = "00bdaa5cca707d1c744db91b9ac0e7ea24f38ceeee9c56244f079af039644a26"  # perfetto/ y queries/ de 0.17.0
 
 
 class BranchQuestionTest(ModulesBase):
@@ -39,10 +40,22 @@ class BranchQuestionTest(ModulesBase):
         other = perf.source_steps(self.root, dict(item, nombre=":pagos-ui", carpeta=str(self.sibling / "ui")))
         self.assertEqual(other, steps)  # la misma pregunta: los llamadores la muestran una sola vez
 
-    def test_las_fases_de_0200_se_completan_sin_repetirlas(self):
-        """0.21.0 solo cambia cómo se elige la rama: mide igual que 0.20.0."""
-        for version in ("0.17.0", "0.20.0", perf.VERSION):
+    def test_las_fases_desde_0170_se_completan_sin_repetirlas(self):
+        """De 0.17.0 a 0.21.0 la captura no cambió: ninguna versión de ese tramo puede faltar en SAME_CAPTURE (a 0.19.0
+        y a 0.20.0 se les olvidó la anterior)."""
+        for version in ("0.17.0", "0.18.0", "0.19.0", "0.20.0", perf.VERSION):
             self.assertTrue(perf.same_capture(version), version)
+        self.assertFalse(perf.same_capture("0.8.0"))
+
+    def test_desde_0170_no_cambiaron_perfetto_ni_las_consultas(self):
+        """Lo que define la misma captura: si un cambio toca estas carpetas, SAME_CAPTURE se revisa."""
+        import hashlib
+        digest = hashlib.sha256()
+        for folder in ("perfetto", "queries"):
+            for path in sorted((SKILL_DIR / "assets" / folder).rglob("*")):
+                if path.is_file():
+                    digest.update(path.relative_to(SKILL_DIR).as_posix().encode() + path.read_bytes())
+        self.assertEqual(digest.hexdigest(), CAPTURE_ASSETS, "cambió la captura: revisa SAME_CAPTURE y actualiza el hash")
 
     def test_la_opcion_de_pasarlo_a_codigo_tampoco_impone_una_rama(self):
         self.assertIn("en la rama que elija el usuario", perf.PASS_TO_SOURCE)
