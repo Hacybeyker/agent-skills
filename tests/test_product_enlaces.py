@@ -165,7 +165,7 @@ class EnlazarHallazgoTest(Base):
 
     def test_con_id_no_cambia_nada_mas_y_sin_id_sigue_pidiendo_lo_de_siempre(self):
         error = self.falla("hallazgo", "--id", self.voz, "--competidor", "C-1", "--texto", "Otro texto", "--critico")
-        self.assertIn("--texto, --critico no va", error)
+        self.assertIn("--critico no va", error)  # --texto sí va: corrige el texto (feedback #82 d)
         self.assertIn("faltan --linea, --fuentes", self.falla("hallazgo", "--texto", "Sin línea"))
         self.p("anular", "--id", self.voz, "--motivo", "Prueba")
         self.assertIn("o está anulado", self.falla("hallazgo", "--id", self.voz, "--competidor", "C-1"))

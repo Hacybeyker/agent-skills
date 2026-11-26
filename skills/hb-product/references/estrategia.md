@@ -7,7 +7,7 @@ Convierte la síntesis en una estrategia y en un modelo de negocio con números.
 **Cuándo:** con la puerta 1 decidida como "seguir". **Presupuesto:** 15 búsquedas y 10 lecturas (20 y 12 en una idea nueva), para los supuestos que 1d no dejó con fuente. Lo nuevo se registra en la línea `estrategia`.
 
 1. Primera línea: `Sesión 2 · Estrategia (<motivo>)`.
-2. `producto.py estado` y `producto.py tipo`. Lee `00-idea.md`, `01-sintesis.md`, `monetizacion.md` y `diferenciacion.md`.
+2. `producto.py estado` y `producto.py tipo`. Lee `00-idea.md`, `01-sintesis.md`, `monetizacion.md` y `diferenciacion.md`, y la sección Distribución de `competencia.md`.
 3. Usuario objetivo y Jobs To Be Done.
 4. Propuesta de valor y posicionamiento, construidos sobre el diferenciador principal.
 5. Lean Canvas y PR/FAQ.
@@ -30,6 +30,8 @@ En una idea nueva, la alternativa es el sustituto: por qué alguien dejaría lo 
 ## Lean Canvas
 
 Nueve bloques en una tabla: problema, segmentos de clientes, propuesta única de valor, solución, canales, fuentes de ingresos, estructura de costos, métricas clave y ventaja injusta. Cada bloque cita su evidencia; el que no la tiene va como **⚠ Sin evidencia**. "Ventaja injusta" puede ser "ninguna todavía": es mejor que inventarla.
+
+**Canales y distribución.** La distribución es una palanca de esta sesión, no un diferenciador: salir arriba en las búsquedas de las tiendas de un país o un idioma donde el rival no aparece (ASO) ayuda a conseguir las primeras instalaciones, pero el rival puede entrar a esas palabras en días y no cambia el producto, así que no cuenta en el puntaje ni en la puerta 1. Su evidencia son los hallazgos de distribución de la 1a (`competencia.md`: resultados de búsqueda en las tiendas por país e idioma, con su fecha de consulta). Cítalos en el bloque Canales y en el posicionamiento; si falta un país o un idioma del objetivo, búscalo con el presupuesto de esta sesión y regístralo en la línea `estrategia` de la misma forma. En la puerta 2, esos hallazgos pueden sostener la hipótesis de canal de la sesión 3: su confianza cuenta como la de cualquier hallazgo enlazado ([validacion.md](validacion.md)).
 
 ## PR/FAQ
 

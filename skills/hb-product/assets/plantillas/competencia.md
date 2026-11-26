@@ -28,9 +28,17 @@ Cómo se resuelve hoy la necesidad sin una app así (peldaño 4): la función qu
 
 ## Rival a superar
 
-La alternativa gratis más fuerte, sea un sustituto o un competidor directo gratis y completo: cada diferenciador de la sesión 1g tendrá que superarla, e igualarla no alcanza. Se marca con `competidor --nombre "<…>" … --rival`; si ninguna alternativa gratis resuelve la necesidad, `competidor --sin-rival "<por qué>"`.
+La alternativa gratis más fuerte, sea un sustituto o un competidor directo gratis y completo: cada diferenciador de la sesión 1g tendrá que superarla, e igualarla no alcanza. Se marca con `competidor --nombre "<…>" … --plataformas android,ios --rival`; si ninguna alternativa gratis resuelve la necesidad, `competidor --sin-rival "<por qué>"`. **Es por tienda del objetivo:** si en una tienda la más fuerte es otra (o la marcada no está en ella), `competidor … --rival --tienda <tienda>` o `--sin-rival "<por qué>" --tienda <tienda>`.
 
-- **Rival:** <por completar: C-… y qué da gratis, o el motivo de `--sin-rival`>
+- **Rival:** <por completar: por cada tienda del objetivo, C-… y qué da gratis, o el motivo de `--sin-rival`>
+
+## Distribución en las tiendas
+
+Para la estrategia, no para la diferenciación: en qué países e idiomas del objetivo el rival no sale arriba en las búsquedas de las tiendas con los términos del usuario. Cada consulta es una fuente `--tipo medido` con su fecha y sus etiquetas de mercado, idioma y tienda. No cuenta en el puntaje ni en la puerta 1; la sesión 2 lo usa para el canal de adquisición.
+
+| Tienda | País | Idioma | Términos | ¿El rival sale arriba? | Fuente y fecha de consulta | Hallazgo |
+| --- | --- | --- | --- | --- | --- | --- |
+| <por completar: una fila por tienda, país e idioma del objetivo> | | | | | | |
 
 ## Hallazgos
 

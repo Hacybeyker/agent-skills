@@ -30,7 +30,8 @@ def vacio_id(salida):
 class PeldanosPorMotivoTest(orquestado.Base):
     def vacio_peldano(self, peldano, motivo):
         return vacio_id(self.p("vacio", "--linea", "demanda", "--peldano", peldano, "--motivo", motivo, "--texto",
-                               "Registro inventado del peldaño %s" % peldano))
+                               "Registro inventado del peldaño %s" % peldano, *(
+                                   ["--buscadas", "foros y buscadores"] if motivo == "sin-resultados" else [])))
 
     def test_el_conteo_dice_el_motivo_de_cada_vacio_por_peldano(self):
         self.nueva_con_lineas(problema=False)

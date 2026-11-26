@@ -211,7 +211,7 @@ class TipoProvisionalTest(Base):
         write(self.carpeta / "producto.json", json.dumps(datos))
         for peldano in (4, 5):
             self.p("vacio", "--linea", "demanda", "--peldano", peldano, "--motivo", "sin-resultados", "--texto",
-                   "Busqué foros y prensa sobre el problema: nada")
+                   "Busqué foros y prensa sobre el problema: nada", "--buscadas", "foros y prensa")
         self.assertIn("peldaño 4", self.p("vacio", "--linea", "demanda", "--peldano", 4, "--motivo", "presupuesto",
                                          "--texto", "x"))
         self.assertIn("un solo valor", self.falla("vacio", "--linea", "demanda", "--peldano", 4, "--mercado", "MX",

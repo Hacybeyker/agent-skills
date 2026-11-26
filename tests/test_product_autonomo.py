@@ -77,10 +77,12 @@ class ParaProbarTest(Base):
         self.assertIn("a los 90 días del lanzamiento", self.p("puerta", "--n", 1))
 
     def test_el_dolor_es_lo_propio_del_diferenciador_y_lo_que_falta_es_la_eleccion(self):
-        # D-1 supera con un hallazgo triangulado (H-VOZ-1) y otro suelto: es viable con confianza baja, pero el dolor
-        # está triangulado, así que el puntaje no se topa en 2 y la puerta difiere los criterios al lanzamiento
+        # D-1 supera con un hallazgo triangulado (H-VOZ-1) y otro del dolor sin triangular (una de sus fuentes): es
+        # viable con confianza baja, pero el dolor está triangulado, así que el puntaje no se topa en 2 y la puerta
+        # difiere los criterios al lanzamiento. Un hallazgo de elección sin triangular ya no lo bajaría (feedback #81)
         voz = self.hasta_1g()
-        suelto = self.sin_triangular()
+        suelto, _ = self.hallazgo("diferenciacion", self.datos("01-investigacion/voz-del-usuario.json")["hallazgos"][0][
+            "fuentes"][:1], "--sin-contra", "nada")
         salida = self.puerta1("--resultado", "supera", "--hallazgos", "%s,%s" % (voz, suelto), "--texto", "Sin "
                               "suscripción", valores="4,4,4,4,4")
         self.assertIn("🟡  PUERTA 1 · VIABLE PARA PROBAR", salida)
@@ -338,7 +340,7 @@ class AutonomoTest(Base):
         self.p("objetivo", "--mercados", "MX,AR", "--motivo", "Sumamos Argentina")
         self.p("vacio", "--linea", "monetizacion", "--mercado", "AR", "--motivo", "herramienta", "--texto",
                "Página dinámica")
-        self.p("puntaje", "--valores", "4,4,4,4,3")
+        self.p("puntaje", "--valores", "3,4,4,4,4")  # la demanda es solo de MX: 3 como máximo (#83 c)
         self.cerrar("1f", "01-sintesis.md")
         automatico = self.json()["pasos"][0]["automatico"]
         self.assertEqual((automatico["sesion"], automatico["detener"]), ("1d", False))  # AR no es de lo que se ajusta

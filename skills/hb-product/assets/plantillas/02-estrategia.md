@@ -27,7 +27,7 @@ Construida sobre el diferenciador principal.
 | Segmentos de clientes | <por completar: y los primeros usuarios> | |
 | Propuesta única de valor | <por completar: una frase> | |
 | Solución | <por completar: las 3 funcionalidades principales> | |
-| Canales | <por completar: cómo llega a los usuarios> | |
+| Canales | <por completar: cómo llega a los usuarios; la distribución en las tiendas (los países e idiomas donde el rival no sale arriba) con los hallazgos de la 1a> | |
 | Fuentes de ingresos | <por completar: modelo y precios> | |
 | Estructura de costos | <por completar: cuentas, servicios y tiempo> | |
 | Métricas clave | <por completar: qué se mide> | |

@@ -221,12 +221,12 @@ class ExtractoTest(Base):
         html = (self.carpeta / "reporte.html").read_text(encoding="utf-8")
         self.assertIn("extracto de búsqueda: no se abrió la página", html)
 
-    def test_no_vale_con_un_archivo_ni_con_una_fuente_oficial(self):
+    def test_no_vale_con_un_archivo_y_una_norma_vista_asi_no_basta_sola(self):
         self.sesion0()
-        error = self.falla("fuente", "--linea", "politicas", "--url", "https://tienda.example/politica",
-                           "--publicada", "2026-06", "--tipo", "oficial", "--peldano", 1, "--resumen", "x",
-                           "--extracto")
-        self.assertIn("se lee en su página", error)
+        # feedback #82 b: una norma vista solo en un extracto se registra, pero no basta sola (test_product_tiendas.py)
+        salida = self.p("fuente", "--linea", "politicas", "--url", "https://tienda.example/politica",
+                        "--publicada", "2026-06", "--tipo", "oficial", "--peldano", 1, "--resumen", "x", "--extracto")
+        self.assertIn("no basta sola", salida)
         ruta = self.tmp / "resenas.csv"
         ruta.write_text("fecha,estrellas,texto\n2026-06-01,2,Muy lenta\n", encoding="utf-8")
         error = self.falla("fuente", "--linea", "voz-del-usuario", "--archivo", ruta, "--autor", "App · Play",
@@ -283,7 +283,7 @@ class SumarFuentesTest(Base):
         contra = self.fuente("demanda", 1, "medido")[0]
         otro, _ = self.hallazgo("demanda", self.fuente("demanda", 1, "medido"), "--en-contra", contra)
         self.assertIn("a favor y en contra a la vez", self.falla("hallazgo", "--id", otro, "--fuentes", contra))
-        self.assertIn("--texto no va", self.falla("hallazgo", "--id", self.id, "--fuentes", contra, "--texto", "x"))
+        self.assertIn("--critico no va", self.falla("hallazgo", "--id", self.id, "--fuentes", contra, "--critico"))
 
     def test_la_ayuda_y_las_referencias_lo_explican(self):
         import contextlib
