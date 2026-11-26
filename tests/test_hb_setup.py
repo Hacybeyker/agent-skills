@@ -624,5 +624,444 @@ class TemplateTest(unittest.TestCase):
             self.assertNotRegex(phrase, r"(?i)\b(agrega|edita|escribe)\b[^.]*\.gitignore")
 
 
+# ── 1.6.0: fuentes previas de contexto de IA, inventario de traspaso y estructura más profunda ─────────────────────────
+PERF_BLOCK = ("<!-- hb-performance:estado -->\n- Estado del setup (lo mantiene `perf.py`: no lo edites): instrumentación "
+              "en el repo: no · hb-performance 0.21.0\n<!-- /hb-performance:estado -->")
+PERF_SECTION = "## Rendimiento\n\n- Se mide con la variante `benchmark`.\n\n" + PERF_BLOCK + "\n"
+RULE = "- Los textos visibles van en `strings.xml`, nunca en el código: el equipo de traducción solo lee ese archivo."
+PUBLISH = "- Desde `develop` se publica la versión `-SNAPSHOT`; desde `main`, la versión final del tag."
+
+
+def old_agents():
+    """Un AGENTS.md antiguo y extenso, con datos inventados: lo que el usuario renombró antes de correr hb-setup."""
+    errors = "\n".join("| `Could not resolve com.ejemplo.huerta:modulo-%02d:1.%d` | Falta el repo en Maven local | "
+                       "`./gradlew :modulo-%02d:publishToMavenLocal` |" % (n, n, n) for n in range(1, 121))
+    protocol = "\n".join("%d. Paso %d del protocolo: reproduce, escribe el test, corrige y verifica." % (n, n)
+                         for n in range(1, 16))
+    return ("# App Huerta\n\nApp Android para planificar el riego y la cosecha de huertas urbanas.\n\n"
+            "## Stack\n\n- Kotlin, Compose, Hilt, Retrofit y Room.\n- minSdk 26.\n\n"
+            "## Comandos\n\n- Compilar: `./gradlew :app:assembleDebug`\n- Tests: `./gradlew test`\n\n"
+            "## Build\n\nEl build toma las versiones de `gradle/libs.versions.toml`.\n\n"
+            "### Errores frecuentes\n\n| Mensaje exacto | Causa | Solución |\n| --- | --- | --- |\n" + errors + "\n\n"
+            "## Publicación\n\n" + PUBLISH + "\n\n"
+            "## Unidades\n\n- Los módulos `feature-*` viven en `../feature-<nombre>`.\n"
+            "- `nucleo` es la excepción: vive en `../nucleo-compartido-android`.\n"
+            "- `feature-alertas` no está en `modulos-locales.json`: se consume publicada.\n"
+            "- `sdk-sensores` vive en otro host.\n\n"
+            "## Sincronización del workspace\n\n`scripts/sincronizar-workspace.sh` clona los repos que faltan, los "
+            "pone en `develop` y hace pull.\n- Descarta los cambios locales de `nucleo-compartido-android`.\n\n"
+            "## Reglas\n\n" + RULE + "\n\n"
+            "## Protocolo de bugfix\n\n" + protocol + "\n\n" + PERF_SECTION + "\n"
+            "## Historial\n\n- Hace años se migró de Java a Kotlin.\n")
+
+
+def new_agents(extra_rules="", documents="", perf=PERF_SECTION, publish=PUBLISH):
+    """El AGENTS.md que escribiría el agente al migrar: corto, con lo esencial y el resto en docs referenciados."""
+    return ("# App Huerta\n\nApp Android para planificar el riego y la cosecha de huertas urbanas.\n\n"
+            "## Stack\n\n- Perfil: hb-stack-mobile-kotlin\n- Variante: android\n- Kotlin, Compose, Hilt, Retrofit y "
+            "Room; minSdk 26. Versiones en `gradle/libs.versions.toml`.\n\n"
+            "## Comandos\n\n| Para | Comando |\n| --- | --- |\n| Compilar | `cd <ruta del proyecto> && ./gradlew "
+            ":app:assembleDebug` |\n| Tests | `cd <ruta del proyecto> && ./gradlew test` |\n\n"
+            "## DoD\n\n1. `cd <ruta del proyecto> && ./gradlew test :app:assembleDebug`\n\nOrigen: DoD derivado del "
+            "build; el proyecto no tiene CI.\n\n"
+            "## Arquitectura\n\nUn módulo `app` y las features en repos vecinos.\n\n"
+            "## Estructura\n\n### Unidades\n\n| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la "
+            "unidad | Repo y rama principal | Publica y versiona |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| `app` | `.` | Es la app | — | `cd <ruta del proyecto> && ./gradlew test` | este repo, `main` | la "
+            "persona, con `hb-release` |\n"
+            "| `nucleo` | `../nucleo-compartido-android` | Publicada: `com.ejemplo.huerta:nucleo`, versión fijada en "
+            "`gradle/libs.versions.toml` | A fuente: `true` en `modulos-locales.json`; volver: `false` | `cd <ruta del "
+            "proyecto>/../nucleo-compartido-android && ./gradlew check` | `https://git.ejemplo.com/huerta/nucleo.git`, "
+            "`main` | su repo |\n\n- Excepciones: `nucleo` vive en `../nucleo-compartido-android`, fuera del patrón "
+            "`../{clave}`.\n- Repos vecinos: clonar los que falten y preguntar la rama de trabajo.\n\n"
+            "### Documentos\n\n| Documento | Léelo cuando… |\n| --- | --- |\n"
+            "| `contexto/docs/troubleshooting.md` | El build falle: trae los mensajes exactos y su solución |\n"
+            "| `contexto/docs/sincronizacion.md` | Vayas a correr el script de sincronización del espacio de trabajo |\n"
+            + documents + "\n## Modernización\n\n- ninguna decidida\n- Los agentes no migran ni proponen migrar fuera "
+            "de lo decidido aquí.\n\n"
+            "## Reglas del proyecto\n\n- Contexto de IA: fuera del repo, con enlaces simbólicos.\n"
+            "- Carpeta de reportes: `contexto/reports`\n" + RULE + "\n" + extra_rules + "\n"
+            "## Git\n\n- Commits: Conventional Commits, en español, sin emoji.\n\n"
+            "## Versionado y release\n\n" + publish + "\n\n" + perf + "\n## Seguridad\n\n- Nada sensible.\n")
+
+
+INVENTORY = """| Fuente | Sección | Destino | Motivo o "Léelo cuando…" |
+| --- | --- | --- | --- |
+| `contexto/AGENTS-old.md` | (inicio) | AGENTS.md | título y descripción |
+| `contexto/AGENTS-old.md` | Stack | AGENTS.md | ## Stack |
+| `contexto/AGENTS-old.md` | Comandos | AGENTS.md | ## Comandos |
+| `contexto/AGENTS-old.md` | Build › (inicio) | AGENTS.md | ## Stack |
+| `contexto/AGENTS-old.md` | Build › Errores frecuentes | `contexto/docs/troubleshooting.md` | El build falle |
+| `contexto/AGENTS-old.md` | Publicación | AGENTS.md | ## Versionado y release |
+| `contexto/AGENTS-old.md` | Unidades | AGENTS.md | ## Estructura |
+| `contexto/AGENTS-old.md` | Sincronización del workspace | `contexto/docs/sincronizacion.md` | Antes de sincronizar |
+| `contexto/AGENTS-old.md` | Reglas | AGENTS.md | ## Reglas del proyecto |
+| `contexto/AGENTS-old.md` | Protocolo de bugfix | descartada | ya la cubre hb-implement |
+| `contexto/AGENTS-old.md` | Rendimiento | AGENTS.md | tal cual |
+| `contexto/AGENTS-old.md` | Historial | descartada | obsoleta: describe una migración terminada |
+| `contexto/protocolo-bugfix.md` | (todo el archivo) | descartada | ya lo cubre hb-implement |
+| `contexto/plantilla-reporte.md` | (todo el archivo) | descartada | ya la cubre el reporte de hb-implement |
+"""
+
+
+class HuertaBase(unittest.TestCase):
+    """Un proyecto sintético con un AGENTS-old.md extenso en una carpeta de contexto enlazada, sin AGENTS.md, con un
+    archivo de sustitución, un repo vecino en otro host, un script de sincronización y skills locales."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve()
+        (self.base / "app-huerta").mkdir()
+        self.repo = init_repo(self.base / "app-huerta")
+        git(self.repo, "remote", "add", "origin", "https://git.ejemplo.com/huerta/app-huerta.git")
+        write(self.repo / "settings.gradle.kts", 'include(":app")\n')
+        write(self.repo / "app" / "build.gradle.kts", "dependencies { implementation(libs.feature.riego) }\n")
+        write(self.repo / "gradle" / "libs.versions.toml", "[libraries]\n" + "".join(
+            '%s = { module = "com.ejemplo.huerta:%s", version.ref = "huerta" }\n' % (name, name)
+            for name in ("feature-riego", "feature-clima", "feature-cosecha", "nucleo", "feature-alertas"))
+            + 'sensores = { module = "com.terceros.sensores:sdk-sensores", version = "2.1.0" }\n')
+        write(self.repo / "modulos-locales.json", json.dumps({"modulos": [
+            {"nombre": "feature-riego", "ruta": "../feature-riego"},
+            {"nombre": "feature-clima", "ruta": "../feature-clima"},
+            {"nombre": "feature-cosecha", "ruta": "../feature-cosecha"},
+            {"nombre": "nucleo", "ruta": "../nucleo-compartido-android"}]}, indent=2) + "\n")
+        write(self.repo / "scripts" / "sincronizar-workspace.sh", "#!/bin/sh\n"
+              "for repo in feature-riego feature-clima feature-cosecha; do\n"
+              "  [ -d ../$repo ] || git clone https://git.ejemplo.com/huerta/$repo.git ../$repo\n"
+              "  git -C ../$repo checkout develop\n  git -C ../$repo pull --rebase\ndone\n"
+              "[ -d ../sdk-sensores ] || git clone https://otro-host.ejemplo.org/terceros/sdk-sensores.git "
+              "../sdk-sensores\ngit -C ../nucleo-compartido-android reset --hard origin/develop\n")
+        write(self.repo / ".claude" / "skills" / "revision-huerta" / "SKILL.md",
+              "---\nname: revision-huerta\ndescription: Checklist de revisión de código de la huerta\n---\n\n"
+              "# Revisión\n\n- Revisa los textos en `strings.xml`.\n")
+        commit_all(self.repo, "base")
+        for name, url in (("feature-riego", "https://git.ejemplo.com/huerta/feature-riego.git"),
+                          ("sdk-sensores", "https://otro-host.ejemplo.org/terceros/sdk-sensores.git")):
+            (self.base / name).mkdir()
+            sibling = init_repo(self.base / name)
+            write(sibling / "README.md", "x\n")
+            commit_all(sibling)
+            git(sibling, "remote", "add", "origin", url)
+        self.outside = self.base / "fuera"
+        context = self.outside / "contexto"
+        write(context / "AGENTS-old.md", old_agents())
+        write(context / "protocolo-bugfix.md", "---\nname: protocolo-bugfix\ndescription: Cómo corregir un bug en la "
+              "huerta\n---\n\n# Protocolo de bugfix\n\n1. Reproduce.\n2. Corrige con un test.\n")
+        write(context / "plantilla-reporte.md", "# Plantilla de reporte\n\n- Qué cambió y por qué.\n")
+        write(context / "docs" / "glosario.md", "# Glosario\n\n- Bancal: la unidad de cultivo.\n")
+        write(context / "reports" / "INDEX.md", "# Índice\n\nEl agente dejó un reporte.\n")
+        os.symlink(os.path.join("..", "fuera", "contexto"), str(self.repo / "contexto"))
+        with open(str(self.repo / ".git" / "info" / "exclude"), "a", encoding="utf-8") as handle:
+            handle.write("/contexto\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def contexto(self, *args, code=0):
+        result = run([sys.executable, "-I", SCRIPT, *args, "--repo", self.repo], self.repo)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        return result.stdout
+
+    def status(self):
+        return run(["git", "status", "--porcelain", "--untracked-files=all"], self.repo).stdout
+
+    def migrate(self, agents=None, inventory=INVENTORY):
+        """Lo que haría el agente: prepara el modo externo, escribe AGENTS.md (en la ruta real), los docs y el
+        inventario fuera del repo."""
+        self.contexto("preparar", "--modo", "externo", "--externa", str(self.outside))
+        write(self.outside / "AGENTS.md", agents if agents is not None else new_agents())
+        old = old_agents()
+        errors = old[old.index("### Errores frecuentes"):old.index("## Publicación")]
+        write(self.outside / "contexto" / "docs" / "troubleshooting.md", "# Errores frecuentes del build\n\n"
+              + errors.split("\n", 2)[2])
+        write(self.outside / "contexto" / "docs" / "sincronizacion.md", "# Sincronización del espacio de trabajo\n\n"
+              "- `scripts/sincronizar-workspace.sh` clona, pasa a `develop` y hace pull.\n- Descarta los cambios "
+              "locales de `nucleo-compartido-android` (reset --hard).\n")
+        self.inventory = self.base / "inventario.md"
+        write(self.inventory, inventory)
+
+    def verificar(self, code=0):
+        return self.contexto("verificar", "--inventario", str(self.inventory), code=code)
+
+
+class PreviousSourcesTest(HuertaBase):
+    def test_una_fuente_renombrada_sin_agents_md_lleva_a_migrar(self):
+        self.assertFalse(os.path.lexists(str(self.repo / "AGENTS.md")))
+        out = self.contexto("fuentes")
+        self.assertIn("Camino: migrar, aunque no exista AGENTS.md", out)
+        self.assertIn("contexto/AGENTS-old.md (variante renombrada de AGENTS.md", out)
+        self.assertIn("se reemplaza: por defecto, propón borrarla después de migrar", out)
+        self.assertNotIn("glosario.md (", out)  # no trae instrucciones para agentes: solo se nombra
+        self.assertIn("Otros .md de la carpeta de contexto", out)
+        self.assertNotIn("reports/INDEX.md", out)  # salidas de las skills, no fuentes
+        state = self.contexto("estado")
+        self.assertIn("Fuentes previas de contexto de IA: contexto/AGENTS-old.md", state)
+        self.assertIn("camino: migrar", state)
+
+    def test_sin_fuentes_el_camino_es_la_plantilla(self):
+        os.unlink(str(self.repo / "contexto"))
+        self.assertIn("Camino: plantilla", self.contexto("fuentes"))
+        self.assertIn("ninguna → camino: plantilla", self.contexto("estado"))
+
+    def test_encuentra_las_variantes_y_los_archivos_de_otros_agentes(self):
+        write(self.repo / "AGENTS.bak.md", "# Viejo\n\n- x\n")
+        write(self.repo / "AGENTS.md.orig", "# Más viejo\n")
+        write(self.repo / ".github" / "copilot-instructions.md", "- Usa Compose.\n")
+        write(self.repo / ".cursorrules", "Responde en español.\n")
+        write(self.repo / ".cursor" / "rules" / "estilo.mdc", "---\nalwaysApply: true\n---\n- Sin emoji.\n")
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n")  # solo importa AGENTS.md: no es una fuente
+        write(self.repo / "CLAUDE.local.md", "notas personales\n")
+        out = self.contexto("fuentes")
+        for path in ("AGENTS.bak.md", "AGENTS.md.orig", ".github/copilot-instructions.md", ".cursorrules",
+                     ".cursor/rules/estilo.mdc"):
+            self.assertIn("  - %s (" % path, out)
+        self.assertNotIn("  - CLAUDE.md (", out)
+        self.assertNotIn("CLAUDE.local.md", out)
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n\n- Usa el modo plan antes de tocar Gradle.\n")
+        self.assertIn("  - CLAUDE.md (instrucciones de Claude Code", self.contexto("fuentes"))
+
+    def test_el_inventario_sugiere_los_tres_destinos_y_parte_lo_extenso(self):
+        out = self.contexto("fuentes")
+        table = [line for line in out.splitlines() if line.startswith("| `contexto/AGENTS-old.md`")]
+        rows = {line.split(" | ")[1]: line for line in table}
+        self.assertIn("AGENTS.md › ## Stack", rows["Stack"])
+        self.assertIn("doc: `<docs>/troubleshooting.md`", rows["Build › Errores frecuentes"])
+        self.assertIn("Build › (inicio)", rows)  # la sección larga va por partes
+        self.assertIn("AGENTS.md › ## Versionado y release", rows["Publicación"])
+        self.assertIn("doc: `<docs>/sincronizacion.md`", rows["Sincronización del workspace"])
+        self.assertIn("descartada si ya la cubre `hb-implement` (bugfix)", rows["Protocolo de bugfix"])
+        self.assertIn("AGENTS.md, tal cual (es de hb-performance)", rows["Rendimiento"])
+        self.assertIn("| (todo el archivo) |", out)
+
+    def test_bloque_de_hb_performance_en_una_fuente_renombrada(self):
+        out = self.contexto("fuentes")
+        self.assertIn("contexto/AGENTS-old.md: bloque <!-- hb-performance:estado -->", out)
+        self.assertIn("## Rendimiento (hb-performance; corre `contexto.py rendimiento`)", out)
+        perf = self.contexto("rendimiento")
+        self.assertIn("La sección de rendimiento está en `contexto/AGENTS-old.md` (fuente previa)", perf)
+        self.assertIn(PERF_BLOCK.splitlines()[1], perf)  # el bloque, para conservarlo tal cual
+        self.assertIn("AGENTS.md no tiene `## Producto`", self.contexto("producto"))
+
+    def test_producto_en_una_fuente_renombrada(self):
+        write(self.outside / "contexto" / "AGENTS-old.md", old_agents() + "\n## Producto\n\n- Carpeta: `producto`\n")
+        out = self.contexto("producto")
+        self.assertIn("`## Producto` está en `contexto/AGENTS-old.md` (fuente previa)", out)
+        self.assertIn("  | `producto/04-prd.md` |", out)
+
+    def test_skill_local_solapada_se_informa_y_no_se_borra(self):
+        before = self.status()
+        out = self.contexto("fuentes")
+        self.assertIn("Se solapan con skills hb-*", out)
+        self.assertIn("propón retirarlas; no las borres", out)
+        self.assertIn("contexto/protocolo-bugfix.md ↔ `hb-implement` (bugfix)", out)
+        self.assertIn("contexto/plantilla-reporte.md ↔ `hb-implement` (reporte de cambios)", out)
+        self.assertIn(".claude/skills/revision-huerta/SKILL.md ↔ `hb-review` (code review)", out)
+        self.assertTrue((self.repo / ".claude" / "skills" / "revision-huerta" / "SKILL.md").is_file())
+        self.assertTrue((self.outside / "contexto" / "protocolo-bugfix.md").is_file())
+        self.assertEqual(self.status(), before)
+
+    def test_fuentes_no_cambia_nada(self):
+        before, excluded = self.status(), (self.repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        for command in ("fuentes", "rendimiento", "producto", "units", "estado"):
+            self.contexto(command)
+        self.assertEqual(self.status(), before)
+        self.assertEqual((self.repo / ".git" / "info" / "exclude").read_text(encoding="utf-8"), excluded)
+        self.assertFalse(os.path.lexists(str(self.repo / "AGENTS.md")))
+
+
+class StructureDetailsTest(HuertaBase):
+    def test_excepciones_de_carpeta_del_archivo_de_sustitucion(self):
+        out = self.contexto("units")
+        self.assertIn("  modulos-locales.json: 4 entradas; patrón dominante: ../{clave}", out)
+        line = next(l for l in out.splitlines() if "Fuera del patrón" in l)
+        self.assertIn("nucleo → ../nucleo-compartido-android", line)
+        self.assertNotIn("feature-riego", line)
+
+    def test_dependencias_del_build_fuera_del_archivo_de_sustitucion(self):
+        line = next(l for l in self.contexto("units").splitlines() if "Dependencias del build" in l)
+        self.assertIn("com.ejemplo.huerta:feature-alertas (gradle/libs.versions.toml)", line)
+        self.assertNotIn("feature-riego", line)
+        self.assertNotIn("sdk-sensores", line)  # otro grupo: no es de las unidades sustituibles
+
+    def test_repos_en_otro_host_y_scripts_de_sincronizacion(self):
+        out = self.contexto("units")
+        hosts = next(l for l in out.splitlines() if l.startswith("Repos en otro host"))
+        self.assertIn("(git.ejemplo.com)", hosts)
+        self.assertIn("../sdk-sensores (https://otro-host.ejemplo.org/terceros/sdk-sensores.git)", hosts)
+        self.assertNotIn("feature-riego", hosts)
+        self.assertIn("  scripts/sincronizar-workspace.sh: clona (2), actualiza con pull (1), cambia de rama (1), "
+                      "descarta cambios con reset --hard (1)", out)
+        self.assertIn("ramas: develop", out)
+        self.assertIn("⚠ Puede descartar o borrar cambios locales (descarta cambios con reset --hard)", out)
+        self.assertIn("con su fila en «Documentos»", out)
+
+    def test_un_proyecto_sin_sustitucion_ni_scripts_no_imprime_nada_de_eso(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp))
+            write(repo / "settings.gradle.kts", 'include(":app")\n')
+            commit_all(repo)
+            result = run([sys.executable, "-I", SCRIPT, "units", "--repo", repo], repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in ("sustitución", "otro host", "sincronización"):
+            self.assertNotIn(text, result.stdout)
+
+
+class VerifyTest(HuertaBase):
+    """De punta a punta: el proyecto con AGENTS-old.md extenso y sin AGENTS.md, migrado como lo haría el agente."""
+
+    def test_de_punta_a_punta_nada_se_pierde(self):
+        self.migrate()
+        out = self.verificar()
+        self.assertIn("✔ Nada se pierde", out)
+        self.assertNotIn("✖", out)
+        self.assertNotIn("no viene de ninguna fuente previa", out)
+        self.assertNotIn("no quedó tal cual", out)
+        self.assertIn("Pregunta si se conservan (por defecto, borrarlas después de migrar): contexto/AGENTS-old.md", out)
+        agents = (self.outside / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertLess(agents.count("\n"), 150)
+        self.assertIn(PERF_BLOCK, agents)
+        self.assertNotIn("AGENTS-old.md", agents)
+        rules = agents.split("## Reglas del proyecto", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(RULE, rules)  # la regla propia, tal cual y en su sección
+        self.assertTrue((self.outside / "contexto" / "AGENTS-old.md").is_file())  # se borra solo si el usuario lo aprueba
+
+    def test_documentos_nunca_referencia_la_fuente_reemplazada(self):
+        self.migrate(new_agents(documents="| `contexto/AGENTS-old.md` | Necesites el detalle de antes |\n"))
+        out = self.verificar(code=1)
+        self.assertIn("\"Documentos\" referencia `contexto/AGENTS-old.md`, una fuente que se reemplaza", out)
+        self.assertIn("AGENTS.md nombra `AGENTS-old.md`", out)
+        inventory = INVENTORY.replace("| Historial | descartada |", "| Historial | `contexto/AGENTS-old.md` |")
+        self.migrate(inventory=inventory)
+        self.assertIn("el destino es `contexto/AGENTS-old.md`, la fuente que se reemplaza", self.verificar(code=1))
+
+    def test_el_inventario_con_los_tres_destinos_se_valida(self):
+        cases = (
+            (INVENTORY.replace("| `contexto/AGENTS-old.md` | Historial | descartada | obsoleta: describe una "
+                               "migración terminada |\n", ""),
+             "sin destino en el inventario: `contexto/AGENTS-old.md` › Historial"),
+            (INVENTORY.replace("| Historial | descartada | obsoleta: describe una migración terminada |",
+                               "| Historial | descartada |  |"), "› Historial: descartada sin motivo"),
+            (INVENTORY.replace("| Historial | descartada | obsoleta: describe una migración terminada |",
+                               "| Historial | AGENTS.md o doc: decide (o descartada con motivo) |  |"),
+             "› Historial: decide el destino"),
+            (INVENTORY.replace("`contexto/docs/sincronizacion.md` | Antes", "`contexto/docs/sync.md` | Antes"),
+             "`contexto/docs/sync.md` no tiene su fila en \"Documentos\""),
+            (INVENTORY.replace("| Rendimiento | AGENTS.md | tal cual |", "| Rendimiento | descartada | ya no se usa |"),
+             "› Rendimiento: es de hb-performance, hb-performance:estado y va en AGENTS.md tal cual"),
+            (INVENTORY.replace("| Build › (inicio) | AGENTS.md | ## Stack |\n", ""),
+             "sin destino en el inventario: `contexto/AGENTS-old.md` › Build › (inicio)"),
+        )
+        for inventory, message in cases:
+            self.migrate(inventory=inventory)
+            self.assertIn(message, self.verificar(code=1), message)
+        self.migrate()
+        (self.outside / "contexto" / "docs" / "troubleshooting.md").unlink()
+        self.assertIn("el doc `contexto/docs/troubleshooting.md` no existe", self.verificar(code=1))
+        self.migrate()
+        self.assertIn("falta el inventario", self.contexto("verificar", code=1))
+
+    def test_una_fila_entera_cubre_la_fuente(self):
+        self.migrate(inventory=INVENTORY.split("| `contexto/protocolo-bugfix.md`")[0]
+                     + "| `contexto/protocolo-bugfix.md` | (todo el archivo) | descartada | lo cubre hb-implement |\n"
+                     "| `plantilla-reporte.md` | (todo el archivo) | descartada | lo cubre hb-implement |\n")
+        self.assertIn("✔ Nada se pierde", self.verificar())
+
+    def test_lo_de_otras_skills_queda_tal_cual(self):
+        self.migrate(new_agents(perf="## Rendimiento\n\n- Se mide con la variante `benchmark`.\n"))
+        out = self.verificar(code=1)
+        self.assertIn("falta el bloque <!-- hb-performance:estado --> tal cual (está en `contexto/AGENTS-old.md`)", out)
+        self.assertIn("## Rendimiento (de hb-performance) no quedó tal cual", out)
+        self.migrate(new_agents(perf=""))
+        self.assertIn("falta la sección ## Rendimiento de hb-performance", self.verificar(code=1))
+
+    def test_una_regla_que_no_quedo_tal_cual_se_avisa(self):
+        self.migrate(new_agents().replace(RULE, "- Los textos van en recursos."))
+        out = self.verificar()
+        self.assertIn("regla de `contexto/AGENTS-old.md` › Reglas que no quedó tal cual en AGENTS.md", out)
+        self.assertIn("«- Los textos van en recursos.» (## Reglas del proyecto) no viene de ninguna fuente previa"
+                      .replace("«- ", "«"), out)
+
+    def test_un_agents_largo_se_avisa(self):
+        self.migrate(new_agents() + "\n".join("- línea %d" % n for n in range(120)) + "\n")
+        self.assertIn("AGENTS.md tiene", self.verificar())
+        self.assertIn("menos de 150", self.verificar())
+
+
+class NothingInventedTest(Base):
+    """hb-setup no agrega reglas propias del proyecto: solo conserva las que ya están escritas en sus fuentes."""
+
+    def agents(self, rules, modernization="- ninguna decidida\n"):
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Modernización\n\n" + modernization + "- Los agentes no migran "
+              "ni proponen migrar fuera de lo decidido aquí.\n\n## Reglas del proyecto\n\n- Contexto de IA: versionado "
+              "con el código.\n- Carpeta de reportes: `reports`\n" + rules + "\n## Git\n\n- x\n")
+        result = self.contexto("verificar")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def test_sin_fuentes_no_aparece_ninguna_regla_inventada(self):
+        out = self.agents("")
+        self.assertIn("Fuentes previas verificadas: ninguna", out)
+        self.assertNotIn("⚠", out)
+
+    def test_una_regla_o_una_migracion_que_no_esta_en_ninguna_fuente_se_avisa(self):
+        out = self.agents("- Toda pantalla nueva va en Compose.\n",
+                          modernization="- Rx se reemplaza por corrutinas al tocar una clase.\n")
+        self.assertIn("«Toda pantalla nueva va en Compose.» (## Reglas del proyecto) no viene de ninguna fuente previa",
+                      out)
+        self.assertIn("«Rx se reemplaza por corrutinas al tocar una clase.» (## Modernización)", out)
+
+    def test_la_regla_de_una_fuente_se_conserva_y_no_se_avisa(self):
+        write(self.repo / ".cursorrules", "## Reglas\n\n" + RULE + "\n")
+        inventory = self.base / "inventario.md"
+        write(inventory, "| Fuente | Sección | Destino | Motivo |\n| --- | --- | --- | --- |\n"
+                         "| `.cursorrules` | Reglas | AGENTS.md | ## Reglas del proyecto |\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Modernización\n\n- ninguna decidida\n\n## Reglas del "
+                                       "proyecto\n\n- Contexto de IA: versionado con el código.\n" + RULE + "\n")
+        result = self.contexto("verificar", "--inventario", str(inventory))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("⚠", result.stdout)
+
+    def test_al_reescribir_un_agents_versionado_compara_con_el_de_head(self):
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- Kotlin\n\n" + PERF_SECTION)
+        commit_all(self.repo, "agents")
+        inventory = self.base / "inventario.md"
+        write(inventory, "| Fuente | Sección | Destino | Motivo |\n| --- | --- | --- | --- |\n"
+                         "| `AGENTS.md` | Stack | AGENTS.md | ## Stack |\n"
+                         "| `AGENTS.md` | Rendimiento | AGENTS.md | tal cual |\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- Kotlin\n")
+        result = self.contexto("verificar", "--inventario", str(inventory))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("falta el bloque <!-- hb-performance:estado --> tal cual (está en `AGENTS.md`)", result.stdout)
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- Kotlin\n\n" + PERF_SECTION)
+        self.assertEqual(self.contexto("verificar", "--inventario", str(inventory)).returncode, 0)
+        copy = self.base / "AGENTS.previo.md"
+        write(copy, "# Proyecto\n\n## Stack\n\n- Kotlin\n\n## Seguridad\n\n- Sin datos de clientes.\n")
+        result = self.contexto("verificar", "--inventario", str(inventory), "--previo", str(copy))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("sin destino en el inventario: `AGENTS.md` › Seguridad", result.stdout)
+
+
+class MigrationSkillTextTest(unittest.TestCase):
+    """Lo que la skill dice del camino migrar, en SKILL.md y en su referencia."""
+
+    def setUp(self):
+        self.skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.migration = (SKILL / "references" / "migracion.md").read_text(encoding="utf-8")
+
+    def test_la_skill_busca_fuentes_previas_y_verifica_el_traspaso(self):
+        for text in ("contexto.py fuentes", "contexto.py verificar", "references/migracion.md"):
+            self.assertIn(text, self.skill)
+        self.assertIn("aunque no exista `AGENTS.md`", self.skill)
+        self.assertNotIn("**Proyecto con `AGENTS.md`:**", self.skill)
+
+    def test_nada_inventado_y_nada_omitido(self):
+        self.assertIn("Nada inventado", self.skill)
+        self.assertIn("ninguna decidida", self.skill)
+        self.assertIn("nunca se omite", self.skill)
+        for text in ("AGENTS.md", "doc", "descartada", "Documentos", "Léelo cuando", "tal cual", "No la borres"):
+            self.assertIn(text, self.migration)
+        self.assertLess(self.skill.count("\n"), 500)
+
+
 if __name__ == "__main__":
     unittest.main()
