@@ -274,7 +274,8 @@ class AttributionTest(unittest.TestCase):
 
     def test_elige_la_tarea_sin_adivinar(self):
         self.assertIn("cuando el usuario o el orquestador nombran la tarea", self.scope)
-        self.assertIn("con varias, pregunta cuál", self.scope)
+        self.assertIn("cuya foto (`snapshot.json`, en su carpeta) tiene en el repo principal la rama actual", self.scope)
+        self.assertIn("con varias, o sin forma de saberlo, pregunta cuál", self.scope)
         self.assertIn("`<base>/` más la carpeta de la columna Ruta de esa fila", self.scope)
 
     def test_lo_que_ya_estaba_no_es_hallazgo(self):
@@ -286,7 +287,9 @@ class AttributionTest(unittest.TestCase):
             self.assertIn(field, self.reference)
         self.assertIn("git -C <repo> diff -M <task_diff_from> -- <ruta>", self.scope)
         self.assertIn("pregúntalo con `question`", self.scope)
-        self.assertIn("salvo lo que el archivo traiga además de la tarea", self.scope)
+        self.assertIn("salvo los cambios de la tarea que el archivo traiga además del temporal", self.scope)
+        self.assertIn("**`empty`** (solo con foto", self.scope)
+        self.assertNotIn("corre de nuevo con `--ignore-snapshot`", self.scope + self.reference)
         self.assertIn("pregunta con `question` si son de la tarea", self.scope)
 
     def test_sin_foto_sin_nada_o_sin_hb_implement(self):

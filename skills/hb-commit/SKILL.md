@@ -29,10 +29,19 @@ Antes de tocar git, busca en `AGENTS.md` (y en `CLAUDE.md` si existe) lo que dig
 
 Antes de commitear, junta:
 
-- **Los repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios. Si la tarea viene de `hb-implement`, los que dice su atribución, la misma que usa `hb-review`: `python3 -I <carpeta de hb-implement>/scripts/report.py --meta <carpeta de la tarea>/meta.json --attribution` (con `hb-implement` 1.8.0 o posterior; si no, los de `repos` en su meta). Sin modelo, el repo actual.
+- **Los repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios. Sin modelo, el repo actual. Si la tarea viene de `hb-implement`, los que dice su atribución, la misma que usa `hb-review`:
+
+  ```bash
+  cd <raíz-del-proyecto> && python3 -I <carpeta de hb-implement>/scripts/report.py --meta <carpeta de la tarea>/meta.json --attribution [--base <ref> | --main-branch <rama>]
+  ```
+
+  `<carpeta de hb-implement>`: junto a esta skill (`<carpeta-de-esta-skill>/../hb-implement`) o en `~/.claude/skills`, `~/.agents/skills` o las carpetas de skills del proyecto; la base, la misma del reporte (`--base` si `AGENTS.md` fija una; si no, `--main-branch` con la rama principal del modelo). Entran los repos de `repos[]`. Con `hb-implement` anterior a 1.8.0, o sin foto (`photo: false`), los de `repos` en su meta y cada unidad del modelo con cambios: pregunta por las que no estén en `repos`.
+- **Lo que no es de la tarea:** no lo commitees con ella salvo que el usuario lo pida; pregúntale.
+  - lo de `unattributed` con el motivo "sin commit desde antes de la tarea", también si trae `claimed_by_meta` (la foto se tomó tarde: si el usuario dice que es de la tarea, entra);
+  - en un archivo `mixed` (ya tenía cambios sin commit al empezar), esos cambios previos: no lo agregues entero; pregúntale si entra entero, si separa él lo de la tarea o si queda fuera;
+  - los repos de `others`, que cambiaron y no son unidades del modelo.
 - **Lo que nunca entra en un commit**, aunque `git status` lo muestre modificado:
   - la configuración local modificada a propósito (su subsección de `## Estructura`);
-  - lo que ya estaba sin commit antes de la tarea: en la atribución con foto, lo de `unattributed` con el motivo "sin commit desde antes de la tarea". Es de otra persona o de otro trabajo: si el usuario quiere incluirlo, que lo diga;
   - los cambios temporales de la tarea: `temporary` del meta de `hb-implement` (`<base>/implementation/<fecha>-<slug>/meta.json`, donde `<base>` es la línea `Carpeta de reportes:`, por defecto `reports`; la fila de la tarea en `<base>/INDEX.md` lleva a su carpeta) o la lista "cambios temporales" de su entrega. Sus rutas son relativas al repo principal; las de un repo vecino van como `<nombre>:<ruta>`.
 
   No son cambios ajenos: no preguntes por ellos ni los propongas para commit. Al final, nómbralos en una línea ("quedan fuera a propósito").
