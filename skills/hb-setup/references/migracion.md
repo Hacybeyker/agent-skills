@@ -7,20 +7,22 @@ Un proyecto puede llegar con contexto de IA escrito antes del estándar: un `AGE
 ## 1. Encuentra las fuentes
 
 ```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py fuentes
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py fuentes [--carpeta <carpeta de contexto>] [--fuente <archivo>]
 ```
 
 Solo lee. Busca, aunque no exista `AGENTS.md`:
 
 | Fuente | Qué pasa con ella |
 | --- | --- |
-| `AGENTS.md` | Se reescribe en su lugar. Antes, guarda una copia fuera del repo para `verificar --previo` (si está en git, sin `--previo` compara con la de `HEAD`) |
-| Variantes renombradas: `AGENTS-old.md`, `AGENTS.bak.md`, `AGENTS.<algo>.md`, `AGENTS.md.orig`, `CLAUDE-old.md`, en la raíz, `docs/`, `.claude/` o la carpeta de contexto | Se reemplaza |
+| `AGENTS.md` | Se reescribe en su lugar |
+| Copias de `AGENTS.md` o `CLAUDE.md`: `AGENTS-old.md`, `AGENTS.bak.md`, `AGENTS.v1.md`, `AGENTS-<fecha>.md`, `AGENTS copy.md`, `AGENTS.md.orig`, `AGENTS.md~`, en la raíz, `docs/`, `.claude/` o la carpeta de contexto. Un nombre con otra palabra (`claude-api.md`, `AGENTS.override.md`) no es una copia | Se reemplaza: por defecto, se propone borrarla después de migrar |
 | `CLAUDE.md` o `.claude/CLAUDE.md` con algo más que `@AGENTS.md` | Queda con `@AGENTS.md` y solo lo propio de Claude Code |
-| `.github/copilot-instructions.md`, `.github/instructions/`, `.cursorrules`, `.cursor/rules/`, `GEMINI.md`, `.junie/guidelines.md`, `.windsurfrules`, `.clinerules` | Se reemplaza |
-| Los `.md` de la carpeta de contexto (también si es un enlace simbólico) que traen instrucciones para agentes, sin contar `reports/`, `modules/` ni los que ya están en "Documentos" | Se traspasa o se queda como doc, con su fila en "Documentos" |
+| `.github/copilot-instructions.md`, `.github/instructions/`, `.cursorrules`, `.cursor/rules/`, `GEMINI.md`, `.junie/guidelines.md`, `.windsurfrules`, `.clinerules` | Su contenido pasa al estándar y el archivo queda como puntero a `AGENTS.md`: esa herramienta lo sigue leyendo, así que no se borra |
+| Los `.md` de la carpeta de contexto (también si es un enlace simbólico, y las carpetas de la raíz enlazadas o en `.git/info/exclude`) que traen instrucciones para agentes | Se traspasa o se queda como doc, con su fila en "Documentos" |
 
-Con alguna fuente, el camino es **migrar**; sin ninguna, la plantilla. Los `.md` de la carpeta de contexto que no parecen instrucciones solo se nombran: si alguno lo es, pásalo con `--fuente <archivo>`.
+Con alguna fuente, el camino es **migrar**; sin ninguna, la plantilla. No son fuentes: lo que ya está en "Documentos", las salidas de las skills (`reports/`, `modules/`, `perf/` y las carpetas de las líneas `Carpeta de reportes:`, `Carpeta de investigaciones:` y la `Carpeta:` de `## Producto`) ni un archivo que solo remite a `AGENTS.md`. Los `.md` de la carpeta de contexto que no parecen instrucciones solo se nombran: si alguno lo es, pásalo con `--fuente <archivo>` (a `fuentes` y a `verificar`).
+
+**Antes de reescribir una fuente en su lugar** (`AGENTS.md`, `CLAUDE.md`, el archivo de otro agente), guarda una copia suya fuera del repo: `verificar` compara contra ella (`--previo <ruta>=<copia>`, una por fuente). Si la fuente está en git, sin `--previo` usa la de `HEAD`. Los punteros a `AGENTS.md`, mejor después de verificar.
 
 ## 2. El inventario de traspaso
 
@@ -32,6 +34,9 @@ Con alguna fuente, el camino es **migrar**; sin ninguna, la plantilla. Los `.md`
 | Un doc | Lo extenso o de una situación concreta: los errores frecuentes del build con sus mensajes exactos (`troubleshooting.md`), la publicación paso a paso, la sincronización del espacio de trabajo, catálogos de rutas o deep links. Va en la carpeta de docs del modo, con su fila en "Documentos" y un "Léelo cuando…" concreto | la ruta del doc: `` `contexto/docs/troubleshooting.md` `` |
 | Descartada | Lo obsoleto, lo que contradice el código (pregúntalo antes: no lo decidas tú), lo que ya cubre un perfil `hb-stack-*` (explicaciones de arquitectura, SOLID, testing o seguridad general) o una skill `hb-*` (un protocolo de bugfix, una plantilla de reporte) | `descartada`, con el motivo en su columna |
 
+Lo propio de una herramienta (lo que solo sirve en Claude Code, por ejemplo) puede quedarse en su archivo: el destino es su propia ruta (`` `CLAUDE.md` ``), y `verificar` comprueba que ese archivo la sigue teniendo.
+
+- **Decide cada fila:** una sugerencia que dice "decide" o que trae `<docs>` sin reemplazar no es un destino, y `verificar` la rechaza.
 - **No copies a mano lo que el doc puede llevar tal cual:** una tabla de errores con sus mensajes exactos pasa entera al doc, sin resumirla.
 - Una fila `(todo el archivo)` cubre una fuente entera (una fuente corta, o un protocolo que se descarta).
 - Una sección larga puede ir entera o por partes (`Build › (inicio)`, `Build › Errores frecuentes`): cada parte con su destino.
@@ -57,16 +62,19 @@ Todo bloque entre `<!-- hb-<skill>:<nombre> -->` y `<!-- /hb-<skill>:<nombre> --
 
 ## 5. Skills locales que se solapan
 
-Un protocolo, una plantilla o una skill del proyecto (en la carpeta de contexto, `.claude/skills/`, `.agents/skills/`, `.claude/commands/` o `.github/prompts/`) que cubre lo mismo que una skill `hb-*` (reporte de cambios, bugfix, review, commits, release) lo marca `fuentes` con la skill con la que se solapa. En el resumen di qué cubre ya la skill, qué es propio del proyecto (eso va a `AGENTS.md` o a un doc, con su fila en el inventario) y propón retirarla. **No la borres:** retirarla es decisión del usuario.
+Un protocolo, una plantilla o una skill del proyecto (en la carpeta de contexto, `.claude/skills/`, `.agents/skills/`, `.claude/commands/` o `.github/prompts/`) que cubre lo mismo que una skill `hb-*` (reporte de cambios, bugfix, review, commits, release) lo marca `fuentes` con la skill con la que se solapa. En el resumen di qué cubre ya la skill, qué es propio del proyecto (eso va a `AGENTS.md` o a un doc; puedes anotarlo con su fila en el inventario, aunque no es obligatoria) y propón retirarla. **No la borres:** retirarla es decisión del usuario.
 
 ## 6. Verifica
 
 ```bash
-cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py verificar --inventario <archivo> [--previo <copia del AGENTS.md de antes>]
+cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py verificar --inventario <archivo> [--previo <ruta>=<copia>]... [--fuente <archivo>]...
 ```
 
-Solo lee. Sale con error si una sección de una fuente no tiene destino, si un doc no está escrito o no tiene su fila en "Documentos" con su "Léelo cuando…", si una descartada no tiene motivo, si un bloque o una sección de otra skill no quedó tal cual, o si `AGENTS.md` o "Documentos" referencian una fuente que se reemplaza. Avisa si una regla de `## Reglas del proyecto` o de `## Modernización` no viene de ninguna fuente previa (si no la pidió el usuario, sobra), si una regla de una fuente no quedó tal cual y si `AGENTS.md` pasa de 150 líneas (lo que no entra va a un doc; nunca se omite).
+Solo lee. `--previo` y `--fuente` se repiten (una vez por fuente); `--inventario -` lo lee de la entrada. Sale con error si una sección de una fuente no tiene destino, si el inventario nombra una fuente que ya no encuentra (reescrita sin copia), si un doc no está escrito o no tiene su fila en "Documentos" con su "Léelo cuando…", si una descartada no tiene motivo, si un bloque o una sección de otra skill no quedó tal cual, o si `AGENTS.md` o "Documentos" referencian una fuente que se reemplaza. Avisa si una regla de `## Reglas del proyecto` o de `## Modernización` no viene de ninguna fuente previa (si no la pidió el usuario, sobra), si una regla de una fuente no quedó tal cual y si `AGENTS.md` pasa de 150 líneas (lo que no entra va a un doc; nunca se omite).
 
 ## 7. La fuente vieja
 
-Una fuente que se reemplaza **no se enlaza**: "Documentos" nunca la referencia, aunque se conserve. Con `verificar` en verde, pregunta si se conserva; por defecto, propón borrarla. La borras solo con la aprobación del usuario; en el modo versionado, el borrado va en el diff que muestras.
+Una fuente que se reemplaza **no se enlaza**: "Documentos" nunca la referencia, aunque se conserve. Con `verificar` en verde:
+
+- Las copias de `AGENTS.md` o `CLAUDE.md`: pregunta si se conservan; por defecto, propón borrarlas. Las borras solo con la aprobación del usuario; en el modo versionado, el borrado va en el diff que muestras.
+- `CLAUDE.md` y los archivos de otros agentes: quedan como puntero a `AGENTS.md` (`@AGENTS.md` donde la herramienta importa archivos; si no, una línea que remita a él), con lo propio de esa herramienta. No se borran: esa herramienta los sigue leyendo.

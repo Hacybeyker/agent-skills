@@ -40,7 +40,7 @@ Uso:
   python3 -I contexto.py rendimiento [--carpeta contexto] [--repo .]
   python3 -I contexto.py producto [--carpeta contexto] [--repo .]
   python3 -I contexto.py fuentes [--fuente <archivo>] [--carpeta contexto] [--repo .]
-  python3 -I contexto.py verificar --inventario <archivo|-> [--previo <copia de AGENTS.md>] [--fuente <archivo>]
+  python3 -I contexto.py verificar --inventario <archivo|-> [--previo <ruta>=<copia>] [--fuente <archivo>]
                                    [--carpeta contexto] [--repo .]
 """
 import argparse
@@ -368,10 +368,12 @@ def modified_naming(repo, names):
 
 
 def section_text(text, title, level):
-    """El cuerpo de la primera sección "<# * level> <title>" de un Markdown, o None."""
-    lines, body, inside = text.splitlines(), [], False
+    """El cuerpo de la primera sección "<# * level> <title>" de un Markdown, o None. Un # dentro de un bloque de código
+    no es un título."""
+    lines, body, inside, fence = text.splitlines(), [], False, None
     for line in lines:
-        heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$", line)
+        fence, marked = next_fence(fence, line)
+        heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$", line) if fence is None and not marked else None
         if inside and heading and len(heading.group(1)) <= level:
             break
         if inside:
@@ -579,16 +581,19 @@ def perf_section(text):
     return (start, len(text)) if start is not None else None
 
 
-def with_section(repo, folder, has):
-    """(ruta, texto) del AGENTS.md si tiene la sección; si no, de la primera fuente previa que la tenga (una variante
-    renombrada, otro agente, la carpeta de contexto); (None, "") si ninguna."""
+def with_section(repo, folder, has, owner):
+    """(ruta, texto) del AGENTS.md si tiene la sección; si no, (ruta, texto de la sección) de la primera fuente previa
+    donde esa sección es de la skill `owner`, con el mismo criterio que `fuentes` y `verificar`; (None, "") si ninguna."""
     agents = repo / "AGENTS.md"
-    text = read_text(agents) if agents.is_file() else ""
+    text = read_text(agents) if is_file(agents) else ""
     if text and has(text):
         return "AGENTS.md", text
     for source in previous_sources(repo, folder)[0]:
-        if source["kind"] != "actual" and has(source["text"]):
-            return source["path"], source["text"]
+        if source["kind"] == "actual":
+            continue
+        for skill, _, section in owned_sections(source["text"], source["kind"] not in LOOSE):
+            if skill == owner:
+                return source["path"], section
     return None, ""
 
 
@@ -623,7 +628,8 @@ def performance(args):
     """S3: muestra el bloque de estado de hb-performance (para conservarlo tal cual al regenerar AGENTS.md) y las líneas
     de la sección de rendimiento que conviene cambiar, con la propuesta. No escribe nada."""
     repo = toplevel(args.repo)
-    where, text = with_section(repo, args.carpeta.strip("/"), lambda text: perf_section(text) is not None)
+    where, text = with_section(repo, args.carpeta.strip("/"), lambda text: perf_section(text) is not None,
+                               "hb-performance")
     if where is None:
         print("AGENTS.md no tiene sección de rendimiento: no hay nada de hb-performance que conservar")
         return 0
@@ -659,7 +665,8 @@ def product(args):
     """La sección `## Producto` de hb-product: se conserva tal cual al migrar AGENTS.md, y su PRD va como fila de
     "Documentos" en ## Estructura. No escribe nada; sin la sección no propone crearla."""
     repo = toplevel(args.repo)
-    where, text = with_section(repo, args.carpeta.strip("/"), lambda text: product_section(text) is not None)
+    where, text = with_section(repo, args.carpeta.strip("/"), lambda text: product_section(text) is not None,
+                               "hb-product")
     found = product_section(text) if where else None
     if where not in (None, "AGENTS.md"):
         print("`## Producto` está en `%s` (fuente previa): va al AGENTS.md nuevo tal cual" % where)
@@ -691,46 +698,58 @@ def product(args):
 # ── Fuentes previas de contexto de IA: fuentes y verificar ───────────────────────────────────────────────────────────
 # Todo contexto de IA que ya tenga el proyecto, aunque no exista AGENTS.md. Si hay alguna, el camino es migrar: cada
 # sección termina en AGENTS.md, en un doc con su fila en "Documentos" o descartada con motivo. Nada se pierde en silencio.
-# Variantes renombradas de AGENTS.md o CLAUDE.md: AGENTS-old.md, AGENTS.bak.md, AGENTS.v1.md, AGENTS.md.orig, CLAUDE-old.md
-RENAMED_MD = re.compile(r"^(agents|claude)[-_. ][^/]*\.md$", re.I)
-RENAMED_COPY = re.compile(r"^(agents|claude)(?:\.md)?\.(?:orig|bak|backup|old|prev|previo|viejo|anterior|copia|copy|"
-                          r"save)$", re.I)
-# Instrucciones de otros agentes: (patrón desde la raíz, qué es)
-OTHER_AGENTS = ((".github/copilot-instructions.md", "instrucciones de GitHub Copilot"),
-                (".github/instructions/**/*.instructions.md", "instrucciones de GitHub Copilot por ruta"),
-                (".cursorrules", "reglas de Cursor"),
-                (".cursor/rules/**/*.md", "reglas de Cursor"),
-                (".cursor/rules/**/*.mdc", "reglas de Cursor"),
-                ("GEMINI.md", "instrucciones de Gemini CLI"),
-                (".junie/guidelines.md", "guías de Junie"),
-                (".windsurfrules", "reglas de Windsurf"),
-                (".windsurf/rules/**/*.md", "reglas de Windsurf"),
-                (".clinerules", "reglas de Cline"),
-                (".clinerules/**/*.md", "reglas de Cline"))
+# Copias de AGENTS.md o CLAUDE.md: AGENTS-old.md, AGENTS.bak.md, AGENTS.v1.md, AGENTS-2024-05-01.md, AGENTS copy.md,
+# AGENTS.md.orig, AGENTS.md~. Un nombre con otra palabra (claude-api.md, AGENTS.override.md) no es una copia.
+COPY_WORD = (r"(?:old|bak|backup|orig|original|prev|previo|previous|viejo|vieja|antiguo|antigua|anterior|copia|copy|"
+             r"save|saved|respaldo|v\d+(?:[._]\d+)*|\d{4}[-_.]?\d{2}[-_.]?\d{2}|\d+)")
+RENAMED = re.compile(r"^(?:agents|claude)(?:\.md)?(?:[-_. ]+" + COPY_WORD + r")+(?:\.md)?~?$|^(?:agents|claude)\.md~$",
+                     re.I)
+# Instrucciones de otros agentes: (ruta desde la raíz, qué es)
+OTHER_AGENTS = ((r"\.github/copilot-instructions\.md", "instrucciones de GitHub Copilot"),
+                (r"\.github/instructions/(?:.+/)?[^/]+\.instructions\.md", "instrucciones de GitHub Copilot por ruta"),
+                (r"\.cursorrules", "reglas de Cursor"),
+                (r"\.cursor/rules/(?:.+/)?[^/]+\.mdc?", "reglas de Cursor"),
+                (r"GEMINI\.md", "instrucciones de Gemini CLI"),
+                (r"\.junie/guidelines\.md", "guías de Junie"),
+                (r"\.windsurfrules", "reglas de Windsurf"),
+                (r"\.windsurf/rules/(?:.+/)?[^/]+\.md", "reglas de Windsurf"),
+                (r"\.clinerules", "reglas de Cline"),
+                (r"\.clinerules/(?:.+/)?[^/]+\.md", "reglas de Cline"))
+AGENT_FILES = (".github/copilot-instructions.md", ".cursorrules", "GEMINI.md", ".junie/guidelines.md", ".windsurfrules",
+               ".clinerules")
+AGENT_DIRS = (".github/instructions", ".cursor/rules", ".windsurf/rules", ".clinerules")
 CLAUDE_FILES = ("CLAUDE.md", ".claude/CLAUDE.md")
 # Skills, comandos y prompts del proyecto: no son fuentes que se reemplazan, pero pueden solaparse con una skill hb-*
 LOCAL_SKILLS = (".claude/skills/*/SKILL.md", ".agents/skills/*/SKILL.md", ".claude/commands/**/*.md",
                 ".github/prompts/*.prompt.md")
 IMPORT_ONLY = re.compile(r"^\s*@\.?/?AGENTS\.md\s*$", re.I)
-# Subcarpetas de la carpeta de contexto que son salidas de las skills, no instrucciones
-CONTEXT_SKIP = {"reports", "modules", "implementation", "performance", "review", "product", "node_modules", ".git"}
+# Subcarpetas que son salidas de las skills o del build, no instrucciones
+CONTEXT_SKIP = {"reports", "modules", "implementation", "performance", "perf", "review", "product", "node_modules",
+                ".git", "build", "dist", "out", "target", "vendor"}
 AGENT_WORDS = re.compile(r"(?i)\b(?:agentes?|agents?|llms?|claude|copilot|cursor|gemini|codex|junie|windsurf|"
                          r"asistentes?|assistants?|prompts?|skills?|ia|ai)\b")
 INSTRUCTION_NAME = re.compile(r"(?i)reglas|rules|instruc|guidelines|convenc|convention|protocol|plantilla|template|"
                               r"checklist|playbook|prompt|skill")
-REPLACED = ("renombrada", "agente", "claude")  # se reemplazan: "Documentos" nunca las referencia
+# Las líneas que dicen dónde escriben otras skills: lo de ahí son salidas, no fuentes
+OUTPUT_LINE = re.compile(r"(?im)^[\s*-]*\**Carpeta de (?:reportes|investigaciones):?\**:?\s*`?([^`\n]+?)`?\s*$")
+NOT_IN_DOCUMENTS = ("renombrada", "agente", "claude")  # "Documentos" nunca las referencia
+DELETED_BY_DEFAULT = ("renombrada",)  # se propone borrarlas después de migrar
+POINTERS = ("agente", "claude")  # quedan como puntero a AGENTS.md (esa herramienta las sigue leyendo)
 INVENTORIED = ("actual", "renombrada", "agente", "claude", "carpeta")  # cada sección suya va al inventario
-KINDS = {"actual": "se reescribe en su lugar",
+LOOSE = ("actual", "renombrada")  # su ## Rendimiento y su ## Producto son de hb-performance y hb-product, como en AGENTS.md
+KINDS = {"actual": "se reescribe en su lugar: antes, guarda una copia fuera del repo",
          "renombrada": "se reemplaza: por defecto, propón borrarla después de migrar",
-         "agente": "se reemplaza: por defecto, propón borrarla después de migrar",
+         "agente": "su contenido pasa al estándar y el archivo queda como puntero a AGENTS.md (esa herramienta lo sigue "
+                   "leyendo): no lo borres",
          "claude": "queda con `@AGENTS.md` y solo lo propio de Claude Code",
          "carpeta": "se traspasa o se queda como doc con su fila en \"Documentos\""}
 LONG_SECTION = 40
 AGENTS_TARGET = 150
 HEADING = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t#]*$")
-FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 HB_BLOCK = re.compile(r"<!--[ \t]*(hb-[a-z0-9-]+:[a-z0-9-]+)[ \t]*-->.*?<!--[ \t]*/\1[ \t]*-->", re.S)
 WHOLE_FILE = "(todo el archivo)"
+PLACEHOLDER = re.compile(r"<[^<>\n]+>")
 # Palabras del título de una sección → la sección del estándar donde suele ir
 STANDARD = ((r"\b(?:stack|tecnologias?|tech|dependencias)\b", "## Stack"),
             (r"\b(?:comandos?|commands?)\b", "## Comandos"),
@@ -753,7 +772,7 @@ DOC_TOPICS = ((r"\b(?:errores|errors?|troubleshooting|problemas|fallos|faq|soluc
 OVERLAPS = (("hb-implement", "bugfix", r"\b(?:bugs?|bugfix\w*|fix|fixes|hotfix\w*|corregir|correccion\w*|incidencias?)\b"),
             ("hb-implement", "reporte de cambios", r"\b(?:reportes?|reports?|informes?)\b"),
             ("hb-implement", "implementación", r"\b(?:implementa\w*|implement\w*|features?|funcionalidad\w*)\b"),
-            ("hb-review", "code review", r"\b(?:review\w*|revision\w*|revisar)\b"),
+            ("hb-review", "code review", r"\b(?:review\w*|revision\w*|revisa\w*)\b"),
             ("hb-commit", "commits y PR", r"\b(?:commits?|pull requests?|prs?|merge requests?)\b"),
             ("hb-release", "release y changelog", r"\b(?:releases?|changelog|publicar)\b"),
             ("hb-performance", "rendimiento", r"\b(?:performance|rendimiento|jank)\b"))
@@ -764,6 +783,29 @@ STANDARD_RULES = re.compile(r"^(?:contexto de ia|carpeta de reportes|carpeta de 
                             r"los agentes no migran)")
 RULE_TITLES = re.compile(r"\b(?:reglas|rules|convenciones|conventions|normas|excepciones|exceptions|modernizacion|"
                          r"migracion|migraciones|decisiones)\b")
+
+
+def is_file(path):
+    """Si la ruta es un archivo; una carpeta sin permiso de lectura cuenta como que no lo es (en Python 3.8,
+    pathlib.is_file lanza el error)."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def next_fence(fence, line):
+    """(bloque de código abierto después de la línea, si la línea abre o cierra un bloque). El cierre usa el mismo
+    carácter, al menos tan largo y sin texto después, como en CommonMark."""
+    mark = FENCE.match(line)
+    if not mark:
+        return fence, False
+    run, rest = mark.group(1), mark.group(2)
+    if fence is None:
+        return (fence, False) if run[0] == "`" and "`" in rest else (run, True)
+    if run[0] == fence[0] and len(run) >= len(fence) and not rest.strip():
+        return None, True
+    return fence, False
 
 
 def plain(text):
@@ -788,6 +830,10 @@ def rel(repo, path):
     return os.path.relpath(str(path), str(repo)).replace(os.sep, "/")
 
 
+def line_count(text):
+    return text.count("\n") + (0 if not text or text.endswith("\n") else 1)
+
+
 def frontmatter(text):
     """Los campos de un frontmatter YAML simple ({campo: valor}) y la línea donde termina (0 si no hay)."""
     match = re.match(r"^---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)", text, re.S)
@@ -808,14 +854,8 @@ def headings(text):
     for index, line in enumerate(text.splitlines()):
         if index < skip:
             continue
-        mark = FENCE.match(line)
-        if mark:
-            if fence is None:
-                fence = mark.group(1)[0]
-            elif mark.group(1)[0] == fence:
-                fence = None
-            continue
-        heading = HEADING.match(line) if fence is None else None
+        fence, marked = next_fence(fence, line)
+        heading = HEADING.match(line) if fence is None and not marked else None
         if heading:
             found.append((index, len(heading.group(1)), heading.group(2).strip()))
     return found
@@ -872,20 +912,21 @@ def hb_blocks(text):
     return [(found.group(1), found.group(0), text.count("\n", 0, found.start()) + 1) for found in HB_BLOCK.finditer(text)]
 
 
-def owned_sections(text):
-    """Las secciones propias de otras skills (## Rendimiento o ## Performance de hb-performance, ## Producto de
-    hb-product): [(skill, título, texto de la sección con su título)]."""
+def owned_sections(text, strict=False):
+    """Las secciones propias de otras skills: [(skill, título, texto de la sección con su título)]. En AGENTS.md y sus
+    copias, la primera sección de rendimiento (como la busca perf.py) es de hb-performance y `## Producto…` es de
+    hb-product. En las demás fuentes (strict), una sección de rendimiento es de hb-performance solo si trae su bloque, y
+    ninguna es de hb-product: esas skills solo escriben en AGENTS.md."""
     lines, marks, found = text.splitlines(), headings(text), []
     for position, (index, level, title) in enumerate(marks):
-        if level <= 2 and PERF_HEADING.match(lines[index]):
-            skill = "hb-performance"
-        elif level == 2 and re.match(r"^Producto\b", title):
-            skill = "hb-product"
-        else:
-            continue
         end = next((other for other, other_level, _ in marks[position + 1:] if other_level <= level), len(lines))
-        if not any(skill == known for known, _, _ in found):
-            found.append((skill, title, "\n".join(lines[index:end])))
+        section = "\n".join(lines[index:end])
+        owners = [skill for skill, _, _ in found]
+        if "hb-performance" not in owners and PERF_HEADING.match(lines[index]) and \
+                (not strict or PERF_BLOCK[0] in section):
+            found.append(("hb-performance", title, section))
+        elif "hb-product" not in owners and not strict and level == 2 and title.startswith("Producto"):
+            found.append(("hb-product", title, section))
     return found
 
 
@@ -905,21 +946,31 @@ def overlaps(text):
     return found
 
 
-def protocol_overlaps(path, text):
-    """Si un archivo es un protocolo, una plantilla o una skill (por su nombre o su frontmatter), las skills hb-* con
-    las que se solapa; si no, []."""
+def protocol_overlaps(path, text, invocable=False):
+    """Si un archivo es un protocolo, una plantilla, una skill, un comando o un prompt, las skills hb-* con las que se
+    solapa, por su nombre, su descripción y su título; si no, []."""
     fields, _ = frontmatter(text)
     name = pathlib.PurePosixPath(path)
-    stem = name.parent.name if name.name.upper() == "SKILL.MD" else name.name
+    stem = name.parent.name if name.name.upper() == "SKILL.MD" else re.sub(r"(?:\.prompt)?\.md$", "", name.name)
     first = next((title for _, _, title in headings(text)), "")
-    skill_like = bool(fields.get("name") and fields.get("description"))
-    if not (skill_like or PROTOCOL.search(words(stem))):
+    if not (invocable or fields.get("description") or PROTOCOL.search(words(stem))):
         return []
     return overlaps(" ".join((stem, fields.get("name", ""), fields.get("description", ""), first)))
 
 
-def only_imports(text):
-    return all(not line.strip() or IMPORT_ONLY.match(line) for line in text.splitlines())
+def only_pointer(text):
+    """Si el archivo solo remite a AGENTS.md (un import, o hasta tres líneas que lo nombran): ya no es una fuente."""
+    lines = [line for line in text.splitlines()[frontmatter(text)[1]:] if line.strip()]
+    return all(IMPORT_ONLY.match(line) for line in lines) or (len(lines) <= 3 and
+                                                             all("AGENTS.md" in line for line in lines))
+
+
+def doc_path(cell):
+    """La ruta de una celda de "Documentos": entre acentos graves, el destino de un enlace o la celda tal cual."""
+    if "`" in cell:
+        return bare(cell)
+    link = re.search(r"\]\(([^)\s]+)\)", cell)
+    return link.group(1) if link else cell.strip()
 
 
 def documented(text):
@@ -929,24 +980,80 @@ def documented(text):
     return table_rows(block) if block else []
 
 
-def renamed(name):
-    return bool(RENAMED_MD.match(name) or RENAMED_COPY.match(name)) and not name.lower().endswith(".local.md")
+def source_kind(path, folder):
+    """El tipo de fuente de una ruta del repo (actual, claude, agente o renombrada) con qué es, o (None, None)."""
+    name = pathlib.PurePosixPath(path)
+    if path == "AGENTS.md":
+        return "actual", "el AGENTS.md actual"
+    if path in CLAUDE_FILES:
+        return "claude", "instrucciones de Claude Code"
+    for pattern, what in OTHER_AGENTS:
+        if re.fullmatch(pattern, path):
+            return "agente", what
+    inside = path.startswith(folder + "/")
+    if RENAMED.match(name.name) and (str(name.parent) in (".", "docs", ".claude") or inside):
+        return "renombrada", "copia de %s" % ("AGENTS.md" if name.name.lower().startswith("a") else "CLAUDE.md")
+    if inside and name.name.upper() in ("AGENTS.MD", "CLAUDE.MD"):  # el de la carpeta de contexto no es el que se usa
+        return "renombrada", "copia de %s en la carpeta de contexto" % name.name
+    return None, None
 
 
-def previous_sources(repo, folder):
-    """El contexto de IA que ya tiene el proyecto: (fuentes, otros .md de la carpeta de contexto, skills locales).
+def output_folders(repo, texts):
+    """Las rutas reales de las carpetas donde escriben otras skills (Carpeta de reportes, Carpeta de investigaciones y la
+    Carpeta de ## Producto), según los textos dados: lo de ahí son salidas, no fuentes."""
+    found = set()
+    for text in texts:
+        for value in OUTPUT_LINE.findall(text):
+            found.add(fixed_part(value.strip()))
+        product = product_section(text)
+        if product:
+            found.add(product[0])
+    real = set()
+    for value in found:
+        if value:
+            path = pathlib.Path(os.path.expanduser(value))
+            real.add(os.path.realpath(str(path if path.is_absolute() else repo / path)))
+    return real
+
+
+def context_folders(repo, folder):
+    """La carpeta de contexto y las que pueden serlo con otro nombre: las carpetas de la raíz que son enlaces
+    simbólicos o que .git/info/exclude deja fuera de git."""
+    names, excluded = [folder], set()
+    try:
+        for line in read_text(exclude_file(repo)).splitlines():
+            line = line.strip()
+            if line and not line.startswith(("#", "!")) and "*" not in line and "/" not in line.strip("/"):
+                excluded.add(line.strip("/"))
+    except RuntimeError:
+        pass
+    try:
+        entries = sorted(repo.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.name in names or entry.name.startswith(".") or entry.name in CONTEXT_SKIP:
+            continue
+        if is_directory(entry) and (entry.is_symlink() or entry.name in excluded):
+            names.append(entry.name)
+    return names
+
+
+def previous_sources(repo, folder, extra=None):
+    """El contexto de IA que ya tiene el proyecto: (fuentes, otros .md de las carpetas de contexto, skills locales).
     Cada una es {"path", "kind", "what", "text"}; kind: actual, renombrada, claude, agente o carpeta. Solo lee."""
-    found, others, local, seen = [], [], [], set()
+    found, others, local, seen, candidates = [], [], [], set(), []
 
     def add(path, kind, what, bucket):
         key = os.path.realpath(str(path))
-        if key in seen or not path.is_file():
+        if key in seen or not is_file(path):
             return
         seen.add(key)
-        bucket.append({"path": rel(repo, path), "kind": kind, "what": what, "text": read_text(path)})
+        label = rel(repo, path) if not os.path.relpath(str(path), str(repo)).startswith("..") else str(path)
+        bucket.append({"path": label, "kind": kind, "what": what, "text": read_text(path)})
 
     agents = repo / "AGENTS.md"
-    if agents.is_file() and read_text(agents).strip():
+    if is_file(agents) and read_text(agents).strip():
         add(agents, "actual", "el AGENTS.md actual", found)
     for parent in (repo, repo / "docs", repo / ".claude"):
         try:
@@ -954,37 +1061,58 @@ def previous_sources(repo, folder):
         except OSError:
             children = []
         for child in children:
-            if renamed(child.name):
-                what = "variante renombrada de %s" % ("AGENTS.md" if child.name.lower().startswith("a") else "CLAUDE.md")
-                add(child, "renombrada", what, found)
-    for name in CLAUDE_FILES:
+            kind, what = source_kind(rel(repo, child), folder)
+            if kind == "renombrada":
+                add(child, kind, what, found)
+    for name in CLAUDE_FILES + AGENT_FILES:
         path = repo / name
-        if path.is_file() and not only_imports(read_text(path)):
-            add(path, "claude", "instrucciones de Claude Code", found)
-    for pattern, what in OTHER_AGENTS:
-        for match in sorted(glob.glob(str(repo / pattern), recursive=True)):
-            path = pathlib.Path(match)
-            if path.is_file() and not only_imports(read_text(path)):
-                add(path, "agente", what, found)
-    base = repo / folder
-    listed = {norm(bare(row[0])) for row in documented(read_text(agents)) if row} if agents.is_file() else set()
-    if is_directory(base):
+        if is_file(path) and not only_pointer(read_text(path)):
+            kind, what = source_kind(name, folder)
+            add(path, kind, what, found)
+    for directory in AGENT_DIRS:
+        if not is_directory(repo / directory):
+            continue
+        for top, dirs, files in os.walk(str(repo / directory)):
+            dirs.sort()
+            for name in sorted(files):
+                path = pathlib.Path(top) / name
+                kind, what = source_kind(rel(repo, path), folder)
+                if kind == "agente" and not only_pointer(read_text(path)):
+                    add(path, kind, what, found)
+    for name in context_folders(repo, folder):
+        base = repo / name
+        if not is_directory(base):
+            continue
         for top, dirs, files in os.walk(str(base), followlinks=True):
             depth = len(pathlib.Path(top).relative_to(base).parts)
             dirs[:] = [] if depth >= 4 else sorted(d for d in dirs if d not in CONTEXT_SKIP and not d.startswith("."))
-            for name in sorted(files):
-                path = pathlib.Path(top) / name
-                if renamed(name):
-                    what = "variante renombrada de %s" % ("AGENTS.md" if name.lower().startswith("a") else "CLAUDE.md")
-                    add(path, "renombrada", what, found)
-                elif name.lower().endswith(".md") and norm(rel(repo, path)) not in listed:
-                    text = read_text(path)
-                    instructions = (AGENT_WORDS.search(text) or INSTRUCTION_NAME.search(name)
-                                    or frontmatter(text)[0].get("description"))
-                    if instructions:
-                        add(path, "carpeta", "de la carpeta de contexto, con instrucciones para agentes", found)
-                    else:
-                        add(path, "otro", "de la carpeta de contexto", others)
+            for file in sorted(files):
+                path = pathlib.Path(top) / file
+                kind, what = source_kind(rel(repo, path), name)
+                if kind == "renombrada":
+                    add(path, kind, what, found)
+                elif file.lower().endswith(".md"):
+                    candidates.append(path)
+    texts = [source["text"] for source in found if source["kind"] in LOOSE]
+    skipped = output_folders(repo, texts)
+    listed = {norm(doc_path(row[0])) for row in documented(read_text(agents)) if row} if is_file(agents) else set()
+    for path in candidates:
+        real = os.path.realpath(str(path))
+        if any(real == out or real.startswith(out + os.sep) for out in skipped) or norm(rel(repo, path)) in listed:
+            continue
+        text = read_text(path)
+        instructions = (INSTRUCTION_NAME.search(path.name) or frontmatter(text)[0].get("description")
+                        or len(AGENT_WORDS.findall(text)) >= 2)
+        if instructions:
+            add(path, "carpeta", "de la carpeta de contexto, con instrucciones para agentes", found)
+        else:
+            add(path, "otro", "de la carpeta de contexto", others)
+    for path in extra or []:
+        source = pathlib.Path(os.path.expanduser(path))
+        if not is_file(source):
+            raise ValueError("--fuente %s no es un archivo" % path)
+        add(source if source.is_absolute() else pathlib.Path(os.path.abspath(str(source))), "carpeta",
+            "fuente indicada con --fuente", found)
     for pattern in LOCAL_SKILLS:
         for match in sorted(glob.glob(str(repo / pattern), recursive=True)):
             path = pathlib.Path(match)
@@ -993,12 +1121,12 @@ def previous_sources(repo, folder):
     return found, others, local
 
 
-def suggest(item, text):
+def suggest(item, text, strict=False):
     """El destino sugerido de una sección (el agente decide): AGENTS.md, un doc o descartada."""
     title, size = item["title"], item["end"] - item["start"] + 1
     content = body(text, item)
     blocks = [key for key, _, _ in hb_blocks(content)]
-    owner = [skill for skill, _, _ in owned_sections(content)]
+    owner = [skill for skill, _, _ in owned_sections(content, strict)]
     if owner or blocks:
         return "AGENTS.md, tal cual (es de %s)" % ", ".join(owner + [key for key in blocks
                                                                        if key.split(":")[0] not in owner])
@@ -1018,7 +1146,7 @@ def suggest(item, text):
     for pattern, section in STANDARD:
         if re.search(pattern, name):
             if size > LONG_SECTION:
-                return "AGENTS.md › %s (lo esencial; el resto, a `<docs>/%s.md`)" % (section, slug(title))
+                return "AGENTS.md › %s, lo esencial, y el resto a `<docs>/%s.md`: decide" % (section, slug(title))
             return "AGENTS.md › %s" % section
     if size > LONG_SECTION:
         return "doc: `<docs>/%s.md` (es extensa: %d líneas)" % (slug(title), size)
@@ -1041,14 +1169,7 @@ def sources_command(args):
     """Las fuentes previas de contexto de IA y el inventario de traspaso sugerido. No escribe nada."""
     repo = toplevel(args.repo)
     folder = args.carpeta.strip("/")
-    found, others, local = previous_sources(repo, folder)
-    extra = []
-    for path in args.fuente or []:
-        source = pathlib.Path(os.path.expanduser(path))
-        if not source.is_file():
-            raise ValueError("--fuente %s no es un archivo" % path)
-        extra.append({"path": path, "kind": "carpeta", "what": "fuente indicada con --fuente", "text": read_text(source)})
-    found = found + extra
+    found, others, local = previous_sources(repo, folder, args.fuente)
     if not found:
         print("Fuentes previas de contexto de IA: ninguna")
         print("Camino: plantilla (crea AGENTS.md desde assets/AGENTS.template.md)")
@@ -1058,13 +1179,16 @@ def sources_command(args):
               "con motivo. Nada se pierde en silencio." % ("" if any(s["kind"] == "actual" for s in found)
                                                            else ", aunque no exista AGENTS.md"))
         for source in found:
-            lines = source["text"].count("\n") + (0 if source["text"].endswith("\n") else 1)
-            print("  - %s (%s, %d líneas): %s" % (source["path"], source["what"], lines, KINDS[source["kind"]]))
-        if any(s["kind"] == "actual" for s in found):
-            print("  Antes de reescribir AGENTS.md, guarda una copia fuera del repo: `verificar --previo <copia>` la "
-                  "compara (si AGENTS.md está en git, sin --previo usa la de HEAD).")
+            print("  - %s (%s, %d líneas): %s" % (source["path"], source["what"], line_count(source["text"]),
+                                                  KINDS[source["kind"]]))
+        rewritten = [source["path"] for source in found if source["kind"] in ("actual",) + POINTERS]
+        if rewritten:
+            print("  Antes de reescribir %s, guarda una copia de cada uno fuera del repo y pásala a `verificar` con "
+                  "`--previo <ruta>=<copia>` (si está en git y cambió, verificar usa la de HEAD). Los punteros a "
+                  "AGENTS.md, mejor después de verificar." % ", ".join(rewritten))
     kept = [(source["path"], key, line) for source in found for key, _, line in hb_blocks(source["text"])]
-    owned = [(source["path"], skill, title) for source in found for skill, title, _ in owned_sections(source["text"])]
+    owned = [(source["path"], skill, title) for source in found
+             for skill, title, _ in owned_sections(source["text"], source["kind"] not in LOOSE)]
     if kept or owned:
         print("De otras skills (van al AGENTS.md nuevo tal cual, con su título y su contenido):")
         for path, key, line in kept:
@@ -1072,14 +1196,15 @@ def sources_command(args):
         for path, skill, title in owned:
             command = "rendimiento" if skill == "hb-performance" else "producto"
             print("  - %s: ## %s (%s; corre `contexto.py %s`)" % (path, title, skill, command))
-    shared = [(source, protocol_overlaps(source["path"], source["text"])) for source in found + local]
+    shared = [(source, protocol_overlaps(source["path"], source["text"], source["kind"] == "skill"))
+              for source in found + local]
     shared = [(source, covered) for source, covered in shared if covered]
     if shared:
         print("Se solapan con skills hb-* (dilo en el resumen: qué cubre ya la skill, qué es propio del proyecto —eso va "
               "a AGENTS.md o a docs— y propón retirarlas; no las borres):")
         for source, covered in shared:
             print("  - %s ↔ %s" % (source["path"], ", ".join("`%s` (%s)" % pair for pair in covered)))
-    others_local = [source for source in local if not protocol_overlaps(source["path"], source["text"])]
+    others_local = [source for source in local if not protocol_overlaps(source["path"], source["text"], True)]
     if others_local:
         print("Skills, comandos o prompts del proyecto sin solape con skills hb-* (no son fuentes: se quedan): "
               + ", ".join(source["path"] for source in others_local))
@@ -1090,37 +1215,57 @@ def sources_command(args):
     if not inventoried:
         return 0
     print("Inventario de traspaso: completa Destino y Motivo, guárdalo fuera del repo y pásalo a `contexto.py verificar "
-          "--inventario <archivo>`. Destino: AGENTS.md, la ruta de un doc (con su fila en \"Documentos\") o descartada "
-          "(con su motivo: obsoleta, contradice el código, ya la cubre un perfil hb-stack-* o una skill hb-*). "
-          "`<docs>` es la carpeta de docs del modo (la imprime `preparar`). Una fila \"%s\" cubre la fuente entera."
-          % WHOLE_FILE)
+          "--inventario <archivo>`. Destino: AGENTS.md, la ruta real de un doc (con su fila en \"Documentos\") o "
+          "descartada (con su motivo: obsoleta, contradice el código, ya la cubre un perfil hb-stack-* o una skill "
+          "hb-*); lo propio de una herramienta puede quedar en su archivo (destino: su ruta). Ninguna fila puede quedar "
+          "con \"decide\" ni con `<docs>`, que es la carpeta de docs del modo (la imprime `preparar`). Una fila \"%s\" "
+          "cubre la fuente entera." % WHOLE_FILE)
     print("")
     print("| Fuente | Sección | Líneas | Destino | Motivo o \"Léelo cuando…\" |")
     print("| --- | --- | --- | --- | --- |")
     for source in inventoried:
         covered = protocol_overlaps(source["path"], source["text"]) if source["kind"] == "carpeta" else []
         if covered:  # un protocolo o una plantilla que ya cubre una skill hb-*: va entero
-            lines = source["text"].count("\n") + (0 if source["text"].endswith("\n") else 1)
             print("| `%s` | %s | 1-%d | descartada si ya la cubre %s; lo propio del proyecto, a AGENTS.md o a un doc |  |"
-                  % (source["path"], WHOLE_FILE, lines, ", ".join("`%s` (%s)" % pair for pair in covered)))
+                  % (source["path"], WHOLE_FILE, line_count(source["text"]),
+                     ", ".join("`%s` (%s)" % pair for pair in covered)))
             continue
         for label, item in inventory_items(source):
             print("| `%s` | %s | %d-%d | %s |  |" % (source["path"], label.replace("|", "\\|"), item["start"],
-                                                    item["end"], suggest(item, source["text"])))
+                                                    item["end"], suggest(item, source["text"],
+                                                                         source["kind"] not in LOOSE)))
     return 0
 
 
-def previous_agents(repo, copy):
-    """El AGENTS.md de antes de reescribirlo: la copia de --previo o, si está en git y cambió, el de HEAD."""
-    if copy:
-        path = pathlib.Path(os.path.expanduser(copy))
-        if not path.is_file():
-            raise ValueError("--previo %s no es un archivo" % copy)
-        return read_text(path)
-    if tracked(repo, "AGENTS.md") and git(repo, "diff", "--quiet", "HEAD", "--", "AGENTS.md").returncode == 1:
-        shown = git(repo, "show", "HEAD:AGENTS.md")
-        return shown.stdout if shown.returncode == 0 else None
-    return None
+def explicit_previous(values):
+    """{ruta: texto} de --previo: "<ruta>=<copia>", o solo "<copia>" para AGENTS.md."""
+    out = {}
+    for value in values or []:
+        path, copy = ("AGENTS.md", value)
+        if "=" in value and not os.path.exists(os.path.expanduser(value)):
+            path, copy = value.split("=", 1)
+        file = pathlib.Path(os.path.expanduser(copy))
+        if not is_file(file):
+            raise ValueError("--previo %s: %s no es un archivo" % (value, copy))
+        out[norm(path)] = read_text(file)
+    return out
+
+
+def head_versions(repo, folder):
+    """Las fuentes previas versionadas que cambiaron o se borraron desde HEAD: {ruta: texto en HEAD}. AGENTS.md, si
+    está en HEAD, siempre: es la fuente del inventario aunque todavía no se haya reescrito."""
+    listing = git(repo, "ls-tree", "-r", "-z", "--name-only", "HEAD")
+    out = {}
+    if listing.returncode != 0:
+        return out
+    for path in listing.stdout.split("\0"):
+        if not path or source_kind(path, folder)[0] is None:
+            continue
+        if path == "AGENTS.md" or git(repo, "diff", "--quiet", "HEAD", "--", path).returncode == 1:
+            shown = git(repo, "show", "HEAD:" + path)
+            if shown.returncode == 0:
+                out[path] = shown.stdout
+    return out
 
 
 def inventory_rows(text):
@@ -1155,9 +1300,10 @@ def inventory_rows(text):
 
 
 def destination(value):
-    """("agents" | "doc" | "descartada" | None, ruta del doc). Una sugerencia sin decidir ("decide") no es un destino."""
+    """("agents" | "doc" | "descartada" | None, ruta del doc). Una sugerencia sin decidir ("decide" o un `<docs>` sin
+    reemplazar) no es un destino."""
     text = plain(value)
-    if not text or "decide" in text:
+    if not text or "decide" in text or PLACEHOLDER.search(value):
         return None, None
     if text.startswith("agents.md"):
         return "agents", None
@@ -1166,7 +1312,7 @@ def destination(value):
     quoted = re.search(r"`([^`]+)`", value)
     rest = re.sub(r"(?i)^doc:\s*", "", value.strip())
     path = quoted.group(1) if quoted else (rest.split()[0] if rest.split() else "")
-    if "<" not in path and ("/" in path or path.endswith(".md")):
+    if "/" in path or path.endswith(".md") or re.fullmatch(r"\.?[\w.-]+", path):
         return "doc", norm(path)
     return None, None
 
@@ -1175,27 +1321,38 @@ def empty(value):
     return plain(value) in ("", "-", "—", "–", "n/a", "ninguno", "ninguna")
 
 
+def has_heading(text, title):
+    wanted = plain(re.sub(r" \(\d+\)$", "", title))
+    return any(plain(found) == wanted for _, _, found in headings(text))
+
+
 def verify(args):
-    """Comprueba el traspaso a AGENTS.md. Errores (sale con 1): una sección de una fuente sin destino, un doc sin su fila
-    en "Documentos" o sin escribir, una descartada sin motivo, un bloque o una sección de otra skill que no quedó tal
-    cual, o "Documentos" que referencia una fuente que se reemplaza. Avisos: reglas que no vienen de ninguna fuente
-    previa, reglas de las fuentes que no quedaron tal cual y un AGENTS.md de más de 150 líneas. No escribe nada."""
+    """Comprueba el traspaso a AGENTS.md. Errores (sale con 1): una sección de una fuente sin destino, una fuente del
+    inventario que ya no está (reescrita sin copia), un doc sin su fila en "Documentos" o sin escribir, una descartada
+    sin motivo, un bloque o una sección de otra skill que no quedó tal cual, o "Documentos" que referencia una fuente que
+    se reemplaza. Avisos: reglas que no vienen de ninguna fuente previa, reglas de las fuentes que no quedaron tal cual y
+    un AGENTS.md de 150 líneas o más. No escribe nada."""
     repo = toplevel(args.repo)
     folder = args.carpeta.strip("/")
     agents = repo / "AGENTS.md"
-    if not agents.is_file():
+    if not is_file(agents):
         raise RuntimeError("no hay AGENTS.md que verificar: escríbelo antes (en la ruta que imprimió `preparar`)")
     new = read_text(agents)
-    found, _, _ = previous_sources(repo, folder)
-    sources = [source for source in found if source["kind"] != "actual"]
-    before = previous_agents(repo, args.previo)
-    if before is not None:
-        sources.insert(0, {"path": "AGENTS.md", "kind": "actual", "what": "el AGENTS.md de antes", "text": before})
-    for path in args.fuente or []:
-        extra = pathlib.Path(os.path.expanduser(path))
-        if not extra.is_file():
-            raise ValueError("--fuente %s no es un archivo" % path)
-        sources.append({"path": path, "kind": "carpeta", "what": "fuente indicada", "text": read_text(extra)})
+    found, _, local = previous_sources(repo, folder, args.fuente)
+    before = head_versions(repo, folder)
+    before.update(explicit_previous(args.previo))
+    sources = []
+    for source in found:
+        if source["kind"] == "actual":
+            continue  # el AGENTS.md de ahora es el resultado: su versión de antes viene de --previo o de HEAD
+        path = norm(source["path"])
+        sources.append(dict(source, text=before.pop(path)) if path in before else source)
+    for path, text in sorted(before.items(), key=lambda item: item[0] != "AGENTS.md"):
+        kind, what = source_kind(path, folder)
+        if text.strip() and not only_pointer(text):
+            sources.insert(0 if kind == "actual" else len(sources),
+                           {"path": path, "kind": kind or "carpeta", "what": (what or "fuente") + ", la de antes",
+                            "text": text})
     errors, warnings = [], []
     new_plain = plain(new)
 
@@ -1206,38 +1363,37 @@ def verify(args):
             blocks.setdefault(key, []).append((source, text))
     for key, versions in sorted(blocks.items()):
         own = [text for source, text in versions if source["kind"] == "actual"]
-        accepted = own or [text for _, text in versions]
-        if not any(text in new for text in accepted):
+        if not any(text in new for text in own or [text for _, text in versions]):
             where = ", ".join(sorted({"`%s`" % source["path"] for source, _ in versions}))
             errors.append("falta el bloque <!-- %s --> tal cual (está en %s): consérvalo sin cambios" % (key, where))
     owned = {}
     for source in sources:
-        for skill, title, text in owned_sections(source["text"]):
+        for skill, title, text in owned_sections(source["text"], source["kind"] not in LOOSE):
             owned.setdefault(skill, []).append((source, title, text))
     mine = {skill: text for skill, _, text in owned_sections(new)}
     for skill, versions in sorted(owned.items()):
         own = [text for source, _, text in versions if source["kind"] == "actual"]
-        accepted = own or [text for _, _, text in versions]
         title = versions[0][1]
         where = ", ".join(sorted({"`%s`" % source["path"] for source, _, _ in versions}))
         if skill not in mine:
             errors.append("falta la sección ## %s de %s (está en %s): va tal cual, con su título y su contenido"
                           % (title, skill, where))
-        elif not any(same_text(mine[skill], text) for text in accepted):
+        elif not any(same_text(mine[skill], text) for text in own or [text for _, _, text in versions]):
             errors.append("## %s (de %s) no quedó tal cual (está en %s): consérvala sin cambios; lo que convenga "
                           "cambiar, propónlo en el resumen" % (title, skill, where))
 
     # "Documentos" nunca referencia una fuente que se reemplaza
-    replaced = {norm(source["path"]): source for source in sources if source["kind"] in REPLACED}
-    rows = [row for row in documented(new) if row]
+    replaced = {norm(source["path"]): source for source in sources if source["kind"] in NOT_IN_DOCUMENTS}
     listed = {}
-    for row in rows:
-        path = norm(bare(row[0]))
+    for row in documented(new):
+        if not row:
+            continue
+        path = norm(doc_path(row[0]))
         listed[path] = row[1] if len(row) > 1 else ""
         if path in replaced:
             errors.append("\"Documentos\" referencia `%s`, una fuente que se reemplaza: traspasa su contenido y quita "
                           "la fila" % replaced[path]["path"])
-        elif empty(listed[path]) or re.match(r"^<.*>$", listed[path]):
+        elif empty(listed[path]) or PLACEHOLDER.fullmatch(listed[path].strip()):
             errors.append("la fila de `%s` en \"Documentos\" no dice cuándo leerlo" % path)
     for source in sources:
         name = pathlib.PurePosixPath(source["path"]).name
@@ -1247,72 +1403,83 @@ def verify(args):
 
     # El inventario: cada sección de cada fuente con su destino
     inventoried = [source for source in sources if source["kind"] in INVENTORIED]
-    destinations = {}
-    if inventoried and not args.inventario:
-        errors.append("falta el inventario de traspaso: pásalo con --inventario <archivo> (la tabla de "
-                      "`contexto.py fuentes`, con Destino completo)")
-    elif inventoried:
+    known_sources = sources + local
+    destinations, rows = {}, []
+    if args.inventario:
         text = sys.stdin.read() if args.inventario == "-" else read_text(pathlib.Path(os.path.expanduser(args.inventario)))
         rows = inventory_rows(text)
         if not rows:
             errors.append("el inventario no tiene la tabla con las columnas Fuente, Sección y Destino")
-        by_source = {}
-        for row in rows:
-            name = norm(bare(row["fuente"])) if row["fuente"] else ""
-            match = [s for s in inventoried if norm(s["path"]) == name] or \
-                [s for s in inventoried if pathlib.PurePosixPath(s["path"]).name == name]
-            if len(match) != 1:
-                warnings.append("fila del inventario con una fuente que no reconozco: «%s» › «%s»"
-                                % (row["fuente"], row["seccion"]))
+    elif inventoried:
+        errors.append("falta el inventario de traspaso: pásalo con --inventario <archivo> (la tabla de "
+                      "`contexto.py fuentes`, con Destino completo)")
+    by_source = {}
+    for row in rows:
+        name = norm(bare(row["fuente"])) if row["fuente"] else ""
+        match = [s for s in known_sources if norm(s["path"]) == name] or \
+            [s for s in known_sources if pathlib.PurePosixPath(s["path"]).name == name]
+        if len(match) != 1:
+            errors.append("el inventario trae «%s», que no encuentro como fuente: si la reescribiste, pasa la copia de "
+                          "antes con --previo %s=<copia> (si está en git, uso la de HEAD); si no la detecté, pásala con "
+                          "--fuente" % (row["fuente"], bare(row["fuente"]) or "<ruta>"))
+            continue
+        by_source.setdefault(match[0]["path"], []).append(row)
+    for source in known_sources if args.inventario else []:  # sin inventario ya hay un error que lo dice
+        mine_rows = by_source.get(source["path"], [])
+        labels = {plain(row["seccion"]): row for row in mine_rows}
+        whole = labels.get(plain(WHOLE_FILE))
+        items = sections(source["text"])
+        known = {plain(WHOLE_FILE)}
+        required = source["kind"] in INVENTORIED
+        for item in items:
+            known.add(plain(item["label"]))
+            known.update(plain(part["label"]) for part in item["parts"])
+            if whole is not None:
+                destinations[(source["path"], item["label"])] = whole
                 continue
-            by_source.setdefault(match[0]["path"], []).append(row)
-        for source in inventoried:
-            mine_rows = by_source.get(source["path"], [])
-            labels = {plain(row["seccion"]): row for row in mine_rows}
-            whole = labels.get(plain(WHOLE_FILE))
-            items = sections(source["text"])
-            known = {plain(WHOLE_FILE)}
-            for item in items:
-                known.add(plain(item["label"]))
-                known.update(plain(part["label"]) for part in item["parts"])
-                if whole is not None:
-                    destinations[(source["path"], item["label"])] = whole
-                    continue
-                if plain(item["label"]) in labels:
-                    destinations[(source["path"], item["label"])] = labels[plain(item["label"])]
-                    continue
-                missing = [part for part in item["parts"] if plain(part["label"]) not in labels]
-                if item["parts"] and not missing:
-                    for part in item["parts"]:
-                        destinations[(source["path"], part["label"])] = labels[plain(part["label"])]
-                    continue
+            if plain(item["label"]) in labels:
+                destinations[(source["path"], item["label"])] = labels[plain(item["label"])]
+                continue
+            missing = [part for part in item["parts"] if plain(part["label"]) not in labels]
+            if item["parts"] and not missing:
+                for part in item["parts"]:
+                    destinations[(source["path"], part["label"])] = labels[plain(part["label"])]
+                continue
+            if required:
                 pieces = ", ".join(part["label"] for part in missing) if item["parts"] else item["label"]
                 errors.append("sin destino en el inventario: `%s` › %s (líneas %d-%d)" % (source["path"], pieces,
                                                                                          item["start"], item["end"]))
-            for label in labels:
-                if label not in known:
-                    warnings.append("fila del inventario con una sección que `%s` no tiene: «%s»" % (source["path"],
-                                                                                                  label))
-        for source in inventoried:
-            for row in by_source.get(source["path"], []):
-                kind, path = destination(row["destino"])
-                where = "`%s` › %s" % (source["path"], row["seccion"])
-                own = [skill for skill, _, _ in owned_sections(section_of(source["text"], row["seccion"]))] + \
-                    [key for key, _, _ in hb_blocks(section_of(source["text"], row["seccion"]))]
-                if kind is None:
-                    errors.append("%s: decide el destino (AGENTS.md, la ruta real de un doc o descartada); llegó «%s»"
-                                  % (where, row["destino"]))
-                elif own and kind != "agents":
-                    errors.append("%s: es de %s y va en AGENTS.md tal cual" % (where, ", ".join(own)))
-                elif kind == "descartada" and empty(row["motivo"]):
-                    errors.append("%s: descartada sin motivo" % where)
-                elif kind == "doc":
-                    if path in replaced:
-                        errors.append("%s: el destino es `%s`, la fuente que se reemplaza" % (where, path))
-                    elif path not in listed:
-                        errors.append("%s: `%s` no tiene su fila en \"Documentos\"" % (where, path))
-                    if not exists(repo / path):
-                        errors.append("%s: el doc `%s` no existe: escríbelo" % (where, path))
+        for label in labels:
+            if label not in known:
+                warnings.append("fila del inventario con una sección que `%s` no tiene: «%s»" % (source["path"], label))
+        for row in mine_rows:
+            kind, path = destination(row["destino"])
+            where = "`%s` › %s" % (source["path"], row["seccion"])
+            part = section_of(source["text"], row["seccion"])
+            own = [skill for skill, _, _ in owned_sections(part, source["kind"] not in LOOSE)] + \
+                [key for key, _, _ in hb_blocks(part)]
+            if kind == "doc" and path == norm(source["path"]) and source["kind"] in POINTERS:
+                kind = "queda"  # lo propio de esa herramienta se queda en su archivo
+            if kind is None:
+                errors.append("%s: decide el destino (AGENTS.md, la ruta real de un doc o descartada); llegó «%s»"
+                              % (where, row["destino"]))
+            elif own and kind != "agents":
+                errors.append("%s: es de %s y va en AGENTS.md tal cual" % (where, ", ".join(own)))
+            elif kind == "descartada" and empty(row["motivo"]):
+                errors.append("%s: descartada sin motivo" % where)
+            elif kind == "queda":
+                now = read_text(repo / source["path"])
+                title = row["seccion"].split(" › ")[-1]
+                if only_pointer(now) or (title not in ("(inicio)", WHOLE_FILE) and not has_heading(now, title)):
+                    errors.append("%s: dice que se queda en `%s`, pero ese archivo ya no la tiene" % (where,
+                                                                                                      source["path"]))
+            elif kind == "doc":
+                if path in replaced:
+                    errors.append("%s: el destino es `%s`, la fuente que se reemplaza" % (where, path))
+                elif path not in listed:
+                    errors.append("%s: `%s` no tiene su fila en \"Documentos\"" % (where, path))
+                if not exists(repo / path):
+                    errors.append("%s: el doc `%s` no existe: escríbelo" % (where, path))
 
     # Nada inventado: las reglas propias vienen de las fuentes previas (o del usuario)
     everything = " ".join(plain(source["text"]) for source in sources)
@@ -1335,17 +1502,19 @@ def verify(args):
                 row = destinations.get((source["path"], part["label"])) or destinations.get((source["path"],
                                                                                               item["label"]))
                 kind, path = destination(row["destino"]) if row else ("agents", None)
-                if kind == "descartada":
+                if kind in ("descartada", None):
                     continue
-                target = plain(read_text(repo / path)) if kind == "doc" and path else new_plain
+                if kind == "doc":  # un doc, o el archivo de esa herramienta si lo propio se queda ahí
+                    target, shown = plain(read_text(repo / path)), "`%s`" % path
+                else:
+                    target, shown = new_plain, "AGENTS.md"
                 for line in body(source["text"], part).splitlines():
                     rule = re.match(r"^[ \t]*[-*+][ \t]+(.+)$", line)
                     if rule and plain(rule.group(1)) not in target:
                         warnings.append("regla de `%s` › %s que no quedó tal cual en %s: «%s»" % (
-                            source["path"], part["label"], "`%s`" % path if kind == "doc" else "AGENTS.md",
-                            rule.group(1).strip()[:100]))
-    lines = new.count("\n") + (0 if new.endswith("\n") else 1)
-    if lines > AGENTS_TARGET:
+                            source["path"], part["label"], shown, rule.group(1).strip()[:100]))
+    lines = line_count(new)
+    if lines >= AGENTS_TARGET:
         warnings.append("AGENTS.md tiene %d líneas (objetivo: menos de %d): lo que no entra va a docs referenciados en "
                         "\"Documentos\", nunca se omite" % (lines, AGENTS_TARGET))
 
@@ -1359,10 +1528,17 @@ def verify(args):
         return 1
     print("✔ Nada se pierde: cada sección de las fuentes tiene destino, lo de otras skills quedó tal cual y "
           "\"Documentos\" no referencia ninguna fuente que se reemplaza.")
-    gone = [source["path"] for source in sources if source["kind"] in REPLACED]
+    gone = [source["path"] for source in sources if source["kind"] in DELETED_BY_DEFAULT and exists(repo /
+                                                                                                    source["path"])]
     if gone:
-        print("Pregunta si se conservan (por defecto, borrarlas después de migrar): " + ", ".join(gone)
-              + ". Las skills locales solapadas no se borran: se propone retirarlas.")
+        print("Pregunta si se conservan (por defecto, borrarlas después de migrar): " + ", ".join(gone) + ".")
+    pointers = [source["path"] for source in sources if source["kind"] in POINTERS
+                and not only_pointer(read_text(repo / source["path"]))]
+    if pointers:
+        print("Deja como puntero a AGENTS.md (`@AGENTS.md` donde la herramienta importa archivos; si no, una línea que "
+              "remita a él), con lo propio de esa herramienta que quedó en su archivo: " + ", ".join(pointers) + ".")
+    if gone or pointers:
+        print("Las skills locales solapadas no se borran: se propone retirarlas.")
     return 0
 
 
@@ -1386,14 +1562,18 @@ KEYED_LINE = re.compile(r"""["']?([@A-Za-z0-9_.:/-]+?)["']?\s*(?:[:=]|=>)\s*["']
                         r"""([A-Za-z0-9_-][A-Za-z0-9._-]*)""")
 GRADLE_PROJECT = re.compile(r"""project\(\s*["']:?([^"']+)["']\s*\)\.projectDir\s*=\s*(?:file\(\s*)?"""
                             r"""(?:new\s+File\([^,]*,\s*)?["']((?:\.\./)+)([A-Za-z0-9_-][A-Za-z0-9._-]*)""")
+LOCK_FILE = re.compile(r"(?:^|/)(?:[^/]*\.lock|[^/]*-lock\.[^/]+|[^/]*\.lockfile|go\.sum)$")
 BUILD_FILE = re.compile(r"(?:^|/)(?:[^/]*\.gradle(?:\.kts)?|[^/]*\.versions\.toml|pom\.xml|package\.json)$")
 COORDINATE = re.compile(r"""["']([A-Za-z][\w-]*(?:\.[\w-]+)+):([A-Za-z][\w.-]*)(?::[^"'\s]*)?["']""")
 TOML_GROUP_NAME = re.compile(r"""group\s*=\s*["']([^"']+)["']\s*,\s*name\s*=\s*["']([^"']+)["']""")
 POM_DEPENDENCY = re.compile(r"<groupId>\s*([^<\s]+)\s*</groupId>\s*<artifactId>\s*([^<\s]+)\s*</artifactId>")
 NPM_SCOPED = re.compile(r'"(@[a-z0-9][\w.-]*)/([a-z0-9][\w.-]*)"\s*:')
 SCRIPT_FILE = re.compile(r"(?:\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|ps1|kts|gradle)|(?:^|/)Makefile)$")
-SYNC_NAME = re.compile(r"(?i)sync|workspace|bootstrap|clone|repos\b|checkout|pull")
+TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|specs?|fixtures?)/|(?:^|/)test_[^/]*$|_test\.[^/]+$|"
+                       r"\.(?:test|spec)\.[^/]+$")
+SYNC_NAME = re.compile(r"(?i)sync|sincroniz|workspace|bootstrap|clon|actualiz|update|repos\b|checkout|pull")
 GIT_ACTION = r"\bgit\s+(?:-C\s+\S+\s+)?"
+GIT_ANY = re.compile(GIT_ACTION + r"(?:clone|pull|fetch|checkout|switch|rebase|merge|reset|clean)\b")
 SYNC_ACTIONS = (("clona", GIT_ACTION + r"clone\b", False),
                 ("actualiza con pull", GIT_ACTION + r"pull\b", False),
                 ("descarga con fetch", GIT_ACTION + r"fetch\b", False),
@@ -1466,10 +1646,21 @@ def substitution_entries(repo, file):
     return entries
 
 
+def key_names(key):
+    """Las formas de una clave que pueden aparecer en el nombre de una carpeta: la clave, su última parte (después de
+    `:`, `/` o `.`) y cada una en minúsculas con guiones (designSystem → design-system)."""
+    out = []
+    for value in (key, re.split(r"[:/]", key)[-1], key.rsplit(".", 1)[-1]):
+        for form in (value, re.sub(r"(?<=[a-z0-9])([A-Z])", r"-\1", value).lower().replace("_", "-")):
+            if form and form not in out:
+                out.append(form)
+    return out
+
+
 def key_template(key, folder):
     """La carpeta con la clave reemplazada por {clave} (feature-{clave}), o None si la carpeta no contiene la clave."""
-    for candidate in (key, re.split(r"[:/]", key)[-1], key.rsplit(".", 1)[-1]):
-        index = folder.lower().find(candidate.lower()) if candidate else -1
+    for candidate in key_names(key):
+        index = folder.lower().find(candidate.lower())
         if index >= 0:
             return folder[:index] + "{clave}" + folder[index + len(candidate):]
     return None
@@ -1526,19 +1717,20 @@ def url_host(url):
 
 def sync_scripts(repo, files):
     """Los scripts que sincronizan el espacio de trabajo (clonan, actualizan o cambian de rama en los repos vecinos):
-    [(archivo, [(acción, veces, destructiva)], repos, ramas, urls)]."""
+    [(archivo, [(acción, veces, destructiva)], repos, ramas, urls)]. Los tests no cuentan."""
     out = []
     for file in files:
-        if not SCRIPT_FILE.search(file) or "node_modules/" in file:
+        if not SCRIPT_FILE.search(file) or "node_modules/" in file or TEST_PATH.search(file):
             continue
         text = read_text(repo / file)
-        git_commands = len(re.findall(GIT_ACTION + r"(?:clone|pull|fetch|checkout|switch)\b", text))
+        git_commands = len(GIT_ANY.findall(text))
         named = sorted({folder for ups, name in OUTSIDE_REF.findall(text)
                         for folder in [sibling_folder(repo, file, ups, name)] if folder})
         urls = sorted({clean_url(url).rstrip(".,;") for url in GIT_URL.findall(text)
                        if url.rstrip(".,;").endswith(".git") or "@" in url.split("/")[0]})
+        outside = bool(named or urls or re.search(r"\.\./\$", text))
         name_hint = SYNC_NAME.search(pathlib.PurePosixPath(file).name)
-        if not ((name_hint and git_commands) or (git_commands >= 2 and (named or urls))):
+        if not ((name_hint and git_commands) or (git_commands >= 2 and outside)):
             continue
         actions = [(label, len(re.findall(pattern, text)), harmful) for label, pattern, harmful in SYNC_ACTIONS]
         branches = sorted({branch for branch in re.findall(GIT_ACTION + r"(?:checkout|switch)\s+(?:-[bBc]\s+)?"
@@ -1550,7 +1742,8 @@ def sync_scripts(repo, files):
 def structure_details(repo, files, sibling_urls):
     """Lo que el inventario de ## Estructura suma al análisis básico: archivos de sustitución con sus excepciones al
     patrón, dependencias del build fuera de ellos, repos en otro host y scripts de sincronización. Solo lee."""
-    substitution = [(file, substitution_entries(repo, file)) for file in files if CONFIG_NAME.search(file)]
+    substitution = [(file, substitution_entries(repo, file)) for file in files
+                    if CONFIG_NAME.search(file) and not LOCK_FILE.search(file)]
     substitution = [(file, entries) for file, entries in substitution if len(entries) >= 2]
     if substitution:
         print("Archivos que pasan unidades a fuente (candidatos a archivo de sustitución):")
@@ -1562,12 +1755,16 @@ def structure_details(repo, files, sibling_urls):
             print("    ⚠ Fuera del patrón (anótalas en ## Estructura como excepciones: la Fuente real de su unidad): "
                   + ", ".join("%s → ../%s" % (key or "(sin clave)", folder) for key, folder in exceptions))
         for key, folder in entries:
-            names.update(value.lower() for value in (key, folder) if value)
+            names.add(folder.lower())
             if key:
-                names.update((re.split(r"[:/]", key)[-1].lower(), key.rsplit(".", 1)[-1].lower()))
+                names.update(form.lower() for form in key_names(key))
     if names:
         coordinates = build_coordinates(repo, files)
-        groups = {group for group, artifact in coordinates if artifact.lower() in names}
+        matched = {}
+        for group, artifact in coordinates:
+            if artifact.lower() in names:
+                matched.setdefault(group, set()).add(artifact.lower())
+        groups = {group for group, artifacts in matched.items() if len(artifacts) >= 2}  # un nombre suelto no basta
         outside = sorted((group, artifact) for group, artifact in coordinates
                          if group in groups and artifact.lower() not in names)
         if outside:
@@ -1587,9 +1784,8 @@ def structure_details(repo, files, sibling_urls):
     for file, _, _, _, urls in scripts:
         for url in urls:
             host = url_host(url)
-            label = "%s (en %s)" % (url, file)
             if main_host and host and host != main_host and not any(url in item for item in foreign):
-                foreign.append(label)
+                foreign.append("%s (en %s)" % (url, file))
     if foreign:
         print("Repos en otro host que el principal (%s): %s. Anótalo en «Repo y rama principal» con su URL: puede pedir "
               "otras credenciales o permisos." % (main_host, ", ".join(foreign)))
@@ -1851,8 +2047,8 @@ def main(argv=None):
     check = sub.add_parser("verificar", help="comprueba el traspaso a AGENTS.md contra el inventario: nada se pierde "
                                              "(no escribe nada)")
     check.add_argument("--inventario", help="el inventario completo (la tabla de `fuentes`); - lo lee de la entrada")
-    check.add_argument("--previo", help="copia del AGENTS.md de antes de reescribirlo (sin ella, el de HEAD si está "
-                                        "en git)")
+    check.add_argument("--previo", action="append", help="la copia de una fuente de antes de reescribirla: "
+                       "<ruta>=<copia> (solo <copia> es la de AGENTS.md); se repite. Sin ella, la de HEAD si está en git")
     for parser in (found, check):
         parser.add_argument("--fuente", action="append", help="otra fuente previa que el script no encontró (se repite)")
         parser.add_argument("--carpeta", default="contexto", help="carpeta de contexto en la raíz (por defecto contexto)")

@@ -789,7 +789,7 @@ class PreviousSourcesTest(HuertaBase):
         self.assertFalse(os.path.lexists(str(self.repo / "AGENTS.md")))
         out = self.contexto("fuentes")
         self.assertIn("Camino: migrar, aunque no exista AGENTS.md", out)
-        self.assertIn("contexto/AGENTS-old.md (variante renombrada de AGENTS.md", out)
+        self.assertIn("contexto/AGENTS-old.md (copia de AGENTS.md", out)
         self.assertIn("se reemplaza: por defecto, propón borrarla después de migrar", out)
         self.assertNotIn("glosario.md (", out)  # no trae instrucciones para agentes: solo se nombra
         self.assertIn("Otros .md de la carpeta de contexto", out)
@@ -1039,6 +1039,232 @@ class NothingInventedTest(Base):
         result = self.contexto("verificar", "--inventario", str(inventory), "--previo", str(copy))
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("sin destino en el inventario: `AGENTS.md` › Seguridad", result.stdout)
+
+
+class ReviewFixesTest(Base):
+    """Lo que encontró la revisión independiente de hb-setup 1.6.0."""
+
+    HEADER = "| Fuente | Sección | Destino | Motivo |\n| --- | --- | --- | --- |\n"
+
+    def run_ok(self, *args, code=0, stdin=None):
+        import subprocess
+        from helpers import ENV
+        result = subprocess.run([sys.executable, "-I", str(SCRIPT)] + [str(a) for a in args] + ["--repo", str(self.repo)],
+                                cwd=str(self.repo), env=ENV, capture_output=True, text=True, encoding="utf-8",
+                                input=stdin)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        return result.stdout
+
+    def inventory(self, rows):
+        path = self.base / "inventario.md"
+        write(path, self.HEADER + rows)
+        return path
+
+    def test_un_claude_md_versionado_que_se_reescribe_se_compara_con_el_de_head(self):
+        write(self.repo / "CLAUDE.md", "# Claude\n\n## Build\n\n- Usa el JDK 17.\n\n## Reglas\n\n- Nunca subas el "
+                                       "keystore.\n")
+        commit_all(self.repo, "claude")
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- Kotlin\n")
+        self.assertIn("falta el inventario", self.run_ok("verificar", code=1))
+        out = self.run_ok("verificar", "--inventario", self.inventory(""), code=1)
+        self.assertIn("sin destino en el inventario: `CLAUDE.md` › Build", out)
+        self.assertIn("sin destino en el inventario: `CLAUDE.md` › Reglas", out)
+
+    def test_un_agents_local_reescrito_sin_copia_no_pasa_y_con_copia_se_compara(self):
+        with open(str(self.repo / ".git" / "info" / "exclude"), "a", encoding="utf-8") as handle:
+            handle.write("/AGENTS.md\n")
+        old = "# Proyecto\n\n## Reglas\n\n- Sin datos de clientes en los logs.\n\n" + PERF_SECTION
+        copy = self.base / "AGENTS.previo.md"
+        write(copy, old)
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- Kotlin\n")
+        rows = self.inventory("| `AGENTS.md` | Reglas | AGENTS.md | ## Reglas del proyecto |\n"
+                              "| `AGENTS.md` | Rendimiento | AGENTS.md | tal cual |\n")
+        self.assertIn("el inventario trae «`AGENTS.md`», que no encuentro como fuente", self.run_ok(
+            "verificar", "--inventario", rows, code=1))
+        out = self.run_ok("verificar", "--inventario", rows, "--previo", "AGENTS.md=%s" % copy, code=1)
+        self.assertIn("falta el bloque <!-- hb-performance:estado -->", out)
+        self.assertIn("falta la sección ## Rendimiento de hb-performance", out)
+        self.assertEqual(self.run_ok("verificar", "--inventario", rows, "--previo", str(copy), code=1), out)
+
+    def test_lo_propio_de_claude_se_queda_en_claude_md_y_no_se_propone_borrarlo(self):
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n\n## Claude Code\n\n- Usa el modo plan antes de tocar Gradle.\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- Kotlin\n")
+        rows = self.inventory("| `CLAUDE.md` | (inicio) | AGENTS.md | el import |\n"
+                              "| `CLAUDE.md` | Claude Code | `CLAUDE.md` | propio de Claude Code |\n")
+        out = self.run_ok("verificar", "--inventario", rows)
+        self.assertIn("✔ Nada se pierde", out)
+        self.assertNotIn("borrarlas después de migrar): CLAUDE.md", out)
+        self.assertIn("Deja como puntero a AGENTS.md", out)
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n\n## Otra cosa\n\n- x\n")
+        copy = self.base / "CLAUDE.previo.md"
+        write(copy, "@AGENTS.md\n\n## Claude Code\n\n- Usa el modo plan antes de tocar Gradle.\n")
+        out = self.run_ok("verificar", "--inventario", rows, "--previo", "CLAUDE.md=%s" % copy, code=1)
+        self.assertIn("dice que se queda en `CLAUDE.md`, pero ese archivo ya no la tiene", out)
+
+    def test_otro_agente_queda_como_puntero_y_no_se_propone_borrarlo(self):
+        write(self.repo / "GEMINI.md", "## Estilo\n\n- Respuestas cortas.\n")
+        out = self.run_ok("fuentes")
+        self.assertIn("GEMINI.md (instrucciones de Gemini CLI", out)
+        self.assertIn("queda como puntero a AGENTS.md", out)
+        self.assertNotIn("GEMINI.md (instrucciones de Gemini CLI, 3 líneas): se reemplaza: por defecto, propón borrarla",
+                         out)
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Reglas del proyecto\n\n- Respuestas cortas.\n")
+        out = self.run_ok("verificar", "--inventario", self.inventory("| `GEMINI.md` | Estilo | AGENTS.md | ## Reglas |\n"))
+        self.assertIn("Deja como puntero a AGENTS.md", out)
+        self.assertNotIn("borrarlas", out)
+        write(self.repo / "GEMINI.md", "@AGENTS.md\n")
+        self.assertIn("Fuentes previas de contexto de IA: AGENTS.md →", self.run_ok("estado"))
+
+    def test_una_seccion_de_rendimiento_generica_de_otro_agente_se_puede_descartar(self):
+        write(self.repo / ".github" / "copilot-instructions.md", "## Performance\n\n- Prefer LazyColumn.\n")
+        out = self.run_ok("fuentes")
+        self.assertNotIn("es de hb-performance", out)
+        self.assertNotIn("## Performance (hb-performance", out)
+        self.assertIn("no hay nada de hb-performance que conservar", self.run_ok("rendimiento"))
+        write(self.repo / "AGENTS.md", "# Proyecto\n")
+        rows = self.inventory("| `.github/copilot-instructions.md` | Performance | descartada | ya lo cubre el perfil |\n")
+        self.assertIn("✔ Nada se pierde", self.run_ok("verificar", "--inventario", rows))
+
+    def test_una_sugerencia_sin_editar_no_es_un_destino(self):
+        write(self.repo / "AGENTS-old.md", "## Stack\n\n" + "".join("- línea %d\n" % n for n in range(45)))
+        suggestion = next(line for line in self.run_ok("fuentes").splitlines() if "| Stack |" in line)
+        self.assertIn("<docs>/stack.md", suggestion)
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Stack\n\n- línea 1\n")
+        destination = suggestion.split(" | ")[3]
+        rows = self.inventory("| `AGENTS-old.md` | Stack | %s |  |\n" % destination)
+        self.assertIn("decide el destino", self.run_ok("verificar", "--inventario", rows, code=1))
+
+    def test_docs_con_otro_nombre_no_son_copias_de_agents(self):
+        for name in ("docs/claude-api.md", "docs/agents-zonas.md", "AGENTS.override.md"):
+            write(self.repo / name, "# Doc\n\n- Contenido del dominio.\n")
+        for name in ("AGENTS copy.md", "AGENTS-2024-05-01.md", "AGENTS.md~", "CLAUDE.v2.md"):
+            write(self.repo / name, "# Viejo\n\n- x\n")
+        out = self.run_ok("fuentes")
+        for name in ("claude-api.md", "agents-zonas.md", "AGENTS.override.md"):
+            self.assertNotIn(name, out)
+        for name in ("AGENTS copy.md", "AGENTS-2024-05-01.md", "AGENTS.md~", "CLAUDE.v2.md"):
+            self.assertIn("  - %s (copia de" % name, out)
+
+    def test_una_carpeta_de_contexto_con_otro_nombre_tambien_se_revisa(self):
+        write(self.base / "fuera" / "ia" / "AGENTS-old.md", "# Viejo\n\n## Reglas\n\n- x\n")
+        os.symlink(os.path.join("..", "fuera", "ia"), str(self.repo / "ia"))
+        self.assertIn("  - ia/AGENTS-old.md (copia de AGENTS.md", self.run_ok("fuentes"))
+        self.assertIn("camino: migrar", self.run_ok("estado"))
+
+    def test_las_salidas_de_otras_skills_no_son_fuentes(self):
+        context = self.repo / "contexto"
+        write(context / "AGENTS-old.md", "# Viejo\n\n## Producto\n\n- Carpeta: `contexto/producto`\n\n## Reglas del "
+                                         "proyecto\n\n- Carpeta de reportes: `contexto/informes`\n")
+        write(context / "producto" / "01-competencia.md", "# Competencia\n\nLa IA de los agentes rivales.\n")
+        write(context / "informes" / "INDEX.md", "| Skill | IA | agentes |\n")
+        write(context / "perf" / "investigaciones" / "x" / "estado.md", "# Estado\n\nEl agente y la IA siguen.\n")
+        out = self.run_ok("fuentes")
+        for name in ("01-competencia.md", "INDEX.md", "estado.md"):
+            self.assertNotIn(name, out)
+        self.assertIn("contexto/AGENTS-old.md", out)
+
+    def test_un_solo_nombre_de_ia_no_vuelve_fuente_un_doc(self):
+        write(self.repo / "contexto" / "docs" / "dominio.md", "# Dominio\n\nLa IA del riego calcula el caudal.\n")
+        self.assertIn("Otros .md de la carpeta de contexto", self.run_ok("fuentes"))
+        self.assertIn("Camino: plantilla", self.run_ok("fuentes"))
+
+    def test_commands_y_prompts_sin_nombre_tambien_se_comparan(self):
+        write(self.repo / ".claude" / "commands" / "review.md", "---\ndescription: Revisa el código del PR\n---\n\nx\n")
+        self.assertIn(".claude/commands/review.md ↔ `hb-review` (code review)", self.run_ok("fuentes"))
+
+    def test_una_fila_de_una_skill_local_en_el_inventario_se_acepta(self):
+        write(self.repo / ".claude" / "skills" / "bugfix-local" / "SKILL.md",
+              "---\nname: bugfix-local\ndescription: Corrige bugs\n---\n\n# Bugfix\n\n- Etiqueta `bug` en el ticket.\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Git\n\n- Etiqueta `bug` en el ticket.\n")
+        rows = self.inventory("| `.claude/skills/bugfix-local/SKILL.md` | (todo el archivo) | AGENTS.md | la "
+                              "etiqueta va en ## Git |\n")
+        self.assertIn("✔ Nada se pierde", self.run_ok("verificar", "--inventario", rows))
+
+    def test_documentos_con_enlaces_y_bloques_de_codigo(self):
+        write(self.repo / "AGENTS-old.md", "## Errores\n\n- x\n")
+        write(self.repo / "docs" / "troubleshooting.md", "# Errores\n\n- x\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Estructura\n\n```bash\n# activa el módulo\n```\n\n"
+                                       "### Documentos\n\n| Documento | Léelo cuando… |\n| --- | --- |\n"
+                                       "| [troubleshooting](docs/troubleshooting.md) | El build falle |\n")
+        rows = self.inventory("| `AGENTS-old.md` | Errores | `docs/troubleshooting.md` | El build falle |\n")
+        self.assertIn("✔ Nada se pierde", self.run_ok("verificar", "--inventario", rows))
+
+    def test_fuente_repetida_e_inventario_por_la_entrada(self):
+        write(self.repo / "AGENTS-old.md", "## Reglas\n\n- Sin datos de clientes.\n")
+        write(self.repo / "AGENTS.md", "# Proyecto\n\n## Reglas del proyecto\n\n- Sin datos de clientes.\n")
+        out = self.run_ok("fuentes", "--fuente", "AGENTS-old.md")
+        self.assertEqual(out.count("  - AGENTS-old.md ("), 1)
+        table = self.HEADER + "| `AGENTS-old.md` | Reglas | AGENTS.md | ## Reglas del proyecto |\n"
+        out = self.run_ok("verificar", "--inventario", "-", "--fuente", "AGENTS-old.md", stdin=table)
+        self.assertIn("✔ Nada se pierde", out)
+
+    def test_ciento_cincuenta_lineas_ya_avisan(self):
+        write(self.repo / "AGENTS.md", "# P\n" + "".join("linea %d\n" % n for n in range(149)))
+        self.assertIn("AGENTS.md tiene 150 líneas", self.run_ok("verificar"))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "como root no hay carpetas sin permiso")
+    def test_una_carpeta_claude_sin_permiso_no_corta_fuentes_ni_estado(self):
+        write(self.repo / ".claude" / "CLAUDE.md", "- x\n")
+        os.chmod(str(self.repo / ".claude"), 0)
+        try:
+            self.run_ok("fuentes")
+            self.run_ok("estado")
+        finally:
+            os.chmod(str(self.repo / ".claude"), 0o755)
+
+    def test_titulos_dentro_de_bloques_anidados_no_son_secciones(self):
+        contexto = load_script("contexto_fences", SCRIPT)
+        text = "## Uso\n\n````markdown\n```bash\n# instala\n```\n# tampoco\n````\n\n## Otra\n"
+        self.assertEqual([item["label"] for item in contexto.sections(text)], ["Uso", "Otra"])
+
+
+class ReviewStructureTest(Base):
+    """units: falsos positivos que encontró la revisión."""
+
+    def units(self):
+        result = self.contexto("units")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def siblings(self, *names):
+        for name in names:
+            (self.base / name).mkdir()
+            sibling = init_repo(self.base / name)
+            write(sibling / "a.txt", "a\n")
+            commit_all(sibling)
+
+    def test_nombres_genericos_no_arrastran_dependencias_de_terceros(self):
+        write(self.repo / "modulos.json", json.dumps({"core": "../core", "ui": "../ui", "network": "../network"}))
+        write(self.repo / "gradle" / "libs.versions.toml", "[libraries]\n"
+              'a = { module = "androidx.core:core", version = "1" }\n'
+              'b = { module = "androidx.core:core-ktx", version = "1" }\n'
+              'c = { module = "androidx.compose.ui:ui", version = "1" }\n'
+              'd = { module = "androidx.compose.ui:ui-tooling", version = "1" }\n')
+        commit_all(self.repo)
+        self.assertNotIn("Dependencias del build", self.units())
+
+    def test_claves_en_camel_case_siguen_el_patron(self):
+        write(self.repo / "modulos.json", json.dumps({"core": "../core", "network": "../network",
+                                                      "designSystem": "../design-system"}))
+        commit_all(self.repo)
+        out = self.units()
+        self.assertIn("modulos.json: 3 entradas; patrón dominante: ../{clave}", out)
+        self.assertNotIn("Fuera del patrón", out)
+
+    def test_los_archivos_de_bloqueo_no_son_de_sustitucion(self):
+        write(self.repo / "pnpm-lock.yaml", "packages:\n  a:\n    version: link:../b\n  c:\n    version: link:../d\n")
+        commit_all(self.repo)
+        self.assertNotIn("Archivos que pasan unidades a fuente", self.units())
+
+    def test_scripts_de_sincronizacion_en_espanol_y_sin_tests(self):
+        write(self.repo / "scripts" / "sincronizar.sh", "#!/bin/sh\nfor r in a b; do\n  git clone "
+              "https://git.example.com/x/$r.git ../$r\n  git -C ../$r reset --hard origin/main\ndone\n")
+        write(self.repo / "tests" / "test_sync.py", "git clone https://otro.example.org/x.git ../x\ngit pull\n")
+        commit_all(self.repo)
+        out = self.units()
+        self.assertIn("  scripts/sincronizar.sh: clona (1), descarta cambios con reset --hard (1)", out)
+        self.assertNotIn("test_sync.py", out)
 
 
 class MigrationSkillTextTest(unittest.TestCase):
