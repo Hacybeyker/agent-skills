@@ -3861,6 +3861,82 @@ def criterio_descarte_vigente(carpeta):
     return None
 
 
+def texto_subir_puntaje(producto, registro, modelo, minimo):
+    """«Qué cambiaría» con el puntaje bajo el mínimo (feedback #84 c): qué criterios podrían subir y cómo, por criterio.
+    La facilidad es una estimación, no sube con evidencia: solo recortando el alcance del MVP. La demanda, con el tope
+    de triangulación y el de un solo mercado (#83 c); la diferenciación, con el tope de lo defendible (#75 a)."""
+    valores, limites = modelo["vigente"]["valores"], limites_puntaje(producto, registro)
+    total = modelo["vigente"]["total"]
+    como = {}
+    if "demanda" in limites:
+        como["demanda"] = ("4 o 5 piden la señal triangulada en los demás mercados que pesan, 1c"
+                           if demanda_de_un_mercado(producto, registro) else
+                           "4 o 5 piden un hallazgo clave triangulado con señales actuales, 1c")
+    else:
+        como["demanda"] = "con señales actuales más fuertes, 1c"
+    como["monetizacion"] = "con evidencia nueva, 1d"
+    como["facilidad"] = "solo recortando el alcance del MVP: un cambio de alcance, con su motivo"
+    if "riesgo" not in limites:  # con una tienda que rechaza la categoría queda en 1
+        como["riesgo"] = "con evidencia nueva, 1e"
+    maximo = limites["diferenciacion"][1]
+    como["diferenciacion"] = {
+        1: "pide un diferenciador viable, 1g",
+        2: "más de 2 pide triangular un viable con confianza baja, 1g",
+        4: "4 como máximo con los viables de hoy: 5 pide dos viables que no se copien fácil o uno en la ficha "
+           "difícil de copiar"}.get(maximo, "%d como máximo con los viables de hoy" % maximo)
+    partes = ["%s, hoy %d (%s)" % (NOMBRES_CRITERIO[c], valores[c], como[c]) for c in CRITERIOS_PUNTAJE
+              if c in como and valores[c] < 5]
+    return "Subir el puntaje a %d/25 o más%s (%s): %s" % (
+        minimo, " con las reglas de hoy" if modelo["vigente"]["incoherencias"] else "",
+        "falta 1 punto" if minimo - total == 1 else "faltan %d puntos" % (minimo - total), "; ".join(partes))
+
+
+SIN_DATOS = re.compile(r"(?:: | \()sin datos no es lo mismo que sin demanda\)?")
+
+
+def demanda_bajo_el_minimo(producto, registro, fatales, ajustes, motivo_de):
+    """La puerta 1 en 🔴 por el puntaje con la demanda (o el problema de una idea nueva) en confianza baja en la primera
+    pasada (feedback #84 b): «sin datos no es lo mismo que sin demanda» bajo un banner de descartar se lee como una
+    contradicción. Si lo que el ajuste tiene que resolver depende entero de vacíos de herramienta (la regla de #57), la
+    razón dice que reabrirla con las mismas herramientas no lo resuelve y los nombra. Si no, y el puntaje es lo único que
+    descarta y con la demanda en su máximo (5) alcanzaría el mínimo, se ajusta la 1c (la regla de #55): el puntaje pasa
+    a ajuste de esa sesión. Si tampoco, la razón dice por qué ajustarla no cambiaría el veredicto. Devuelve
+    (fatales, ajustes)."""
+    puntaje_ = next((m for m in fatales if motivo_de.get(id(m)) == "puntaje"), None)
+    demanda = next((m for m in ajustes if motivo_de.get(id(m)) in ("demanda", "problema") and m[3]), None)
+    if not puntaje_ or not demanda or not producto.get("puntaje"):
+        return fatales, ajustes
+    razon, sesion, alcance = SIN_DATOS.sub("", demanda[0]), demanda[2], demanda[4]
+    minimo = int(producto["criterios"]["puntaje_minimo_nueva" if tipo_de(producto) == "nueva" else "puntaje_minimo"])
+    modelos = puntajes_por_modelo(producto, registro)
+    hoy_ = max(modelos, key=lambda m: m["vigente"]["total"] - m["vigente"]["valores"]["demanda"])
+    valor = hoy_["vigente"]["valores"]["demanda"]
+    quedaria = hoy_["vigente"]["total"] - valor + 5
+    bloqueo = bloqueo_herramienta(producto, registro, sesion, [(True, alcance, demanda[1])])
+    if bloqueo and bloqueo["detener"] and bloqueo["vacios"]:
+        vacios = bloqueo["vacios"]
+        nuevo = ("%s. Lo que falta depende %s por límite de las herramientas (%s): reabrir la %s con las mismas "
+                 "herramientas no lo resuelve" % (razon, "de un vacío" if len(vacios) == 1 else "de vacíos", "; ".join(
+                     "%s: %s %s" % (v["id"], NOMBRE_DIMENSION.get(v["dimension"], v["dimension"]), v["valor"])
+                     for v in vacios), sesion), demanda[1], sesion, True, alcance)
+    elif len(fatales) == 1 and quedaria >= minimo:
+        motivo = (puntaje_[0] + ", pero la demanda está en confianza baja en la primera pasada de la %s, sin evidencia "
+                  "en contra: confirmada, podría puntuar hasta 5 (hoy %d) y el puntaje llegaría hasta %d/25" % (
+                      sesion, valor, quedaria),
+                  "Con la demanda confirmada, volver a puntuarla en la 1f: con 5 (hoy %d), el puntaje llegaría hasta "
+                  "%d/25 (el mínimo es %d)" % (valor, quedaria, minimo), sesion, True, alcance)
+        motivo_de.pop(id(puntaje_), None)  # el id de una tupla que ya no está podría reusarse
+        motivo_de[id(motivo)] = "puntaje"
+        return [], [motivo] + ajustes
+    else:
+        nuevo = ("%s. Ajustar la %s no cambiaría el veredicto: %s" % (
+            razon, sesion, "ni con la demanda en 5 (hoy %d) el puntaje llegaría al mínimo de %d (quedaría en %d/25)"
+            % (valor, minimo, quedaria) if quedaria < minimo else "lo demás que descarta la idea no depende de la "
+                                                                  "demanda"), demanda[1], sesion, True, alcance)
+    motivo_de[id(nuevo)] = motivo_de.pop(id(demanda))
+    return fatales, [nuevo if a is demanda else a for a in ajustes]
+
+
 def motivos_criterio(numero_puerta, criterio, producto, registro):
     """Lo que un criterio que no se cumple dice del veredicto: (fatal, razón, qué lo cambiaría, sesión, hallazgos).
     Fatal es lo que lleva a No viable; lo demás se puede completar ajustando una sesión."""
@@ -3883,8 +3959,7 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
         if len(modelos) > 1:
             razon += " (con cada modelo de monetización: %s)" % "; ".join(
                 "%s %s" % (m["modelo"], texto_puntaje(m)) for m in modelos)
-        cambiaria = "Evidencia nueva que suba el puntaje a %d/25 o más%s" % (
-            minimo, " con las reglas de hoy" if base["vigente"]["incoherencias"] else "")
+        cambiaria = texto_subir_puntaje(producto, registro, base, minimo)
         # la tienda cuyo rival baja la diferenciación (feedback #83 b): quitarla es un cambio de criterio, con su motivo
         hoy_, diferenciacion = base["vigente"]["total"], base["vigente"]["valores"]["diferenciacion"]
         for cambio in sin_cada_tienda(producto, registro):
@@ -4159,6 +4234,8 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             motivo_de[id(motivo)] = criterio["clave"]
             (fatales if fatal else ajustes).append(motivo)
             hallazgos += ids
+    if numero_puerta == 1:  # el 🔴 por puntaje con la demanda baja en la primera pasada (feedback #84 b)
+        fatales, ajustes = demanda_bajo_el_minimo(producto, registro, fatales, ajustes, motivo_de)
     vigente_ = puntaje_vigente(producto, registro) if numero_puerta == 1 else None
     if numero_puerta == 1 and not fatales:
         revisar_rival = rival_a_revisar(registro)
@@ -5498,6 +5575,16 @@ def cmd_fuente(args):
         raise Fallo("--autor no puede ser un nombre de usuario: es la app, la empresa o el medio que publica")
     marcas = {d: etiquetas(getattr(args, d), d) or [] for d in DIMENSIONES}
     publicada, csv_datos = args.publicada, None
+    if args.vivo:  # un dato vivo de una ficha o una búsqueda: su fecha es la de consulta (feedback #84 a)
+        if args.archivo or args.tipo == "oficial" or args.clase:
+            raise Fallo("--vivo es para un dato vivo de una ficha o de una búsqueda (instalaciones, precios, "
+                        "valoraciones, orden de resultados), leído en su página: no va con --archivo, --tipo oficial "
+                        "ni --clase")
+        consultada_ = fecha_publicacion(args.consultada) if args.consultada else hoy().isoformat()
+        if publicada and fecha_publicacion(publicada, anio=True) != consultada_:
+            raise Fallo("Con --vivo la fecha es la de consulta (%s): no pases --publicada. La «última actualización» "
+                        "de la ficha es otro dato: va en el resumen" % consultada_)
+        publicada = consultada_
     if args.archivo:
         if not autor:
             raise Fallo("Un CSV necesita --autor: de qué app y de qué tienda son las reseñas (por ejemplo, \"App A · "
@@ -5577,7 +5664,9 @@ def cmd_fuente(args):
             existente["publicada"] = fecha
             if aproximada:
                 existente["aproximada"] = "anio"
-            completado.append(texto_publicada(existente))
+            if args.vivo:
+                existente["vivo"] = True
+            completado.append(texto_publicada(existente) + (" (dato vivo: la fecha de consulta)" if args.vivo else ""))
         if args.clase and not existente.get("clase"):
             existente["clase"] = args.clase
             completado.append(CLASES_VIGENCIA[args.clase])
@@ -5634,6 +5723,8 @@ def cmd_fuente(args):
             fuente["acumulado"] = True
         if args.extracto:
             fuente["extracto"] = True
+        if args.vivo:
+            fuente["vivo"] = True
         if lectura:
             fuente["lectura"] = lectura
         if editor:
@@ -5658,11 +5749,14 @@ def cmd_fuente(args):
                       producto["criterios"]["vigencia_meses"]))
         if reemplaza:
             print("· %s reemplaza a %s: la edición anterior deja de ser vigente." % (identificador, reemplaza))
-        if fecha and fecha == consultada and not args.archivo:
-            print("⚠ La fecha de publicación es la misma que la de consulta (%s). Si es un dato vivo (el contador de "
-                  "una ficha, una tendencia de los últimos meses), está bien; si es una reseña, un artículo, un hilo o "
-                  "una política, registra su fecha real o `--publicada desconocida` (`anular --id %s` y otra vez "
-                  "`fuente`)." % (fecha, identificador))
+        if args.vivo:
+            print("· Dato vivo de una ficha o una búsqueda: su fecha es la de consulta (%s) y es vigente. La «última "
+                  "actualización» de la ficha es otro dato: va en el resumen." % fecha)
+        elif fecha and fecha == consultada and not args.archivo:
+            print("⚠ La fecha de publicación es la misma que la de consulta (%s). Si es un dato vivo de una ficha o "
+                  "una búsqueda (instalaciones, precios, valoraciones, orden de resultados), regístralo con `--vivo`; "
+                  "si es una reseña, un artículo, un hilo o una política, registra su fecha real o `--publicada "
+                  "desconocida` (`anular --id %s` y otra vez `fuente`)." % (fecha, identificador))
         if args.tipo == "oficial" and linea in BASTA_OFICIAL and args.extracto:
             print("· Fuente oficial vista en un extracto (%s): cuenta como cualquier fuente, pero no basta sola para "
                   "un hallazgo de la línea %s; la norma se lee en su página. Cuando la abras, repite `fuente` con la "
@@ -6700,7 +6794,7 @@ def imprimir_viabilidad(registro, diferenciador, como="", siguiente=True):
     en_uso = any(d.get("se_ve") == "uso" for d in registro.viables())
     if registro.viables() and not (en_ficha and en_uso):
         print("· Lo ideal es tener un diferenciador viable que se vea en la ficha (consigue descargas) y otro en el "
-              "uso (consigue retención): falta el de %s." % ("la ficha" if not en_ficha else "el uso"))
+              "uso (consigue retención): falta el %s." % ("de la ficha" if not en_ficha else "del uso"))
     if not siguiente:
         return
     print("Siguiente paso: %s" % (
@@ -9604,6 +9698,10 @@ def parser():
                      help="obligatorio en una fuente nueva: la fecha real de publicación (AAAA-MM-DD, AAAA-MM o AAAA si solo se sabe el año), "
                           "desconocida o, con --archivo, auto")
     sub.add_argument("--consultada", help="AAAA-MM-DD (por defecto, hoy)")
+    sub.add_argument("--vivo", action="store_true",
+                     help="dato vivo de una ficha o de una búsqueda (instalaciones, precios, valoraciones, orden de "
+                          "resultados): su fecha es la de consulta, en vez de --publicada; la «última actualización» "
+                          "de la ficha va en el resumen")
     sub.add_argument("--tipo", choices=TIPOS_FUENTE,
                      help="obligatorio en una fuente nueva. oficial: el texto de una política de tienda o de una ley (con --version o --publicada)")
     sub.add_argument("--version", help="versión o fecha de la norma, para --tipo oficial")

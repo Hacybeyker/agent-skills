@@ -592,7 +592,7 @@ class DiferenciadorTest(Base):
         self.assertIn("✔ D-1 registrado: viable", salida)
         self.assertIn("triangulado en 2 competidores", salida)
         self.assertIn("fácil de copiar", salida)
-        self.assertIn("falta el de el uso", salida)
+        self.assertIn("falta el del uso", salida)
 
     def test_no_es_viable_con_un_solo_competidor_ni_sin_triangular(self):
         uno, _ = self.hallazgo("voz-del-usuario", self.fuente("voz-del-usuario", 3, "usuario"), "--competidores",

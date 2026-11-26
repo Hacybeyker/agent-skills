@@ -99,7 +99,10 @@ class QuitarTiendaTest(Base):
         self.con_principal_que_supera(voz, alta)
         salida = self.hasta_puerta("4,3,3,3,3")  # 16/25: D-2 es el único viable y es fácil de copiar
         self.assertIn("🔴  PUERTA 1 · NO VIABLE", salida)
-        self.assertIn("Evidencia nueva que suba el puntaje a 17/25 o más; o quitar Google Play del objetivo (`objetivo "
+        # qué criterios podrían subir y cómo (feedback #84 c), y después quitar la tienda
+        self.assertIn("Subir el puntaje a 17/25 o más (falta 1 punto): demanda, hoy 4", salida)
+        self.assertIn("4 como máximo con los viables de hoy: 5 pide dos viables que no se copien fácil o uno en la "
+                      "ficha difícil de copiar); o quitar Google Play del objetivo (`objetivo "
                       "--tiendas app-store --motivo \"<por qué>\"`): es un cambio de criterio con su motivo, que la "
                       "puerta muestra, y nunca se hace solo. Quedaría en 17/25 si se quita Google Play y la "
                       "diferenciación se vuelve a puntuar en la 1f con su máximo, 4 (hoy 3): sin el rival C-4 "

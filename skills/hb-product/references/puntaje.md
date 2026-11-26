@@ -38,7 +38,7 @@ Cinco criterios de 1 a 5. Los valores 2 y 4 son los intermedios entre dos anclas
 - **La distribución no es diferenciación.** Aparecer arriba en las búsquedas de las tiendas de un país o un idioma donde el rival no sale (ASO) no cuenta en este criterio ni en la puerta 1: el rival puede entrar a esas palabras en días y no cambia el producto. Es un hallazgo de la 1a que la sesión 2 usa para el canal de adquisición ([estrategia.md](estrategia.md)).
 - **Un puntaje registrado con reglas anteriores** (o con evidencia que cambió después: una fuente que envejeció, un hallazgo anulado) puede quedar por encima de lo que las reglas de hoy aceptan. El criterio de la puerta 1, el veredicto, el reporte y el tablero muestran como principal el puntaje de hoy, con "se registró N/25" como dato secundario; se corrige volviendo a correr `puntaje` en la sesión 1f.
 - **El modelo de monetización cambia el puntaje.** Los anuncios en una app para niños bajan el riesgo de políticas a 1; un pago único detrás de un control parental, no. Si hay un modelo alternativo registrado en la sesión 0, puntúa con cada uno (`--alternativo`): la puerta 1 muestra los dos totales y, si el mínimo solo se alcanza con el alternativo, dice que lo exige y que la sesión 2 tiene que elegirlo.
-- **Facilidad** es una estimación tuya, sin fuentes: di con qué supuestos (stack, backend, integraciones).
+- **Facilidad** es una estimación tuya, sin fuentes: di con qué supuestos (stack, backend, integraciones). No sube con evidencia: solo recortando el alcance del MVP, que es un cambio de alcance con su motivo (la puerta 1 lo dice así en «Qué cambiaría»).
 - **Riesgo de políticas = 1** pide una mitigación escrita (`--mitigacion`); sin ella, la puerta 1 no se cumple en ese criterio.
 
 ## Confianza global
