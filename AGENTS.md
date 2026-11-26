@@ -45,7 +45,7 @@ Antes de dar una tarea por terminada, en este orden, con `.venv/bin` en el `PATH
 - Las skills se escriben en español.
 - Nada invasivo: los instaladores nunca pisan ni borran lo que no crearon, y todo lo externo es opcional.
 - Todo lo propio lleva el prefijo `hb-`. Una skill externa no se copia a este repo: se lista en `CATALOG.md`.
-- Al cambiar una skill, sube su `metadata.version` (SemVer) y refleja la misma versión en `CATALOG.md`. `check_conventions.py` detecta si no coinciden y `check_version_bump.py`, si olvidaste subirla.
+- Al cambiar una skill, sube su `metadata.version` (SemVer) y refleja la misma versión en `CATALOG.md` y en la columna "Versión" de la tabla de skills de `README.md`. `check_conventions.py` detecta si no coinciden y `check_version_bump.py`, si olvidaste subirla.
 - Al agregar o quitar una skill, actualiza `README.md` y `CATALOG.md` y vuelve a correr `./install.sh`.
 - Un `SKILL.md` tiene 500 líneas como máximo: el detalle va a `references/`.
 - Los archivos de `skills/*/scripts/` deben ser ejecutables, porque el CI falla sin ese permiso.

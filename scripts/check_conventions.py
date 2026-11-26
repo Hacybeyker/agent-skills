@@ -5,7 +5,7 @@
 - SKILL.md de 500 líneas como máximo.
 - Enlaces relativos entre archivos .md que existan (fuera de assets/, que tiene plantillas).
 - Scripts ejecutables y con sintaxis válida (Python, Bash, JavaScript), incluidos install.sh y scripts/.
-- README.md y CATALOG.md listan cada skill, y el catálogo con su versión actual.
+- README.md y CATALOG.md listan cada skill con su versión actual.
 
 Uso: python3 scripts/check_conventions.py   (necesita el CLI `agentskills` de skills-ref en el PATH)
 """
@@ -103,17 +103,31 @@ def check_repo_scripts():
             error(script, "no es ejecutable (chmod +x)")
 
 
+def listed_version(text, name):
+    """La versión de la fila de una skill en una tabla `| Skill | Tipo | Versión | ...`: el nombre entre acentos graves,
+    con o sin enlace ([`hb-x`](skills/hb-x)). None si no hay fila con versión."""
+    row = re.search(rf"^\|\s*\[?`{re.escape(name)}`\]?(?:\([^)]*\))?\s*\|[^|]*\|\s*([^|\s]+)\s*\|", text, re.M)
+    return row.group(1) if row else None
+
+
+def docs_errors(found, readme, catalog):
+    """[(archivo, mensaje)]: cada skill con su fila y su versión actual en la tabla de README.md y en CATALOG.md."""
+    out = []
+    for name, version in found.items():
+        for file, text in (("README.md", readme), ("CATALOG.md", catalog)):
+            listed = listed_version(text, name)
+            if listed is None:
+                out.append((file, f"no lista la skill {name} con su versión"))
+            elif listed != version:
+                out.append((file, f"{name} figura con la versión {listed}, pero la skill está en {version}"))
+    return out
+
+
 def check_docs(found):
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     catalog = (ROOT / "CATALOG.md").read_text(encoding="utf-8")
-    for name, version in found.items():
-        if f"`{name}`" not in readme:
-            error(ROOT / "README.md", f"no lista la skill {name}")
-        row = re.search(rf"^\|\s*`{re.escape(name)}`\s*\|[^|]*\|\s*([^|\s]+)\s*\|", catalog, re.M)
-        if not row:
-            error(ROOT / "CATALOG.md", f"no lista la skill {name} con su versión")
-        elif row.group(1) != version:
-            error(ROOT / "CATALOG.md", f"{name} figura con la versión {row.group(1)}, pero la skill está en {version}")
+    for file, message in docs_errors(found, readme, catalog):
+        error(ROOT / file, message)
 
 
 def main():
