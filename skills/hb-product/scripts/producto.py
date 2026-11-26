@@ -1732,6 +1732,18 @@ def hipotesis(carpeta, registro):
     return resultado
 
 
+def sostenida(fila):
+    """Una hipótesis sostenida con confianza media o alta: lo que piden «sobrevive» y el 🟢 de las puertas 2 y 3."""
+    return fila["veredicto"] == "sostenida" and fila["nivel"] >= 2
+
+
+def exenta(fila, diferida):
+    """La hipótesis más riesgosa débil cuando ya se mide después del lanzamiento (`diferida`: el criterio de descarte
+    vigente de una idea que pasó la puerta 1 como Viable para probar o, en las puertas 2 y 3, una idea nueva): no cuenta
+    contra «sobrevive» (feedback #47) ni contra el 🟢 de lo que sostiene el negocio (feedback #77). Refutada, sí."""
+    return bool(diferida) and fila["riesgosa"] and fila["veredicto"] == "débil"
+
+
 def sobrevive_abogado(filas, diferenciador, descarte=None):
     """La regla de «sobrevive al abogado del diablo» de la puerta 2, la misma para el principal y para la alternativa
     que se recomendaría en su lugar (feedback #61): todas sus hipótesis de 03-validacion.md (las que lo llevan en la
@@ -1739,9 +1751,8 @@ def sobrevive_abogado(filas, diferenciador, descarte=None):
     Viable para probar), la más riesgosa débil no cuenta: es la prueba de elección, que se mide después del
     lanzamiento. Sin ninguna hipótesis, no sobrevive: nada lo puso a prueba. (sobrevive, detalle)."""
     suyas = [fila for fila in filas or [] if fila["diferenciador"] == diferenciador["id"]]
-    diferidas = [f for f in suyas if descarte and f["riesgosa"] and f["veredicto"] == "débil"]
-    sobrevive = bool(suyas) and all(f["veredicto"] == "sostenida" and f["nivel"] >= 2
-                                    for f in suyas if f not in diferidas)
+    diferidas = [f for f in suyas if exenta(f, descarte)]
+    sobrevive = bool(suyas) and all(sostenida(f) for f in suyas if f not in diferidas)
     return sobrevive, ", ".join(
         "%s %s (confianza %s%s)" % (f["id"], f["veredicto"] or "sin veredicto", NIVELES[f["nivel"]],
                                     "; es la más riesgosa: se prueba después del lanzamiento" if f in diferidas else "")
@@ -1754,8 +1765,7 @@ def lo_que_impide(filas, diferenciador, descarte=None):
     sostenidas con confianza baja) falta evidencia, que se busca en la sesión 3; solo una refutada es evidencia en
     contra. Con un criterio de descarte vigente, la más riesgosa débil no cuenta, igual que en `sobrevive_abogado`."""
     suyas = [fila for fila in filas or [] if fila["diferenciador"] == diferenciador["id"]]
-    impiden = [f for f in suyas if not (f["veredicto"] == "sostenida" and f["nivel"] >= 2)
-               and not (descarte and f["riesgosa"] and f["veredicto"] == "débil")]
+    impiden = [f for f in suyas if not sostenida(f) and not exenta(f, descarte)]
     return {"id": diferenciador["id"], "sin_hipotesis": not suyas,
             "refutadas": [f["id"] for f in impiden if f["veredicto"] == "refutada"],
             "fortalecer": [f for f in impiden if f["veredicto"] != "refutada"]}
@@ -2199,6 +2209,111 @@ def motivo_modelo(modelo):
     return "estimación: sin fuente en %s" % ", ".join(modelo["sin_fuente"])
 
 
+# El umbral de descarte de la hipótesis más riesgosa contra los escenarios (feedback #78 d): con la 2 y la 3 en paralelo,
+# el umbral sale de los hallazgos y no de los escenarios. Solo se compara lo que se lee sin ambigüedad en la columna
+# «Métrica y umbral» (después de «descarta»: «menos de 260 al mes», «D30 por debajo de 2,4 %»); lo demás, a mano.
+UMBRAL_NUMERO = r"\d{1,3}(?:[ .  ]\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?"
+UMBRAL_DEBAJO = r"(?:menos de|por debajo de|menor(?:es)? (?:a|de|que)|inferior(?:es)? a|bajo|<)"
+
+
+def numero_umbral(texto):
+    """'1 000', '1.000', '260', '2,4' o '2.4' → número."""
+    limpio = re.sub(r"[   ]", "", texto)
+    if re.fullmatch(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?", limpio):
+        limpio = limpio.replace(".", "")
+    return float(limpio.replace(",", "."))
+
+
+def umbrales_descarte(texto):
+    """Los umbrales de descarte que se leen sin ambigüedad en «Métrica y umbral»: {"instalaciones_mes": n, "d30": p}
+    (la retención como proporción). Solo mira lo que sigue a «descarta» hasta el «;», el punto o «confirma»."""
+    inicio = re.search(r"descart\w*", texto or "", re.I)
+    if not inicio:
+        return {}
+    clausula = re.split(r";|\.\s|\bconfirma", texto[inicio.end():], maxsplit=1, flags=re.I)[0]
+    umbrales = {}
+    instalaciones = re.search(r"%s\s*(%s)\s+(?:[a-záéíóúñ]+\s+){0,3}al mes" % (UMBRAL_DEBAJO, UMBRAL_NUMERO),
+                              clausula, re.I)
+    if instalaciones:
+        umbrales["instalaciones_mes"] = numero_umbral(instalaciones.group(1))
+    for retencion in re.finditer(r"(?:\bD\s?(1|7|30)\b|retenci[oó]n a (1|7|30) d[ií]as?)[^;%%\d]{0,40}?%s\s*(%s)\s*%%"
+                                 % (UMBRAL_DEBAJO, UMBRAL_NUMERO), clausula, re.I):
+        umbrales.setdefault("d%s" % (retencion.group(1) or retencion.group(2)),
+                            numero_umbral(retencion.group(3)) / 100.0)
+    return umbrales
+
+
+def supuestos_escenarios(mercados):
+    """Las instalaciones nuevas del mes (la suma de los mercados) y la retención (la menor del pesimista y la mayor del
+    base entre los mercados) de los casos pesimista y base: {instalaciones_mes: {pesimista, base} o None, retencion:
+    {d1|d7|d30: {pesimista, base}}}. Lo que falta en algún mercado no se compara."""
+    casos = ("pesimista", "base")
+
+    def leer(valor):
+        if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+            return {c: float(valor) for c in casos}
+        if isinstance(valor, dict) and all(isinstance(valor.get(c), (int, float)) for c in casos):
+            return {c: float(valor[c]) for c in casos}
+        return None
+
+    mercados = [m for m in mercados or [] if isinstance(m, dict)]
+    instalaciones = [leer(m.get("instalaciones_mes")) for m in mercados]
+    resultado = {"instalaciones_mes": {c: sum(i[c] for i in instalaciones) for c in casos}
+                 if instalaciones and all(instalaciones) else None, "retencion": {}}
+    for dia in RETENCION:
+        valores = [leer(m["retencion"].get(dia)) if isinstance(m.get("retencion"), dict) else None for m in mercados]
+        if valores and all(valores):
+            resultado["retencion"][dia] = {"pesimista": min(v["pesimista"] for v in valores),
+                                           "base": max(v["base"] for v in valores)}
+    return resultado
+
+
+def supuestos_de(carpeta, producto):
+    """Los supuestos que `escenarios` guardó al calcular o, en unos escenarios anteriores, los del archivo de entrada si
+    está en la carpeta de la idea; None si no hay."""
+    escenarios = producto.get("escenarios") or {}
+    if escenarios.get("supuestos"):
+        return escenarios["supuestos"]
+    ruta = carpeta / Path(escenarios["entrada"]).name if escenarios.get("entrada") else None
+    datos = leer_json(ruta) if ruta and ruta.is_file() else None
+    mercados = datos.get("mercados") if isinstance(datos, dict) else None
+    return supuestos_escenarios(mercados) if isinstance(mercados, list) and mercados else None
+
+
+def umbral_contra_escenarios(carpeta, producto, registro):
+    """El aviso de la puerta 2 si el umbral de descarte de la hipótesis más riesgosa contradice los escenarios
+    (feedback #78 d): por debajo del caso pesimista (un lanzamiento peor que el peor caso no se descartaría) o por encima
+    del base (el resultado esperado ya se descartaría). None si no contradice o no se puede comparar sin ambigüedad."""
+    riesgosas = [f for f in hipotesis(carpeta, registro) or [] if f["riesgosa"]]
+    if len(riesgosas) != 1:
+        return None
+    umbrales = umbrales_descarte(riesgosas[0]["metrica"])
+    supuestos = supuestos_de(carpeta, producto) if umbrales else None
+    if not supuestos:
+        return None
+    partes = []
+    porcentaje = lambda v: "%s %%" % ("%g" % round(v * 100, 2)).replace(".", ",")
+    for clave, umbral in umbrales.items():
+        if clave == "instalaciones_mes":
+            casos = supuestos.get("instalaciones_mes")
+            dice, valor = "menos de %s instalaciones al mes" % numero(umbral), numero
+        else:
+            casos = (supuestos.get("retencion") or {}).get(clave)
+            dice, valor = "%s por debajo de %s" % (clave.upper(), porcentaje(umbral)), porcentaje
+        if not casos:
+            continue
+        if umbral < casos["pesimista"]:
+            partes.append("%s queda por debajo del caso pesimista (%s): un lanzamiento peor que el peor caso no se "
+                          "descartaría" % (dice, valor(casos["pesimista"])))
+        elif umbral > casos["base"]:
+            partes.append("%s queda por encima del caso base (%s): el resultado que esperan los escenarios ya se "
+                          "descartaría" % (dice, valor(casos["base"])))
+    if not partes:
+        return None
+    return "El umbral de descarte de %s contradice los escenarios: %s. No cambia el veredicto: revisa el umbral " \
+           "(sesión 3) o los escenarios (sesión 2)" % (riesgosas[0]["id"], "; ".join(partes))
+
+
 def avisos_puerta(numero_puerta, carpeta, producto, registro):
     """Lo que el usuario tiene que ver antes de decidir y no es un criterio: [línea]."""
     avisos = []
@@ -2274,6 +2389,14 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
     if numero_puerta == 2:
         for aviso in (producto.get("escenarios") or {}).get("avisos") or []:
             avisos.append("⚠ Usuarios activos de un comparable maduro: %s." % aviso)
+        contradice = umbral_contra_escenarios(carpeta, producto, registro)
+        if contradice:  # no cambia el veredicto (feedback #78 d)
+            avisos.append("⚠ %s." % contradice)
+    if numero_puerta in (2, 3):  # lo que sostiene el negocio y otra búsqueda no subiría (feedback #77)
+        negocio = negocio_puerta(numero_puerta, carpeta, producto, registro)
+        if negocio["sin_salida"]:
+            avisos.append("⚠ No lo pases por alto: %s." % primera_minuscula(texto_riesgos(
+                numero_puerta, negocio, negocio["sin_salida"], aviso=True)))
     if numero_puerta == 2 and not meta_obligatoria(producto):
         escenarios, meta = producto.get("escenarios"), float(producto["criterios"].get("meta_ingresos_mes") or 0)
         if escenarios and meta:
@@ -2639,7 +2762,7 @@ def reaperturas_sin_salida(producto, registro):
 
 
 # lo que vuelve a juzgar más adelante un criterio cuya confianza quedó baja en una línea ya reabierta (feedback #76)
-JUZGA_DESPUES = {"monetizacion": "la puerta 2 vuelve a exigir un modelo de monetización viable con evidencia",
+JUZGA_DESPUES = {"monetizacion": "la puerta 2 la vuelve a juzgar y no da Viable mientras siga en baja",
                  "riesgo": "la puerta 3 vuelve a revisar las políticas con el checklist",
                  "diferenciacion": "la sesión 3 pone a prueba al principal y la puerta 2 pide que sobreviva"}
 
@@ -2741,19 +2864,31 @@ def que_fortalecer(registro, impide):
                 % (impide["id"], impide["id"]), [], False)
     partes, ids, solo_hallazgos = [], [], True
     for fila in impide["fortalecer"]:
-        bajos = [registro.hallazgos[i] for i in fila["hallazgos"] if i in registro.hallazgos
-                 and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
-        if bajos:
-            partes.append("%s, %s %s" % (fila["id"], {"Triangular": "triangulando"}.get(
-                subir_o_triangular(registro, bajos), "llevando a confianza media"), "; ".join(
-                    falta_confianza(registro, h, "3") for h in bajos)))
-            ids += [h["id"] for h in bajos]
-        else:
-            partes.append("%s, con evidencia a favor nueva que la sostenga frente a lo que tiene en contra (sus "
-                          "hallazgos ya están en confianza %s)" % (fila["id"], NIVELES[fila["nivel"]]))
-            solo_hallazgos = False
+        texto, suyos = fortalecer_fila(registro, fila, fila["hallazgos"])
+        partes.append(texto)
+        ids += suyos
+        solo_hallazgos = solo_hallazgos and bool(suyos)
     return ("fortalecer las hipótesis de %s: %s" % (impide["id"], "; ".join(partes)), list(dict.fromkeys(ids)),
             solo_hallazgos)
+
+
+def bajos_de(registro, ids):
+    """Los hallazgos de esos IDs que están en confianza baja."""
+    return [registro.hallazgos[i] for i in ids if i in registro.hallazgos
+            and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
+
+
+def fortalecer_fila(registro, fila, ids):
+    """Qué le falta a una hipótesis débil para quedar sostenida (feedback #64): (texto, hallazgos a triangular). Con
+    hallazgos en confianza baja, triangularlos (o subirlos a media); con todos en media o alta, evidencia a favor nueva
+    (y ningún hallazgo que nombrar)."""
+    bajos = bajos_de(registro, ids)
+    if bajos:
+        return "%s, %s %s" % (fila["id"], {"Triangular": "triangulando"}.get(
+            subir_o_triangular(registro, bajos), "llevando a confianza media"), "; ".join(
+                falta_confianza(registro, h, "3") for h in bajos)), [h["id"] for h in bajos]
+    return ("%s, con evidencia a favor nueva que la sostenga frente a lo que tiene en contra (sus hallazgos ya están en "
+            "confianza %s)" % (fila["id"], NIVELES[fila["nivel"]]), [])
 
 
 def motivo_fortalecer(criterio, registro, candidatos, sin_principal=False):
@@ -2796,6 +2931,161 @@ def motivo_fortalecer(criterio, registro, candidatos, sin_principal=False):
         registro, [registro.hallazgos[i] for i in dict.fromkeys(ids)], "3"))
     alcance = {"hallazgos": ids} if solo and ids else {"linea": "validacion"}  # lo que el ajuste resuelve (#57)
     return False, razon, cambiaria, "3", ids, True, alcance
+
+
+# Lo que sostiene el negocio (feedback #77): el 🟢 de las puertas 2 y 3 pide confianza media o alta en cada hipótesis
+# crítica y en la monetización, igual que el 🟢 de la puerta 1 pide la confianza global media o alta. Lo que hace la
+# puerta sale de las reglas de siempre: ajustar la 3 una sola vez si falta evidencia que se puede buscar (#64), riesgo a
+# medir después del lanzamiento si otra búsqueda no la subiría (#76) y No viable solo con evidencia en contra.
+
+def cita_monetizacion(registro, fila):
+    """Si la hipótesis cita un hallazgo de la línea de monetización: la de pago, casi siempre."""
+    return any((registro.hallazgos.get(i) or {}).get("linea") == "monetizacion" for i in fila["hallazgos"])
+
+
+def trabas_fortalecer(registro, ids, agotadas):
+    """Por qué otra búsqueda no subiría esos hallazgos en confianza baja (feedback #77, con las reglas de #57 y #76):
+    un texto por cada uno que es de una línea ya reabierta sin salida (`reaperturas_sin_salida`) o que depende entero de
+    vacíos por límite de las herramientas de su línea. Vacío si todos se pueden buscar todavía."""
+    trabas, por_sesion = [], {}
+    for hallazgo in bajos_de(registro, ids):
+        sesion = LINEAS.get(hallazgo["linea"], ("", ""))[1]
+        if sesion in agotadas:
+            if sesion not in por_sesion:
+                por_sesion[sesion] = []
+                trabas.append(sesion)
+            por_sesion[sesion].append(hallazgo["id"])
+            continue
+        por = vacios_herramienta_lineas(registro, [hallazgo["linea"]])
+        estado, _, vacios = estado_hallazgo(registro, hallazgo["id"], por) if por else (None, "", [])
+        if estado:
+            trabas.append("%s depende de vacíos por límite de las herramientas (%s)" % (
+                hallazgo["id"], y_lista(dict.fromkeys(v["id"] for v in vacios))))
+    return ["%s %s de la %s, que ya se reabrió (%s)" % (y_lista(por_sesion[t]), "es" if len(por_sesion[t]) == 1
+                                                        else "son", t, agotadas[t]) if t in por_sesion else t
+            for t in trabas]
+
+
+def negocio_puerta(numero_puerta, carpeta, producto, registro):
+    """Lo que sostiene el negocio y no llega a confianza media o alta, en las puertas 2 y 3 (feedback #77). Cuenta cada
+    hipótesis crítica débil (o sostenida con confianza baja), esté o no enlazada a un diferenciador, salvo la más
+    riesgosa exenta (`exenta`), las refutadas (su criterio de siempre) y, en la puerta 2, las que ya juzga «sobrevive»
+    (las del principal y, si no sobrevive o no hay principal, las de los viables); y la confianza baja de la
+    monetización, que la puerta 1 deja como riesgo a validar aquí cuando la 1d ya se reabrió (#76, `JUZGA_DESPUES`).
+    {buscables, sin_salida, fatal, gastada}: cada elemento es {id, texto, ids, trabas, metrica, fila, puerta1}.
+    Buscable, solo en la puerta 2: la sesión 3 no se reabrió por un ajuste suyo y nada de lo que falta es de una línea
+    ya reabierta sin salida ni depende entero de vacíos por límite de las herramientas. En la puerta 3 nada es buscable:
+    la puerta 2 ya se decidió. Fatal: un hallazgo clave de monetización refutado con la 1d ya reabierta (#76)."""
+    nueva = tipo_de(producto) == "nueva"
+    filas = [f for f in hipotesis(carpeta, registro) or [] if f["veredicto"]]
+    if not filas:  # sin la tabla de la sesión 3 no hay nada que juzgar: la puerta pide la validación (su criterio)
+        return {"buscables": [], "sin_salida": [], "fatal": None, "gastada": None, "monetizacion": None}
+    descarte = criterio_descarte_vigente(carpeta)
+    excluir = set()
+    principal = registro.principal()
+    if numero_puerta == 2 and not nueva:
+        if principal:
+            excluir.add(principal["id"])
+        if not principal or not sobrevive_abogado(filas, principal, descarte)[0]:
+            excluir.update(d["id"] for d in registro.viables())
+    agotadas = reaperturas_sin_salida(producto, registro)
+    gastada = reapertura_validacion(carpeta, producto)
+    elementos = []
+    for fila in filas:
+        if sostenida(fila) or fila["veredicto"] == "refutada" or exenta(fila, descarte or nueva) or (
+                fila["diferenciador"] and fila["diferenciador"] in excluir):
+            continue
+        ids = fila["claves"] or fila["hallazgos"]
+        elementos.append({"id": fila["id"], "fila": fila, "ids": ids, "metrica": fila["metrica"], "puerta1": False,
+                          "texto": "%s %s (confianza %s%s)" % (
+                              fila["id"], fila["veredicto"] or "sin veredicto", NIVELES[fila["nivel"]],
+                              "; cita monetización" if cita_monetizacion(registro, fila) else ""),
+                          "trabas": trabas_fortalecer(registro, ids, agotadas)})
+    fatal = None
+    monetizacion = next((d for d in debiles_confianza(producto, registro, agotadas)
+                         if d["criterio"] == "monetizacion"), None)
+    if monetizacion and monetizacion["gastada"] and monetizacion["refutados"]:  # evidencia en contra (#76)
+        fatal = ("La monetización tiene evidencia en contra (%s %s tantas fuentes en contra como a favor) y la 1d ya se "
+                 "reabrió (%s): ajustarla otra vez no traería evidencia nueva" % (
+                     y_lista(monetizacion["refutados"]), "tiene" if len(monetizacion["refutados"]) == 1 else "tienen",
+                     monetizacion["gastada"]),
+                 "Evidencia nueva de monetización que pese más que la que está en contra y que no dependa de más "
+                 "búsquedas en la 1d (un navegador en el agente o datos propios)", None, True, None)
+    elif monetizacion:
+        elementos.append({"id": "monetización", "fila": None, "ids": monetizacion["por_confirmar"], "metrica": "",
+                          "puerta1": bool(monetizacion["gastada"]),
+                          "texto": "la confianza de monetización (baja%s)" % (
+                              ", que la puerta 1 dejó como riesgo a validar en esta puerta"
+                              if monetizacion["gastada"] else ""),
+                          "trabas": ["la 1d ya se reabrió (%s)" % monetizacion["gastada"]] if monetizacion["gastada"]
+                          else trabas_fortalecer(registro, monetizacion["por_confirmar"], agotadas)})
+    for elemento in elementos:
+        elemento["buscable"] = numero_puerta == 2 and not gastada and not elemento["trabas"]
+    return {"buscables": [e for e in elementos if e["buscable"]],
+            "sin_salida": [e for e in elementos if not e["buscable"]], "fatal": fatal, "gastada": gastada,
+            "monetizacion": monetizacion}
+
+
+def texto_riesgos_decision(riesgos):
+    """'HIP-06 y la monetización quedan como riesgos a medir', con los riesgos que guarda la decisión de seguir."""
+    return "%s %s" % (y_lista("la monetización" if r["id"] == "monetización" else r["id"] for r in riesgos),
+                      "queda como riesgo a medir" if len(riesgos) == 1 else "quedan como riesgos a medir")
+
+
+def ajuste_negocio(registro, negocio, otro_ajuste_3=False):
+    """El ajuste de la sesión 3 para fortalecer lo que sostiene el negocio en la primera pasada (feedback #77, la regla
+    de #64): (razón, qué cambiaría, «3», pide buscar, alcance) y los hallazgos que nombra."""
+    partes, ids, solo = [], [], True
+    for elemento in negocio["buscables"]:
+        if elemento["fila"]:
+            texto, suyos = fortalecer_fila(registro, elemento["fila"], elemento["ids"])
+        else:
+            todos = bajos_de(registro, elemento["ids"])
+            bajos = [h for h in todos if h["id"] not in ids]  # los que ya nombra una hipótesis no se repiten
+            suyos = [h["id"] for h in todos]
+            texto = "la confianza de monetización, %s %s" % ({"Triangular": "triangulando"}.get(
+                subir_o_triangular(registro, bajos), "llevando a confianza media"), "; ".join(
+                    falta_confianza(registro, h, "3") for h in bajos)) if bajos else \
+                "la confianza de monetización, con %s" % y_lista(suyos) if suyos else \
+                "la confianza de monetización, con un hallazgo clave de monetización con evidencia"
+        partes.append(texto)
+        ids += suyos
+        solo = solo and bool(suyos)
+    ids = list(dict.fromkeys(ids))
+    razon = ("Lo que sostiene el negocio no llega a confianza media o alta (%s): Viable lo pide en cada hipótesis "
+             "crítica, esté o no enlazada a un diferenciador, y falta evidencia, no hay evidencia en contra; la sesión 3 "
+             "todavía no se reabrió para fortalecer%s" % (y_lista(e["texto"] for e in negocio["buscables"]),
+                                                          "la" if len(negocio["buscables"]) == 1 else "las"))
+    cambiaria = "%s %s%s" % (
+        "En esa misma reapertura de la sesión 3, fortalecer también" if otro_ajuste_3
+        else "Ajustar la sesión 3, una sola vez, para fortalecer", "; ".join(partes),
+        texto_reunir(registro, [registro.hallazgos[i] for i in ids], "3"))
+    alcance = {"hallazgos": ids} if solo and ids else {"linea": "validacion"}  # lo que el ajuste resuelve (#57)
+    return (razon, cambiaria, "3", True, alcance), ids
+
+
+def texto_riesgos(numero_puerta, negocio, elementos, aviso=False):
+    """La razón (o el aviso) de lo que sostiene el negocio cuando otra búsqueda no lo subiría (feedback #77): qué quedó
+    débil o en baja y por qué, y que queda como riesgo a medir después del lanzamiento, con su métrica y su umbral si
+    los tiene; si no, definirlos en el PRD."""
+    detalle = "; ".join("%s: %s" % (e["texto"], "; ".join(e["trabas"])) if e["trabas"] else e["texto"]
+                        for e in elementos)
+    if negocio["gastada"]:
+        porque = ", y la sesión 3 ya se reabrió para fortalecerlas (%s)" % negocio["gastada"]
+    elif numero_puerta == 3 and any(not e["trabas"] for e in elementos):
+        porque = ", y la puerta 3 no reabre la validación: la puerta 2 ya se decidió"
+    else:
+        porque = ""
+    nombre = lambda e: "la monetización" if not e["fila"] else e["id"]
+    con = ["%s, con «%s»" % (e["id"], texto_corto(llano(e["metrica"]), 90)) for e in elementos if e["metrica"]]
+    sin = [nombre(e) for e in elementos if not e["metrica"]]
+    if sin:
+        con.append("%s, sin métrica ni umbral: defínelos en el PRD, en la sesión 4" % y_lista(sin))
+    queda = "queda como riesgo a medir" if len(elementos) == 1 else "quedan como riesgos a medir"
+    return "Lo que sostiene el negocio no llega a confianza media o alta: %s. Otra búsqueda no lo subiría%s, así que %s" \
+           "%s después del lanzamiento (%s)" % (
+               detalle, porque, "si la idea sigue, " if aviso else "la puerta no da Viable ni vuelve a pedir un "
+                                                                     "ajuste: ", queda, "; ".join(con))
 
 
 def refutados(registro, ids):
@@ -3475,6 +3765,20 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             hallazgos += abiertos[0]["ids"]
         for debil in sin_salida_conf:
             hallazgos += debil["ids"]
+    # Lo que sostiene el negocio en las puertas 2 y 3 (feedback #77): una hipótesis crítica débil o en confianza baja
+    # (esté o no enlazada a un diferenciador) o la monetización en baja no dejan dar Viable. En la puerta 2, si falta
+    # evidencia que todavía se puede buscar y la 3 no se reabrió por eso, ajustar la 3 una vez (#64); lo que otra
+    # búsqueda no subiría queda como riesgo a medir (más abajo), y la evidencia en contra sigue siendo No viable.
+    negocio = None
+    if numero_puerta in (2, 3) and not fatales:
+        negocio = negocio_puerta(numero_puerta, carpeta, producto, registro)
+        if negocio["fatal"]:
+            fatales.append(negocio["fatal"])
+            hallazgos += negocio["monetizacion"]["ids"]
+        elif negocio["buscables"]:
+            ajuste, ids = ajuste_negocio(registro, negocio, any(a[2] == "3" for a in ajustes))
+            ajustes.append(ajuste)
+            hallazgos += ids
     de_propuesta = []  # una propuesta trae algo nuevo (un navegador, un dato): no es «ajustar otra vez lo mismo»
     if not fatales:
         for propuesta in propuestas_de(producto, numero_puerta):
@@ -3510,7 +3814,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                 "Evidencia que no dependa de más búsquedas en la %s: un navegador en el agente, un CSV de reseñas que "
                 "aportes o datos propios" % s, None, True, None) for s in sesiones_]
             ajustes = []
-    descarte = None
+    descarte, riesgos = None, []
     if fatales:
         nivel, elegidas, sesion = "no", fatales + ajustes, None
         cambios = fatales
@@ -3563,6 +3867,30 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             (None, "Un hallazgo clave de %s refutado, con tantas fuentes en contra como a favor (pasaría a No viable)"
              % y_lista(NOMBRES_CRITERIO[d["criterio"]] for d in sin_salida_conf), None, False)]
         hallazgos += sustento(registro)["demanda"] or []
+    elif negocio and negocio["sin_salida"]:
+        # Cumple los criterios, pero lo que sostiene el negocio quedó débil o en baja y otra búsqueda no lo subiría
+        # (feedback #77): no es Viable (pide confianza media o alta) ni se ajusta otra vez; se prueba, con eso como
+        # riesgo a medir después del lanzamiento.
+        nivel, sesion = "probar", None
+        elementos = negocio["sin_salida"]
+        elegidas = [("Cumple los %s de la puerta %d" % (plural(len(evaluados), "criterio"), numero_puerta), None, None,
+                     False)]
+        principal = registro.principal()
+        if principal and numero_puerta == 2:
+            elegidas.append(("El diferenciador principal (%s) es viable" % principal["id"], None, None, False))
+            hallazgos += registro.hallazgos_de(principal)
+        elegidas.append((texto_riesgos(numero_puerta, negocio, elementos), None, None, False))
+        nombres = y_lista("la monetización" if not e["fila"] else e["id"] for e in elementos)
+        cambios = [(None, "Evidencia que sostenga %s con confianza media o alta sin depender de otra búsqueda sin salida "
+                          "(datos propios, un navegador en el agente o una prueba con usuarios) (pasaría a Viable)"
+                    % nombres, None, False),
+                   (None, {2: "Que la validación refute una hipótesis crítica%s (pasaría a No viable)" % (
+                       ", o un hallazgo clave de monetización refutado" if any(not e["fila"] for e in elementos)
+                       else ""),
+                       3: "Que el MVP deje de caber en el presupuesto o pierda la trazabilidad (pasaría a Viable con "
+                          "reservas)"}[numero_puerta], None, False)]
+        hallazgos += [i for e in elementos for i in e["ids"]]
+        riesgos = [{"id": e["id"], "texto": e["texto"], "metrica": e["metrica"]} for e in elementos]
     else:
         nivel, sesion = "viable", None
         global_ = confianzas(registro)[1]
@@ -3611,7 +3939,8 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     if nivel == "reservas":
         if not any("Viable para probar" in c for c in cambiaria):
             despues = probar or (numero_puerta == 1 and candidatos_para_probar(  # con la demanda ajustada (#55)
-                carpeta, producto, registro, filas_hipotesis, con_demanda=False))
+                carpeta, producto, registro, filas_hipotesis, con_demanda=False)) or (
+                negocio and negocio["sin_salida"])  # lo que otra búsqueda no sube queda como riesgo (#77)
             cambiaria.append("Con eso, el veredicto pasaría a %s" % ("Viable para probar" if despues else "Viable"))
         for de_sesion in sesiones:  # solo la línea dueña de cada sesión (#44 y #57)
             bloqueos[de_sesion] = bloqueo_herramienta(producto, registro, de_sesion, por_sesion[de_sesion])
@@ -3623,7 +3952,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             "recomienda": VEREDICTOS[nivel]["recomienda"], "sesion": sesion, "sesiones": sesiones, "razones": razones,
             "cambiaria": cambiaria, "provisional": abiertas, "hallazgos": list(dict.fromkeys(hallazgos)),
             "incoherencias": (vigente_ or {}).get("incoherencias", []),
-            "diferidos": diferidos if nivel in ("probar", "reservas") else [], "descarte": descarte,
+            "diferidos": diferidos if nivel in ("probar", "reservas") else [], "descarte": descarte, "riesgos": riesgos,
             "por_resolver": por_resolver, "por_sesion": por_sesion, "bloqueo": bloqueo, "bloqueos": bloqueos}
 
 
@@ -3887,6 +4216,11 @@ def texto_sesion(carpeta, producto, sesion):
                                                          descarte.get("dias") or 60), "día"))
             if sesion == "3" else "el MVP pone a prueba la hipótesis más riesgosa (el criterio de descarte), con su "
                                   "métrica y su umbral, en la columna Hipótesis de su funcionalidad"))
+    riesgos = (vigente(decisiones(carpeta), 2) or {}).get("riesgos") if sesion == "4" else None
+    if riesgos:  # la puerta 2 fue Viable para probar por lo que sostiene el negocio (feedback #77)
+        partes.append("La puerta 2 fue Viable para probar: %s después del lanzamiento; el PRD lleva la métrica y el "
+                      "umbral de cada uno (los de 03-validacion.md o, si no los tiene, defínelos en las métricas)."
+                      % texto_riesgos_decision(riesgos))
     reapertura = int((producto["sesiones"].get(sesion) or {}).get("reaperturas") or 0)
     if sesion in CON_PRESUPUESTO and reapertura:
         limites = presupuesto_reapertura(producto)
@@ -6255,14 +6589,27 @@ def caso(valor, nombre, lleva_fuente, registro, sin_fuente, por_analogia):
     if min(valor[c] for c in ("pesimista", "base", "optimista")) < 0:
         raise Fallo("El supuesto `%s` no puede ser negativo" % nombre)
     if lleva_fuente:
-        fuente = str(valor.get("fuente") or "").strip()
-        if not fuente:
+        fuentes = fuentes_supuesto(valor)
+        faltan = [f for f in fuentes if f not in registro.fuentes]
+        if faltan:
+            raise Fallo("El supuesto `%s` cita %s, que no existe%s" % (
+                nombre, "la fuente %s" % faltan[0] if len(faltan) == 1 else "las fuentes %s" % y_lista(faltan),
+                "" if len(faltan) == 1 else "n"))
+        if not fuentes:
             sin_fuente.append(nombre)
-        elif fuente not in registro.fuentes:
-            raise Fallo("El supuesto `%s` cita la fuente %s, que no existe" % (nombre, fuente))
-        elif registro.fuentes[fuente]["peldano"] >= 3:
-            por_analogia.append("%s (%s, peldaño %d)" % (nombre, fuente, registro.fuentes[fuente]["peldano"]))
+        elif min(registro.fuentes[f]["peldano"] for f in fuentes) >= 3:  # por analogía si ninguna es directa
+            por_analogia.append("%s (%s)" % (nombre, ", ".join(
+                "%s, peldaño %d" % (f, registro.fuentes[f]["peldano"]) for f in fuentes)))
     return {c: float(valor[c]) for c in ("pesimista", "base", "optimista")}
+
+
+def fuentes_supuesto(valor):
+    """Las fuentes de un supuesto de los escenarios (feedback #78 a): `"fuente": "S-1"`, como siempre, o varias, en una
+    lista (`["S-1", "S-2"]`) o separadas por comas (`"S-1, S-2"`)."""
+    fuente = valor.get("fuente") if isinstance(valor, dict) else None
+    if isinstance(fuente, (list, tuple)):
+        return list(dict.fromkeys(str(f).strip() for f in fuente if str(f).strip()))
+    return list(dict.fromkeys(lista(fuente)))
 
 
 RETENCION = ("d1", "d7", "d30")
@@ -6293,13 +6640,15 @@ def comparable_maduro(registro, valor):
         fila = registro.competidor(str(valor["comparable"]))
         if fila:
             filas.append(fila)
-    fuente = str(valor.get("fuente") or "").strip()
-    filas += [c for c in registro.competidores.values() if fuente and fuente in c.get("fuentes", [])
+    fuentes = fuentes_supuesto(valor)
+    filas += [c for c in registro.competidores.values() if any(f in c.get("fuentes", []) for f in fuentes)
               and c.get("peldano", 1) <= 3 and c not in filas]
     if filas:
         return "%s, una app que ya está en la tienda" % y_lista(nombre_fila(c) for c in filas)
-    if fuente in registro.fuentes and registro.fuentes[fuente].get("acumulado"):
-        return "%s, un dato acumulado desde el lanzamiento" % fuente
+    acumuladas = [f for f in fuentes if f in registro.fuentes and registro.fuentes[f].get("acumulado")]
+    if acumuladas:
+        return "%s, %s acumulado desde el lanzamiento" % (y_lista(acumuladas), "un dato" if len(acumuladas) == 1
+                                                          else "datos")
     return None
 
 
@@ -6419,7 +6768,8 @@ def cmd_escenarios(args):
             precio, _ = supuestos(compra.get("precio"), ruta_supuesto + ".precio", False)
             comision = compra.get("comision")
             if not isinstance(comision, (int, float)) or not 0 <= comision < 1:
-                raise Fallo("`%s.comision` es la comisión de la tienda como proporción: 0.15 o 0.30" % ruta_supuesto)
+                raise Fallo("`%s.comision` es la comisión de la tienda como proporción entre 0 y 1 (por ejemplo, 0.15): "
+                            "la tasa de tu programa y mercado, con su fuente oficial en `_leeme`" % ruta_supuesto)
             if max(conversion.values()) > 1:
                 raise Fallo("`%s.conversion` es una proporción entre 0 y 1 (1 % = 0.01)" % ruta_supuesto)
             if compra["tipo"] == "suscripcion":
@@ -6456,7 +6806,8 @@ def cmd_escenarios(args):
                               "base": round(totales["base"], 2), "optimista": round(totales["optimista"], 2),
                               "rotulos": rotulos, "dau_base": usuarios["base"], "dau_meta": necesarios,
                               "entrada": str(ruta), "modelos": lista_modelos, "calculo": CALCULO_ESCENARIOS,
-                              "dau_origen": origen, "avisos": avisos}
+                              "dau_origen": origen, "avisos": avisos,
+                              "supuestos": supuestos_escenarios(mercados)}  # la puerta 2 los compara (#78 d)
     guardar(carpeta, producto)
     actualizar_estado(carpeta, producto)
     print("Escenarios de ingresos netos al mes (%s)%s" % (moneda, " · " + " · ".join(rotulos) if rotulos else ""))
@@ -6831,6 +7182,8 @@ def cmd_decidir(args):
         registro_decision.update(automatica=True, por="decisión automática (modo autónomo)")
     if tomada == "seguir" and resultado.get("descarte"):  # Viable para probar: la puerta 3 y la medición lo usan
         registro_decision["criterio_descarte"] = resultado["descarte"]
+    if tomada == "seguir" and resultado.get("riesgos"):  # lo que se mide después del lanzamiento (feedback #77)
+        registro_decision["riesgos"] = resultado["riesgos"]
     for decision in lista_decisiones:
         if decision["puerta"] == args.puerta:
             decision["vigente"] = False
@@ -6866,6 +7219,9 @@ def cmd_decidir(args):
             print("· Viable para probar: la prueba de elección queda para después del lanzamiento. Criterio de "
                   "descarte: %s. La sesión 3 la registra como la hipótesis más riesgosa, con su métrica y su umbral, y "
                   "la puerta 3 pide que el MVP la ponga a prueba." % registro_decision["criterio_descarte"]["texto"])
+        if registro_decision.get("riesgos"):
+            print("· Viable para probar: %s después del lanzamiento. La sesión 4 define en el PRD la métrica y el umbral "
+                  "de los que no los tienen." % texto_riesgos_decision(registro_decision["riesgos"]))
         regenerar_reporte(carpeta)
         actualizar_tablero(carpeta, producto)
         print("\n" + con_color(siguiente))
@@ -8551,7 +8907,8 @@ def parser():
     sub.add_argument("--peldano", type=int, choices=sorted(PELDANOS),
                      help="un peldaño de la escalera que se buscó sin resultado (o no se pudo buscar), con su motivo")
     sub.add_argument("--motivo", required=True, choices=sorted(MOTIVOS_VACIO),
-                     help="herramienta (página dinámica o bloqueada), sin-resultados o presupuesto")
+                     help="herramienta (página dinámica o bloqueada, un 403 o un PDF sin herramienta para extraer "
+                          "su texto: una lectura fallida no cuenta como lectura), sin-resultados o presupuesto")
     sub.add_argument("--texto", required=True, help="qué se intentó y qué pasó")
 
     sub = comando("cobertura", cmd_cobertura, "Lista por línea los mercados, idiomas y tiendas sin fuentes")
@@ -8626,7 +8983,9 @@ def parser():
     sub.add_argument("--sesion", required=True, help=", ".join(SESION))
     sub.add_argument("--busquedas", help="sesiones que buscan (el triaje de la 0, con 3 como máximo; 1a a 1e, 1g, 2 y "
                                          "3): búsquedas usadas en esta pasada")
-    sub.add_argument("--lecturas", help="las mismas sesiones: lecturas usadas en esta pasada")
+    sub.add_argument("--lecturas", help="las mismas sesiones: lecturas usadas en esta pasada (una lectura fallida, "
+                                        "un 403 o un PDF sin extraer, no cuenta; si deja un hueco, `vacio --motivo "
+                                        "herramienta`)")
     agregar_raiz(sub)
 
     sub = comando("puerta", cmd_puerta, "Veredicto de una puerta, criterio por criterio")

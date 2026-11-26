@@ -723,7 +723,9 @@ class EscenariosTest(Base):
         compra["tipo"] = "suscripcion"
         write(self.carpeta / "mal.json", json.dumps({"mercados": [{"mercado": "MX", "dau": 10, "dau_mau": 0.2,
                                                                   "compras": [compra]}]}))
-        self.assertIn("0.15 o 0.30", self.falla("escenarios", "--entrada", "mal.json"))
+        # la tasa no es siempre 0.15 o 0.30: la del programa y el mercado, con su fuente oficial (feedback #78 b)
+        self.assertIn("la tasa de tu programa y mercado, con su fuente oficial",
+                      self.falla("escenarios", "--entrada", "mal.json"))
 
     def falla_escenarios(self, fuente):
         entrada = {"mercados": [{"mercado": "MX", "dau": {"pesimista": 1, "base": 2, "optimista": 3,

@@ -63,11 +63,11 @@ class LineaReabiertaTest(Base):
         razon = ("La confianza global es baja por monetización, y la 1d ya se reabrió (3 de 8 búsquedas y 2 de 5 "
                  "lecturas en la reapertura 1): H-MON-1 está triangulado, pero en confianza baja por una bajada a mano "
                  "(Las fuentes se contradicen). Otra pasada con las mismas herramientas no la subiría, así que la "
-                 "puerta no vuelve a pedir ese ajuste: queda como riesgo a validar, y la puerta 2 vuelve a exigir un "
-                 "modelo de monetización viable con evidencia")
+                 "puerta no vuelve a pedir ese ajuste: queda como riesgo a validar, y la puerta 2 la vuelve a juzgar "
+                 "y no da Viable mientras siga en baja")  # feedback #77: la puerta 2 la juzga de verdad
         self.assertIn("  3. %s." % razon, salida)  # la razón del banner
-        self.assertIn("⚠ No lo pases por alto: %s. Si la idea sigue, queda como riesgo a validar: la puerta 2 vuelve "
-                      "a exigir un modelo de monetización viable con evidencia." % producto.primera_minuscula(
+        self.assertIn("⚠ No lo pases por alto: %s. Si la idea sigue, queda como riesgo a validar: la puerta 2 la "
+                      "vuelve a juzgar y no da Viable mientras siga en baja." % producto.primera_minuscula(
                           razon.split(": queda como riesgo")[0]), salida)  # y el aviso
         self.assertNotIn("Los criterios que se cumplen se apoyan en evidencia débil", salida)  # no lo repite
         self.assertIn("y la evidencia de monetización en confianza media, con datos que no dependan de más búsquedas "
