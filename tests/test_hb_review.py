@@ -261,25 +261,40 @@ class AttributionTest(unittest.TestCase):
         self.assertRegex(self.text, r'(?m)^  version: "1\.3\.0"$')
 
     def test_usa_la_atribucion_del_script_de_hb_implement(self):
-        command = "<carpeta-de-esta-skill>/../hb-implement/scripts/report.py --meta <carpeta de la tarea>/meta.json " \
-                  "--attribution"
+        command = "<carpeta de hb-implement>/scripts/report.py --meta <carpeta de la tarea>/meta.json --attribution " \
+                  "[--base <ref> | --main-branch <rama>]"
         self.assertIn(command, self.scope)
         self.assertIn(command, self.reference)
+        self.assertIn("junto a esta skill (`<carpeta-de-esta-skill>/../hb-implement`)", self.scope)
+        self.assertIn("`~/.claude/skills/hb-implement`, `~/.agents/skills/hb-implement`", self.scope)
         script = SKILL.parent / ".." / "hb-implement" / "scripts" / "report.py"
         self.assertTrue(script.resolve().is_file())  # instaladas una al lado de la otra, como en el repo
         self.assertIn('"--attribution"', script.read_text(encoding="utf-8"))
+        self.assertIn("`--base` si `AGENTS.md` fija una", self.scope)
+
+    def test_elige_la_tarea_sin_adivinar(self):
+        self.assertIn("cuando el usuario o el orquestador nombran la tarea", self.scope)
+        self.assertIn("con varias, pregunta cuál", self.scope)
+        self.assertIn("`<base>/` más la carpeta de la columna Ruta de esa fila", self.scope)
 
     def test_lo_que_ya_estaba_no_es_hallazgo(self):
-        self.assertIn("`unattributed`: lo que ya estaba antes de la tarea. **No es hallazgo:**", self.scope)
+        self.assertIn("**No es hallazgo de la tarea:**", self.scope)
+        self.assertIn("avísalo para que no se commitee con ella", self.scope)
+        self.assertIn("\"entra al PR sin revisar\"", self.scope)
         for field in ("`photo`", "`repos[]`", "`unattributed[]`", "`excluded[]`", "`skipped[]`", "`others[]`",
-                      "`empty`", "`task_diff_from`"):
+                      "`empty`", "`task_diff_from`", "`repos[].path`", "`untracked`", "`repo_path`"):
             self.assertIn(field, self.reference)
-        self.assertIn("git -C <repo> diff <task_diff_from> -- <ruta>", self.scope)
+        self.assertIn("git -C <repo> diff -M <task_diff_from> -- <ruta>", self.scope)
         self.assertIn("pregúntalo con `question`", self.scope)
+        self.assertIn("salvo lo que el archivo traiga además de la tarea", self.scope)
+        self.assertIn("pregunta con `question` si son de la tarea", self.scope)
 
-    def test_sin_foto_o_sin_hb_implement_sigue_como_antes(self):
-        self.assertIn("`photo: false`", self.scope)
-        self.assertIn("Si el script falla o `hb-implement` no está instalada, sigue como sin tarea", self.scope)
+    def test_sin_foto_sin_nada_o_sin_hb_implement(self):
+        self.assertIn("**Sin foto** (`photo: false`", self.scope)
+        self.assertIn("`repos` y `unattributed` no separan nada. Revisa como sin tarea", self.scope)
+        self.assertIn("Sin nada revisado no hay veredicto ✅", self.scope)
+        self.assertIn("Sin ningún archivo revisado no hay aprobación", self.text)
+        self.assertIn("Si el script falla, no está o es anterior a 1.8.0", self.scope)
 
     def test_el_modo_rapido_tambien_la_usa_si_tiene_la_carpeta(self):
         quick = section(self.text, "## Modo rápido (para orquestadores)", None)
