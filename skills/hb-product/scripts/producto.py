@@ -2211,9 +2211,16 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
         por_criterio, global_ = confianzas(registro)
         if producto.get("puntaje") and global_ < 2:
             debiles = [c for c, nivel in por_criterio.items() if nivel is not None and nivel < 2]
-            avisos.append("⚠ No lo pases por alto: la confianza global es %s. Los criterios que se cumplen se apoyan "
-                          "en evidencia débil (%s): `triangulacion` dice qué le falta a cada hallazgo." % (
-                              NIVELES[global_], ", ".join(debiles)))
+            # la demanda baja no es un riesgo a validar (#47 y #55): con la 1c ya reabierta, la puerta es No viable
+            sin_salida = [d for d in debiles_confianza(producto, registro) if d["gastada"] and not d["refutados"]
+                          and d["criterio"] != "demanda"]
+            if len(sin_salida) < len(debiles):
+                avisos.append("⚠ No lo pases por alto: la confianza global es %s. Los criterios que se cumplen se "
+                              "apoyan en evidencia débil (%s): `triangulacion` dice qué le falta a cada hallazgo." % (
+                                  NIVELES[global_], ", ".join(debiles)))
+            if sin_salida:  # la puerta no vuelve a pedir ese ajuste (feedback #76): lo dice aquí, con el porqué
+                avisos.append("⚠ No lo pases por alto: %s." % primera_minuscula(texto_sin_salida(
+                    producto, registro, sin_salida, aviso=True)))
         principal = registro.principal()
         if principal and tipo_de(producto) == "nueva" and registro.sin_triangular(principal):
             avisos.append("⚠ No lo pases por alto: los hallazgos del diferenciador principal (%s) no están "
@@ -2227,7 +2234,7 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
         revisar_rival = rival_a_revisar(registro)
         if revisar_rival:
             avisos.append("⚠ Revisar el rival: %s." % texto_rival_a_revisar(registro, revisar_rival))
-        excedidas = pasadas_excedidas(producto, INVESTIGACION)
+        excedidas = pasadas_excedidas(producto, INVESTIGACION, vigente=True)
         if excedidas:
             avisos.append("⚠ Presupuesto excedido: %s. La síntesis lo dice." % texto_excedidas(excedidas))
         exigido = modelo_exigido(producto, registro)
@@ -2257,7 +2264,7 @@ def avisos_puerta(numero_puerta, carpeta, producto, registro):
                               "lo que dice el vacío sigue sin leerse): %s. No cambian la cobertura ni el veredicto; "
                               "con las mismas herramientas, ajustar esas líneas no los resuelve." % texto_parciales(
                                   parciales))
-    excedidas = pasadas_excedidas(producto, ("2", "3")) if numero_puerta == 2 else []
+    excedidas = pasadas_excedidas(producto, ("2", "3"), vigente=True) if numero_puerta == 2 else []
     if excedidas:  # la estrategia y la validación también anotan lo que usaron (feedback #62)
         avisos.append("⚠ Presupuesto excedido: %s. Dilo en la decisión." % texto_excedidas(excedidas))
     descarte = criterio_descarte_vigente(carpeta) if numero_puerta in (2, 3) else None
@@ -2546,16 +2553,21 @@ def estado_pasada(pasada):
                                                             else "lecturas") for clave, usado, limite in excedido))
 
 
-def pasadas_excedidas(producto, sesiones=CON_PRESUPUESTO):
+def excedida(pasada):
+    return any(pasada.get(clave, 0) > pasada["presupuesto"][clave] for clave in ("busquedas", "lecturas"))
+
+
+def pasadas_excedidas(producto, sesiones=CON_PRESUPUESTO, vigente=False):
     """Las sesiones con alguna pasada que se pasó de su presupuesto, con el estado de cada pasada (feedback #62):
     [(sesión, 'primera pasada con 11 de 10 lecturas; reapertura 1 dentro del presupuesto')]. Un registro anterior, sin
-    pasadas, compara el total con el presupuesto original."""
+    pasadas, compara el total con el presupuesto original. Con vigente=True (el aviso de las puertas, feedback #76),
+    solo las sesiones cuya última pasada se excedió: lo de una pasada anterior ya lo dijo la puerta que la siguió, y
+    `estado` guarda la historia completa."""
     resultado = []
     for sesion in sesiones:
         datos = producto["sesiones"].get(sesion) or {}
         pasadas = sorted(datos.get("pasadas") or [], key=lambda p: p["reapertura"])
-        if any(pasada.get(clave, 0) > pasada["presupuesto"][clave] for pasada in pasadas
-               for clave in ("busquedas", "lecturas")):
+        if (excedida(pasadas[-1]) if vigente and pasadas else any(excedida(pasada) for pasada in pasadas)):
             resultado.append((sesion, "; ".join(estado_pasada(pasada) for pasada in pasadas)))
         uso, limites = datos.get("uso") or {}, presupuesto_de(producto)
         if not pasadas and any(int(uso.get(clave) or 0) > limites[clave] for clave in ("busquedas", "lecturas")):
@@ -2616,6 +2628,100 @@ def reapertura_validacion(carpeta, producto):
     if not any(d.get("decision") == "ajustar" and "3" in sesiones_de(d) for d in decisiones(carpeta)):
         return None
     return reapertura_gastada(producto, "3")
+
+
+def reaperturas_sin_salida(producto, registro):
+    """Las líneas de investigación que ya se reabrieron sin salida, {sesión: texto de la pasada} (feedback #76): de la
+    1a a la 1e, cualquier reapertura ya cerrada (`reapertura_gastada`, la regla de la 1c de #55 para todas); la 1g, si
+    además usó su presupuesto (#30). Ningún ajuste que pida buscar más en ellas se recomienda otra vez."""
+    gastadas = [(s, reapertura_gastada(producto, s)) for s in ("1a", "1b", "1c", "1d", "1e")]
+    return {s: t for s, t in [("1g", presupuesto_agotado(producto, registro, "1g"))] + gastadas if t}
+
+
+# lo que vuelve a juzgar más adelante un criterio cuya confianza quedó baja en una línea ya reabierta (feedback #76)
+JUZGA_DESPUES = {"monetizacion": "la puerta 2 vuelve a exigir un modelo de monetización viable con evidencia",
+                 "riesgo": "la puerta 3 vuelve a revisar las políticas con el checklist",
+                 "diferenciacion": "la sesión 3 pone a prueba al principal y la puerta 2 pide que sobreviva"}
+
+
+def debiles_confianza(producto, registro, sin_salida=None):
+    """Los criterios del puntaje que dejan la confianza global en baja, el más débil primero (vacío si no es baja):
+    [{criterio, sesion, ids, por_confirmar, bajos, gastada, refutados}]. `sesion` es la que los completa; `gastada`, el
+    texto de su reapertura si ya se reabrió sin salida (feedback #76), y `refutados`, sus hallazgos clave con tantas
+    fuentes en contra como a favor (evidencia en contra, que la regla de #76 no tapa)."""
+    por_criterio, global_ = confianzas(registro)
+    if not producto.get("puntaje") or global_ >= 2:
+        return []
+    sin_salida = reaperturas_sin_salida(producto, registro) if sin_salida is None else sin_salida
+    resultado = []
+    for _, criterio in sorted((nivel, c) for c, nivel in por_criterio.items() if nivel is not None and nivel < 2):
+        ids = sustento(registro)[criterio] or []
+        sesion = SESION_CRITERIO[criterio]
+        por_confirmar = [i for i in ids if i in registro.hallazgos
+                         and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
+        bajos = [registro.hallazgos[i] for i in por_confirmar]
+        if criterio == "diferenciacion" and registro.principal():
+            por_confirmar = [i for i, _ in registro.sin_triangular(registro.principal())]
+            sesion = sesion_ajustable(1, sesion_de(registro, por_confirmar, "1g"), "1g")
+        resultado.append({"criterio": criterio, "sesion": sesion, "ids": ids, "por_confirmar": por_confirmar,
+                          "bajos": bajos, "gastada": sin_salida.get(sesion), "refutados": refutados(registro, ids)})
+    return resultado
+
+
+def por_que_no_sube(producto, registro, debil):
+    """Por qué otra pasada de la línea ya reabierta no subiría esos hallazgos (feedback #76): los que solo tienen fuentes
+    de valores con vacíos por límite de las herramientas, los que su peldaño deja como mucho en baja, los triangulados
+    que siguen en baja por otro motivo y los que siguen sin confirmar después de la reapertura; con los vacíos de
+    herramienta que tocan a cada uno."""
+    por = vacios_herramienta_lineas(registro, lineas_de([debil["sesion"]]))
+    partes, sin_confirmar = [], []
+    for hallazgo in debil["bajos"]:
+        estado, texto, vacios = estado_hallazgo(registro, hallazgo["id"], por) if por else (None, "", [])
+        if estado:
+            partes.append("%s, vacíos por límite de las herramientas (%s)" % (
+                texto, y_lista(dict.fromkeys(v["id"] for v in vacios))))
+            continue
+        valores = huella(registro, hallazgo)
+        tocan = list(dict.fromkeys(v["id"] for d, claves in por.items() for clave, lista in claves.items()
+                                   if clave in valores.get(d, {}) for v in lista))
+        con_vacios = ", con vacíos por límite de las herramientas (%s)" % y_lista(tocan) if tocan else ""
+        evaluacion = registro.evaluar(hallazgo)
+        if evaluacion["triangulado"]:
+            partes.append("%s está triangulado, pero en confianza %s por %s%s" % (
+                hallazgo["id"], evaluacion["confianza"], causas_baja(registro, hallazgo) or "otro motivo", con_vacios))
+        elif any(clase == "peldano" for clase, _ in registro.para_subir(hallazgo, 2)):
+            partes.append("%s está en el peldaño %d (%s), que llega como mucho a confianza baja%s" % (
+                hallazgo["id"], evaluacion["peldano"], PELDANOS[evaluacion["peldano"]][0], con_vacios))
+        elif tocan:
+            partes.append("%s sigue sin confirmar después de la reapertura%s" % (hallazgo["id"], con_vacios))
+        else:
+            sin_confirmar.append(hallazgo["id"])
+    if sin_confirmar:
+        partes.append("%s, sin confirmar después de la reapertura" % y_lista(sin_confirmar))
+    return "; ".join(partes)
+
+
+def texto_sin_salida(producto, registro, debiles, aviso=False):
+    """La razón y el aviso de una confianza global baja en líneas ya reabiertas (feedback #76): qué quedó en baja, por
+    qué la puerta no vuelve a pedir ese ajuste y dónde se vuelve a juzgar. El aviso no sabe el veredicto: si la idea
+    sigue, es un riesgo a validar."""
+    partes = []
+    for debil in debiles:
+        porque = por_que_no_sube(producto, registro, debil)
+        partes.append("%s, y la %s ya se reabrió (%s)%s" % (
+            NOMBRES_CRITERIO[debil["criterio"]], debil["sesion"], debil["gastada"], ": %s" % porque if porque else ""))
+    return ("La confianza global es baja por %s. Otra pasada con las mismas herramientas no la subiría, así que la "
+            "puerta no vuelve a pedir ese ajuste%s %s" % (
+                " · ".join(partes), ". Si la idea sigue, queda como riesgo a validar:" if aviso else
+                ": queda como riesgo a validar, y", y_lista(dict.fromkeys(JUZGA_DESPUES[d["criterio"]]
+                                                                          for d in debiles))))
+
+
+def subir_sin_salida(debiles):
+    """Qué subiría una confianza global baja en líneas ya reabiertas: evidencia que no dependa de más búsquedas."""
+    return "la evidencia de %s en confianza media, con datos que no dependan de más búsquedas en la %s (un navegador " \
+           "en el agente o datos propios)" % (y_lista(NOMBRES_CRITERIO[d["criterio"]] for d in debiles),
+                                              y_lista(dict.fromkeys(d["sesion"] for d in debiles)))
 
 
 def texto_impide(impide):
@@ -3280,6 +3386,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
     probar = candidatos_para_probar(carpeta, producto, registro, filas_hipotesis) if numero_puerta == 1 else []
     principal_probar = registro.principal() if registro.principal() in probar else None
     diferidos = []
+    agotadas = reaperturas_sin_salida(producto, registro)
     for sesion, antes, peldanos in revisar:
         ajustes.append(("La sesión %s cerró %s y la idea es %s: no buscó en los peldaños %s, así que esa evidencia no "
                         "se buscó (no es evidencia en contra)" % (sesion, "como idea %s" % antes if antes else
@@ -3287,6 +3394,7 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                                                                   y_lista(str(n) for n in peldanos)),
                         "Ajustar la sesión %s con el tipo de hoy (%s)" % (sesion, tipo_de(producto)), sesion, True,
                         {"peldanos": list(peldanos)}))
+    por_tipo = list(ajustes)  # las líneas a revisar por cambio de tipo: no es buscar otra vez lo mismo
     if probar and not principal_probar:
         principal = registro.principal()
         ajustes.append(("%s %s %s con el dolor triangulado (%s para probar), pero %s" % (
@@ -3334,29 +3442,39 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                     elegido["id"], a_los_rivales(rivales)),
                 sesion_ajustable(1, sesion_de(registro, debiles, "1g"), "1g"), True, None))
             hallazgos += debiles
+    # La confianza global baja de una línea ya reabierta sin salida no se pide otra vez (feedback #76): pasa a aviso y
+    # el veredicto sale de los criterios; con un hallazgo clave refutado (evidencia en contra) sigue siendo No viable.
+    sin_salida_conf = []
     if numero_puerta == 1 and producto.get("puntaje") and not fatales:
-        por_criterio, global_ = confianzas(registro)
-        if global_ < 2:
-            debiles = sorted((nivel, c) for c, nivel in por_criterio.items() if nivel is not None and nivel < 2)
-            criterio = debiles[0][1]
-            ids = sustento(registro)[criterio] or []
-            sesion = SESION_CRITERIO[criterio]
-            por_confirmar = [i for i in ids if i in registro.hallazgos
-                             and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
-            if criterio == "diferenciacion" and registro.principal():
-                por_confirmar = [i for i, _ in registro.sin_triangular(registro.principal())]
-                sesion = sesion_ajustable(1, sesion_de(registro, por_confirmar, "1g"), "1g")
+        debiles = debiles_confianza(producto, registro, agotadas)
+        for debil in debiles:
+            if debil["gastada"] and debil["refutados"] and debil["criterio"] != "demanda":
+                fatales.append(("%s tiene evidencia en contra (%s %s tantas fuentes en contra como a favor) y la %s ya "
+                                "se reabrió (%s): ajustarla otra vez no traería evidencia nueva" % (
+                                    primera_mayuscula(NOMBRES_CRITERIO[debil["criterio"]]), y_lista(debil["refutados"]),
+                                    "tiene" if len(debil["refutados"]) == 1 else "tienen", debil["sesion"],
+                                    debil["gastada"]),
+                                "Evidencia nueva de %s que pese más que la que está en contra y que no dependa de más "
+                                "búsquedas en la %s (un navegador en el agente o datos propios)" % (
+                                    NOMBRES_CRITERIO[debil["criterio"]], debil["sesion"]), None, True, None))
+                hallazgos += debil["ids"]
+        # la demanda baja nunca es un riesgo a validar: Viable para probar la pide media o alta (#47), y con la 1c ya
+        # reabierta sigue la regla de siempre (No viable si no queda otro ajuste, #55)
+        sin_salida_conf = [d for d in debiles if d["gastada"] and not d["refutados"] and d["criterio"] != "demanda"]
+        abiertos = [d for d in debiles if not d["gastada"] or d["criterio"] == "demanda"]
+        if abiertos:
+            criterio, sesion, por_confirmar = (abiertos[0][c] for c in ("criterio", "sesion", "por_confirmar"))
             # «sin confirmar» solo si ningún hallazgo en baja de esos criterios está triangulado (feedback #71)
-            en_baja = [registro.hallazgos[i] for i in dict.fromkeys(
-                i for _, c in debiles for i in (sustento(registro)[c] or [])) if i in registro.hallazgos
-                and registro.evaluar(registro.hallazgos[i])["nivel"] < 2]
+            en_baja = list({h["id"]: h for d in abiertos for h in d["bajos"]}.values())
             estado = estado_confianza_baja(registro, en_baja, "sin confirmar")
             ajustes.append(("La confianza global es baja: %s se apoya%s en evidencia %s" % (
-                ", ".join(NOMBRES_CRITERIO[c] for _, c in debiles), "n" if len(debiles) > 1 else "",
+                ", ".join(NOMBRES_CRITERIO[d["criterio"]] for d in abiertos), "n" if len(abiertos) > 1 else "",
                 "en confianza baja: %s" % estado if estado else "sin confirmar"),
                 confirmar_criterio(registro, criterio, por_confirmar), sesion, True,
                 alcance_hallazgos(por_confirmar)))
-            hallazgos += ids
+            hallazgos += abiertos[0]["ids"]
+        for debil in sin_salida_conf:
+            hallazgos += debil["ids"]
     de_propuesta = []  # una propuesta trae algo nuevo (un navegador, un dato): no es «ajustar otra vez lo mismo»
     if not fatales:
         for propuesta in propuestas_de(producto, numero_puerta):
@@ -3375,11 +3493,11 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
             elif not vacios_de_sesion(producto, registro, sesion):  # sin alcance, lo seguro: se puede cerrar
                 ajustes.append((razon, "Aplicar la propuesta %s al ajustar la sesión %s" % (propuesta["id"], sesion), sesion,
                                 False, None))
-    # La 1g que ya se reabrió y usó su presupuesto, y la 1c que ya se reabrió (feedback #55), no se recomiendan otra
-    # vez para buscar más evidencia: si no queda ningún otro ajuste que lo resuelva, el veredicto es No viable.
-    agotadas = {s: t for s, t in (("1g", presupuesto_agotado(producto, registro, "1g")),
-                                  ("1c", reapertura_gastada(producto, "1c"))) if t}
-    sin_salida = [a for a in ajustes if a[2] in agotadas and a[3] and a not in de_propuesta]
+    # Una línea de investigación que ya se reabrió sin salida (la 1g que usó su presupuesto, #30; cualquier otra de la
+    # 1a a la 1e ya reabierta y cerrada, #55 y #76) no se recomienda otra vez para buscar más evidencia: si no queda
+    # ningún otro ajuste que lo resuelva, el veredicto es No viable. Una propuesta pendiente trae algo nuevo, y una línea
+    # a revisar por cambio de tipo busca otros peldaños: esas sí se recomiendan.
+    sin_salida = [a for a in ajustes if a[2] in agotadas and a[3] and a not in de_propuesta and a not in por_tipo]
     if not fatales and sin_salida:
         posibles = [a for a in ajustes if a not in sin_salida]
         if posibles:
@@ -3412,15 +3530,39 @@ def veredicto(numero_puerta, carpeta, producto, registro, evaluados=None):
                      "políticas" % (numero(float(principal_probar.get("semanas") or 0)), plural(float(
                          producto["criterios"].get("presupuesto_semanas") or 0), "semana"), NIVELES[demanda]),
                      None, None, False),
-                    ("La evidencia que la sostiene tiene confianza %s" % NIVELES[global_], None, None, False)]
+                    (texto_sin_salida(producto, registro, sin_salida_conf) if sin_salida_conf else
+                     "La evidencia que la sostiene tiene confianza %s" % NIVELES[global_], None, None, False)]
         cambios = [(None, "Que a los %s del lanzamiento no se cumpla el criterio de descarte (se descarta la idea o se "
                           "cambia el diferenciador)" % plural(descarte["dias"], "día"), None, False),
                    (None, "Un hallazgo de la comparación, distinto del dolor, triangulado y en confianza alta, de que "
-                          "la gente elige la app por %s frente %s (pasaría a Viable)" % (
-                              principal_probar["id"], a_los_rivales(rivales)), None, False),
-                   (None, "Evidencia en contra del dolor o una hipótesis sobre %s refutada (pasaría a No viable)"
-                    % principal_probar["id"], None, False)]
+                          "la gente elige la app por %s frente %s%s (pasaría a Viable)" % (
+                              principal_probar["id"], a_los_rivales(rivales), ", y %s" % subir_sin_salida(
+                                  sin_salida_conf) if sin_salida_conf else ""), None, False),
+                   (None, "Evidencia en contra del dolor o una hipótesis sobre %s refutada%s (pasaría a No viable)"
+                    % (principal_probar["id"], ", o un hallazgo clave de %s refutado" % y_lista(
+                        NOMBRES_CRITERIO[d["criterio"]] for d in sin_salida_conf) if sin_salida_conf else ""),
+                    None, False)]
         hallazgos += registro.hallazgos_de(principal_probar) + (sustento(registro)["demanda"] or [])
+    elif sin_salida_conf:
+        # Cumple los criterios, pero la confianza global quedó baja en líneas ya reabiertas sin salida (feedback #76): no
+        # es Viable (pide confianza media o alta) ni se ajusta otra vez; se prueba, con eso como riesgo a validar.
+        nivel, sesion = "probar", None
+        principal = registro.principal()
+        descarte = criterio_descarte(producto, registro, principal, filas_hipotesis) if principal else None
+        elegidas = [("Cumple los %s de la puerta 1" % plural(len(evaluados), "criterio"), None, None, False)]
+        if principal:
+            elegidas.append(("El diferenciador principal (%s) es viable%s" % (principal["id"], (
+                " y supera %s, con prueba de elección" % a_los_rivales(rivales)) if rivales else ""),
+                None, None, False))
+            hallazgos += registro.hallazgos_de(principal)
+        elegidas.append((texto_sin_salida(producto, registro, sin_salida_conf), None, None, False))
+        cambios = ([(None, "Que a los %s del lanzamiento no se cumpla el criterio de descarte (se descarta la idea o se "
+                           "cambia el diferenciador)" % plural(descarte["dias"], "día"), None, False)]
+                   if descarte else []) + [
+            (None, "%s (pasaría a Viable)" % primera_mayuscula(subir_sin_salida(sin_salida_conf)), None, False),
+            (None, "Un hallazgo clave de %s refutado, con tantas fuentes en contra como a favor (pasaría a No viable)"
+             % y_lista(NOMBRES_CRITERIO[d["criterio"]] for d in sin_salida_conf), None, False)]
+        hallazgos += sustento(registro)["demanda"] or []
     else:
         nivel, sesion = "viable", None
         global_ = confianzas(registro)[1]
@@ -3760,6 +3902,10 @@ def texto_sesion(carpeta, producto, sesion):
         if sesion == "1c":  # la skill recomienda reabrir la 1c una sola vez (feedback #55)
             partes.append("Es la reapertura de la demanda: si al cerrar la demanda sigue en confianza baja (o el "
                           "problema sin documentar, en una idea nueva), la puerta 1 no recomienda reabrirla otra vez.")
+        elif sesion in ("1a", "1b", "1d", "1e"):  # la misma regla en todas las líneas de investigación (feedback #76)
+            partes.append("Es la única reapertura de %s: si al cerrar lo que pidió la puerta sigue sin resolverse (por "
+                          "ejemplo, sus hallazgos clave en confianza baja), la puerta no recomienda reabrirla otra vez "
+                          "para buscar más." % SESION[sesion]["nombre"].lower())
     return " ".join(partes + ["No hagas commit ni push."])
 
 

@@ -315,25 +315,22 @@ class AutonomoTest(Base):
         self.assertEqual((decision["decision"], decision["automatica"]), ("descartar", True))
         self.assertTrue(decision["motivo"].startswith("No viable: El puntaje es 14/25"))
 
-    def test_el_tercer_ajuste_de_la_misma_sesion_se_detiene(self):
+    def test_la_1d_ya_reabierta_no_se_ajusta_otra_vez(self):
+        # Antes de #76 la puerta pedía la 1d una y otra vez hasta el tope de tres ajustes (ese tope lo cubre
+        # test_product_paralelo con la sesión 2): ahora, reabierta y cerrada, no se recomienda otra vez.
         self.investigacion()
         self.p("confianza", "--hallazgo", "H-MON-1", "--bajar", "baja", "--motivo", "Las fuentes se contradicen")
         self.p("puntaje", "--valores", "4,4,4,4,3")
         self.cerrar("1f", "01-sintesis.md")
-        for vuelta in range(2):
-            automatico = self.json()["pasos"][0]["automatico"]
-            self.assertEqual((automatico["decision"], automatico["sesion"], automatico["ajustes_previos"],
-                              automatico["detener"]), ("ajustar", "1d", vuelta, False))
-            self.assertIn("ajustar la sesión 1d", self.p("decidir", "--puerta", 1, "--automatico"))
-            self.cerrar("1d")
-            self.cerrar("1f")
         automatico = self.json()["pasos"][0]["automatico"]
-        self.assertEqual((automatico["ajustes_previos"], automatico["detener"]), (2, True))
-        self.assertIn("por tercera vez", automatico["motivo"])
-        error = self.falla("decidir", "--puerta", 1, "--automatico")
-        self.assertIn("Modo autónomo: aquí se detiene y le pregunta al usuario, porque la puerta 1 pide ajustar la "
-                      "sesión 1d por tercera vez (ya se ajustó 2 veces)", error)
-        self.p("decidir", "--puerta", 1, "--ajustar", "1d")  # el usuario sí puede decidirlo
+        self.assertEqual((automatico["decision"], automatico["sesion"], automatico["ajustes_previos"],
+                          automatico["detener"]), ("ajustar", "1d", 0, False))
+        self.assertIn("ajustar la sesión 1d", self.p("decidir", "--puerta", 1, "--automatico"))
+        self.cerrar("1d")
+        self.cerrar("1f")
+        automatico = self.json()["pasos"][0]["automatico"]
+        self.assertEqual((automatico["decision"], automatico["sesion"], automatico["detener"]), ("seguir", None, False))
+        self.assertIn("la 1d ya se reabrió", self.p("puerta", "--n", 1))
 
     def test_un_vacio_de_herramienta_del_que_depende_el_ajuste_lo_detiene(self):
         self.investigacion()  # las fuentes de H-MON-1 son de MX
