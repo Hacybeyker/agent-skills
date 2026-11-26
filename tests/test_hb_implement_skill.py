@@ -195,6 +195,17 @@ class CoverageFlowTest(TextBase):
         for field in ("| `layer` | Por archivo |", "| `ticket` | Reporte |", "se ignora con un aviso en la salida"):
             self.assertIn(field, self.report)
 
+    def test_revision_de_1_7_0(self):
+        """El slug se decide con el código de la tarea, los pros vacíos no se inventan y una migración se pregunta."""
+        self.assertIn("pregúntalo antes de pedir la carpeta", self.skill)
+        self.assertIn('`"pros": []`', self.skill)
+        self.assertIn("nunca inventes pros", self.skill)
+        self.assertIn("pregúntale antes de deshacerla", self.skill)
+        self.assertNotIn("si no, deshazla", self.skill)
+        for phrase in ('`"pros": []` también cuenta como analizado', "commit contra commit",
+                       "Un repo hermano que no es unidad nunca sale en el HTML", "pregúntale al usuario antes de deshacer"):
+            self.assertIn(phrase, self.report)
+
 
 if __name__ == "__main__":
     unittest.main()

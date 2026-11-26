@@ -36,7 +36,9 @@ Esa ruta es la **base** común de las skills: `hb-implement` escribe en `<base>/
 `--folder` la toma al empezar la tarea, antes de cambiar nada. Guarda, por repo, su ruta (relativa a la raíz del repo principal), su papel (`main`, `unit` o `sibling`), las unidades del modelo que viven en él, la rama, el `HEAD` y los archivos sin commit (modificados, borrados o sin rastrear) con su hash de contenido, el mismo que da `git hash-object --no-filters`.
 
 - **Qué repos mira:** el principal; cada repo git hermano (las subcarpetas directas de la carpeta padre del principal, sin los otros worktrees del mismo repo); y el repo de cada fuente de la tabla de unidades de `## Estructura` (o de "Repos relacionados", el formato anterior). Una unidad sin clonar queda en `missing_units`.
-- **Rápido con muchos repos:** un solo `git status` por repo (sin locks ni reescribir el índice), en paralelo; los hashes se calculan sin procesos. Con más de 50 repos hermanos tarda lo que el más lento.
+- **Rápido con muchos repos:** un solo `git status` por repo (sin locks ni reescribir el índice), en paralelo (hasta 16 a la vez). El hash de contenido se calcula sin procesos, salvo el de un repo anidado (su `HEAD` y sus cambios sin commit). De un repo hermano que no es unidad del modelo solo se guardan el tamaño y la fecha de cada archivo sucio (`st:<tamaño>:<fecha>`), sin leerlo.
+- **Qué no mira:** las carpetas ocultas de la carpeta padre y, si la carpeta padre es la personal (`~`), ningún repo hermano: solo el principal y las unidades del modelo. La carpeta de reportes no cuenta como cambio en ningún repo, tampoco si vive en un repo hermano (el modo externo de `hb-setup`).
+- **Una unidad dentro del principal que es su propio repo** (un submódulo o un repo anidado) tiene su propia entrada, con su foto. El cambio del puntero en el principal entra solo si cambió el commit; si solo cambió algo dentro, lo muestra la sección de la unidad.
 - **Sin fallar:** una carpeta sin permiso o un repo que git no puede leer queda en `unreadable` (o con `error`), se avisa y la foto sigue.
 - **Una sola vez:** si la carpeta ya tiene foto, se conserva la del inicio. Si la tarea ya tenía meta, reporte o bitácora sin foto (empezó antes de 1.7.0), no se toma tarde: contaría sus propios cambios como previos.
 - Si la foto ya encuentra cambios sin commit en el principal o en una unidad (sin contar la configuración local modificada a propósito), el script los lista: si no son de la tarea, avísale al usuario antes de empezar.
@@ -47,7 +49,7 @@ Esa ruta es la **base** común de las skills: `hb-implement` escribe en `<base>/
 python3 -I <carpeta-de-la-skill>/scripts/report.py --unit <ruta> --folder <slug>
 ```
 
-En cuanto una unidad se pasa a fuente o se corre su DoD. `<ruta>` es la de su fuente, relativa a la raíz del repo principal (`../core-lib`), o su identificador de `## Estructura`. La anota en `repos` del meta (con su `main_branch` del modelo, si la hay; si el meta no existe, lo crea solo con eso) y en `registered` de la foto. No duplica, no toca el resto del meta, no toma la foto y no cambia el índice. Si el meta no es un JSON válido, no lo toca y lo dice. Una ruta del repo principal no hace falta registrarla.
+En cuanto una unidad se pasa a fuente o se corre su DoD. `<ruta>` es la de su fuente, relativa a la raíz del repo principal (`../core-lib`), o su identificador de `## Estructura` (el identificador manda sobre una carpeta del principal con el mismo nombre). Varios `--unit` a la vez no se pisan: cada uno bloquea la carpeta de la tarea mientras escribe. Si se corre antes de `--folder`, `--folder` igual toma la foto después. La anota en `repos` del meta (con su `main_branch` del modelo, si la hay; si el meta no existe, lo crea solo con eso) y en `registered` de la foto. No duplica, no toca el resto del meta, no toma la foto y no cambia el índice. Si el meta no es un JSON válido, no lo toca y lo dice. Una ruta del repo principal no hace falta registrarla.
 
 ## Qué entra al reporte
 
@@ -64,9 +66,11 @@ Dentro de un repo que entra, cada archivo cambiado contra la base se compara con
 
 - **Cambió después de la foto:** es de la tarea.
 - **Ya estaba sin commit y no cambió**, o ya estaba commiteado en la rama antes de la foto: va a **"Cambios no atribuidos"**, una sección plegada que no entra en los conteos.
-- **Ya estaba sin commit y además cambió:** entra con un aviso (su diff contra la base mezcla los dos cambios), en el archivo y en el resumen.
+- **Ya estaba sin commit y además cambió**, o **ya estaba commiteado en la rama antes de la foto y además cambió:** entra con un aviso (su diff contra la base mezcla los dos cambios), en el archivo y en el resumen.
+- Lo que estaba limpio en la foto y sigue limpio se compara commit contra commit, no contra el disco: con filtros de git (`eol=crlf`, LFS) el archivo en disco no es el que guarda git.
+- Un repo que git no puede leer no corta el reporte: una unidad del modelo sin registrar queda fuera con un aviso; una registrada se compara contra su base y, si tampoco se puede, queda fuera con un aviso que la nombra. Una unidad en fuente sin cambios igual avisa si su fuente no es la versión que fija la app.
 
-**Sin foto** (una tarea vieja, o `--ignore-snapshot`): entran el principal y `repos` del meta, como hasta 1.6.0; los repos hermanos y las unidades con cambios sin commit que no están en `repos` salen en "Cambios no atribuidos", y la salida avisa con el comando `--unit` de cada uno.
+**Sin foto** (una tarea vieja, o `--ignore-snapshot`): entran el principal y `repos` del meta, como hasta 1.6.0; las unidades del modelo con cambios sin commit que no están en `repos` salen en "Cambios no atribuidos". Un repo hermano que no es unidad nunca sale en el HTML (el reporte se comparte): solo la salida lo nombra, con el comando `--unit` de cada uno.
 
 **Foto tomada tarde.** Si la carpeta se pidió después de empezar a cambiar, los cambios de la tarea quedan como previos. El script lo nota cuando el meta explica un archivo que ya estaba así en la foto, o cuando no queda ningún archivo de la tarea, y sugiere volver a generar con `--ignore-snapshot` (y registrar con `--unit` cada repo vecino que cambió).
 
@@ -76,7 +80,7 @@ Si no queda ningún archivo de la tarea, el script **no escribe el reporte** (ni
 
 ## Aviso de migración de lenguaje
 
-Un archivo de código fuente **borrado, vaciado o reducido a comentarios** (con, a lo sumo, la declaración de paquete o los imports) cuyo equivalente del mismo repo, con el mismo nombre base, aparece con otra extensión de código (`LoginTest.java` vaciado y `LoginTest.kt` nuevo), o un renombre a otra extensión, sale como aviso en el resumen, en los dos archivos y en la salida: una migración de lenguaje que nadie pidió. No cuenta las cabeceras (`.h`, `.hpp`).
+Un archivo de código fuente **borrado, vaciado o reducido a comentarios** (con, a lo sumo, la declaración de paquete o los imports) cuyo equivalente del mismo repo, en el mismo lugar y con el mismo nombre base, aparece en otro lenguaje (`src/test/java/…/LoginTest.java` vaciado y `src/test/kotlin/…/LoginTest.kt` nuevo: las carpetas de lenguaje de un source set cuentan como el mismo lugar), o un renombre a otro lenguaje, sale como aviso en el resumen, en los dos archivos y en la salida: una migración de lenguaje que nadie pidió. No cuenta las cabeceras (`.h`, `.hpp`) ni las extensiones del mismo lenguaje (`.js` y `.mjs`, `.kt` y `.kts`). Ante el aviso, pregúntale al usuario antes de deshacer nada.
 
 ## Cómo se ve
 
@@ -130,7 +134,7 @@ En cada entrada de `repos`, opcionales: `"main_branch"` (arriba), `"pinned_versi
 
 El flujo **los completa siempre que pueda sostenerlos con lo que vio en el código**; el script nunca falla por ellos. Todo campo ausente o vacío (un texto vacío, una lista vacía) simplemente no se muestra, sin sección vacía; un valor con formato inválido se ignora con un aviso en la salida y el reporte sale igual. Al terminar, la salida dice qué datos de análisis faltan.
 
-**Ausente no es lo mismo que vacío en `cons`.** Sin `cons`, no se analizó: no se muestra y la salida lo cuenta entre los datos que faltan. `"cons": []` dice que se analizó y no hubo contras: el reporte muestra "Sin contras identificados" y no lo cuenta como faltante. Escribe `[]` solo si de verdad lo revisaste. `pros` no tiene ese caso: vacío o ausente, no se muestra.
+**Ausente no es lo mismo que vacío en `cons`.** Sin `cons`, no se analizó: no se muestra y la salida lo cuenta entre los datos que faltan. `"cons": []` dice que se analizó y no hubo contras: el reporte muestra "Sin contras identificados" y no lo cuenta como faltante. Escribe `[]` solo si de verdad lo revisaste. `"pros": []` también cuenta como analizado (sin pros: no hace falta inventarlos), pero no se muestra: `pros` no tiene un texto para ese caso.
 
 | Campo | Dónde | Qué es |
 | --- | --- | --- |

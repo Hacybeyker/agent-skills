@@ -797,9 +797,11 @@ class SnapshotTest(WorkspaceTest):
             repo = self.ws.app / path
             self.assertEqual(entry["branch"], "main")
             self.assertEqual(entry["head"], git(repo, "rev-parse", "HEAD").strip())
-        expected = git(self.ws.billing, "hash-object", "--no-filters", "notas.txt").strip()
-        self.assertEqual(repos["../billing-tools"]["dirty"], {"notas.txt": expected})
-        self.assertEqual(list(repos["."]["dirty"]), ["local-modules.json"])  # la foto no se ve a sí misma
+        info = os.lstat(str(self.ws.billing / "notas.txt"))  # un hermano ajeno: tamaño y fecha, sin leerlo
+        self.assertEqual(repos["../billing-tools"]["dirty"],
+                         {"notas.txt": "st:%d:%d" % (info.st_size, info.st_mtime_ns)})
+        expected = git(self.ws.app, "hash-object", "--no-filters", "local-modules.json").strip()
+        self.assertEqual(repos["."]["dirty"], {"local-modules.json": expected})  # la foto no se ve a sí misma
         self.assertEqual(snapshot["registered"], [])
 
     def test_volver_a_pedir_la_carpeta_conserva_la_foto_del_inicio(self):
@@ -1148,9 +1150,12 @@ class OldTaskWithoutPhotoTest(WorkspaceTest):
         self.assertIn('id="unidad-app-shell"', html)
         self.assertNotIn('id="unidad-shop-auth"', html)
         unattributed = html.split('id="no-atribuidos"', 1)[1].split("</section>", 1)[0]
-        for path in ("../shop-auth", "../billing-tools", "borrador.txt", KOTLIN_TEST):
+        for path in ("../shop-auth", KOTLIN_TEST):  # una unidad del modelo
             self.assertIn(path, unattributed)
+        for path in ("billing-tools", "borrador.txt"):  # un repo hermano ajeno: solo en la salida, nunca en el HTML
+            self.assertNotIn(path, html)
         self.assertIn("Repos con cambios sin commit que no están en \"repos\" del meta", result.stderr)
+        self.assertIn("../billing-tools", result.stderr)
         self.assertIn("--unit ../shop-auth --folder fix-login", result.stderr)
         self.assertEqual(self.stat(html, "Archivos nuevos"), "1")  # src/Nuevo.kt
 
@@ -1531,6 +1536,284 @@ class GitEdgeCasesTest(WorkspaceTest):
         self.assertIn("no es AAAA-MM-DD", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(list(self.ws.parent.parent.glob("fuera*")), [])
+
+
+# ── Revisión de 1.7.0: casos que encontró la revisión independiente ──────────
+def add_unit_row(ws, row):
+    """Agrega una fila a la tabla de unidades del AGENTS.md del principal y la commitea."""
+    text = (ws.app / "AGENTS.md").read_text(encoding="utf-8").replace("\n\n- Repos vecinos:", "\n" + row +
+                                                                       "\n\n- Repos vecinos:", 1)
+    write(ws.app / "AGENTS.md", text)
+    git(ws.app, "add", "AGENTS.md")
+    git(ws.app, "commit", "-q", "-m", "modelo")
+
+
+def raw_git(repo, *args, data=None):
+    """git con argumentos en bytes (nombres que no son UTF-8)."""
+    command = [b"git", b"-C", os.fsencode(str(repo))] + [a if isinstance(a, bytes) else a.encode() for a in args]
+    result = subprocess.run(command, env=ENV, capture_output=True, input=data)
+    if result.returncode != 0:
+        raise AssertionError(result.stderr.decode("utf-8", "replace"))
+    return result.stdout
+
+
+class ReviewFindingsTest(WorkspaceTest):
+    def unit_html(self, html, name):
+        return html.split('<section id="unidad-%s"' % name, 1)[1].split("</section>", 1)[0]
+
+    def test_01_un_submodulo_que_es_unidad_entra_con_su_foto(self):
+        library = self.ws.mkdir("core-src")
+        init_repo(library)
+        write(library / "README.md", "# Núcleo\n")
+        commit_all(library, "v1")
+        git(self.ws.app, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "core")
+        commit_all(self.ws.app, "submódulo")
+        add_unit_row(self.ws, "| `core` | `core` | En fuente (módulo del build) | — | `make core` | este repo, `main` | "
+                              "con la app |")
+        self.ok(self.ws.folder())
+        write(self.ws.app / "core" / "README.md", "# Núcleo compartido\n")
+        write(self.ws.app / "core" / "C.kt", "class C\n")
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        unit = self.unit_html(self.ws.html(), "core")
+        self.assertIn("C.kt", unit)
+        self.assertIn("README.md", unit)
+        self.assertNotIn("ya estaban antes de la foto", result.stderr)
+
+    def test_02_una_unidad_con_git_ilegible_que_la_tarea_no_toco_no_corta_el_reporte(self):
+        self.ok(self.ws.folder())
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        shutil.move(str(self.ws.auth / ".git"), str(self.ws.parent / "auth-git-movido"))
+        write(self.ws.auth / ".git", "gitdir: /no/existe/x\n")
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        self.assertIn("shop-auth", result.stderr)
+        self.assertIn('id="unidad-app-shell"', self.ws.html())
+
+    def test_03_varios_unit_en_paralelo_no_pierden_registros(self):
+        names = ["lib-%d" % n for n in range(8)]
+        for name in names:
+            path = init_repo(self.ws.mkdir(name))
+            write(path / "a.txt", "a\n")
+            commit_all(path)
+        self.ok(self.ws.folder())
+        command = [sys.executable, "-I", str(SCRIPT), "--repo", str(self.ws.app)]
+        processes = [subprocess.Popen(command + ["--unit", "../" + name, "--folder", self.ws.slug, "--date",
+                                                 self.ws.date], cwd=str(self.ws.app), env=ENV,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) for name in names]
+        outputs = [process.communicate() for process in processes]
+        self.assertEqual([process.returncode for process in processes], [0] * len(names),
+                         [err.decode("utf-8", "replace") for _, err in outputs])
+        meta = json.loads((self.ws.task / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(entry["path"] for entry in meta["repos"]), sorted("../" + n for n in names))
+        self.assertEqual(sorted(self.ws.snapshot()["registered"]), sorted("../" + n for n in names))
+        self.assertEqual([p.name for p in self.ws.task.iterdir() if p.name.endswith(".tmp")], [])
+
+    def test_04_un_nombre_que_no_es_utf8_no_corta_ni_vacia_el_reporte(self):
+        blob = raw_git(self.ws.app, "hash-object", "-w", "--stdin", data=b"x\n").strip()
+        raw_git(self.ws.app, "update-index", "--add", "--cacheinfo", b"100644," + blob + b",raro\xff.txt")
+        raw_git(self.ws.app, "commit", "-q", "-m", "raro")
+        raw_git(self.ws.app, "rm", "--cached", "-q", b"raro\xff.txt")  # en macOS ese nombre no puede estar en disco
+        self.ws.write_meta()
+        write(self.ws.task / "report.html", "el reporte anterior\n")
+        result = self.ok(self.ws.generate("--ignore-snapshot"))
+        html = self.ws.html()
+        self.assertIn("raro�.txt", html)
+        self.assertGreater(len(html), 1000)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_05_la_carpeta_de_reportes_en_un_repo_hermano_no_es_otro_repo_que_cambio(self):
+        context = init_repo(self.ws.mkdir("app-contexto"))
+        write(context / "README.md", "# Contexto\n")
+        commit_all(context)
+        os.symlink("../app-contexto", str(self.ws.app / "contexto"))
+        with open(str(self.ws.app / ".git" / "info" / "exclude"), "a", encoding="utf-8") as handle:
+            handle.write("/contexto\n")
+        write(self.ws.app / "AGENTS.md", SHELL_AGENTS + "\n## Reglas del proyecto\n\n- Carpeta de reportes: "
+                                                        "`contexto/reports`\n")
+        commit_all(self.ws.app, "reportes")
+        self.ok(self.ws.folder())
+        self.ws.task = self.ws.app / "contexto" / "reports" / "implementation" / ("%s-%s" % (self.ws.date, self.ws.slug))
+        self.ws.fix_login()
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        self.assertNotIn("app-contexto", result.stderr)
+        self.assertNotIn("Otros repos cambiaron", result.stderr)
+
+    def test_06_sin_foto_el_html_no_lista_repos_hermanos_ajenos(self):
+        write(self.ws.billing / "contrato-privado.txt", "x\n")
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        self.ws.fix_login()
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        html = self.ws.html()
+        self.assertNotIn("billing-tools", html)
+        self.assertNotIn("contrato-privado.txt", html)
+        self.assertIn("../billing-tools", result.stderr)  # en la salida sí, con el comando para registrarlo
+        self.assertIn(KOTLIN_TEST, html)  # shop-auth es unidad del modelo: sus cambios sí van a "no atribuidos"
+
+    def test_07_con_eol_crlf_lo_commiteado_antes_de_la_foto_no_es_de_la_tarea(self):
+        write(self.ws.app / ".gitattributes", "*.txt text eol=crlf\n")
+        commit_all(self.ws.app, "atributos")
+        git(self.ws.app, "checkout", "-q", "-b", "feat/previo")
+        write(self.ws.app / "previo.txt", "uno\ndos\n")
+        git(self.ws.app, "add", "previo.txt")
+        git(self.ws.app, "commit", "-q", "-m", "previo")
+        (self.ws.app / "previo.txt").unlink()
+        git(self.ws.app, "checkout", "-q", "--", "previo.txt")  # git lo escribe con CRLF: limpio para git
+        self.assertIn(b"\r\n", (self.ws.app / "previo.txt").read_bytes())
+        self.ok(self.ws.folder())
+        write(self.ws.app / "src" / "A.kt", "class A\n")
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        html = self.ws.html()
+        app = self.unit_html(html, "app-shell")
+        self.assertIn("src/A.kt", app)
+        self.assertNotIn("previo.txt", app)
+        self.assertIn("previo.txt", html.split('id="no-atribuidos"', 1)[1])
+        self.assertIn("app-shell (1 archivo)", result.stdout)
+
+    def test_08_la_version_fijada_se_avisa_aunque_la_unidad_no_cambie(self):
+        git(self.ws.auth, "tag", "v2.0.0")
+        self.ok(self.ws.folder())
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        self.ws.write_meta(repos=[{"path": "../shop-auth", "pinned_version": "1.0.0"}])
+        result = self.ok(self.ws.generate())
+        self.assertIn("no coincide con la versión que fija la app", result.stderr)
+        self.assertIn("no coincide con la versión que fija la app", self.ws.html())
+
+    def test_10_la_rama_principal_del_modelo_vale_para_una_unidad_en_subcarpeta(self):
+        write(self.ws.app / "AGENTS.md", SHELL_AGENTS.replace("| `shop-auth` | `../shop-auth` |",
+                                                              "| `shop-auth` | `../shop-auth/src/main` |").replace(
+            "`https://git.example.com/shop/shop-auth.git`, `main`", "`https://git.example.com/shop/shop-auth.git`, "
+                                                                     "`develop`"))
+        commit_all(self.ws.app, "modelo")
+        git(self.ws.auth, "checkout", "-q", "-b", "develop")
+        write(self.ws.auth / "d1.kt", "class D1\n")
+        commit_all(self.ws.auth, "develop")
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        self.assertIn("Base de shop-auth: merge-base con develop", result.stdout)
+        self.assertNotIn("d1.kt", self.ws.html())
+
+    def test_11_unit_antes_de_folder_no_deja_la_tarea_sin_foto(self):
+        self.ok(self.ws.unit("../billing-tools"))
+        self.assertEqual(run(["git", "check-ignore", "-q", "reports/x"], self.ws.app).returncode, 0)
+        result = self.ok(self.ws.folder())
+        self.assertNotIn("empezó sin foto", result.stderr)
+        self.assertTrue((self.ws.task / "snapshot.json").is_file())
+        meta = json.loads((self.ws.task / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual([entry["path"] for entry in meta["repos"]], ["../billing-tools"])
+
+    def test_12_lo_commiteado_antes_de_la_foto_y_cambiado_por_la_tarea_se_avisa(self):
+        git(self.ws.app, "checkout", "-q", "-b", "feat/pago")
+        write(self.ws.app / "src" / "Pago.kt", "class Pago\n")
+        commit_all(self.ws.app, "pago")
+        self.ok(self.ws.folder())
+        write(self.ws.app / "src" / "Pago.kt", "class Pago(val total: Long)\n")
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        entry = self.unit_html(self.ws.html(), "app-shell")
+        self.assertIn("src/Pago.kt", entry)
+        self.assertIn("commiteados en la rama antes de la tarea", entry)
+
+    def test_13_un_status_del_dod_que_no_es_texto_no_corta_el_reporte(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta(dod=[{"name": "Tests", "status": ["pass"]}])
+        result = self.ok(self.ws.generate())
+        self.assertIn('El paso del DoD "Tests" trae "status"', result.stderr)
+
+    def test_14_el_identificador_del_modelo_manda_sobre_una_carpeta_del_principal(self):
+        write(self.ws.app / "shop-auth" / "build.gradle.kts", "\n")
+        commit_all(self.ws.app, "módulo con el mismo nombre")
+        self.ok(self.ws.folder())
+        result = self.ok(self.ws.unit("shop-auth"))
+        self.assertNotIn("es del repo principal", result.stdout)
+        meta = json.loads((self.ws.task / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual([entry["path"] for entry in meta["repos"]], ["../shop-auth"])
+
+    def test_15_ids_unicos_en_el_html(self):
+        for name in ("core-lib", "core_lib"):
+            path = init_repo(self.ws.mkdir(name))
+            write(path / "a.txt", "a\n")
+            commit_all(path)
+        self.ok(self.ws.folder())
+        for name in ("core-lib", "core_lib"):
+            self.ok(self.ws.unit("../" + name))
+            write(self.ws.parent / name / "b.txt", "b\n")
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        ids = re.findall(r'id="([^"]+)"', self.ws.html())
+        self.assertEqual(len(ids), len(set(ids)), [i for i in ids if ids.count(i) > 1])
+
+    def test_16_los_hermanos_ocultos_no_se_miran_y_los_ajenos_no_se_hashean(self):
+        hidden = init_repo(self.ws.mkdir(".oculto"))
+        write(hidden / "a.txt", "a\n")
+        commit_all(hidden)
+        write(self.ws.billing / "grande.bin", "x" * 4096)
+        self.ok(self.ws.folder())
+        repos = {entry["path"]: entry for entry in self.ws.snapshot()["repos"]}
+        self.assertNotIn("../.oculto", repos)
+        self.assertTrue(all(not value or value.startswith("st:")
+                            for value in repos["../billing-tools"]["dirty"].values()))
+        self.assertFalse(repos["../shop-auth"]["dirty"])  # una unidad del modelo: con su hash de contenido
+        # registrado después, lo que ya estaba sucio y no cambió sigue siendo previo
+        self.ok(self.ws.unit("../billing-tools"))
+        self.ws.fix_login()
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        self.assertIn("grande.bin", self.ws.html().split('id="no-atribuidos"', 1)[1])
+        self.assertNotIn("MIXED", result.stderr)
+
+    def test_16b_con_la_carpeta_padre_en_home_no_se_miran_los_hermanos(self):
+        env = dict(ENV, HOME=str(self.ws.parent))
+        self.ok(self.ws.folder(env=env))
+        roles = [entry["role"] for entry in self.ws.snapshot()["repos"]]
+        self.assertNotIn("sibling", roles)
+        self.assertIn("unit", roles)  # las unidades del modelo sí
+
+    def test_17_concordancia_con_un_solo_cambio_previo(self):
+        write(self.ws.app / "src" / "Previo.kt", "class Previo\n")
+        self.ok(self.ws.folder())
+        self.ws.write_meta()
+        result = self.ws.generate()
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Los 1 cambio", result.stderr)
+        self.assertIn("El cambio que hay ya estaba antes de la foto inicial", result.stderr)
+
+    def test_a13_pros_vacio_cuenta_como_analizado(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        files = {"shop-auth:" + LOGIN: {"why": "x", "risk": "bajo", "pros": [], "cons": []}}
+        self.ws.write_meta(files=files)
+        result = self.ok(self.ws.generate())
+        self.assertNotIn("pros o cons de shop-auth:" + LOGIN, result.stderr)
+        self.assertNotIn("👍 Pros", self.unit_html(self.ws.html(), "shop-auth").split(LOGIN, 1)[1].split("<details", 1)[0])
+
+
+class MigrationFalsePositivesTest(LanguageMigrationTest):
+    """09: el mismo nombre en otra carpeta o en la misma familia de lenguaje no es una migración."""
+
+    def test_09_otra_carpeta_u_otra_extension_del_mismo_lenguaje(self):
+        cases = (
+            [self.entry("D", "tools/index.js", before="run()\n"), self.entry("A", "b/index.ts", after="run()\n")],
+            [self.entry("D", "tools/main.py", before="run()\n"), self.entry("A", "cmd/main.go", after="run()\n")],
+            [self.entry("D", "src/index.js", before="run()\n"), self.entry("A", "src/index.mjs", after="run()\n")],
+            [self.entry("D", "build.kt", before="run()\n"), self.entry("A", "build.kts", after="run()\n")],
+        )
+        for files in cases:
+            self.assertEqual(self.found(*files), [], files)
+
+    def test_09_el_mismo_lugar_en_otro_source_set_si_es_migracion(self):
+        java = self.entry("D", JAVA_TEST, before=LOGIN_TEST_JAVA)
+        kotlin = self.entry("A", KOTLIN_TEST, after=LOGIN_TEST_KT)
+        self.assertEqual(self.found(java, kotlin), [(JAVA_TEST, KOTLIN_TEST, "borrado")])
+        js = self.entry("D", "src/app/index.js", before="run()\n")
+        ts = self.entry("A", "src/app/index.ts", after="run()\n")
+        self.assertEqual(self.found(js, ts), [("src/app/index.js", "src/app/index.ts", "borrado")])
 
 
 if __name__ == "__main__":
