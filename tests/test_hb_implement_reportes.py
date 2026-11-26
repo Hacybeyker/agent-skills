@@ -2007,9 +2007,8 @@ class VerificationFindingsTest(WorkspaceTest):
             os.chmod(str(secret), 0o644)
 
 
-class AttributionTest(WorkspaceTest):
-    """1.8.0: --attribution dice en JSON qué es de la tarea, con la misma lógica del reporte, sin escribir nada. Lo usa
-    hb-review para no marcar como hallazgo lo que ya estaba antes de la tarea."""
+class AttributionBase(WorkspaceTest):
+    """Utilidades para --attribution: shop-auth con trabajo de antes de la tarea y la tarea encima."""
 
     SESSION = "src/main/kotlin/com/example/auth/Sesion.kt"
     PAYMENT = "src/main/kotlin/com/example/auth/Pago.kt"
@@ -2038,6 +2037,11 @@ class AttributionTest(WorkspaceTest):
     def files(self, data, repo):
         entry = next(r for r in data["repos"] if r["name"] == repo)
         return {f["path"]: f for f in entry["files"]}
+
+
+class AttributionTest(AttributionBase):
+    """1.8.0: --attribution dice en JSON qué es de la tarea, con la misma lógica del reporte, sin escribir nada. Lo usa
+    hb-review para no marcar como hallazgo lo que ya estaba antes de la tarea."""
 
     def test_separa_lo_de_la_tarea_de_lo_que_ya_estaba(self):
         self.prepare()
@@ -2120,6 +2124,114 @@ class AttributionTest(WorkspaceTest):
             self.assertIn(path, body)
         unattributed = body.split('id="no-atribuidos"', 1)[1]
         self.assertIn(self.PAYMENT, unattributed)
+
+
+class AttributionReviewTest(AttributionBase):
+    """Lo que encontró la revisión de --attribution."""
+
+    def test_un_archivo_que_el_meta_explica_y_ya_estaba_se_marca(self):
+        self.prepare()
+        self.ws.write_meta(files={"shop-auth:" + self.PAYMENT: {"why": "lo creó la tarea"}})
+        data = self.attribution()
+        self.assertEqual(data["claimed"], ["shop-auth:" + self.PAYMENT])
+        payment = next(item for item in data["unattributed"] if item["path"] == self.PAYMENT)
+        self.assertTrue(payment["claimed_by_meta"])
+        self.assertEqual(payment["repo_path"], "../shop-auth")
+        self.assertTrue(any("--ignore-snapshot" in note and "ya estaban así" in note for note in data["notes"]))
+
+    def test_un_rebase_despues_de_la_foto_no_vuelve_mezclado_lo_de_la_tarea(self):
+        git(self.ws.auth, "checkout", "-q", "-b", "feat/SHOP-9-login")
+        self.ok(self.ws.folder())
+        write(self.ws.auth / LOGIN, LOGIN_KT_FIXED)
+        commit_all(self.ws.auth, "la tarea")
+        git(self.ws.auth, "checkout", "-q", "main")
+        write(self.ws.auth / "README.md", "cambio de main, ajeno a la tarea\n")
+        commit_all(self.ws.auth, "main avanza")
+        git(self.ws.auth, "checkout", "-q", "feat/SHOP-9-login")
+        git(self.ws.auth, "rebase", "-q", "main")
+        self.ws.write_meta()
+        login = self.files(self.attribution(), "shop-auth")[LOGIN]
+        self.assertEqual(login["attribution"], "task")
+        self.assertNotIn("README.md", self.files(self.attribution(), "shop-auth"))
+
+    def test_con_un_merge_despues_de_la_foto_el_diff_de_la_tarea_no_se_aisla(self):
+        git(self.ws.auth, "checkout", "-q", "-b", "feat/SHOP-9-login")
+        write(self.ws.auth / self.SESSION, "class Sesion(val minutos: Int = 30)\n")
+        commit_all(self.ws.auth, "sesion de antes de la tarea")
+        self.ok(self.ws.folder())
+        write(self.ws.auth / self.SESSION, "class Sesion(val minutos: Int = 15)\n")
+        commit_all(self.ws.auth, "la tarea")
+        git(self.ws.auth, "checkout", "-q", "main")
+        write(self.ws.auth / "README.md", "cambio de main\n")
+        commit_all(self.ws.auth, "main avanza")
+        git(self.ws.auth, "checkout", "-q", "feat/SHOP-9-login")
+        git(self.ws.auth, "merge", "-q", "--no-edit", "main")
+        self.ws.write_meta()
+        session = self.files(self.attribution(), "shop-auth")[self.SESSION]
+        self.assertEqual(session["attribution"], "mixed-committed")
+        self.assertIsNone(session["task_diff_from"])
+        self.assertIn("no se puede aislar el diff de la tarea", session["note"])
+
+    def test_un_repo_sin_commits_en_la_foto_es_todo_de_la_tarea(self):
+        empty = init_repo(self.ws.mkdir("vacio"))
+        self.ok(self.ws.folder())
+        write(empty / "S.kt", "class S\n")
+        commit_all(empty, "primer commit")
+        write(empty / "S.kt", "class S(val x: Int)\n")
+        self.ws.write_meta(repos=[{"path": "../vacio"}])
+        self.assertEqual(self.files(self.attribution(), "vacio")["S.kt"]["attribution"], "task")
+
+    def test_un_repo_que_no_estaba_en_la_foto_lo_dice(self):
+        (self.ws.parent.parent / "lejos" / "extra").mkdir(parents=True)
+        far = init_repo(self.ws.parent.parent / "lejos" / "extra")
+        write(far / "Base.kt", "class Base\n")
+        commit_all(far)
+        write(far / "Ajeno.kt", "class Ajeno\n")
+        self.ok(self.ws.folder())
+        self.ws.write_meta(repos=[{"path": "../../lejos/extra"}])
+        data = self.attribution()
+        extra = next(r for r in data["repos"] if r["name"] == "extra")
+        self.assertFalse(extra["in_photo"])
+        self.assertTrue(any("extra no estaba en la foto inicial" in note for note in data["notes"]))
+        self.assertEqual(self.files(data, "extra")["Ajeno.kt"]["attribution"], "task")  # sin foto no se separa
+
+    def test_sin_foto_nombra_los_repos_hermanos_con_cambios(self):
+        self.prepare()
+        write(self.ws.billing / "README.md", "# Facturación, cambiado\n")
+        self.ws.write_meta()
+        data = self.attribution("--ignore-snapshot")
+        self.assertIn("../billing-tools", [item["path"] for item in data["others"]])
+        self.assertTrue(any("Atribuyo sin la foto inicial" in note for note in data["notes"]))
+        self.assertFalse(any("empezó antes de hb-implement 1.7.0" in note for note in data["notes"]))
+
+    def test_rama_del_inicio_y_archivos_sin_trackear(self):
+        self.prepare()
+        git(self.ws.auth, "checkout", "-q", "-b", "otra-rama")
+        self.ws.write_meta()
+        data = self.attribution()
+        auth = next(r for r in data["repos"] if r["name"] == "shop-auth")
+        self.assertEqual((auth["branch"], auth["branch_before"]), ("otra-rama", "fix/SHOP-9-login"))
+        files = self.files(data, "shop-auth")
+        self.assertTrue(files[KOTLIN_TEST]["untracked"])
+        self.assertFalse(files[LOGIN]["untracked"])
+
+    def test_la_foto_de_la_carpeta_del_meta_manda_aunque_la_base_sea_otra(self):
+        self.ok(self.ws.script("--folder", self.ws.slug, "--date", self.ws.date, "--out", "otros"))
+        self.ws.fix_login()
+        meta = self.ws.app / "otros" / "implementation" / ("%s-%s" % (self.ws.date, self.ws.slug)) / "meta.json"
+        result = self.ws.script("--meta", meta, "--attribution")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["photo"])
+        self.assertEqual((data["task"]["slug"], data["task"]["folder"]),
+                         (self.ws.slug, "otros/implementation/%s-%s" % (self.ws.date, self.ws.slug)))
+
+    def test_la_salida_es_ascii(self):
+        self.prepare()
+        self.ws.write_meta()
+        result = self.ws.script("--meta", self.ws.task / "meta.json", "--attribution")
+        self.assertTrue(all(ord(char) < 128 for char in result.stdout))
+        self.assertIn("\\u00f3", result.stdout)  # los acentos van escapados: JSON válido en cualquier locale
 
 
 if __name__ == "__main__":

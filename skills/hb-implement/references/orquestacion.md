@@ -74,7 +74,7 @@ El prompt de cada bloque lleva solo lo propio: el entregable, los archivos clave
 ## Qué hace el orquestador con cada bloque
 
 1. **Lanza** al subagente con el brief común y la parte del bloque. Un subagente a la vez si comparten árbol de trabajo; en paralelo solo con un worktree por subagente. No corras Gradle, el emulador ni otro agente sobre el mismo árbol mientras alguien edita.
-2. **Lee la lógica**, no solo la lista de archivos y el DoD: las clases nuevas con reglas de negocio, estado y persistencia. El DoD no ve los fallos de diseño, y uno de los que se escaparon estaba en una clase que nadie leyó. Para eso sirve la revisión rápida de `hb-review` sobre el diff del bloque.
+2. **Lee la lógica**, no solo la lista de archivos y el DoD: las clases nuevas con reglas de negocio, estado y persistencia. El DoD no ve los fallos de diseño, y uno de los que se escaparon estaba en una clase que nadie leyó. Para eso sirve la revisión rápida de `hb-review` sobre el diff del bloque: pásale la carpeta de la tarea, para que no tome como del bloque lo que ya estaba sin commit antes de la tarea.
 3. **Corre el DoD él mismo.** Con la caché del build, repetirlo es barato.
 4. **Commitea** con el mensaje que propuso el subagente, ajustado, en el entorno del proyecto: zona horaria local y hooks activos (nada de `--no-verify` salvo con el DoD probado). Para agrupar commits, hacer push o abrir un PR puede cargar `hb-commit`.
 5. **Registra:** actualiza el estado y el commit en `PLAN.md`, y anota en `decisiones.md` sus propias decisiones (dividir un bloque, fijar algo que el alcance no fijaba) **antes** de delegar.
