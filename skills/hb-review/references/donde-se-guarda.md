@@ -54,7 +54,7 @@ Sugerencia: filtrar por tipo de error antes de reintentar.
 2. …
 ```
 
-- **Alcance:** una fila por repo revisado; "Unidades", las que toca el cambio en ese repo. Debajo, lo que quedó fuera a propósito (la configuración local y los temporales), el estado de los mapas del módulo y, si las hay, las diferencias con `## Estructura` con su corrección.
+- **Alcance:** una fila por repo revisado; "Unidades", las que toca el cambio en ese repo. Debajo, lo que quedó fuera a propósito (la configuración local y los temporales), el estado de los mapas del módulo y, si las hay, las diferencias con `## Estructura` con su corrección. En una tarea de `hb-implement`, también lo que ya estaba antes de la tarea, los archivos mezclados y si hubo foto inicial ([atribucion.md](atribucion.md)).
 - **DoD:** una fila por comando, con la unidad; `skipped` con su motivo (modo rápido, revisión solo de lectura, un repo sin `## DoD`).
 - **Hallazgos:** los mismos del chat, en Conventional Comments. En el modo rápido, sin `nitpick` ni `praise`.
 - **Veredicto:** el de la skill, con la lista priorizada si hay cambios requeridos.

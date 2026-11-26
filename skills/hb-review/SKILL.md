@@ -4,7 +4,7 @@ description: 'Revisa código contra las reglas del proyecto (AGENTS.md), su perf
 license: MIT
 metadata:
   author: hacybeyker
-  version: "1.2.0"
+  version: "1.3.0"
   category: flow
   origin: "basada en code-reviewer"
 ---
@@ -26,8 +26,22 @@ Revisión de solo lectura: **no modifica código**. Lo único que escribe es su 
    Aquí el mapa es de solo lectura: si el de una unidad revisada no existe o quedó atrás, no lo escribas; dilo en el alcance del reporte para que `hb-implement` lo cree o lo actualice.
 2. Define qué revisar:
    - Sin indicación: **cada repo de la tarea**, con su diff contra su base de comparación **y sus archivos sin trackear** (`git ls-files --others --exclude-standard`, con `git -C <repo>` en un repo vecino), que `git diff` no muestra: las clases nuevas de un cambio que aún no se commitea viven ahí; léelos completos.
-     - **Repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios; si revisas una tarea de `hb-implement`, los de `repos` en su meta. Sin modelo, el repo actual.
+     - **Repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios. Si revisas una tarea de `hb-implement`, los que dice su atribución (abajo). Sin modelo, el repo actual.
      - **Base de comparación de cada repo:** la que fije `AGENTS.md`; si no, `git -C <repo> merge-base HEAD <rama principal>`, con la rama de "Repo y rama principal" (su ref remota, `origin/<rama>`, si existe; sin modelo, la primera que exista de `origin/HEAD`, `origin/main`, `origin/master`, `main` y `master`, la misma lista de `hb-implement`; si no hay ninguna, `HEAD`). El diff es `git -C <repo> diff <base de comparación>`: lo ya commiteado en la rama de trabajo y lo que aún no. En la rama principal al día, la base es `HEAD` y quedan el working tree y lo staged. Si el usuario pide solo lo que no está commiteado, `git diff HEAD`.
+   - **Una tarea de `hb-implement`** (su carpeta `<base>/implementation/<fecha>-<slug>/`, la que indique el usuario o el orquestador, o la fila de `hb-implement` de la tarea en `<base>/INDEX.md`): revisa lo que es de la tarea, no todo lo que hay en cada repo. El script de `hb-implement` lo dice con la misma lógica de su reporte, en JSON y sin escribir nada; el meta puede no existir todavía si la carpeta ya tiene su foto:
+
+     ```bash
+     cd <raíz-del-proyecto> && python3 -I <carpeta-de-esta-skill>/../hb-implement/scripts/report.py --meta <carpeta de la tarea>/meta.json --attribution
+     ```
+
+     Detalle de cada campo: [atribucion.md](references/atribucion.md). En corto:
+     - `repos`: los repos de la tarea (también una unidad del modelo que cambió sin registrarse), cada uno con su `base` (la misma del reporte: úsala) y sus `files`, que incluyen los nuevos sin trackear. Revisa esos archivos.
+     - `attribution: "mixed"`: ya tenía cambios sin commit al empezar. Revísalo con una nota en el alcance: su diff mezcla lo de antes con lo de la tarea; no le atribuyas a la tarea lo que no puedes separar (pregúntalo con `question`).
+     - `attribution: "mixed-committed"`: ya tenía commits de la rama de antes de la tarea. Lo de la tarea es `git -C <repo> diff <task_diff_from> -- <ruta>`.
+     - `unattributed`: lo que ya estaba antes de la tarea. **No es hallazgo:** nómbralo en una línea del alcance.
+     - `excluded` (temporales y configuración local), `others` (repos que cambiaron y no son de la tarea) y `skipped` (unidades que quedaron fuera, con su causa): en el alcance, sin revisarlos.
+     - `photo: false` (una tarea anterior a `hb-implement` 1.7.0, sin foto): no se puede separar lo de antes; revisa todo el diff de esos repos, como sin tarea, y dilo en el alcance. `empty`: no hay nada de la tarea que revisar; dilo y no inventes alcance.
+     - Si el script falla o `hb-implement` no está instalada, sigue como sin tarea y dilo en el alcance.
    - Un PR: `gh pr diff <n>` y `gh pr view <n>` (descripción, checks). Si la tarea tiene PR en otros repos (los enlaza la descripción), revísalos juntos.
    - Archivos o una feature: esos archivos completos.
 3. **Lo que no se revisa:** la configuración local modificada a propósito (su subsección del modelo) y los cambios temporales de la tarea: `temporary` del meta de `hb-implement` (`<base>/implementation/<fecha>-<slug>/meta.json`, con `<base>` la carpeta de reportes de la sección 4) o la lista "cambios temporales" de su entrega. No son hallazgo ni cambio ajeno: déjalos fuera del diff (`git diff <base de comparación> -- . ':(exclude)<ruta>'`) y nómbralos en una línea del alcance. Si el archivo trae además cambios de la tarea, revisa solo esos. Lo que sí es `issue (blocking)`: que el cambio que pasa a fuente, o un temporal, esté en staging o haya entrado en un commit de la rama, porque nunca se commitea.
@@ -107,7 +121,7 @@ Además de entregarlo en el chat, guarda el reporte en **`<base>/review/<fecha>-
 Para quien delegó un bloque a un subagente y debe revisarlo antes de commitear, sin repetir el DoD que ya corrió. Se activa cuando el pedido lo dice ("revisión rápida del bloque", "modo rápido") o cuando un plan lo invoca por cada bloque.
 
 - **Qué revisas:** el diff del bloque (`git diff HEAD`, o `git diff <base de comparación>...<rama>` si ya está commiteado; el orquestador lo indica) **más los archivos sin trackear** (`git ls-files --others --exclude-standard`: el orquestador no commitea antes de revisar, así que las clases nuevas del bloque no salen en `git diff`), **contra el documento de alcance** y el `AGENTS.md`. Si el bloque tocó varios repos, el diff y los archivos sin trackear de cada uno (el orquestador los indica; si no, los repos del modelo con cambios). Lee completos los archivos nuevos y los que tienen lógica (reglas de negocio, estado, persistencia, manejo de errores): la lista de archivos y el DoD en verde no bastan. Carga solo las referencias del perfil que toca el bloque.
-- **Fuera de la revisión**, igual que en el modo normal: la configuración local modificada a propósito y los cambios temporales de la tarea.
+- **Fuera de la revisión**, igual que en el modo normal: la configuración local modificada a propósito y los cambios temporales de la tarea. Si el orquestador te pasa la carpeta de la tarea de `hb-implement`, usa su atribución (sección 1): lo que ya estaba antes de la tarea no es hallazgo del bloque.
 - **No corres el DoD:** lo corre el orquestador. Márcalo `skipped` con el motivo "lo corre el orquestador".
 - **Qué buscas** (lo que el DoD no ve): estado y persistencia frente a los requisitos; `catch` demasiado amplios; dependencias sin uso; casos que el alcance pide y no están; decisiones del agente que cambian una regla del alcance; reglas del `AGENTS.md` (comentarios, palabras prohibidas, idioma); tests que no fallarían si el código se rompiera.
 - **Qué no haces:** no repites lo que el linter ya cubre, no propones migraciones, no tocas código.

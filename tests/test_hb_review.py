@@ -119,7 +119,7 @@ class StructureModelTest(unittest.TestCase):
     def test_revisa_cada_repo_de_la_tarea_contra_su_merge_base(self):
         self.assertIn("cada repo de la tarea", self.scope)
         self.assertIn("Repo y rama principal", self.scope)
-        self.assertIn("los de `repos` en su meta", self.scope)
+        self.assertIn("Si revisas una tarea de `hb-implement`, los que dice su atribución", self.scope)
 
     def test_la_configuracion_local_y_los_temporales_no_son_hallazgo(self):
         self.assertIn("configuración local modificada a propósito", self.scope)
@@ -247,6 +247,43 @@ class SavedReviewTest(unittest.TestCase):
             inside = run(["git", "check-ignore", "-q", "contexto/reports/review/2026-11-25-x/review.md"], repo)
             self.assertNotIn(inside.returncode, (0, 1))
             self.assertEqual(run(["git", "check-ignore", "-q", "contexto"], repo).returncode, 1)
+
+
+class AttributionTest(unittest.TestCase):
+    """1.3.0: al revisar una tarea de hb-implement, solo lo que es de la tarea, según su atribución."""
+
+    def setUp(self):
+        self.text = SKILL.read_text(encoding="utf-8")
+        self.reference = (SKILL.parent / "references" / "atribucion.md").read_text(encoding="utf-8")
+        self.scope = section(self.text, "## 1. Alcance y contexto", "## 2. Qué revisar")
+
+    def test_version(self):
+        self.assertRegex(self.text, r'(?m)^  version: "1\.3\.0"$')
+
+    def test_usa_la_atribucion_del_script_de_hb_implement(self):
+        command = "<carpeta-de-esta-skill>/../hb-implement/scripts/report.py --meta <carpeta de la tarea>/meta.json " \
+                  "--attribution"
+        self.assertIn(command, self.scope)
+        self.assertIn(command, self.reference)
+        script = SKILL.parent / ".." / "hb-implement" / "scripts" / "report.py"
+        self.assertTrue(script.resolve().is_file())  # instaladas una al lado de la otra, como en el repo
+        self.assertIn('"--attribution"', script.read_text(encoding="utf-8"))
+
+    def test_lo_que_ya_estaba_no_es_hallazgo(self):
+        self.assertIn("`unattributed`: lo que ya estaba antes de la tarea. **No es hallazgo:**", self.scope)
+        for field in ("`photo`", "`repos[]`", "`unattributed[]`", "`excluded[]`", "`skipped[]`", "`others[]`",
+                      "`empty`", "`task_diff_from`"):
+            self.assertIn(field, self.reference)
+        self.assertIn("git -C <repo> diff <task_diff_from> -- <ruta>", self.scope)
+        self.assertIn("pregúntalo con `question`", self.scope)
+
+    def test_sin_foto_o_sin_hb_implement_sigue_como_antes(self):
+        self.assertIn("`photo: false`", self.scope)
+        self.assertIn("Si el script falla o `hb-implement` no está instalada, sigue como sin tarea", self.scope)
+
+    def test_el_modo_rapido_tambien_la_usa_si_tiene_la_carpeta(self):
+        quick = section(self.text, "## Modo rápido (para orquestadores)", None)
+        self.assertIn("Si el orquestador te pasa la carpeta de la tarea de `hb-implement`, usa su atribución", quick)
 
 
 if __name__ == "__main__":
