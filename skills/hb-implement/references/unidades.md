@@ -25,26 +25,27 @@ Para cada unidad que vas a tocar y cuya fuente está fuera del repo principal (`
 | --- | --- |
 | La carpeta no existe y el modelo trae la URL ("Repo y rama principal") | `git clone <URL> <fuente>`, en la ruta de la columna "Fuente" |
 | La carpeta no existe y no hay URL | Pregunta la URL; con el alcance aprobado, detente en ese punto y anótalo |
-| Limpia, en su rama principal y atrasada | `git -C <fuente> fetch` y `git -C <fuente> pull --ff-only` |
-| Con cambios sin commit, o en otra rama que no es la principal ni la de esta tarea | **Pregunta** antes de tocarla: pueden ser de otra tarea |
+| Atrasada respecto de su remoto | Dilo en el plan y sigue con lo que hay: nunca `pull`, `merge` ni `rebase` para prepararla |
+| Con cambios sin commit que no son de esta tarea | **Pregunta** antes de tocarla: pueden ser de otra tarea |
 | El agente no puede leer la carpeta | **Detente** y di qué carpeta debe darte acceso: la ruta del modelo y la absoluta que resulta. Cada agente tiene su forma de sumar directorios de trabajo. No supongas su contenido |
 
-- "Atrasada" es que `git -C <fuente> rev-list --count HEAD..@{u}` da más de 0 después del `fetch`. Si `pull --ff-only` falla, no fuerces nada: pregunta.
+- "Atrasada" es que `git -C <fuente> rev-list --count HEAD..@{u}` da más de 0. Puedes hacer `git -C <fuente> fetch` para saberlo (no toca la rama ni los archivos); actualizarla es decisión del usuario.
 - Lo registrado en "Configuración local modificada a propósito" (también un archivo del repo vecino) no cuenta como cambio sin commit.
-- **Con la línea `Repos vecinos: no clonar ni crear ramas`** en `## Estructura`, no clones, no actualices ni crees ramas en ningún repo de la tarea, tampoco en el principal: propón los comandos y sigue con lo que hay. Si sin el repo no puedes seguir, detente en ese punto. Sin la línea, vale `Repos vecinos: clonar los que falten y crear ramas de trabajo`.
+- **Con la línea `Repos vecinos: no clonar ni crear ramas`** en `## Estructura`, no clones ni crees ramas en ningún repo de la tarea, tampoco en el principal, ni hagas la pregunta de la rama (sección 5): propón los comandos y sigue con lo que hay. Si sin el repo no puedes seguir, detente en ese punto. Sin la línea, vale `Repos vecinos: clonar los que falten y preguntar la rama de trabajo`; la de antes, `… y crear ramas de trabajo`, vale igual: la rama se pregunta.
 
 ## 3. Pasa a fuente sin preguntar
 
 Si la tarea cambia una unidad **publicada** y el modelo trae su mecanismo (columna "Pasar a fuente y volver", "A fuente: …; volver: …"):
 
 1. Aplica el cambio "A fuente" **sin preguntar**: es el mecanismo que el proyecto documenta.
-2. Compila la app (o el comando del DoD del proyecto que compila) para comprobar que ahora usa el código local. Si no compila por el cambio de configuración, vuelve al estado anterior con "volver" y dilo; si compila, sigue.
-3. Ese cambio de configuración es **temporal**: va en `temporary` del meta con su forma de volver (sección 7), nunca se propone para commit y la entrega dice cómo revertirlo. Si `AGENTS.md` pide revertirlo al terminar, hazlo después del DoD, deshaciendo solo ese cambio (nada de `git checkout` ni `git restore` sobre un archivo que tenga otros cambios).
+2. **Regístrala en ese momento**, para que entre al reporte aunque al final nadie lo recuerde: `report.py --unit <fuente> --folder <slug>` (la ruta de su fuente o su identificador del modelo). La anota en `repos` del meta (lo crea si falta) y en la foto inicial; repetirlo no la duplica.
+3. Compila la app (o el comando del DoD del proyecto que compila) para comprobar que ahora usa el código local. Si no compila por el cambio de configuración, vuelve al estado anterior con "volver" y dilo; si compila, sigue.
+4. Ese cambio de configuración es **temporal**: va en `temporary` del meta con su forma de volver (sección 7), nunca se propone para commit y la entrega dice cómo revertirlo. Si `AGENTS.md` pide revertirlo al terminar, hazlo después del DoD, deshaciendo solo ese cambio (nada de `git checkout` ni `git restore` sobre un archivo que tenga otros cambios).
 
 - Si el archivo del mecanismo está en "Configuración local modificada a propósito", lo que ya tenía no es un cambio ajeno ni de esta tarea: no avises por él. Si la unidad ya estaba en fuente, no hay nada que hacer; si agregaste una, solo esa parte va en `temporary`.
 - Los cambios en el **código** de la unidad sí son de la tarea: su repo va en `repos` del meta y sus commits se proponen aparte.
 - Si solo necesitas **leer** una unidad publicada, lee su fuente en su repo; no hace falta pasarla a fuente. No deduzcas su comportamiento del artefacto compilado.
-- Si la tarea necesita una unidad publicada **en fuente sin cambiarla** (por ejemplo, para compilar contra un cambio de otra unidad que la usa), pásala igual: clona su repo si falta (sección 2), aplica "A fuente" y anótalo en `temporary`. No le crees rama de trabajo: no la modificas.
+- Si la tarea necesita una unidad publicada **en fuente sin cambiarla** (por ejemplo, para compilar contra un cambio de otra unidad que la usa), pásala igual: clona su repo si falta (sección 2), aplica "A fuente" y anótalo en `temporary`. No la incluyas en la pregunta de la rama: no la modificas.
 - `temporary` deja fuera del reporte el **archivo entero**. Si ese archivo tiene además un cambio real de la tarea, sácalo de `temporary` y explícalo en `files`.
 
 ### Sin mecanismo
@@ -59,23 +60,27 @@ Si la columna dice `sin mecanismo` (o el modelo no trae ninguno), no inventes un
 
 Para cada unidad publicada que está en fuente en la tarea (la pasaste tú o ya lo estaba por la configuración local), compara la versión que fija la app (columna "Cómo se consume") con lo que hay en su fuente: `git -C <fuente> describe --tags --always`. Si no coinciden (el fuente va por delante o por detrás del tag de esa versión), lo que pruebes puede no compilar o comportarse distinto con lo publicado: avísalo en la entrega y pon `pinned_version` en la entrada de `repos` (sección 7), para que el reporte lo muestre. No cambies de commit por tu cuenta para igualarlas: dilo y sigue.
 
-## 5. Rama de trabajo en cada repo que modificas
+## 5. Rama de trabajo: una sola pregunta
 
-Antes de editar un repo (el principal o un vecino), crea la rama de trabajo desde su rama principal al día (en el principal, como en un vecino: si está limpio y atrasado, `git pull --ff-only`; si no, desde donde está, y lo dices):
+`hb-implement` no crea ramas por su cuenta. Antes de editar, haz **una sola pregunta** para todos los repos que la tarea va a modificar (el principal y los vecinos):
 
-- El nombre sigue `## Git`. Si no fija nada, `<tipo>/<slug>`: `feat` para feature y enhancement, `fix` para bugfix, `refactor` para refactor. **La misma rama** en cada repo que la tarea modifica.
-- Si el repo ya está en una rama que no es la principal, sigue en ella.
-- No crees ramas con la línea `Repos vecinos: no clonar ni crear ramas`, ni si `## Git` u otra regla dice que la IA no cambia de rama: propón el nombre y sigue en la rama actual.
+- Muestra la **rama actual** de cada uno y ofrece: (a) seguir en esa rama, o (b) crear una rama nueva con el nombre que dé el usuario, la misma en cada repo. Los nombres suelen llevar el código de la tarea (`fix/SHOP-1234-login`): **no los inventes**. Si elige (b) sin dar el nombre, pregúntaselo. `## Git` puede fijar la forma del nombre, no el nombre.
+- **Si nadie responde** (modo autónomo, subagente o sin usuario), sigue en la rama actual de cada repo, sin crear ni cambiar ramas, y dilo en la entrega y en el reporte (`branch_note` del meta). El reporte muestra además la rama de cada repo al empezar (la de la foto) y la actual.
+- **Nunca** hagas `pull`, `merge` ni `rebase` para preparar la rama: si un repo está atrasado, dilo y sigue (sección 2).
+- Con la línea `Repos vecinos: no clonar ni crear ramas`, o si `## Git` u otra regla dice que la IA no cambia de rama, no hagas la pregunta: sigue en la rama actual y propón el comando (`git -C <repo> switch -c <rama>`) para que el usuario lo corra.
 - Commit y push siguen las reglas de `## Git` ("quién commitea"): crear la rama no autoriza a commitear.
 
 ## 6. DoD de cada unidad tocada
 
+- Antes de correr el DoD de una unidad, regístrala si no lo hiciste al pasarla a fuente: `report.py --unit <fuente> --folder <slug>`.
 - Corre el **DoD de cada unidad que cambiaste**: la columna "DoD de la unidad", con su `cd`. Si dice `el ## DoD del proyecto`, ese.
 - Corre además el `## DoD` del proyecto (el que compila la app con todo) si cambiaste la app, pasaste unidades a fuente, cambiaste algo que no es de ninguna unidad, cambiaste un contrato que otras unidades consumen (una API pública, una interfaz, un esquema) o la unidad no tiene build propio (una carpeta de feature, cuyo DoD solo filtra tests).
 - Una unidad sin DoD en el modelo: el `## DoD` del `AGENTS.md` de su repo. Si tampoco hay, dilo y propón agregarlo al modelo.
-- Cada paso entra al DoD del reporte con el nombre de la unidad (por ejemplo, `core-lib · Tests`).
+- Cada paso entra al DoD del reporte con el nombre de la unidad (por ejemplo, `core-lib · Tests`, o con `"unit": "core-lib"`): sale en la sección de esa unidad.
 
 ## 7. Un solo reporte con varios repos
+
+Qué repos entran lo decide el script con la foto inicial, no la memoria del agente: el principal, las unidades del modelo y las registradas con `--unit` (o en `repos`), si cambiaron después de la foto. Un repo hermano que cambió y no es unidad no entra: el script lo lista y tú le preguntas al usuario si es de la tarea; si dice que sí, lo registras con `--unit` y vuelves a generar el reporte. Sin foto (una tarea empezada antes de 1.7.0), entran el principal y `repos` del meta ([reporte.md](reporte.md)).
 
 El reporte compara cada repo contra su base: sin `base`, el `merge-base` de `HEAD` con su rama principal, así sale lo ya commiteado en la rama de trabajo. Si `AGENTS.md` fija otra base, pásala en `base` (y `--base` para el principal).
 
@@ -95,7 +100,7 @@ El reporte compara cada repo contra su base: sin `base`, el `merge-base` de `HEA
 ```
 
 - `path`: la fuente de la unidad, relativa a la raíz del repo principal (o absoluta). `name`: el prefijo de sus claves; por defecto, el nombre de la carpeta.
-- `main_branch`: su rama principal, la de "Repo y rama principal" del modelo. Sin ella, el script prueba `origin/HEAD`, `origin/main`, `origin/master`, `main` y `master`; si no encuentra ninguna, compara contra `HEAD` y avisa. La del principal va en `--main-branch`.
+- `main_branch`: su rama principal, la de "Repo y rama principal" del modelo (el script ya la toma de ahí para las unidades del modelo). Sin ella, el script prueba `origin/HEAD`, `origin/main`, `origin/master`, `main` y `master`; si no encuentra ninguna, compara contra `HEAD` y avisa. La del principal va en `--main-branch`.
 - `base`: una base explícita, que manda sobre `main_branch`.
 - `pinned_version`: la versión que fija la app. `source_version`, opcional: lo que dio `git describe --tags --always` en el fuente; sin ella, el script describe la base del repo. Si no coinciden, el reporte lo muestra como aviso.
 - Las claves del principal no llevan prefijo; las de un vecino, `<name>:<ruta>`. `groups` y `temporary` usan las mismas claves.

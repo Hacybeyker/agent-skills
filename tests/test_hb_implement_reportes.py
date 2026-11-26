@@ -1,15 +1,21 @@
-"""hb-implement 1.6.0 · report.py: carpeta por tarea bajo la base común, compatibilidad con el formato plano, INDEX.md,
-base de comparación por repo (merge-base con la rama principal), versiones fijada y del fuente, carpeta de contexto
-enlazada (escritura sobre la ruta real y rutas relativas) y worktrees a los que les faltan los enlaces."""
+"""hb-implement · report.py. 1.6.0: carpeta por tarea bajo la base común, compatibilidad con el formato plano,
+INDEX.md, base de comparación por repo (merge-base con la rama principal), versiones fijada y del fuente, carpeta de
+contexto enlazada (escritura sobre la ruta real y rutas relativas) y worktrees a los que les faltan los enlaces.
+Los casos de 1.7.0 (foto inicial, --unit, detección contra la foto, reporte por unidad y tema) van al final."""
+import importlib.util
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from helpers import ROOT, commit_all, git, init_repo, run, write
+from helpers import ENV, ROOT, commit_all, git, init_repo, run, write
 
 SCRIPT = ROOT / "skills" / "hb-implement" / "scripts" / "report.py"
 META = {
@@ -90,22 +96,34 @@ class Base(unittest.TestCase):
         return [line for line in text.splitlines() if line.startswith("| ") and "hb-" in line]
 
     def stat(self, html, label):
-        return re.search(r"%s</div><div class=\"stat-value[^\"]*\"[^>]*>([^<]+)<" % label, html).group(1)
+        """El número de una tarjeta del resumen ("Archivos Nuevos", "DoD"…)."""
+        return re.search(r'<div class="stat-value[^"]*">([^<]+)</div><div class="stat-label">%s</div>' % label, html,
+                         re.I).group(1)
+
+    def start(self, *folder_args, repo=None):
+        """Como el flujo: pide la carpeta (y toma la foto) con el árbol limpio, y después hace los cambios de la tarea."""
+        git(self.repo, "checkout", "-q", "--", "a.txt")
+        (self.repo / "b.txt").unlink()
+        result = self.folder_ok(*folder_args, repo=repo)
+        write(self.repo / "a.txt", "dos\n")
+        write(self.repo / "b.txt", "nuevo\n")
+        return result
 
 
 class TaskFolderTest(Base):
     """Sin marcadores, la línea es la base: la tarea va en <base>/implementation/<fecha>-<slug>/."""
 
     def test_folder_y_reporte_quedan_juntos_en_la_carpeta_de_la_tarea(self):
-        result = self.folder_ok("prueba-x", "--date", "2026-01-02")
+        result = self.start("prueba-x", "--date", "2026-01-02")
         task = self.repo / "reports" / "implementation" / "2026-01-02-prueba-x"
         self.assertEqual(self.printed(result, "meta"), "reports/implementation/2026-01-02-prueba-x/meta.json")
         self.with_meta(task / "meta.json")
         generated = self.ok(meta=task / "meta.json")
         self.assertIn("reports/implementation/2026-01-02-prueba-x/report.html", generated.stdout)
         html = (task / "report.html").read_text(encoding="utf-8")
-        self.assertEqual(self.stat(html, "Archivos Nuevos"), "1")  # b.txt: ni el meta ni el índice cuentan
+        self.assertEqual(self.stat(html, "Archivos Nuevos"), "1")  # b.txt: ni el meta ni el índice ni la foto cuentan
         self.assertNotIn("el meta va en", generated.stderr)
+        self.assertTrue((task / "snapshot.json").is_file())
         self.assertEqual(sorted(p.name for p in (self.repo / "reports").iterdir()), ["INDEX.md", "implementation"])
 
     def test_la_tarea_vieja_en_formato_plano_se_retoma_plana(self):
@@ -214,7 +232,7 @@ class IndexTest(Base):
             "(implementation/2026-11-25-perfil-de-usuario/report.html) |\n"))
 
     def test_el_reporte_reemplaza_la_misma_fila_con_el_tipo_y_el_dod(self):
-        self.folder_ok("prueba-x", "--date", "2026-01-02")
+        self.start("prueba-x", "--date", "2026-01-02")
         self.ok()
         self.assertEqual(self.rows(self.index()), [
             "| 2026-01-02 | hb-implement | prueba-x | bugfix | DoD PASS | "
@@ -302,8 +320,7 @@ class BaseBranchTest(Base):
         self.assertIn("commiteado en la rama", html)
         self.assertEqual(self.stat(html, "Archivos Nuevos"), "2")  # b.txt y rama.txt
         sha = git(self.repo, "rev-parse", "--short", "main").strip()
-        self.assertIn('<p class="hero-base">Comparado con merge-base con <code>main</code> · <code>%s</code></p>' % sha,
-                      html)
+        self.assertIn("<td>merge-base con <code>main</code> · <code>%s</code></td>" % sha, html)
         self.assertIn("🔀 Base de app-shell: merge-base con main (%s)" % sha, result.stdout)
 
     def test_base_explicita_manda(self):
@@ -311,7 +328,7 @@ class BaseBranchTest(Base):
         self.ok("--base", "HEAD")
         html = self.report()
         self.assertNotIn("commiteado en la rama", html)
-        self.assertIn('<p class="hero-base">Comparado con <code>HEAD</code></p>', html)
+        self.assertIn('<div class="k">Base</div><div class="x"><code>HEAD</code></div>', html)
 
     def clone(self):
         """Un remoto bare con main y un clon (con origin/HEAD); en el clon, un commit en main sin publicar."""
@@ -354,7 +371,7 @@ class BaseBranchTest(Base):
         result = self.ok()
         self.assertIn("comparo contra HEAD", result.stderr)
         self.assertIn("--main-branch", result.stderr)
-        self.assertIn('<p class="hero-base">Comparado con <code>HEAD</code> · sin rama principal</p>', self.report())
+        self.assertIn("<td><code>HEAD</code> · sin rama principal</td>", self.report())
 
     def test_cada_vecino_usa_su_rama_principal(self):
         neighbor = init_repo(self.mkdir("core-lib"))
@@ -369,7 +386,7 @@ class BaseBranchTest(Base):
         html = self.report()
         self.assertIn("<td>merge-base con <code>develop</code> · <code>%s</code></td>" % sha, html)
         self.assertIn("commiteado en la rama", html)
-        self.assertNotIn('class="hero-base"', html)  # con varios repos, la base va en la tabla
+        self.assertIn('<section id="unidad-core-lib" class="unit">', html)  # cada repo, su sección
 
 
 class VersionTest(Base):
@@ -396,7 +413,7 @@ class VersionTest(Base):
         self.assertIn("core-lib: el fuente (%s) no coincide con la versión que fija la app (2.3.1)" % source,
                       result.stderr)
         html = self.report()
-        self.assertIn("version-warning", html)
+        self.assertIn("core-lib: el fuente no coincide con la versión que fija la app", html)
         self.assertIn("fijada <code>2.3.1</code> · fuente <code>%s</code>" % source, html)
         self.assertIn("⚠️ no coinciden", html)
 
@@ -409,7 +426,7 @@ class VersionTest(Base):
         self.assertNotIn("no coincide", result.stderr)
         html = self.report()
         self.assertIn("fijada <code>2.3.1</code> · fuente <code>v2.3.1</code>", html)
-        self.assertNotIn("version-warning", html.split("</style>", 1)[1])
+        self.assertNotIn("no coinciden", html.split("</style>", 1)[1])
 
     def test_source_version_explicita_manda(self):
         self.with_meta(repos=[{"path": "../core-lib", "pinned_version": "2.3.1", "source_version": "2.4.0"}])
@@ -442,7 +459,7 @@ class LinkedContextTest(Base):
         self.reports = self.outside / "reports"
 
     def test_folder_previews_e_indice_a_traves_del_enlace(self):
-        result = self.folder_ok("prueba-x", "--date", "2026-01-02")
+        result = self.start("prueba-x", "--date", "2026-01-02")
         task = "contexto/reports/implementation/2026-01-02-prueba-x"
         self.assertEqual(self.printed(result, "previews"), task + "/previews")
         self.assertEqual(self.printed(result, "índice"), "contexto/reports/INDEX.md")
@@ -580,6 +597,906 @@ class WorktreeTest(Base):
         self.add_tree()
         self.folder_ok("prueba-x")
         self.assertTrue((self.outside / "contexto" / "reports" / "INDEX.md").is_file())
+
+
+# ── hb-implement 1.7.0 ───────────────────────────────────────────────────────
+# Un proyecto "cascarón" con módulos en repos hermanos, con nombres inventados: app-shell (el principal), shop-auth
+# (una unidad del modelo, publicada y ya pasada a fuente desde antes) y billing-tools (un proyecto ajeno que vive en la
+# misma carpeta padre).
+SHELL_AGENTS = (
+    "# Tienda\n\n## Arquitectura\n\nCapas: dominio, datos y presentación.\n\n## Estructura\n\n### Unidades\n\n"
+    "| Unidad | Fuente | Cómo se consume | Pasar a fuente y volver | DoD de la unidad | Repo y rama principal | "
+    "Publica y versiona |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+    "| `app-shell` | `.` | Es la app | — | `make check` | este repo, `main` | con la app |\n"
+    "| `shop-auth` | `../shop-auth` | Publicada: `com.example:shop-auth`, versión fijada en `versions.toml` | "
+    "A fuente: `\"shop-auth\": true` en `local-modules.json`; volver: `false` | `cd ../shop-auth && make check` | "
+    "`https://git.example.com/shop/shop-auth.git`, `main` | su repo, con `hb-release` |\n\n"
+    "- Repos vecinos: clonar los que falten y preguntar la rama de trabajo.\n\n"
+    "### Configuración local modificada a propósito\n\n"
+    "- `local-modules.json`: dice qué unidades van en fuente. No se commitea.\n\n"
+    "## Git\n\n- Ramas: `<tipo>/<ticket>-<slug>`.\n")
+SHELL_AGENTS_WITHOUT_AUTH = re.sub(r"(?m)^\| `shop-auth`.*\n", "", SHELL_AGENTS)
+LOGIN_KT = ("package com.example.auth\n\nclass Login {\n    fun accepts(user: String, password: String): Boolean =\n"
+            "        user.isNotBlank()\n}\n")
+LOGIN_KT_FIXED = ("package com.example.auth\n\nclass Login {\n    fun accepts(user: String, password: String): Boolean =\n"
+                  "        user.isNotBlank() && password.isNotBlank()\n}\n")
+LOGIN_TEST_JAVA = ("package com.example.auth;\n\nimport org.junit.Test;\nimport static org.junit.Assert.assertFalse;\n\n"
+                   "public class LoginTest {\n    @Test\n    public void rejectsEmptyPassword() {\n"
+                   "        assertFalse(new Login().accepts(\"ana\", \"\"));\n    }\n}\n")
+LOGIN_TEST_KT = ("package com.example.auth\n\nimport org.junit.Assert.assertFalse\nimport org.junit.Test\n\n"
+                 "class LoginTest {\n    @Test\n    fun `rechaza la clave vacia`() {\n"
+                 "        assertFalse(Login().accepts(\"ana\", \"\"))\n    }\n}\n")
+JAVA_TEST = "src/test/java/com/example/auth/LoginTest.java"
+KOTLIN_TEST = "src/test/kotlin/com/example/auth/LoginTest.kt"
+LOGIN = "src/main/kotlin/com/example/auth/Login.kt"
+CHECKOUT = "src/main/kotlin/com/example/shop/Checkout.kt"
+FULL_ANALYSIS = {
+    "ticket": "SHOP-1234",
+    "severity": "alto",
+    "root_cause": "Login.accepts no validaba la clave: solo miraba el usuario.",
+    "impact": [{"label": "Usuarios afectados", "value": "Todos los que entran con usuario y clave"},
+               {"label": "Pantallas", "value": 2}],
+    "diagrams": [{"title": "Validación del login", "mermaid": "flowchart LR\n  A[Pantalla] --> B[Login.accepts]\n"
+                  "  B --> C{¿Usuario y clave?}", "description": "La clave vacía ahora se rechaza."}],
+    "branch_note": "El usuario eligió seguir en la rama actual de cada repo.",
+}
+
+
+def load_report_module():
+    spec = importlib.util.spec_from_file_location("hb_implement_report", str(SCRIPT))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+report_module = load_report_module()
+
+
+class Workspace:
+    """La carpeta padre con los tres repos. La tarea arregla el login en shop-auth: vacía el test en Java y crea uno en
+    Kotlin (la migración que nadie pidió), y corrige Login.kt."""
+
+    def __init__(self, base, agents=SHELL_AGENTS, slug="fix-login", date="2026-03-10"):
+        self.parent = base / "workspace"
+        self.slug, self.date = slug, date
+        self.app = init_repo(self.mkdir("app-shell"))
+        write(self.app / "AGENTS.md", agents)
+        write(self.app / "local-modules.json", '{"shop-auth": false}\n')
+        write(self.app / CHECKOUT, "package com.example.shop\n\nclass Checkout\n")
+        commit_all(self.app, "base")
+        write(self.app / "local-modules.json", '{"shop-auth": true}\n')  # ya estaba en fuente antes de la tarea
+        self.auth = init_repo(self.mkdir("shop-auth"))
+        write(self.auth / LOGIN, LOGIN_KT)
+        write(self.auth / JAVA_TEST, LOGIN_TEST_JAVA)
+        commit_all(self.auth, "base")
+        self.billing = init_repo(self.mkdir("billing-tools"))
+        write(self.billing / "README.md", "# Facturación\n")
+        commit_all(self.billing, "base")
+        self.task = self.app / "reports" / "implementation" / ("%s-%s" % (date, slug))
+
+    def mkdir(self, name):
+        path = self.parent / name
+        path.mkdir(parents=True)
+        return path
+
+    def script(self, *args, env=None):
+        command = [sys.executable, "-I", str(SCRIPT), "--repo", str(self.app)] + [str(a) for a in args]
+        return subprocess.run(command, cwd=str(self.app), env=env or ENV, capture_output=True, text=True,
+                              encoding="utf-8")
+
+    def folder(self, env=None):
+        return self.script("--folder", self.slug, "--date", self.date, env=env)
+
+    def unit(self, path):
+        return self.script("--unit", path, "--folder", self.slug, "--date", self.date)
+
+    def fix_login(self):
+        write(self.auth / JAVA_TEST, "")
+        write(self.auth / KOTLIN_TEST, LOGIN_TEST_KT)
+        write(self.auth / LOGIN, LOGIN_KT_FIXED)
+
+    def write_meta(self, **extra):
+        meta = {"title": "Corrige el login con clave vacía", "type": "bugfix", "date": self.date, "slug": self.slug,
+                "description": "El login aceptaba una clave vacía.",
+                "dod": [{"icon": "🧪", "name": "shop-auth · Tests", "command": "cd ../shop-auth && make check",
+                         "status": "pass"}]}
+        meta.update(extra)
+        write(self.task / "meta.json", json.dumps(meta, ensure_ascii=False))
+
+    def generate(self, *extra, env=None):
+        return self.script("--meta", self.task / "meta.json", *extra, env=env)
+
+    def html(self):
+        return (self.task / "report.html").read_text(encoding="utf-8")
+
+    def snapshot(self):
+        return json.loads((self.task / "snapshot.json").read_text(encoding="utf-8"))
+
+
+class WorkspaceTest(unittest.TestCase):
+    agents = SHELL_AGENTS
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace(Path(os.path.realpath(self.tmp.name)), agents=self.agents)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def ok(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return result
+
+    def stat(self, html, label):
+        return re.search(r'<div class="stat-value[^"]*">([^<]+)</div><div class="stat-label">%s</div>' % label, html,
+                         re.I).group(1)
+
+    def body(self, html):
+        return html.split("</style>", 1)[1]
+
+
+class RegressionTest(WorkspaceTest):
+    """El caso real: la tarea cambió solo un repo vecino ya pasado a fuente, el agente corrió su DoD pero no lo anotó
+    en "repos", y 1.6.0 generó un reporte con 0 archivos sin avisar."""
+
+    def test_la_unidad_del_modelo_que_cambio_entra_aunque_no_este_en_repos(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta()  # sin "repos", sin análisis: como en el caso real
+        result = self.ok(self.ws.generate())
+        html = self.ws.html()
+        self.assertIn('<section id="unidad-shop-auth" class="unit">', html)
+        self.assertEqual(self.stat(html, "Archivos nuevos"), "1")  # LoginTest.kt
+        self.assertEqual(self.stat(html, "Archivos modificados"), "2")  # LoginTest.java (vaciado) y Login.kt
+        self.assertIn("🧩 Unidades en el reporte: shop-auth (3 archivos)", result.stdout)
+        # El principal no cambió después de la foto: su configuración local es temporal, no de la tarea.
+        self.assertNotIn('id="unidad-app-shell"', html)
+        self.assertIn("Sin cambios desde la foto inicial", html)
+        self.assertIn('<div class="file-path">local-modules.json</div>', html)
+        # La migración de lenguaje que nadie pidió: en el reporte y en la salida.
+        migration = "%s (vaciado) → %s" % (JAVA_TEST, KOTLIN_TEST)
+        self.assertIn("Posible migración de lenguaje que nadie pidió", html)
+        self.assertIn(migration, html)
+        self.assertIn(migration, result.stderr)
+        # El DoD de la unidad va en su sección.
+        unit = html.split('<section id="unidad-shop-auth"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("shop-auth · Tests", unit)
+        self.assertEqual(self.stat(html, "DoD"), "PASS")
+        self.assertIn("| fix-login | bugfix | DoD PASS |", (self.ws.app / "reports" / "INDEX.md").read_text("utf-8"))
+
+    def test_sin_foto_1_6_0_daba_cero_archivos_y_ahora_no_escribe_y_explica(self):
+        """Sin foto (como en 1.6.0) y sin "repos", el principal no tiene cambios: no hay reporte vacío."""
+        self.ws.fix_login()
+        self.ws.write_meta()
+        git(self.ws.app, "checkout", "-q", "--", "local-modules.json")
+        result = self.ws.generate()
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("No genero el reporte", result.stderr)
+        self.assertIn("../shop-auth", result.stderr)
+        self.assertIn("--unit ../shop-auth --folder fix-login", result.stderr)
+        self.assertFalse((self.ws.task / "report.html").exists())
+
+
+class SnapshotTest(WorkspaceTest):
+    """Punto 1: --folder guarda la foto inicial con el principal, los repos hermanos y las fuentes del modelo."""
+
+    def test_la_foto_trae_cada_repo_con_rama_head_y_archivos_sucios_con_su_hash(self):
+        write(self.ws.billing / "notas.txt", "pendiente\n")
+        result = self.ok(self.ws.folder())
+        self.assertIn("   foto inicial: reports/implementation/2026-03-10-fix-login/snapshot.json (3 repos: el "
+                      "principal, 1 unidad y 1 repo hermano)", result.stdout)
+        snapshot = self.ws.snapshot()
+        repos = {entry["path"]: entry for entry in snapshot["repos"]}
+        self.assertEqual(sorted(repos), [".", "../billing-tools", "../shop-auth"])
+        self.assertEqual((repos["."]["role"], repos["."]["units"]), ("main", ["app-shell"]))
+        self.assertEqual((repos["../shop-auth"]["role"], repos["../shop-auth"]["units"]), ("unit", ["shop-auth"]))
+        self.assertEqual(repos["../billing-tools"]["role"], "sibling")
+        for path, entry in repos.items():
+            repo = self.ws.app / path
+            self.assertEqual(entry["branch"], "main")
+            self.assertEqual(entry["head"], git(repo, "rev-parse", "HEAD").strip())
+        expected = git(self.ws.billing, "hash-object", "--no-filters", "notas.txt").strip()
+        self.assertEqual(repos["../billing-tools"]["dirty"], {"notas.txt": expected})
+        self.assertEqual(list(repos["."]["dirty"]), ["local-modules.json"])  # la foto no se ve a sí misma
+        self.assertEqual(snapshot["registered"], [])
+
+    def test_volver_a_pedir_la_carpeta_conserva_la_foto_del_inicio(self):
+        self.ok(self.ws.folder())
+        before = (self.ws.task / "snapshot.json").read_bytes()
+        self.ws.fix_login()
+        again = self.ok(self.ws.folder())
+        self.assertIn("ya existía: se conserva la del inicio de la tarea", again.stdout)
+        self.assertEqual((self.ws.task / "snapshot.json").read_bytes(), before)
+
+    def test_avisa_si_la_foto_ya_encuentra_cambios_en_el_principal_o_las_unidades(self):
+        write(self.ws.app / "notas.txt", "x\n")
+        write(self.ws.auth / LOGIN, LOGIN_KT_FIXED)
+        result = self.ok(self.ws.folder())
+        self.assertIn("La foto inicial ya encuentra cambios sin commit en app-shell: 1 archivo (notas.txt); "
+                      "shop-auth: 1 archivo (%s)" % LOGIN, result.stderr)
+        self.assertNotIn("local-modules.json", result.stderr)  # la configuración local no es un cambio ajeno
+
+    def test_una_unidad_sin_clonar_queda_anotada_sin_fallar(self):
+        write(self.ws.app / "AGENTS.md", SHELL_AGENTS.replace("`../shop-auth`", "`../core-lib`"))
+        self.ok(self.ws.folder())
+        snapshot = self.ws.snapshot()
+        self.assertEqual(snapshot["missing_units"], [{"unit": "shop-auth", "path": "../core-lib"}])
+
+    def test_el_hash_es_el_de_git_hash_object(self):
+        folder = self.ws.parent / "hashes"
+        folder.mkdir()
+        init_repo(folder)
+        write(folder / "texto.txt", "línea\r\n")
+        (folder / "binario.bin").write_bytes(b"\x00\x01\xff")
+        os.symlink("texto.txt", str(folder / "enlace"))
+        for name in ("texto.txt", "binario.bin"):
+            expected = git(folder, "hash-object", "--no-filters", name).strip()
+            self.assertEqual(report_module.content_hash(folder / name), expected, name)
+        git(folder, "add", "enlace")
+        self.assertEqual(report_module.content_hash(folder / "enlace"),
+                         git(folder, "ls-files", "-s", "enlace").split()[1])
+        self.assertIsNone(report_module.content_hash(folder / "no-existe"))
+        self.assertEqual(report_module.content_hash(folder / ".git"), "dir")
+
+    def test_una_tarea_empezada_sin_foto_no_la_toma_tarde(self):
+        write(self.ws.task / "meta.json", json.dumps({"title": "x"}))
+        result = self.ok(self.ws.folder())
+        self.assertIn("La tarea empezó sin foto inicial", result.stderr)
+        self.assertFalse((self.ws.task / "snapshot.json").exists())
+        self.assertNotIn("foto inicial:", result.stdout)
+
+
+class ManySiblingsTest(WorkspaceTest):
+    """Más de 50 repos hermanos: un solo `git status` por repo, en paralelo, y sin pasos por archivo."""
+
+    SIBLINGS = 60
+
+    def setUp(self):
+        super().setUp()
+        for number in range(self.SIBLINGS):
+            folder = self.ws.mkdir("proyecto-%02d" % number)
+            git(folder, "init", "-q")
+        write(self.ws.parent / "proyecto-07" / "borrador.txt", "x\n")
+        bin_dir = self.ws.parent.parent / "bin"
+        bin_dir.mkdir()
+        self.log = self.ws.parent.parent / "git.log"
+        real_git = shutil.which("git", path=ENV.get("PATH"))
+        (bin_dir / "git").write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\nexec %s "$@"\n' % (
+            shlex.quote(str(self.log)), shlex.quote(real_git)), encoding="utf-8")
+        (bin_dir / "git").chmod(0o755)
+        self.env = dict(ENV, PATH=str(bin_dir) + os.pathsep + ENV.get("PATH", ""))
+
+    def calls(self):
+        lines = self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+        self.log.write_text("", encoding="utf-8")
+        return lines
+
+    def test_la_foto_y_el_reporte_con_60_hermanos(self):
+        start = time.monotonic()
+        self.ok(self.ws.folder(env=self.env))
+        elapsed = time.monotonic() - start
+        calls = self.calls()
+        repos = self.SIBLINGS + 3  # los 60, el principal, shop-auth y billing-tools
+        self.assertEqual(sum(1 for line in calls if "status --porcelain=v2" in line), repos)
+        self.assertLess(len(calls), repos + 15, "\n".join(calls))  # nada por archivo ni por repo fuera del status
+        self.assertLess(elapsed, 60)
+        self.assertEqual(len(self.ws.snapshot()["repos"]), repos)
+        self.ws.fix_login()
+        write(self.ws.parent / "proyecto-33" / "nuevo.txt", "x\n")  # un proyecto ajeno cambia durante la tarea
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate(env=self.env))
+        calls = self.calls()
+        self.assertEqual(sum(1 for line in calls if "status --porcelain=v2" in line), repos)
+        self.assertIn("../proyecto-33: 1 archivo sin commit", result.stderr)
+        self.assertNotIn("proyecto-07", result.stderr)  # estaba sucio antes y no cambió: no es noticia
+        self.assertNotIn("proyecto-33", self.ws.html())
+
+
+class UnreadableFolderTest(WorkspaceTest):
+    """Una carpeta sin permiso en la carpeta padre no detiene ni la foto ni el reporte."""
+
+    def setUp(self):
+        super().setUp()
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("como root, una carpeta sin permiso se lee igual")
+        self.secret = self.ws.mkdir("secreto")
+        git(self.secret, "init", "-q")
+        self.secret.chmod(0)
+
+    def tearDown(self):
+        self.secret.chmod(0o755)
+        super().tearDown()
+
+    def test_queda_anotada_y_sigue(self):
+        result = self.ok(self.ws.folder())
+        self.assertIn("No pude leer 1 carpeta: ../secreto (sin permiso)", result.stderr)
+        self.assertEqual(self.ws.snapshot()["unreadable"], [{"path": "../secreto", "reason": "sin permiso"}])
+        self.ws.fix_login()
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        self.assertIn('id="unidad-shop-auth"', self.ws.html())
+
+
+class ForeignSiblingTest(WorkspaceTest):
+    """Punto 3: un repo hermano que cambió durante la tarea y no es unidad no entra: se lista para preguntar."""
+
+    def test_no_entra_y_se_lista_con_el_comando_para_registrarlo(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        write(self.ws.billing / "README.md", "# Facturación\n\nOtro proyecto, otra persona.\n")
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        self.assertNotIn("billing-tools", self.ws.html())
+        self.assertIn("Otros repos cambiaron durante la tarea y no son unidades del modelo ni están registrados",
+                      result.stderr)
+        self.assertIn("../billing-tools: 1 archivo sin commit", result.stderr)
+        self.assertIn("--unit ../billing-tools --folder fix-login", result.stderr)
+
+    def test_si_el_usuario_dice_que_es_de_la_tarea_se_registra_y_entra(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        write(self.ws.billing / "README.md", "# Facturación\n\nCambio de la tarea.\n")
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        registered = self.ok(self.ws.unit("../billing-tools"))
+        self.assertIn("✔ Unidad registrada: billing-tools (../billing-tools)", registered.stdout)
+        result = self.ok(self.ws.generate())
+        self.assertIn('id="unidad-billing-tools"', self.ws.html())
+        self.assertNotIn("Otros repos cambiaron", result.stderr)
+
+    def test_un_hermano_sucio_desde_antes_que_no_cambia_no_se_nombra(self):
+        write(self.ws.billing / "borrador.txt", "x\n")
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        self.assertNotIn("billing-tools", result.stderr + self.ws.html())
+
+
+class RegisterUnitTest(WorkspaceTest):
+    """Punto 2: --unit anota la unidad en "repos" del meta (lo crea si falta) y en la foto, en el momento."""
+
+    agents = SHELL_AGENTS_WITHOUT_AUTH  # shop-auth no está en el modelo: solo entra si se registra
+
+    def meta(self):
+        return json.loads((self.ws.task / "meta.json").read_text(encoding="utf-8"))
+
+    def test_crea_el_meta_si_falta_y_no_duplica(self):
+        self.ok(self.ws.folder())
+        first = self.ok(self.ws.unit("../shop-auth"))
+        self.assertIn("✔ Unidad registrada: shop-auth (../shop-auth)", first.stdout)
+        self.assertEqual(self.meta(), {"repos": [{"path": "../shop-auth", "name": "shop-auth"}]})
+        again = self.ok(self.ws.unit("../shop-auth/src"))
+        self.assertIn("ya estaba registrada", again.stdout)
+        self.assertEqual(len(self.meta()["repos"]), 1)
+        self.assertEqual(self.ws.snapshot()["registered"], ["../shop-auth"])
+
+    def test_conserva_lo_que_el_meta_ya_tiene(self):
+        self.ok(self.ws.folder())
+        self.ws.write_meta(files={"x": {"why": "y"}})
+        self.ok(self.ws.unit("../shop-auth"))
+        meta = self.meta()
+        self.assertEqual(meta["files"], {"x": {"why": "y"}})
+        self.assertEqual(meta["title"], "Corrige el login con clave vacía")
+        self.assertEqual(meta["repos"], [{"path": "../shop-auth", "name": "shop-auth"}])
+
+    def test_la_registrada_entra_aunque_el_meta_se_reescriba_sin_repos(self):
+        self.ok(self.ws.folder())
+        self.ok(self.ws.unit("../shop-auth"))  # al pasarla a fuente o al correr su DoD
+        self.ws.fix_login()
+        self.ws.write_meta()  # el agente escribe el meta entero al final, sin "repos"
+        self.ok(self.ws.generate())
+        self.assertIn('id="unidad-shop-auth"', self.ws.html())
+
+    def test_sin_registrar_no_entra_y_el_reporte_vacio_dice_como_registrarla(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta()
+        result = self.ws.generate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("../shop-auth (3 archivos sin commit)", result.stderr)
+        self.assertIn("--unit ../shop-auth --folder fix-login", result.stderr)
+
+    def test_acepta_el_identificador_del_modelo(self):
+        write(self.ws.app / "AGENTS.md", SHELL_AGENTS)
+        self.ok(self.ws.folder())
+        self.ok(self.ws.unit("shop-auth"))
+        self.assertEqual(self.meta()["repos"], [{"path": "../shop-auth", "name": "shop-auth", "main_branch": "main"}])
+
+    def test_una_unidad_del_principal_no_se_registra(self):
+        self.ok(self.ws.folder())
+        result = self.ok(self.ws.unit("src"))
+        self.assertIn("es del repo principal: ya entra al reporte", result.stdout)
+        self.assertFalse((self.ws.task / "meta.json").exists())
+
+    def test_errores_claros_sin_traceback(self):
+        self.ok(self.ws.folder())
+        missing = self.ws.unit("../no-existe")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn('No encuentro la unidad "../no-existe"', missing.stderr)
+        write(self.ws.task / "meta.json", "{roto")
+        broken = self.ws.unit("../shop-auth")
+        self.assertEqual(broken.returncode, 1)
+        self.assertIn("no es un JSON válido", broken.stderr)
+        self.assertEqual((self.ws.task / "meta.json").read_text(encoding="utf-8"), "{roto")
+        alone = self.ws.script("--unit", "../shop-auth")
+        self.assertEqual(alone.returncode, 2)
+        self.assertIn("--unit va con --folder", alone.stderr)
+        for result in (missing, broken):
+            self.assertNotIn("Traceback", result.stderr)
+
+
+class PreviousChangesTest(WorkspaceTest):
+    """Punto 3: lo que ya estaba antes de la foto, en un repo de la tarea."""
+
+    def report_with(self, before, during):
+        before()
+        self.ok(self.ws.folder())
+        during()
+        self.ws.fix_login()
+        self.ws.write_meta()
+        return self.ok(self.ws.generate())
+
+    def test_sucio_antes_y_sin_cambios_va_a_no_atribuidos_fuera_de_los_conteos(self):
+        self.report_with(lambda: write(self.ws.auth / "NOTAS.md", "borrador\n"), lambda: None)
+        html = self.ws.html()
+        self.assertIn("Cambios no atribuidos", html)
+        self.assertRegex(html, r'<code class="file-path">NOTAS.md</code> <span class="muted">· sin commit desde antes')
+        self.assertEqual(self.stat(html, "Archivos nuevos"), "1")  # solo LoginTest.kt
+        self.assertIn('<details class="block">', html)  # colapsado
+
+    def test_sucio_antes_y_que_ademas_cambio_entra_con_un_aviso(self):
+        self.report_with(lambda: write(self.ws.auth / LOGIN, LOGIN_KT + "// a medias\n"), lambda: None)
+        html = self.ws.html()
+        self.assertEqual(self.stat(html, "Archivos modificados"), "2")
+        self.assertIn("Ya tenía cambios sin commit antes de la tarea", html)
+        self.assertIn("Archivos que ya tenían cambios antes de la tarea", html)
+
+    def test_lo_commiteado_en_la_rama_antes_de_la_foto_no_es_de_la_tarea(self):
+        def before():
+            git(self.ws.auth, "checkout", "-q", "-b", "feat/otra-cosa")
+            write(self.ws.auth / "VIEJO.md", "de antes\n")
+            commit_all(self.ws.auth, "antes de la tarea")
+        self.report_with(before, lambda: None)
+        html = self.ws.html()
+        self.assertRegex(html, r"VIEJO.md</code> <span class=\"muted\">· commiteado en la rama antes de la tarea")
+        self.assertEqual(self.stat(html, "Archivos nuevos"), "1")
+
+    def test_el_meta_que_explica_un_archivo_previo_avisa_de_la_foto_tardia(self):
+        write(self.ws.auth / "NOTAS.md", "borrador\n")
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta(files={"shop-auth:NOTAS.md": {"why": "Notas de la tarea."}})
+        result = self.ok(self.ws.generate())
+        self.assertIn("El meta explica archivos que ya estaban así en la foto inicial", result.stderr)
+        self.assertIn("--ignore-snapshot", result.stderr)
+
+    def test_la_rama_del_inicio_y_la_actual(self):
+        self.ok(self.ws.folder())
+        git(self.ws.auth, "checkout", "-q", "-b", "fix/SHOP-1234-login")
+        self.ws.fix_login()
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        self.assertIn("<code>fix/SHOP-1234-login</code> <span class=\"muted\">· al empezar: <code>main</code>",
+                      self.ws.html())
+
+
+class EmptyReportTest(WorkspaceTest):
+    """Punto 4: sin ningún archivo de la tarea no hay reporte; la salida dice la causa probable y el siguiente paso."""
+
+    def assert_empty(self, result):
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("No genero el reporte", result.stderr)
+        self.assertIn("Causa probable:", result.stderr)
+        self.assertIn("Siguiente paso:", result.stderr)
+        self.assertFalse((self.ws.task / "report.html").exists())
+        self.assertIn("| fix-login | — | en curso |", (self.ws.app / "reports" / "INDEX.md").read_text("utf-8"))
+
+    def test_nada_cambio_despues_de_la_foto(self):
+        self.ok(self.ws.folder())
+        self.ws.write_meta()
+        result = self.ws.generate()
+        self.assert_empty(result)
+        self.assertIn("Todo lo que cambió es temporal o configuración local", result.stderr)
+
+    def test_foto_tomada_tarde(self):
+        self.ws.fix_login()
+        self.ok(self.ws.folder())
+        self.ws.write_meta()
+        result = self.ws.generate()
+        self.assert_empty(result)
+        self.assertIn("ya estaban antes de la foto inicial", result.stderr)
+        self.assertIn("--ignore-snapshot", result.stderr)
+        self.ok(self.ws.unit("../shop-auth"))
+        recovered = self.ok(self.ws.generate("--ignore-snapshot"))
+        self.assertIn("Genero sin la foto inicial", recovered.stderr)
+        self.assertIn('id="unidad-shop-auth"', self.ws.html())
+
+    def test_ningun_repo_cambio_despues_de_la_foto(self):
+        git(self.ws.app, "checkout", "-q", "--", "local-modules.json")
+        self.ok(self.ws.folder())
+        self.ws.write_meta()
+        result = self.ws.generate()
+        self.assert_empty(result)
+        self.assertIn("Ningún repo de la tarea cambió después de la foto inicial (app-shell, shop-auth)", result.stderr)
+
+    def test_sin_foto_ningun_repo_con_cambios_contra_su_base(self):
+        git(self.ws.app, "checkout", "-q", "--", "local-modules.json")
+        self.ws.write_meta()
+        result = self.ws.generate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Ningún repo de la tarea tiene cambios contra su base (app-shell: merge-base con main", result.stderr)
+        self.assertIn("pasa la base con --base", result.stderr)
+        self.assertFalse((self.ws.task / "report.html").exists())
+
+
+class OldTaskWithoutPhotoTest(WorkspaceTest):
+    """Punto 3, sin foto: una tarea vieja usa "repos" del meta y lista los repos sucios como no atribuidos."""
+
+    def test_usa_repos_del_meta_y_lista_los_hermanos_sucios(self):
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        self.ws.fix_login()
+        write(self.ws.billing / "borrador.txt", "x\n")
+        self.ws.write_meta()  # sin snapshot.json: la tarea empezó con 1.6.0
+        result = self.ok(self.ws.generate())
+        html = self.ws.html()
+        self.assertIn("La tarea no tiene foto inicial", result.stderr)
+        self.assertIn("La tarea no tiene foto inicial", html)
+        self.assertIn('id="unidad-app-shell"', html)
+        self.assertNotIn('id="unidad-shop-auth"', html)
+        unattributed = html.split('id="no-atribuidos"', 1)[1].split("</section>", 1)[0]
+        for path in ("../shop-auth", "../billing-tools", "borrador.txt", KOTLIN_TEST):
+            self.assertIn(path, unattributed)
+        self.assertIn("Repos con cambios sin commit que no están en \"repos\" del meta", result.stderr)
+        self.assertIn("--unit ../shop-auth --folder fix-login", result.stderr)
+        self.assertEqual(self.stat(html, "Archivos nuevos"), "1")  # src/Nuevo.kt
+
+    def test_con_repos_en_el_meta_entra_como_antes(self):
+        self.ws.fix_login()
+        self.ws.write_meta(repos=[{"path": "../shop-auth"}])
+        self.ok(self.ws.generate())
+        self.assertIn('id="unidad-shop-auth"', self.ws.html())
+
+
+class LanguageMigrationTest(unittest.TestCase):
+    """Punto 5: un archivo de código borrado, vaciado o reducido a comentarios cuyo equivalente con el mismo nombre
+    base aparece en otra extensión de código."""
+
+    REPO = {"real": "/repo"}
+
+    def entry(self, status, path, before=None, after=None, old=None):
+        return {"status": status, "path": path, "old": old if old is not None else (None if status == "A" else path),
+                "before": before, "after": after, "repo": self.REPO}
+
+    def found(self, *files):
+        return [(f["path"], other["path"], how) for f, other, how in report_module.language_migrations(list(files))]
+
+    def test_borrado_vaciado_y_reducido_a_comentarios(self):
+        kotlin = self.entry("A", "kotlin/LoginTest.kt", after=LOGIN_TEST_KT)
+        cases = (
+            (self.entry("D", "java/LoginTest.java", before=LOGIN_TEST_JAVA), "borrado"),
+            (self.entry("M", "java/LoginTest.java", before=LOGIN_TEST_JAVA, after=""), "vaciado"),
+            (self.entry("M", "java/LoginTest.java", before=LOGIN_TEST_JAVA, after="// migrado a Kotlin\n"),
+             "reducido a comentarios"),
+            (self.entry("M", "java/LoginTest.java", before=LOGIN_TEST_JAVA,
+                        after="package com.example.auth;\n\n/* migrado */\n"), "reducido a comentarios"),
+        )
+        for java, how in cases:
+            self.assertEqual(self.found(java, kotlin), [("java/LoginTest.java", "kotlin/LoginTest.kt", how)], how)
+
+    def test_renombrado_a_otra_extension(self):
+        moved = self.entry("M", "kotlin/LoginTest.kt", before=LOGIN_TEST_JAVA, after=LOGIN_TEST_KT,
+                           old="java/LoginTest.java")
+        self.assertEqual(self.found(moved), [("kotlin/LoginTest.kt", "kotlin/LoginTest.kt", "renombrado")])
+
+    def test_sin_aviso(self):
+        kotlin = self.entry("A", "kotlin/LoginTest.kt", after=LOGIN_TEST_KT)
+        cases = (
+            [self.entry("M", "java/LoginTest.java", before=LOGIN_TEST_JAVA, after=LOGIN_TEST_JAVA + "// x\n"), kotlin],
+            [self.entry("D", "docs/LoginTest.md", before="# x\n"), self.entry("A", "docs/LoginTest.txt", after="x")],
+            [self.entry("D", "java/LoginTest.java", before=LOGIN_TEST_JAVA), self.entry("A", "LoginTest.md", after="x")],
+            [self.entry("D", "java/LoginTest.java", before=LOGIN_TEST_JAVA), self.entry("A", "Otro.kt", after="x")],
+            [self.entry("D", "a/Login.java", before=LOGIN_TEST_JAVA), self.entry("A", "b/Login.java", after="x")],
+            [self.entry("M", "x/Vacio.java", before="", after=""), self.entry("A", "x/Vacio.kt", after="x")],
+        )
+        for files in cases:
+            self.assertEqual(self.found(*files), [], files)
+
+    def test_en_otro_repo_no_es_equivalente(self):
+        java = self.entry("D", "LoginTest.java", before=LOGIN_TEST_JAVA)
+        kotlin = dict(self.entry("A", "LoginTest.kt", after=LOGIN_TEST_KT), repo={"real": "/otro"})
+        self.assertEqual(self.found(java, kotlin), [])
+
+
+class GroupedReportTest(WorkspaceTest):
+    """Punto 6: resumen global y una sección por unidad, con rama, base, conteos y DoD de esa unidad."""
+
+    def setUp(self):
+        super().setUp()
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        write(self.ws.app / "src" / "main" / "kotlin" / "com" / "example" / "shop" / "LoginScreen.kt", "class LoginScreen\n")
+        self.ws.write_meta(dod=[
+            {"icon": "🧪", "name": "Tests", "command": "cd ../shop-auth && make check", "status": "pass",
+             "unit": "shop-auth"},
+            {"icon": "🧪", "name": "app-shell · Tests", "command": "make check", "status": "fail", "output": "1 fallo"},
+            {"icon": "🏗️", "name": "Build de la app", "command": "make build", "status": "pass"},
+        ], groups=[{"match": "shop-auth:src/test/", "why": "Tests del login."}])
+        self.result = self.ok(self.ws.generate())
+        self.html = self.ws.html()
+
+    def unit(self, name):
+        return self.html.split('<section id="unidad-%s"' % name, 1)[1].split("</section>", 1)[0]
+
+    def test_resumen_global_y_una_seccion_por_unidad(self):
+        summary = self.html.split('<section id="resumen">', 1)[1].split("</section>", 1)[0]
+        self.assertEqual(self.stat(summary, "Archivos nuevos"), "2")
+        self.assertEqual(self.stat(summary, "Unidades"), "2")
+        self.assertEqual(self.stat(summary, "DoD"), "FAIL")
+        self.assertLess(self.html.index('id="resumen"'), self.html.index('id="unidad-app-shell"'))
+        self.assertLess(self.html.index('id="unidad-app-shell"'), self.html.index('id="unidad-shop-auth"'))
+        for name in ("app-shell", "shop-auth"):
+            self.assertIn('<a href="#unidad-%s">' % name, self.html)  # índice y tabla de unidades
+            unit = self.unit(name)
+            for label in ("Rama", "Base", "Cambios", "DoD de la unidad"):
+                self.assertIn('<div class="k">%s</div>' % label, unit)
+        self.assertIn("1 nuevo · 2 modificados · 0 eliminados", self.unit("shop-auth"))
+        self.assertIn("1 nuevo · 0 modificados · 0 eliminados", self.unit("app-shell"))
+
+    def test_el_dod_de_cada_unidad_en_su_seccion_y_el_del_proyecto_aparte(self):
+        self.assertIn("cd ../shop-auth &amp;&amp; make check", self.unit("shop-auth"))
+        self.assertIn("app-shell · Tests", self.unit("app-shell"))
+        self.assertIn("1 fallo", self.unit("app-shell"))
+        project = self.html.split('<section id="dod">', 1)[1].split("</section>", 1)[0]
+        self.assertIn("Build de la app", project)
+        self.assertNotIn("app-shell · Tests", project)
+
+    def test_grupos_por_unidad_e_ids_unicos(self):
+        self.assertEqual(self.unit("shop-auth").count("shop-auth:src/test/ · 1 archivo<"), 2)  # uno por estado
+        ids = re.findall(r'<details class="file" open id="(f\d+)"', self.html)
+        self.assertEqual(len(ids), len(set(ids)))
+
+
+class AnalysisDataTest(WorkspaceTest):
+    """Punto 9: el flujo completa los datos de análisis; el script nunca falla por ellos."""
+
+    def generate(self, **extra):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta(**extra)
+        result = self.ok(self.ws.generate())
+        return result, self.body(self.ws.html())
+
+    def test_sin_datos_de_analisis_el_reporte_sale_completo_sin_esas_secciones(self):
+        result, body = self.generate()
+        for text in ("Causa raíz", "Impacto", "Diagramas", "👍 Pros", "👎 Contras", "Riesgo ", "Severidad", "Capa:",
+                     "🎫", "Rama de trabajo", "<script src=", "Sin contras"):
+            self.assertNotIn(text, body)
+        for text in ('id="resumen"', 'id="unidad-shop-auth"', "Archivos nuevos", "DoD de la unidad", "Diff"):
+            self.assertIn(text, body)
+        self.assertNotRegex(body, r"<section[^>]*><h2>[^<]*</h2></section>")  # ninguna sección vacía
+        self.assertIn("Datos de análisis que faltan", result.stderr)
+        self.assertIn("diagrams, impact, severity, root_cause", result.stderr)
+
+    def test_con_todos_los_datos_se_ven_todos(self):
+        files = {"shop-auth:" + LOGIN: {"before": "Aceptaba la clave vacía.", "after": "La rechaza.",
+                                        "risk": "alto", "layer": "dominio", "pros": ["Un solo lugar valida"],
+                                        "cons": ["Cambia un contrato que usa la app"]},
+                 "shop-auth:" + KOTLIN_TEST: {"why": "Test del bug.", "risk": "bajo", "layer": "tests",
+                                              "pros": ["Reproduce el bug"], "cons": ["Duplica el de Java"]},
+                 "shop-auth:" + JAVA_TEST: {"before": "Test en Java.", "after": "Vacío.", "risk": "medio",
+                                            "pros": ["x"], "cons": ["Migración no pedida"]}}
+        result, body = self.generate(files=files, **FULL_ANALYSIS)
+        for text in ("🎫 SHOP-1234", "Severidad alta", "Causa raíz", "Impacto", "Diagramas", "Riesgo alto",
+                     "Capa: dominio", "👍 Pros", "👎 Contras", "Cambia un contrato que usa la app",
+                     "Rama de trabajo", "El usuario eligió seguir en la rama actual", "<pre class=\"mermaid\">"):
+            self.assertIn(text, body)
+        self.assertNotIn("Datos de análisis que faltan", result.stderr)
+
+    def test_un_valor_vacio_no_se_muestra_y_uno_invalido_se_ignora_con_aviso(self):
+        files = {"shop-auth:" + LOGIN: {"why": "", "risk": "", "pros": [], "cons": [" "], "layer": ""},
+                 "shop-auth:" + KOTLIN_TEST: {"risk": "enorme", "pros": "no es lista", "layer": 3}}
+        result, body = self.generate(files=files, ticket="", root_cause=None, impact=[], diagrams=[{"title": "x"}],
+                                     severity="grave")
+        for text in ("Riesgo ", "👍 Pros", "👎 Contras", "Capa:", "🎫", "Causa raíz", "Impacto", "Diagramas",
+                     "Severidad"):
+            self.assertNotIn(text, body)
+        for warning in ('"risk" de shop-auth:%s debe ser critico, alto, medio o bajo (llegó "enorme")' % KOTLIN_TEST,
+                        '"pros" de shop-auth:%s debe ser una lista de textos' % KOTLIN_TEST,
+                        '"layer" de shop-auth:%s debe ser un texto' % KOTLIN_TEST,
+                        'La entrada 1 de "diagrams" no trae mermaid', '"severity" debe ser critico'):
+            self.assertIn(warning, result.stderr)
+
+
+class ThemeTest(WorkspaceTest):
+    """Punto 7: el sistema de tema de hb-performance, copiado: mismos tokens, el del sistema por defecto, un botón y la
+    preferencia en localStorage dentro de try/catch; al imprimir, claro. Un HTML autónomo."""
+
+    PERF = ROOT / "skills" / "hb-performance" / "assets" / "plantillas" / "reporte.html"
+
+    @staticmethod
+    def tokens(css, selector):
+        start = css.index(selector + " {")
+        block = css[start:css.index("}", start)]
+        return dict(re.findall(r"(--[\w-]+):\s*([^;]+?)\s*;", block))
+
+    def setUp(self):
+        super().setUp()
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        self.page = self.ws.html()
+        self.perf = self.PERF.read_text(encoding="utf-8")
+
+    def test_los_mismos_tokens_que_hb_performance(self):
+        light = self.tokens(self.page, ":root")
+        dark = self.tokens(self.page, ':root:not([data-theme="light"])')
+        self.assertEqual(light, self.tokens(self.perf, ":root"))
+        self.assertEqual(dark, self.tokens(self.perf, ':root:not([data-theme="light"])'))
+        self.assertEqual(self.tokens(self.page, ':root[data-theme="dark"]'), dark)
+        printed = ':root, :root[data-theme], :root:not([data-theme="light"])'
+        self.assertEqual(self.tokens(self.page, printed), self.tokens(self.perf, printed))
+        self.assertEqual(len(light), 18)
+
+    def test_tema_del_sistema_boton_y_preferencia_recordada(self):
+        self.assertIn("@media (prefers-color-scheme: dark) {\n    :root:not([data-theme=\"light\"]) {", self.page)
+        self.assertIn('<button class="theme-btn" id="theme-btn" type="button">', self.page)
+        uses = [line for line in self.page.splitlines() if "localStorage" in line and "/*" not in line]
+        self.assertGreaterEqual(len(uses), 3)
+        for line in uses:
+            self.assertRegex(line, r"try \{.*localStorage.*\} catch \(e\) \{\}")
+        self.assertRegex(self.page.split("<style>", 1)[0], r'<script id="theme-early">')  # antes de pintar
+
+    def test_imprime_en_claro_y_no_carga_nada_de_fuera(self):
+        self.assertIn("@media print", self.page)
+        self.assertIn(".theme-btn, .toc, .tabs { display: none; }", self.page)
+        for remote in ("<link", "@import", "url(http", "<script src="):
+            self.assertNotIn(remote, self.page)
+
+
+class ExampleReportTest(WorkspaceTest):
+    """Los reportes de ejemplo para revisar a ojo, en tema claro y oscuro: con todos los datos de análisis y sin ellos.
+    Con HB_IMPLEMENT_EJEMPLOS=<carpeta>, los deja ahí."""
+
+    def build(self, analysis):
+        git(self.ws.auth, "checkout", "-q", "-b", "fix/SHOP-1234-login")
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        write(self.ws.app / "src" / "main" / "kotlin" / "com" / "example" / "shop" / "LoginScreen.kt",
+              "package com.example.shop\n\nclass LoginScreen(private val login: Login) {\n"
+              "    fun submit(user: String, password: String) = login.accepts(user, password)\n}\n")
+        write(self.ws.app / CHECKOUT, "package com.example.shop\n\nclass Checkout(val total: Long)\n")
+        extra = {}
+        if analysis:
+            extra = dict(FULL_ANALYSIS, files={
+                CHECKOUT: {"before": "Checkout sin total.", "after": "Lleva el total en centavos.", "risk": "medio",
+                           "layer": "dominio", "pros": ["El total viaja tipado"], "cons": ["Rompe a quien lo construía"]},
+                "src/main/kotlin/com/example/shop/LoginScreen.kt": {
+                    "why": "La pantalla delega la validación en shop-auth.", "risk": "bajo", "layer": "presentación",
+                    "pros": ["Sin lógica en la vista"], "cons": []},
+                "shop-auth:" + LOGIN: {"before": "Aceptaba la clave vacía.", "after": "Exige usuario y clave.",
+                                       "risk": "alto", "layer": "dominio",
+                                       "pros": ["Un solo lugar valida", "Cubierto por test"],
+                                       "cons": ["Cambia el contrato de accepts"]},
+                "shop-auth:" + KOTLIN_TEST: {"why": "Reproduce el bug de la clave vacía.", "risk": "bajo",
+                                             "layer": "tests", "pros": ["Falla sin la corrección"],
+                                             "cons": ["Duplica el test en Java"]},
+                "shop-auth:" + JAVA_TEST: {"before": "El test en Java.", "after": "Vacío: se migró a Kotlin.",
+                                           "risk": "medio", "layer": "tests", "pros": ["Un solo lenguaje"],
+                                           "cons": ["Nadie pidió migrarlo"]}})
+        self.ws.write_meta(dod=[
+            {"icon": "🧪", "name": "shop-auth · Tests", "command": "cd ../shop-auth && make check", "status": "pass"},
+            {"icon": "🧹", "name": "shop-auth · Lint", "command": "cd ../shop-auth && make lint", "status": "pass"},
+            {"icon": "🧪", "name": "app-shell · Tests", "command": "make check", "status": "pass"},
+            {"icon": "🏗️", "name": "Build de la app con shop-auth en fuente", "command": "make build",
+             "status": "skipped", "note": "sin el SDK en este entorno"}], **extra)
+        self.ok(self.ws.generate())
+        target = os.environ.get("HB_IMPLEMENT_EJEMPLOS")
+        if target:
+            name = "con-analisis" if analysis else "sin-analisis"
+            Path(target).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(self.ws.task / "report.html"), os.path.join(target, "reporte-%s.html" % name))
+        return self.ws.html()
+
+    def test_con_todos_los_datos_de_analisis(self):
+        html = self.build(analysis=True)
+        self.assertEqual(self.stat(html, "Unidades"), "2")
+        self.assertIn("🎫 SHOP-1234", html)
+
+    def test_sin_datos_de_analisis(self):
+        html = self.build(analysis=False)
+        self.assertEqual(self.stat(html, "Unidades"), "2")
+        self.assertNotIn("👍 Pros", self.body(html))
+
+
+
+class GitEdgeCasesTest(WorkspaceTest):
+    """Lo que encontró la revisión: estados de git poco comunes que no deben perder archivos de la tarea ni cortar el
+    reporte."""
+
+    def generate(self, **extra):
+        self.ws.write_meta(**extra)
+        result = self.ok(self.ws.generate())
+        return result, self.ws.html()
+
+    def unit_html(self, html, name):
+        return html.split('<section id="unidad-%s"' % name, 1)[1].split("</section>", 1)[0]
+
+    def test_un_nombre_con_acentos_y_espacios_es_de_la_tarea(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        write(self.ws.auth / "docs" / "notas de diseño.md", "# Diseño\n")
+        write(self.ws.auth / "README.md", "# Autenticación\n")
+        result, html = self.generate()
+        unit = self.unit_html(html, "shop-auth")
+        self.assertIn("docs/notas de diseño.md", unit)
+        self.assertIn("README.md", unit)
+        self.assertNotIn("Cambios no atribuidos", html)
+        self.assertNotIn("\\303", html + result.stderr)  # sin las comillas de core.quotePath
+
+    def test_un_grupo_con_campos_invalidos_se_ignora_con_aviso(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        result, html = self.generate(groups=[{"match": "shop-auth:src/test/", "why": 123, "before": ["x"]}])
+        self.assertIn('"why" del grupo shop-auth:src/test/ debe ser un texto', result.stderr)
+        self.assertIn('"before" del grupo shop-auth:src/test/ debe ser un texto', result.stderr)
+        self.assertIn("shop-auth:src/test/ · 1 archivo", html)
+
+    def test_el_cambio_de_puntero_de_un_submodulo_es_de_la_tarea(self):
+        library = self.ws.mkdir("auth-vendor")
+        init_repo(library)
+        write(library / "lib.txt", "v1\n")
+        commit_all(library, "v1")
+        git(self.ws.auth, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "vendor/lib")
+        commit_all(self.ws.auth, "submódulo")
+        self.ok(self.ws.folder())
+        submodule = self.ws.auth / "vendor" / "lib"
+        write(submodule / "lib.txt", "v2\n")
+        commit_all(submodule, "v2")
+        result, html = self.generate()
+        unit = self.unit_html(html, "shop-auth")
+        self.assertIn('<code class="file-path">vendor/lib</code>', unit)
+        self.assertNotIn("Cambios no atribuidos", html)
+
+    def test_una_unidad_sin_commits_no_corta_el_reporte(self):
+        write(self.ws.app / "AGENTS.md", SHELL_AGENTS.replace(
+            "\n\n- Repos vecinos:", "\n| `shop-docs` | `../shop-docs` | En fuente (módulo del build) | — | `make docs` | "
+            "`https://git.example.com/shop/shop-docs.git`, `main` | con la app |\n\n- Repos vecinos:", 1))
+        docs = self.ws.mkdir("shop-docs")
+        git(docs, "init", "-q")
+        self.ok(self.ws.folder())
+        write(docs / "guia.md", "# Guía\n")
+        result, html = self.generate()
+        unit = self.unit_html(html, "shop-docs")
+        self.assertIn("guia.md", unit)
+        self.assertIn("repo sin commits: todo es nuevo", unit)
+
+    def test_un_enlace_que_pasa_a_archivo_es_una_modificacion(self):
+        os.symlink("Login.kt", str(self.ws.auth / "src" / "main" / "kotlin" / "com" / "example" / "auth" / "Alias.kt"))
+        commit_all(self.ws.auth, "enlace")
+        self.ok(self.ws.folder())
+        alias = self.ws.auth / "src" / "main" / "kotlin" / "com" / "example" / "auth" / "Alias.kt"
+        alias.unlink()
+        write(alias, "package com.example.auth\n\ntypealias Alias = Login\n")
+        result, html = self.generate()
+        self.assertIn('<span class="chip st-modified">Modificado</span><code class="file-path">'
+                      'src/main/kotlin/com/example/auth/Alias.kt</code>', html)
+
+    def test_una_fecha_que_no_es_aaaa_mm_dd_no_escribe_fuera_de_la_carpeta(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        reports = self.ws.app / "reports"
+        meta = reports / "meta.json"  # un meta suelto en la base: el formato plano usa la fecha en el nombre
+        write(meta, json.dumps({"title": "x", "date": "../../fuera"}))
+        result = self.ws.script("--meta", meta)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no es AAAA-MM-DD", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(list(self.ws.parent.parent.glob("fuera*")), [])
 
 
 if __name__ == "__main__":

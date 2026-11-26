@@ -87,6 +87,7 @@ class SharedIndexTest(unittest.TestCase):
         self.assertIn("| hb-implement | pagos |", rows[0])
         self.assertIn("| hb-performance | inicio/2026-11-25 |", rows[1])
         # report.py vuelve a escribir su fila (al generar el reporte) y la de perf queda igual
+        write(self.repo / "src" / "a.txt", "b\n")  # la tarea cambia algo después de la foto: sin cambios no hay reporte
         meta = self.repo / "reports" / "implementation" / "2026-11-25-pagos" / "meta.json"
         meta.write_text(json.dumps({"title": "Pagos", "slug": "pagos", "date": "2026-11-25", "type": "feature",
                                     "dod": [{"name": "Tests", "status": "pass"}]}), encoding="utf-8")

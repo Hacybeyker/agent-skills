@@ -7,39 +7,62 @@ con el contexto que git no sabe (título, tipo, por qué de cada archivo, result
 Carpeta de reportes: --out o, sin él, la línea "Carpeta de reportes: <ruta>" del AGENTS.md del repo; si no hay,
 reports. Es la base común de las skills (hb-performance y hb-review escriben en sus propias subcarpetas).
 - Sin marcadores: una carpeta por tarea, <base>/implementation/<fecha>-<slug>/, con meta.json, report.html,
-  bitacora.md y previews/. Una tarea vieja en formato plano (<base>/<fecha>-<slug>.meta.json) sigue ahí, plana.
+  snapshot.json, bitacora.md y previews/. Una tarea vieja en formato plano (<base>/<fecha>-<slug>.meta.json) sigue ahí.
 - Con {fecha} y {slug} en la ruta: la ruta tal cual, con los mismos archivos; la base es la parte fija.
 Si ya hay una carpeta con ese slug en otra fecha, la tarea sigue ahí.
 Cada tarea tiene su fila en <base>/INDEX.md (clave: hb-implement + slug): "en curso" con --folder y el resultado del DoD
 al generar el reporte. Las demás filas y líneas del índice no se tocan; se escribe sobre la ruta real (un enlace
 simbólico sigue siendo enlace).
+
+Foto inicial: --folder, al empezar la tarea, guarda snapshot.json con la rama, el HEAD y los archivos sucios (con su hash
+de contenido, el mismo que da `git hash-object --no-filters`) del repo principal, de cada repo git hermano (las
+subcarpetas directas de la carpeta padre del principal) y de las fuentes de las unidades de ## Estructura. Un solo
+`git status` por repo, en paralelo; una carpeta que no se puede leer queda anotada y no detiene nada.
+--unit <ruta> --folder <slug> registra una unidad en "repos" del meta (y en la foto) en cuanto se pasa a fuente o se
+corre su DoD.
+
+Al generar, cada repo se compara con la foto. Entran el principal, las unidades de ## Estructura y las registradas
+(con --unit o en "repos"), si cambiaron después de la foto. Otro repo hermano que cambió no entra: se lista en la
+salida para que el flujo pregunte si es de la tarea. Un archivo que ya estaba sucio antes y no cambió va a "Cambios no
+atribuidos", fuera de los conteos; si además cambió, entra con un aviso. Sin foto (una tarea vieja), entran el
+principal y "repos" del meta, y los repos hermanos con cambios salen como no atribuidos.
+Sin ningún archivo de la tarea no escribe el reporte: dice la causa probable y el siguiente paso.
+Avisa de un archivo de código borrado o vaciado cuyo equivalente (mismo nombre base) aparece con otra extensión de
+código: una migración de lenguaje que nadie pidió.
+
 Base de comparación de cada repo: --base (o "base" en "repos"); sin ella, el merge-base de HEAD con su rama principal
-(--main-branch o "main_branch"; si no, origin/HEAD, origin/main, origin/master, main o master).
-Los archivos masivos o generados (goldens, fixtures) se explican en grupo, por carpeta o patrón,
-con "groups"; un archivo con su propia entrada en "files" se muestra aparte.
-Con "repos" en el meta, el mismo reporte cubre los repos relacionados (sus claves son "<nombre>:<ruta>"), y
-"temporary" deja fuera los cambios de configuración que no son de la tarea. Los archivos de "### Configuración local
-modificada a propósito" (## Estructura de AGENTS.md) quedan fuera solos, aunque el meta no los nombre.
+(--main-branch, "main_branch" o la de ## Estructura; si no, origin/HEAD, origin/main, origin/master, main o master).
+Los archivos masivos o generados (goldens, fixtures) se explican en grupo, por carpeta o patrón, con "groups"; un
+archivo con su propia entrada en "files" se muestra aparte. "temporary" deja fuera los cambios de configuración que no
+son de la tarea, y los archivos de "### Configuración local modificada a propósito" quedan fuera solos.
+Los datos de análisis (why, before, after, risk, pros, cons, layer, severity, root_cause, impact, diagrams, ticket)
+nunca detienen el reporte: lo que falta o viene vacío no se muestra, y un valor con formato inválido se ignora con un
+aviso.
 En un worktree enlazado al que le faltan AGENTS.md (fuera de git en el principal) o el enlace simbólico por el que
 pasa la carpeta de reportes, se detiene y dice cómo recrearlos, sin escribir nada.
 
 Uso:
-  python3 -I report.py --meta <meta.json> [--base <ref> | --main-branch <rama>] [--out <carpeta>] [--repo .]
   python3 -I report.py --folder <slug> [--date AAAA-MM-DD] [--out <carpeta>] [--repo .]
-      (imprime y crea la carpeta de la tarea, sin generar el reporte)
+      (al empezar: crea la carpeta de la tarea y toma la foto inicial, sin generar el reporte)
+  python3 -I report.py --unit <ruta> --folder <slug> [--out <carpeta>] [--repo .]
+      (registra una unidad: la ruta de su fuente, relativa a la raíz del repo principal, o su identificador)
+  python3 -I report.py --meta <meta.json> [--base <ref> | --main-branch <rama>] [--out <carpeta>] [--repo .]
 """
 import argparse
 import base64
+import concurrent.futures
 import datetime
 import difflib
 import fnmatch
 import glob
+import hashlib
 import html
 import json
 import os
 import pathlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import urllib.parse
@@ -47,15 +70,15 @@ import urllib.parse
 HERE = pathlib.Path(__file__).resolve().parent
 TEMPLATE = HERE.parent / "assets" / "report-template.html"
 TYPES = {
-    "feature": ("badge-feature", "✨ Feature"),
-    "bugfix": ("badge-bugfix", "🐛 Bug Fix"),
-    "enhancement": ("badge-enhancement", "⚡ Enhancement"),
-    "refactor": ("badge-refactor", "♻️ Refactor"),
+    "feature": "✨ Feature",
+    "bugfix": "🐛 Bugfix",
+    "enhancement": "⚡ Mejora",
+    "refactor": "♻️ Refactor",
 }
 PILLS = {
-    "pass": ("pill-pass", "✅ PASS"),
-    "fail": ("pill-fail", "❌ FAIL"),
-    "skipped": ("pill-skipped", "⏭️ SKIPPED"),
+    "pass": ("c-ok", "✅ PASS"),
+    "fail": ("c-ko", "❌ FAIL"),
+    "skipped": ("c-same", "⏭️ SKIPPED"),
 }
 LEVELS = ("critico", "alto", "medio", "bajo")
 RISK_LABELS = {"critico": "Riesgo crítico", "alto": "Riesgo alto", "medio": "Riesgo medio", "bajo": "Riesgo bajo"}
@@ -73,12 +96,31 @@ INDEX_COLUMNS = ["Fecha", "Skill", "Slug", "Tipo", "Estado", "Ruta"]
 INDEX_INTRO = ("# Índice de reportes\n\n"
                "Una fila por tarea. Cada skill agrega o actualiza solo sus filas (clave: Skill + Slug).\n\n")
 INDEX_TABLE = "| " + " | ".join(INDEX_COLUMNS) + " |\n|" + " --- |" * len(INDEX_COLUMNS) + "\n"
+TABLE_SEPARATOR = re.compile(r"\s*\|(\s*:?-+:?\s*\|)+\s*")
 MAIN_BRANCHES = ("origin/main", "origin/master", "main", "master")
 MARKER = re.compile(r"(\{fecha\}|\{slug\})")
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # "Carpeta de reportes: <ruta>" en AGENTS.md, con o sin viñeta, negrita o acentos graves (también en inglés).
 FOLDER_KEY = re.compile(r"carpeta\s+de\s+(?:los\s+)?reportes|reports?\s+folder", re.I)
 FOLDER_LINE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?[*_]*(?P<key>[^:*_`]+?)[*_]*[ \t]*:[*_]*[ \t]*(?P<value>\S.*?)[ \t]*$")
+FENCE = re.compile(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$")
+BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+SNAPSHOT = "snapshot.json"
+SNAPSHOT_FORMAT = 1
+STATUS_TIMEOUT_S = 120
+MAX_WORKERS = 16
+LIST_LIMIT = 50  # rutas por repo en "Cambios no atribuidos"
+ABSENT = object()  # una ruta que no está en un mapa de archivos sucios (None ahí es "borrado")
+# Extensiones de código fuente, para el aviso de migración de lenguaje. Sin cabeceras (.h, .hpp): conviven con su
+# implementación con el mismo nombre base.
+SOURCE_EXTENSIONS = {
+    ".java", ".kt", ".kts", ".scala", ".groovy", ".swift", ".m", ".mm", ".c", ".cc", ".cpp", ".cxx", ".cs", ".fs",
+    ".vb", ".go", ".rs", ".py", ".rb", ".php", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".dart", ".lua", ".pl",
+    ".r", ".jl", ".ex", ".exs", ".erl", ".clj", ".hs", ".ml", ".elm", ".vue", ".svelte",
+}
+NOT_CODE = re.compile(r"(?:package|import|using|namespace|module)\b")
+MIXED_WARNING = ("Ya tenía cambios sin commit antes de la tarea: el diff contra la base mezcla esos cambios con los de "
+                 "la tarea.")
 e = html.escape
 
 
@@ -98,6 +140,10 @@ def decode(data):
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return False
+
+
+def plural(count, word, many=None):
+    return "%d %s" % (count, word if count == 1 else (many or word + "s"))
 
 
 # ── Rutas ────────────────────────────────────────────────────────────────────
@@ -126,6 +172,12 @@ def shown(path, repo):
     """Relativa al repo si está dentro; absoluta si no."""
     relative = relative_in(path, repo)
     return relative.as_posix() if relative is not None else str(path)
+
+
+def display_path(path, main):
+    """La ruta de un repo o carpeta tal como la escribe el modelo: relativa a la raíz del repo principal (".",
+    "../core-lib")."""
+    return pathlib.Path(os.path.relpath(str(path), str(main))).as_posix()
 
 
 def slug(text):
@@ -194,9 +246,76 @@ def local_config(repo):
     return found
 
 
+def markdown_tables(block):
+    """Las tablas Markdown de un bloque: [(celdas de la cabecera, [celdas de cada fila])]."""
+    lines, tables, i = block.splitlines(), [], 0
+    while i < len(lines) - 1:
+        header = index_cells(lines[i])
+        if header is None or not TABLE_SEPARATOR.fullmatch(lines[i + 1]):
+            i += 1
+            continue
+        rows, i = [], i + 2
+        while i < len(lines):
+            cells = index_cells(lines[i])
+            if cells is None:
+                break
+            rows.append(cells)
+            i += 1
+        tables.append((header, rows))
+    return tables
+
+
+def cell_value(cell):
+    """Lo primero entre acentos graves de una celda (o la celda entera); None si es un marcador o está vacía."""
+    quoted = re.findall(r"`([^`]+)`", cell)
+    value = (quoted[0] if quoted else re.sub(r"[*_]", "", cell)).strip()
+    return None if not value or value.startswith("<") or value in ("—", "–", "-") else value
+
+
+def cell_branch(cell):
+    """La rama principal de la celda "Repo y rama principal": lo último entre acentos graves que no es una URL."""
+    for value in reversed(re.findall(r"`([^`]+)`", cell)):
+        value = value.strip()
+        if BRANCH_NAME.fullmatch(value) and not value.endswith(".git"):
+            return value
+    return None
+
+
+def structure_units(repo):
+    """Las unidades del modelo de AGENTS.md: [{"id", "source", "main_branch"}]. Salen de la tabla "### Unidades" de
+    ## Estructura (columna "Fuente") o, en el formato anterior, de "### Repos relacionados" de ## Arquitectura
+    (columna "Ruta"). Sin modelo, []."""
+    try:
+        text = FENCE.sub("", (repo / "AGENTS.md").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    structure = markdown_section(text, "Estructura", 2)
+    if structure is not None:
+        block, keys = markdown_section(structure, "Unidades", 3) or structure, ("fuente",)
+    else:
+        architecture = markdown_section(text, "Arquitectura", 2) or ""
+        block, keys = markdown_section(architecture, "Repos relacionados", 3) or "", ("ruta", "fuente")
+    for header, rows in markdown_tables(block):
+        names = [re.sub(r"[*_`]", "", cell).strip().lower() for cell in header]
+        source = next((i for i, name in enumerate(names) if name in keys), None)
+        if source is None:
+            continue
+        branch = next((i for i, name in enumerate(names) if "rama" in name), None)
+        units = []
+        for row in rows:
+            ident = cell_value(row[0]) if row else None
+            path = cell_value(row[source]) if source < len(row) else None
+            if ident and path:
+                units.append({"id": ident, "source": path,
+                              "main_branch": cell_branch(row[branch]) if branch is not None and branch < len(row)
+                              else None})
+        return units
+    return []
+
+
 class Task:
     """La carpeta de una tarea y sus archivos. flat: el formato plano de antes, <base>/<fecha>-<slug>.<extensión>,
-    que se conserva para las tareas que ya estaban así."""
+    que se conserva para las tareas que ya estaban así (sin foto inicial)."""
     NAMES = {"report": "report.html", "meta": "meta.json", "bitacora": "bitacora.md"}
     SUFFIXES = {"report": ".html", "meta": ".meta.json", "bitacora": ".bitacora.md"}
 
@@ -212,6 +331,10 @@ class Task:
     @property
     def previews(self):
         return self.folder / "previews"
+
+    @property
+    def snapshot(self):
+        return None if self.flat else self.folder / SNAPSHOT
 
 
 class Layout:
@@ -364,6 +487,14 @@ def real(path):
     return pathlib.Path(os.path.realpath(str(path)))
 
 
+def write_json(path, data, ascii_only=False):
+    """Escribe el JSON entero o nada: primero un temporal al lado y después lo reemplaza."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=ascii_only, indent=2) + "\n", encoding="utf-8")
+    os.replace(str(temporary), str(path))
+
+
 # ── Índice de reportes (<base>/INDEX.md) ─────────────────────────────────────
 def index_cell(text):
     return re.sub(r"[\r\n]+", " ", str(text)).replace("|", "\\|").strip()
@@ -407,7 +538,7 @@ def update_index(layout, task, kind, state):
         else:
             lines = text.splitlines(keepends=True)
             header = next((i for i in range(len(lines) - 1) if index_cells(lines[i]) == INDEX_COLUMNS
-                           and re.fullmatch(r"\s*\|(\s*:?-+:?\s*\|)+\s*", lines[i + 1])), None)
+                           and TABLE_SEPARATOR.fullmatch(lines[i + 1])), None)
             if header is None:  # sin la cabecera exacta: la tabla va al final, sin borrar nada
                 row = index_row(layout, task, kind or "—", state)
                 new = text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + \
@@ -449,6 +580,15 @@ def home(path):
 def tracked(repo, name):
     result = subprocess.run(["git", "-C", str(repo), "ls-files", "--", name], capture_output=True, text=True)
     return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def worktree_roots(repo):
+    """Las carpetas (rutas reales) de todos los worktrees del repo: no son repos hermanos, son el mismo repo."""
+    try:
+        listing = git(repo, "worktree", "list", "--porcelain").decode("utf-8", "replace")
+    except RuntimeError:
+        return set()
+    return {os.path.realpath(line[len("worktree "):]) for line in listing.splitlines() if line.startswith("worktree ")}
 
 
 def main_worktree(repo):
@@ -526,6 +666,287 @@ def check_worktree(repo, layout, with_agents):
     raise RuntimeError("\n".join(lines))
 
 
+# ── Foto inicial: estado de cada repo ────────────────────────────────────────
+def content_hash(path):
+    """El hash de contenido de un archivo, el mismo que da `git hash-object --no-filters` (de un enlace simbólico, el de
+    su destino, como lo guarda git). None si no existe, "dir" si es una carpeta (un repo anidado) y "unreadable" si no
+    se puede leer. Sin procesos: se calcula aquí."""
+    path = str(path)
+    try:
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return "unreadable"
+    try:
+        if stat.S_ISLNK(info.st_mode):
+            data = os.fsencode(os.readlink(path))
+            return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+        if stat.S_ISDIR(info.st_mode):
+            return nested_head(path)
+        digest = hashlib.sha1(b"blob %d\0" % info.st_size)
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+def nested_head(path):
+    """El "hash" de una carpeta: el HEAD de un repo anidado (un submódulo), así un cambio de su puntero se ve; "dir" en
+    cualquier otra carpeta."""
+    if not os.path.lexists(os.path.join(path, ".git")):
+        return "dir"
+    result = subprocess.run(["git", "--no-optional-locks", "-C", path, "rev-parse", "-q", "--verify", "HEAD"],
+                            capture_output=True, text=True)
+    return result.stdout.strip() or "dir" if result.returncode == 0 else "dir"
+
+
+def repo_state(root, exclude=None):
+    """La rama, el HEAD y los archivos sucios (modificados, borrados o sin rastrear, con su hash de contenido) de un
+    repo, con un solo `git status` que no toma locks ni reescribe el índice. Si git falla, {"error": motivo}."""
+    command = ["git", "--no-optional-locks", "-C", str(root), "status", "--porcelain=v2", "--branch", "-z",
+               "--untracked-files=all"]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=STATUS_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"error": "git status tardó más de %d s" % STATUS_TIMEOUT_S}
+    except OSError as err:
+        return {"error": str(err)}
+    if result.returncode != 0:
+        lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        return {"error": lines[-1] if lines else "git status falló"}
+    branch_name = head = None
+    paths = []
+    fields = result.stdout.split(b"\0")
+    index = 0
+    while index < len(fields):
+        entry = fields[index].decode("utf-8", "surrogateescape")
+        index += 1
+        if entry.startswith("# branch.oid "):
+            value = entry[len("# branch.oid "):]
+            head = None if value == "(initial)" else value
+        elif entry.startswith("# branch.head "):
+            value = entry[len("# branch.head "):]
+            branch_name = None if value == "(detached)" else value
+        elif entry[:2] == "1 ":
+            parts = entry.split(" ", 8)
+            paths += parts[8:]
+        elif entry[:2] == "2 ":
+            parts = entry.split(" ", 9)
+            paths += parts[9:]
+            if index < len(fields):  # con -z, la ruta de origen del renombre viene en el campo siguiente
+                paths.append(fields[index].decode("utf-8", "surrogateescape"))
+                index += 1
+        elif entry[:2] == "u ":
+            paths += entry.split(" ", 10)[10:]
+        elif entry[:2] == "? ":
+            paths.append(entry[2:])
+    dirty = {}
+    for path in paths:
+        path = path.rstrip("/")
+        if path and not (exclude and exclude(path)):
+            dirty[path] = content_hash(os.path.join(str(root), path))
+    return {"branch": branch_name, "head": head, "dirty": dirty}
+
+
+def states(roots, excludes=None):
+    """{clave: estado} de cada repo, en paralelo: con decenas de repos hermanos, la foto tarda lo que el más lento."""
+    excludes = excludes or {}
+    if not roots:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(roots)))) as pool:
+        futures = {key: pool.submit(repo_state, path, excludes.get(key)) for key, path in roots.items()}
+    return {key: future.result() for key, future in futures.items()}
+
+
+def find_root(path):
+    """La raíz del repo git que contiene la ruta, buscando .git hacia arriba sin llamar a git; None si no hay."""
+    current = pathlib.Path(os.path.abspath(str(path)))
+    for candidate in [current] + list(current.parents):
+        if os.path.lexists(str(candidate / ".git")):
+            return candidate
+    return None
+
+
+def unreadable_reason(err):
+    return "sin permiso" if isinstance(err, PermissionError) else (err.strerror or str(err))
+
+
+def git_children(folder, skip, main):
+    """Las subcarpetas directas de folder que son repos git, y las que no se pudieron leer ([{"path", "reason"}])."""
+    try:
+        names = sorted(os.listdir(str(folder)))
+    except OSError as err:
+        return [], [{"path": display_path(folder, main), "reason": unreadable_reason(err)}]
+    repos, unreadable = [], []
+    for name in names:
+        path = folder / name
+        if not os.path.isdir(str(path)) or os.path.realpath(str(path)) in skip:
+            continue
+        if not os.access(str(path), os.R_OK | os.X_OK):
+            unreadable.append({"path": display_path(path, main), "reason": "sin permiso"})
+        elif os.path.lexists(str(path / ".git")):
+            repos.append(path)
+    return repos, unreadable
+
+
+def discover(main, units):
+    """Los repos que mira la foto: el principal, los de las fuentes de las unidades del modelo y los repos git hermanos.
+    Devuelve ({ruta real: {"root", "role", "units", "main_branch"}}, unidades sin clonar, carpetas sin leer)."""
+    real_main = os.path.realpath(str(main))
+    found = {real_main: {"root": main, "role": "main", "units": [], "main_branch": None}}
+    missing, unreadable = [], []
+    for unit in units:
+        target = pathlib.Path(os.path.normpath(os.path.join(str(main), os.path.expanduser(unit["source"]))))
+        real_target = os.path.realpath(str(target))
+        if real_target == real_main or real_target.startswith(real_main.rstrip(os.sep) + os.sep):
+            entry = found[real_main]
+        elif not os.path.lexists(str(target)):
+            missing.append({"unit": unit["id"], "path": unit["source"]})
+            continue
+        elif not os.access(str(target), os.R_OK | os.X_OK):
+            unreadable.append({"path": unit["source"], "reason": "sin permiso"})
+            continue
+        else:
+            root = find_root(target)
+            if root is None:
+                unreadable.append({"path": unit["source"], "reason": "no es un repo git"})
+                continue
+            entry = found.setdefault(os.path.realpath(str(root)),
+                                     {"root": root, "role": "unit", "units": [], "main_branch": None})
+        entry["units"].append(unit["id"])
+        if real_target == os.path.realpath(str(entry["root"])) and not entry["main_branch"]:
+            entry["main_branch"] = unit.get("main_branch")
+    siblings, blocked = git_children(main.parent, worktree_roots(main) | {real_main}, main)
+    for path in siblings:
+        found.setdefault(os.path.realpath(str(path)), {"root": path, "role": "sibling", "units": [], "main_branch": None})
+    unique = {}
+    for item in unreadable + blocked:  # una unidad hermana sin permiso sale de los dos lados: una sola vez
+        unique.setdefault(os.path.normpath(item["path"]), item)
+    return found, missing, list(unique.values())
+
+
+def take_snapshot(main, layout, units):
+    """La foto inicial de la tarea: el estado de cada repo que mira (principal, unidades y hermanos)."""
+    found, missing, unreadable = discover(main, units)
+    real_main = os.path.realpath(str(main))
+    now = states({key: info["root"] for key, info in found.items()},
+                 {real_main: lambda path: layout.is_output(main / path)})
+    repos = []
+    for key, info in found.items():
+        entry = {"path": display_path(info["root"], main), "real": key, "role": info["role"], "units": info["units"]}
+        entry.update(now[key])
+        repos.append(entry)
+    return {"skill": SKILL, "format": SNAPSHOT_FORMAT, "taken": datetime.datetime.now().isoformat(timespec="seconds"),
+            "root": str(main), "repos": repos, "missing_units": missing, "unreadable": unreadable, "registered": []}
+
+
+def photo_summary(snapshot):
+    roles = [entry.get("role") for entry in snapshot["repos"]]
+    units, siblings = roles.count("unit"), roles.count("sibling")
+    parts = ["el principal"] + ([plural(units, "unidad", "unidades")] if units else []) + \
+        ([plural(siblings, "repo hermano", "repos hermanos")] if siblings else [])
+    text = ", ".join(parts[:-1]) + " y " + parts[-1] if len(parts) > 1 else parts[0]
+    return "%s: %s" % (plural(len(roles), "repo"), text)
+
+
+def load_snapshot(task, notes):
+    path = task.snapshot
+    if path is None or not real(path).is_file():
+        return None
+    try:
+        data = json.loads(real(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        notes.append(f"⚠️  No pude leer la foto inicial ({path.name}: {err}): sigo como si la tarea no tuviera foto.")
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("repos"), list):
+        notes.append(f"⚠️  La foto inicial ({path.name}) no tiene el formato esperado: sigo como si no la hubiera.")
+        return None
+    return data
+
+
+# ── Registro de unidades (--unit) ────────────────────────────────────────────
+def unit_root(repo, value):
+    """La raíz del repo de una unidad: la ruta de su fuente (relativa a la raíz del repo principal, o absoluta) o el
+    identificador de una unidad de ## Estructura."""
+    path = pathlib.Path(os.path.expanduser(value))
+    path = pathlib.Path(os.path.normpath(str(path if path.is_absolute() else repo / path)))
+    if not os.path.lexists(str(path)):
+        unit = next((u for u in structure_units(repo) if u["id"] == value), None)
+        if unit:
+            path = pathlib.Path(os.path.normpath(os.path.join(str(repo), os.path.expanduser(unit["source"]))))
+    if not os.path.lexists(str(path)):
+        raise RuntimeError(f'No encuentro la unidad "{value}" ({path}): pasa la ruta de su fuente, relativa a la raíz '
+                           "del repo principal (por ejemplo ../core-lib), o su identificador de ## Estructura.")
+    if os.path.isdir(str(path)) and not os.access(str(path), os.R_OK | os.X_OK):
+        raise RuntimeError(f"No puedo leer {path}: dale al agente acceso a esa carpeta y vuelve a registrarla.")
+    root = find_root(path)
+    if root is None:
+        raise RuntimeError(f"{path} no está dentro de un repo git: una unidad registrada necesita su repo.")
+    return root
+
+
+def register_unit(repo, layout, args):
+    """Anota la unidad en "repos" del meta de la tarea (lo crea si falta) y en la foto, sin tocar nada más."""
+    task = layout.task(safe_slug(args.folder), args.date or datetime.date.today().isoformat())
+    root = unit_root(repo, args.unit)
+    if os.path.realpath(str(root)) == os.path.realpath(str(repo)):
+        print(f"ℹ️  {args.unit} es del repo principal: ya entra al reporte, no hace falta registrarla.")
+        return
+    relative = display_path(root, repo)
+    real_root = os.path.realpath(str(root))
+    meta_file = real(task.file("meta"))
+    meta = {}
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except ValueError as err:
+            raise ValueError(f"{shown(task.file('meta'), repo)} no es un JSON válido ({err}): corrígelo y vuelve a "
+                             "registrar la unidad (no lo toco, para no perder lo que tiene)")
+        if not isinstance(meta, dict):
+            raise ValueError(f"{shown(task.file('meta'), repo)} no es un objeto JSON: corrígelo y vuelve a registrar "
+                             "la unidad")
+    entries = meta.setdefault("repos", [])
+    if not isinstance(entries, list):
+        raise ValueError('"repos" del meta debe ser una lista: corrígelo y vuelve a registrar la unidad')
+
+    def same(entry):
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            return False
+        path = os.path.normpath(os.path.join(str(repo), os.path.expanduser(entry["path"])))
+        found = find_root(path) if os.path.lexists(path) else None
+        return found is not None and os.path.realpath(str(found)) == real_root
+    already = any(same(entry) for entry in entries)
+    if not already:
+        entry = {"path": relative, "name": root.name}
+        units = structure_units(repo)
+        branch_name = next((u["main_branch"] for u in units if u.get("main_branch") and os.path.realpath(
+            os.path.normpath(os.path.join(str(repo), os.path.expanduser(u["source"])))) == real_root), None)
+        if branch_name:
+            entry["main_branch"] = branch_name
+        entries.append(entry)
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        write_json(meta_file, meta)
+    photo = task.snapshot
+    if photo is not None and real(photo).is_file():
+        try:
+            data = json.loads(real(photo).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            registered = data.setdefault("registered", [])
+            if isinstance(registered, list) and relative not in registered:
+                registered.append(relative)
+                write_json(real(photo), data, ascii_only=True)
+    else:
+        print("⚠️  La tarea no tiene foto inicial: el reporte usará \"repos\" del meta. Al empezar una tarea, pide la "
+              "carpeta con --folder: así toma la foto.", file=sys.stderr)
+    state = "ya estaba registrada" if already else "registrada"
+    print(f"✔ Unidad {state}: {root.name} ({relative}) en \"repos\" de {shown(task.file('meta'), repo)}")
+
+
 # ── Repos y archivos cambiados ───────────────────────────────────────────────
 def toplevel(path):
     return pathlib.Path(git(path, "rev-parse", "--show-toplevel").decode().strip())
@@ -561,6 +982,11 @@ def resolve_base(repo):
     repo["warnings"] = []
     if repo["base"]:
         repo["base"], repo["base_label"] = str(repo["base"]), None
+        return
+    if not ref_exists(repo["root"], "HEAD"):  # un repo sin commits: todo lo que tiene es nuevo
+        empty = subprocess.run(["git", "-C", str(repo["root"]), "hash-object", "-t", "tree", os.devnull],
+                               capture_output=True, text=True).stdout.strip()
+        repo["base"], repo["base_label"] = empty, ("HEAD", "repo sin commits: todo es nuevo")
         return
     preferred = repo.get("main_branch")
     if preferred and not (ref_exists(repo["root"], "origin/" + preferred) or ref_exists(repo["root"], preferred)):
@@ -619,13 +1045,20 @@ def same_version(pinned, source):
     return clean(pinned) == clean(source)
 
 
-def load_repos(main, main_base, main_branch, entries):
-    """El repo principal primero y después los relacionados de "repos" del meta:
-    [{root, name, base, base_label, main, pinned, source, warnings}]. Una entrada que apunta al principal solo le pone
-    nombre, base o rama principal (--base y --main-branch mandan sobre ella)."""
-    repos = [{"root": main, "name": main.name, "base": main_base, "main_branch": main_branch, "main": True,
-              "pinned": None, "source": None}]
-    for entry in entries:
+def new_repo(root, name, role, main=False, base=None, main_branch=None, units=()):
+    return {"root": pathlib.Path(root), "real": os.path.realpath(str(root)), "name": name, "role": role, "main": main,
+            "base": base, "main_branch": main_branch, "pinned": None, "source": None, "units": list(units),
+            "explicit": False, "photo": None, "state": None}
+
+
+def candidates(main, args, meta, snapshot, found, notes):
+    """Los repos que pueden entrar al reporte, el principal primero: el principal, los de "repos" del meta, los
+    registrados con --unit y, con foto, los de las unidades del modelo. {ruta real: repo}."""
+    real_main = os.path.realpath(str(main))
+    info = found[real_main]
+    ordered = {real_main: new_repo(main, main.name, "main", True, args.base, args.main_branch or info["main_branch"],
+                                   info["units"])}
+    for entry in meta.get("repos", []):
         path = pathlib.Path(os.path.expanduser(str(entry["path"])))
         path = path if path.is_absolute() else main / path
         try:
@@ -634,48 +1067,106 @@ def load_repos(main, main_base, main_branch, entries):
             raise RuntimeError(
                 f'No puedo leer el repo relacionado "{entry.get("name") or entry["path"]}" ({path}): si existe, '
                 f'dale al agente acceso a esa carpeta; si no, corrige "path" en "repos" del meta. Detalle: {err}')
+        key = os.path.realpath(str(root))
         name = str(entry.get("name") or root.name)
-        if root.resolve() == main.resolve():
-            repos[0]["name"] = name
-            repos[0]["base"] = repos[0]["base"] or entry.get("base")
-            repos[0]["main_branch"] = repos[0]["main_branch"] or entry.get("main_branch")
+        if key == real_main:
+            repo = ordered[real_main]
+            repo["name"] = name
+            repo["base"] = repo["base"] or entry.get("base")
+            repo["main_branch"] = args.main_branch or entry.get("main_branch") or repo["main_branch"]
             continue
-        repos.append({"root": root, "name": name, "base": entry.get("base"), "main_branch": entry.get("main_branch"),
-                      "main": False, "pinned": entry.get("pinned_version"), "source": entry.get("source_version")})
-    names = [r["name"] for r in repos]
-    for name in names:
+        unit = found.get(key, {})
+        repo = ordered.setdefault(key, new_repo(root, name, "registered", units=unit.get("units", [])))
+        repo.update(name=name, base=entry.get("base"), pinned=entry.get("pinned_version"),
+                    source=entry.get("source_version"), explicit=True,
+                    main_branch=entry.get("main_branch") or unit.get("main_branch"))
+    if snapshot is None:
+        return ordered
+    for relative in snapshot.get("registered") or []:
+        if not isinstance(relative, str):
+            continue
+        path = os.path.normpath(os.path.join(str(main), os.path.expanduser(relative)))
+        root = find_root(path) if os.path.lexists(path) else None
+        if root is None:
+            notes.append(f"⚠️  La unidad registrada {relative} ya no está en disco: no entra al reporte.")
+            continue
+        key = os.path.realpath(str(root))
+        if key not in ordered:
+            unit = found.get(key, {})
+            ordered[key] = new_repo(root, root.name, "registered", main_branch=unit.get("main_branch"),
+                                    units=unit.get("units", []))
+    for key, unit in found.items():
+        if unit["role"] == "unit" and key not in ordered:
+            ordered[key] = new_repo(unit["root"], unit["root"].name, "unit", main_branch=unit["main_branch"],
+                                    units=unit["units"])
+    return ordered
+
+
+def check_names(repos):
+    """Nombres que sirven de prefijo y no se repiten. Uno que puso el meta y choca falla; uno automático se desambigua."""
+    taken = set()
+    for repo in repos:
+        name = repo["name"]
         if not name or ":" in name or "/" in name:
             raise ValueError(f'el nombre de repo "{name}" no sirve como prefijo: sin ":" ni "/"')
-        if names.count(name) > 1:
-            raise ValueError(f'dos repos se llaman "{name}": ponles "name" distintos en "repos" del meta')
+        if name in taken:
+            if repo["main"] or repo["explicit"]:
+                raise ValueError(f'dos repos se llaman "{name}": ponles "name" distintos en "repos" del meta')
+            number = 2
+            while f"{name}-{number}" in taken:
+                number += 1
+            repo["name"] = name = f"{name}-{number}"
+        taken.add(name)
     for repo in repos:
-        resolve_base(repo)
-        if repo["pinned"] and not repo["source"]:  # lo que había en el fuente al empezar: la base, no lo de la tarea
-            repo["source"] = describe(repo["root"], repo["base"])
-        repo["version_mismatch"] = bool(repo["pinned"] and repo["source"]
-                                        and not same_version(repo["pinned"], repo["source"]))
-        if repo["version_mismatch"]:
-            repo["warnings"].append(
-                f'⚠️  {repo["name"]}: el fuente ({repo["source"]}) no coincide con la versión que fija la app '
-                f'({repo["pinned"]}): lo probado en fuente puede no compilar o comportarse distinto con lo publicado.')
-    return repos
+        repo["aliases"] = {repo["name"], repo["root"].name} | {unit for unit in repo["units"]
+                                                              if ":" not in unit and "/" not in unit}
+
+
+def finish_repo(repo):
+    """La base, la rama y las versiones de un repo que entra al reporte."""
+    resolve_base(repo)
+    if repo["pinned"] and not repo["source"]:  # lo que había en el fuente al empezar: la base, no lo de la tarea
+        repo["source"] = describe(repo["root"], repo["base"])
+    repo["version_mismatch"] = bool(repo["pinned"] and repo["source"]
+                                    and not same_version(repo["pinned"], repo["source"]))
+    if repo["version_mismatch"]:
+        repo["warnings"].append(
+            f'⚠️  {repo["name"]}: el fuente ({repo["source"]}) no coincide con la versión que fija la app '
+            f'({repo["pinned"]}): lo probado en fuente puede no compilar o comportarse distinto con lo publicado.')
+    state = repo.get("state") or {}
+    if "branch" in state:
+        repo["branch"] = state["branch"] or ((state.get("head") or "")[:7] + " (detached)")
+    else:
+        repo["branch"] = branch(repo["root"])
+    photo = repo.get("photo") or {}
+    repo["branch_before"] = photo.get("branch") if "branch" in photo else None
 
 
 def changed_files(repo, base, layout):
+    """Los archivos cambiados contra la base, con -z: un nombre con acentos, comillas o tabuladores llega tal cual (sin
+    las comillas de core.quotePath), igual que en la foto. Un cambio de tipo (T: un enlace que pasa a archivo) es una
+    modificación."""
     files = []
     try:
-        listing = git(repo["root"], "diff", "--name-status", "-M", base).decode()
+        fields = git(repo["root"], "diff", "--name-status", "-z", "-M", base).decode("utf-8", "surrogateescape")
     except RuntimeError as err:
         raise RuntimeError(f'{repo["name"]}: no pude comparar contra {base}: {err}')
-    for line in listing.splitlines():
-        parts = line.split("\t")
-        status = parts[0][0]
-        if status == "R":
-            files.append({"status": "M", "path": parts[2], "old": parts[1]})
-        elif status in "AMD":
-            files.append({"status": status, "path": parts[1], "old": parts[1]})
-    for path in git(repo["root"], "ls-files", "--others", "--exclude-standard").decode().splitlines():
-        files.append({"status": "A", "path": path.rstrip("/"), "old": None})
+    fields, index = fields.split("\0"), 0
+    while index < len(fields) - 1:
+        status, index = fields[index][:1], index + 1
+        if status in ("R", "C"):
+            old, path, index = fields[index], fields[index + 1], index + 2
+            files.append({"status": "M" if status == "R" else "A", "path": path,
+                          "old": old if status == "R" else None})
+        elif status in ("A", "M", "D", "T"):
+            path, index = fields[index], index + 1
+            files.append({"status": "M" if status == "T" else status, "path": path, "old": path})
+        elif status:
+            index += 1  # U (sin resolver) u otro: no es un cambio del árbol de trabajo
+    untracked = git(repo["root"], "ls-files", "-z", "--others", "--exclude-standard").decode("utf-8", "surrogateescape")
+    for path in untracked.split("\0"):
+        if path:
+            files.append({"status": "A", "path": path.rstrip("/"), "old": None})
     return [f for f in files if not layout.is_output(repo["root"] / f["path"])]
 
 
@@ -695,21 +1186,192 @@ def read_after(repo, path):
     return p.read_bytes() if p.is_file() else None
 
 
+# ── Qué es de la tarea: comparación con la foto ──────────────────────────────
+def changed_since(state, before):
+    """Si el repo cambió después de la foto: otro HEAD u otros archivos sucios (o el mismo con otro contenido)."""
+    if not isinstance(before, dict) or "error" in before or "error" in state:
+        return True
+    return state.get("head") != before.get("head") or (state.get("dirty") or {}) != (before.get("dirty") or {})
+
+
+def change_detail(state, before):
+    """Qué cambió en un repo desde la foto, en palabras; "" si nada."""
+    now = state.get("dirty") or {}
+    if before is None:
+        return f"apareció después de la foto, con {plural(len(now), 'archivo')} sin commit" if now else ""
+    if not isinstance(before, dict) or "error" in before:
+        return ""
+    old = before.get("dirty") or {}
+    files = [path for path in set(now) | set(old) if now.get(path, ABSENT) != old.get(path, ABSENT)]
+    parts = [plural(len(files), "archivo") + " sin commit"] if files else []
+    if state.get("head") != before.get("head"):
+        parts.append("commits nuevos")
+    return " y ".join(parts)
+
+
+def blobs_at(root, head, paths):
+    """El hash de cada ruta en un commit, con un solo `git cat-file --batch-check`; las que no estaban no salen."""
+    if not head or not paths:
+        return {}
+    data = "".join("%s:%s\n" % (head, path) for path in paths).encode("utf-8", "surrogateescape")
+    try:
+        result = subprocess.run(["git", "-C", str(root), "cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                                input=data, capture_output=True, timeout=STATUS_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    found = {}
+    for path, line in zip(paths, result.stdout.decode("utf-8", "replace").splitlines()):
+        parts = line.rsplit(" ", 1)
+        if len(parts) == 2 and parts[1] in ("blob", "commit"):  # commit: el puntero de un submódulo
+            found[path] = parts[0]
+        elif len(parts) == 2 and parts[1] == "tree":
+            found[path] = "dir"
+    return found
+
+
+def attribute(repo, files):
+    """Para cada archivo cambiado contra la base: "task" (cambió después de la foto), "mixed" (ya estaba sucio y además
+    cambió) o "previous" (su contenido es el de la foto: ya estaba antes de la tarea), con el motivo."""
+    photo = repo.get("photo")
+    if not isinstance(photo, dict) or "error" in photo:
+        return {id(f): ("task", None) for f in files}
+    dirty = photo.get("dirty") or {}
+    names = sorted({name for f in files for name in (f["path"], f["old"]) if name and name not in dirty})
+    at_head = blobs_at(repo["root"], photo.get("head"), names)
+    verdicts = {}
+    for f in files:
+        paths = [f["path"]] + ([f["old"]] if f["old"] and f["old"] != f["path"] else [])
+        before = {path: dirty[path] if path in dirty else at_head.get(path) for path in paths}
+        now = {path: content_hash(repo["root"] / path) for path in paths}
+        was_dirty = any(path in dirty for path in paths)
+        if before == now:
+            verdicts[id(f)] = ("previous", "sin commit desde antes de la tarea" if was_dirty else
+                               "commiteado en la rama antes de la tarea")
+        else:
+            verdicts[id(f)] = ("mixed" if was_dirty else "task", None)
+    return verdicts
+
+
+class Coverage:
+    """Qué entra al reporte y qué queda fuera."""
+
+    def __init__(self):
+        self.repos = []         # los repos que cambiaron después de la foto (o todos los candidatos, sin foto)
+        self.unchanged = []     # candidatos que no cambiaron después de la foto
+        self.others = []        # [{"path", "detail"}]: repos hermanos que cambiaron y no son de la tarea
+        self.unattributed = []  # [{"repo", "path", "reason"}]: cambios que ya estaban o que no se sabe de quién son
+        self.dirty_without_photo = []  # sin foto: repos hermanos con cambios sin commit
+        self.claimed = []       # archivos que el meta explica y que ya estaban así en la foto
+        self.notes = []
+        self.unreadable = []
+        self.photo = False
+
+
+def coverage(main, layout, args, meta, snapshot, units):
+    cov = Coverage()
+    cov.photo = snapshot is not None
+    found, _missing, cov.unreadable = discover(main, units)
+    ordered = candidates(main, args, meta, snapshot, found, cov.notes)
+    check_names(list(ordered.values()))
+    real_main = os.path.realpath(str(main))
+    excludes = {real_main: lambda path: layout.is_output(main / path)}
+    if snapshot is not None:
+        photo = {entry["real"]: entry for entry in snapshot.get("repos", [])
+                 if isinstance(entry, dict) and isinstance(entry.get("real"), str)}
+        roots = {key: repo["root"] for key, repo in ordered.items()}
+        roots.update({key: info["root"] for key, info in found.items() if key not in roots})
+        now = states(roots, excludes)
+        for key, repo in ordered.items():
+            repo["photo"], repo["state"] = photo.get(key), now[key]
+            if "error" in now[key]:
+                cov.notes.append(f'⚠️  No pude leer el estado de {repo["name"]} ({now[key]["error"]}): lo comparo '
+                                 "contra su base, sin la foto.")
+            (cov.repos if changed_since(now[key], photo.get(key)) else cov.unchanged).append(repo)
+        for key, path in roots.items():
+            if key in ordered or "error" in now[key]:
+                continue
+            detail = change_detail(now[key], photo.get(key))
+            if detail:
+                cov.others.append({"path": display_path(path, main), "detail": detail})
+    else:
+        cov.notes.append("ℹ️  La tarea no tiene foto inicial (empezó antes de hb-implement 1.7.0, o sin report.py "
+                         "--folder al empezar): entran el repo principal y \"repos\" del meta.")
+        cov.repos = list(ordered.values())
+        rest = {key: info["root"] for key, info in found.items() if key not in ordered}
+        now = states(rest)
+        for key, path in rest.items():
+            dirty = now[key].get("dirty") or {}
+            if not dirty:
+                continue
+            where = display_path(path, main)
+            cov.dirty_without_photo.append(where)
+            for relative in sorted(dirty):
+                cov.unattributed.append({"repo": where, "path": relative,
+                                         "reason": "sin foto inicial: no se sabe si es de la tarea"})
+    return cov
+
+
+# ── Migración de lenguaje ────────────────────────────────────────────────────
+def suffix(path):
+    return pathlib.PurePosixPath(path).suffix.lower()
+
+
+def stem(path):
+    return pathlib.PurePosixPath(path).stem.lower()
+
+
+def has_code(text):
+    """Si el texto tiene código: algo más que comentarios, líneas vacías y declaraciones de paquete o imports."""
+    if not isinstance(text, str):
+        return text is False  # un binario no es código fuente, pero tampoco está vacío
+    body = re.sub(r"(?s)/\*.*?\*/|<!--.*?-->", "", text)
+    body = re.sub(r'(?s)^\s*(?:"""|\'\'\').*?(?:"""|\'\'\')', "", body)
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("//", "#", "--", ";", "*")) or NOT_CODE.match(line):
+            continue
+        return True
+    return False
+
+
+def language_migrations(files):
+    """[(archivo, equivalente, cómo)]: un archivo de código borrado, vaciado o reducido a comentarios cuyo equivalente
+    del mismo repo, con el mismo nombre base, aparece con otra extensión de código."""
+    by_stem = {}
+    for f in files:
+        if suffix(f["path"]) in SOURCE_EXTENSIONS and f["status"] != "D":
+            by_stem.setdefault((f["repo"]["real"], stem(f["path"])), []).append(f)
+    found = []
+    for f in files:
+        renamed = f["status"] == "M" and f["old"] not in (None, f["path"])
+        source = f["old"] if renamed else f["path"]
+        if suffix(source) not in SOURCE_EXTENSIONS:
+            continue
+        if renamed and suffix(f["path"]) != suffix(source) and suffix(f["path"]) in SOURCE_EXTENSIONS \
+                and stem(f["path"]) == stem(source):
+            found.append((f, f, "renombrado"))
+            continue
+        if f["status"] == "D":
+            how = "borrado"
+        elif f["status"] == "M" and isinstance(f["before"], str) and has_code(f["before"]) and not has_code(f["after"]):
+            how = "vaciado" if not (f["after"] or "").strip() else "reducido a comentarios"
+        else:
+            continue
+        for other in by_stem.get((f["repo"]["real"], stem(source)), []):
+            if other is not f and suffix(other["path"]) != suffix(source):
+                found.append((f, other, how))
+    return found
+
+
+def migration_text(f, other, how):
+    if f is other:
+        return f'{f["old"]} → {f["path"]} (renombrado a otra extensión)'
+    return f'{f["path"]} ({how}) → {other["path"]}'
+
+
 # ── Validación del meta ──────────────────────────────────────────────────────
-def level(value, what):
-    normalized = str(value).strip().lower().replace("í", "i")
-    if normalized not in LEVELS:
-        raise ValueError(f'{what} debe ser critico, alto, medio o bajo (llegó "{value}")')
-    return normalized
-
-
-def texts(value, what):
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{what} debe ser una lista de textos")
-    return value
-
-
-def entries(meta, key, required):
+def strict_entries(meta, key, required):
+    """Las listas que deciden qué entra al reporte ("repos", "temporary"): si no sirven, falla antes de escribir."""
     value = meta.get(key, [])
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise ValueError(f'"{key}" debe ser una lista de objetos')
@@ -720,47 +1382,160 @@ def entries(meta, key, required):
     return value
 
 
-def validate(meta):
-    """Falla antes de escribir nada si un campo opcional viene con un valor que no sirve."""
+def keep_text(container, key, what, notes, numbers=False):
+    """Un campo de texto: vacío se quita sin avisar; de otro tipo, se quita con un aviso."""
+    value = container.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        container.pop(key, None)
+    elif numbers and isinstance(value, (int, float)) and not isinstance(value, bool):
+        container[key] = str(value)
+    elif not isinstance(value, str):
+        notes.append(f"⚠️  {what} debe ser un texto: lo ignoro.")
+        container.pop(key)
+
+
+def keep_texts(container, key, what, notes):
+    value = container.get(key)
+    if value is None:
+        container.pop(key, None)
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        items = [item for item in value if item.strip()]
+        if items:
+            container[key] = items
+        else:
+            container.pop(key)
+    else:
+        notes.append(f"⚠️  {what} debe ser una lista de textos: lo ignoro.")
+        container.pop(key)
+
+
+def keep_level(container, key, what, notes):
+    value = container.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        container.pop(key, None)
+        return
+    normalized = value.strip().lower().replace("í", "i") if isinstance(value, str) else None
+    if normalized in LEVELS:
+        container[key] = normalized
+    else:
+        notes.append(f'⚠️  {what} debe ser critico, alto, medio o bajo (llegó "{value}"): lo ignoro.')
+        container.pop(key)
+
+
+def keep_objects(meta, key, notes, required=()):
+    value = meta.get(key)
+    if value is None:
+        meta[key] = []
+        return []
+    if not isinstance(value, list):
+        notes.append(f'⚠️  "{key}" debe ser una lista: lo ignoro.')
+        meta[key] = []
+        return []
+    kept = []
+    for number, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            notes.append(f'⚠️  La entrada {number} de "{key}" no es un objeto: la ignoro.')
+            continue
+        missing = [field for field in required if not (isinstance(item.get(field), str) and item[field].strip())]
+        if missing:
+            notes.append(f'⚠️  La entrada {number} de "{key}" no trae {", ".join(missing)}: la ignoro.')
+            continue
+        kept.append(item)
+    meta[key] = kept
+    return kept
+
+
+def clean_meta(meta, notes):
+    """Lo que decide qué entra al reporte ("repos", "temporary", "slug", "date") falla antes de escribir si no sirve.
+    Los datos de análisis y de presentación nunca detienen el reporte: lo que falta o viene vacío no se muestra y un
+    valor con formato inválido se ignora con un aviso en notes."""
     if not isinstance(meta, dict):
         raise ValueError("el meta debe ser un objeto JSON")
-    files = meta.get("files", {})
-    if not isinstance(files, dict) or not all(isinstance(info, dict) for info in files.values()):
-        raise ValueError('"files" debe ser un objeto con un objeto por archivo')
-    for key, info in files.items():
-        if "risk" in info:
-            info["risk"] = level(info["risk"], f'"risk" de {key}')
-        for field in ("pros", "cons"):
-            if field in info:
-                texts(info[field], f'"{field}" de {key}')
-    if "severity" in meta:
-        meta["severity"] = level(meta["severity"], '"severity"')
-    if "root_cause" in meta and not isinstance(meta["root_cause"], str):
-        raise ValueError('"root_cause" debe ser un texto')
     if "slug" in meta and not isinstance(meta["slug"], str):
         raise ValueError('"slug" debe ser un texto')
-    entries(meta, "impact", ("label",))
-    entries(meta, "diagrams", ("mermaid",))
-    for repo in entries(meta, "repos", ("path",)):
+    if meta.get("date") is not None and not (isinstance(meta["date"], str) and DATE.match(meta["date"])):
+        raise ValueError("la fecha %r no es AAAA-MM-DD: va en el nombre de la carpeta de la tarea" % (meta["date"],))
+    for repo in strict_entries(meta, "repos", ("path",)):
         for field in ("base", "main_branch", "pinned_version", "source_version"):
             if field in repo and repo[field] is not None and not isinstance(repo[field], str):
                 raise ValueError(f'"{field}" de "repos" debe ser un texto')
-    entries(meta, "temporary", ("path",))
+    strict_entries(meta, "temporary", ("path",))
+    for key in ("project", "title", "description", "scope", "root_cause", "branch_note"):
+        keep_text(meta, key, f'"{key}"', notes)
+    keep_text(meta, "ticket", '"ticket"', notes, numbers=True)
+    if "type" in meta and not isinstance(meta["type"], str):
+        notes.append('⚠️  "type" debe ser un texto: uso feature.')
+        meta["type"] = "feature"
+    elif meta.get("type") and meta["type"] not in TYPES:
+        notes.append(f'⚠️  "type" debe ser feature, bugfix, enhancement o refactor (llegó "{meta["type"]}"): el '
+                     "reporte lo muestra como feature.")
+    keep_level(meta, "severity", '"severity"', notes)
+    files = meta.get("files")
+    if files is not None and not isinstance(files, dict):
+        notes.append('⚠️  "files" debe ser un objeto con un objeto por archivo: lo ignoro.')
+        files = None
+    meta["files"] = {}
+    for key, info in (files or {}).items():
+        if not isinstance(info, dict):
+            notes.append(f"⚠️  La entrada de {key} en \"files\" no es un objeto: la ignoro.")
+            continue
+        for field in ("why", "before", "after", "layer"):
+            keep_text(info, field, f'"{field}" de {key}', notes)
+        keep_level(info, "risk", f'"risk" de {key}', notes)
+        for field in ("pros", "cons"):
+            keep_texts(info, field, f'"{field}" de {key}', notes)
+        meta["files"][key] = info
+    for item in keep_objects(meta, "impact", notes, ("label",)):
+        keep_text(item, "value", '"value" de "impact"', notes, numbers=True)
+    for item in keep_objects(meta, "diagrams", notes, ("mermaid",)):
+        for field in ("title", "description"):
+            keep_text(item, field, f'"{field}" de "diagrams"', notes)
+    for group in keep_objects(meta, "groups", notes, ("match",)):
+        for field in ("why", "before", "after"):
+            keep_text(group, field, f'"{field}" del grupo {group["match"]}', notes)
+    keep_objects(meta, "previews", notes, ("image",))
+    for step in keep_objects(meta, "dod", notes):
+        for field in ("icon", "name", "command", "note", "output", "unit"):
+            keep_text(step, field, f'"{field}" de un paso del DoD', notes)
+        if step.get("status") not in PILLS:
+            if "status" in step:
+                notes.append(f'⚠️  El paso del DoD "{step.get("name", "")}" trae "status" {step["status"]!r}: lo '
+                             "muestro como skipped.")
+            step["status"] = "skipped"
+    return meta
+
+
+def explained(info):
+    return bool(info) and any(info.get(field) for field in ("why", "before", "after"))
+
+
+def missing_analysis(meta, files):
+    """Los datos de análisis que el flujo debería completar y no vinieron (solo para avisar: no son obligatorios)."""
+    report = [field for field in ("diagrams", "impact") if not meta.get(field)]
+    if meta.get("type") == "bugfix":
+        report += [field for field in ("severity", "root_cause") if not meta.get(field)]
+    per_file = [f["key"] for f in files if f["group"] is None and explained(f["info"])
+                and not all(f["info"].get(field) for field in ("risk", "pros", "cons"))]
+    return report, per_file
 
 
 # ── HTML ─────────────────────────────────────────────────────────────────────
+def chip(text, kind):
+    return f'<span class="chip {kind}">{e(text)}</span>'
+
+
 def code_block(text, dim=False):
     if text is False:
         return '<div class="empty-state">Archivo binario: no se muestra el contenido.</div>'
     if text is None:
         return '<div class="empty-state">Sin contenido para mostrar.</div>'
     lines = text.splitlines()
-    cut = len(lines) > MAX_LINES
-    body = "\n".join(f'<span class="line-num">{i}</span>{e(l)}' for i, l in enumerate(lines[:MAX_LINES], 1))
-    if cut:
-        body += f'\n<span class="line-num">…</span>(recortado: {len(lines) - MAX_LINES} líneas más)'
-    style = ' style="opacity:.6"' if dim else ""
-    return f'<pre class="code-block"{style}>{body}</pre>'
+    if not lines:
+        return '<div class="empty-state">Archivo vacío.</div>'
+    body = "\n".join(f'<span class="ln">{i}</span>{e(line)}' for i, line in enumerate(lines[:MAX_LINES], 1))
+    if len(lines) > MAX_LINES:
+        body += f'\n<span class="ln">…</span>(recortado: {len(lines) - MAX_LINES} líneas más)'
+    return f'<pre class="code{" dim" if dim else ""}">{body}</pre>'
 
 
 def diff_block(before, after):
@@ -783,76 +1558,64 @@ def diff_block(before, after):
             rows.append(("", str(new_no), line))
     if not rows:
         return '<div class="empty-state">Sin cambios de contenido (solo renombre o permisos).</div>'
-    html_rows = "".join(
-        f'<div class="diff-line {cls}"><div class="gutter">{g}</div><div class="content">{e(c)}</div></div>'
-        for cls, g, c in rows
-    )
-    return f'<div class="diff-block">{html_rows}</div>'
+    body = "".join(f'<div class="dl {kind}"><span class="g">{gutter}</span><span class="c">{e(text)}</span></div>'
+                   for kind, gutter, text in rows)
+    return f'<div class="diff"><div class="diff-inner">{body}</div></div>'
 
 
-def summary(items):
-    cells = "".join(
-        f'<div class="change-summary-item change-summary-{kind}"><div class="change-summary-label">{label}</div>{e(text)}</div>'
-        for kind, label, text in items if text
-    )
-    return f'<div class="change-summary">{cells}</div>' if cells else ""
-
-
-STATUS = {"A": ("status-new", "New"), "M": ("status-modified", "Modified"), "D": ("status-deleted", "Deleted")}
-
-
-def status_summary(status, info):
+def explain(status, info):
     if status == "A":
-        return summary([("after", "✅ Por qué se crea", info.get("why"))])
-    if status == "D":
-        return summary([("before", "🗑️ Por qué se elimina", info.get("why"))])
-    return summary([("before", "⚠️ Antes", info.get("before")), ("after", "✅ Después", info.get("after") or info.get("why"))])
-
-
-def analysis(info):
-    """Pros y contras del cambio, solo si el meta los trae. Una lista de contras vacía también dice algo."""
-    columns = []
-    if "pros" in info:
-        items = "".join(f"<li>{e(item)}</li>" for item in info["pros"]) or "<li>—</li>"
-        columns.append(f'<div class="analysis-item analysis-pros"><div class="change-summary-label">👍 Pros</div>'
-                       f'<ul>{items}</ul></div>')
-    if "cons" in info:
-        items = ("<ul>" + "".join(f"<li>{e(item)}</li>" for item in info["cons"]) + "</ul>" if info["cons"]
-                 else '<p class="analysis-none">Sin contras identificados</p>')
-        columns.append(f'<div class="analysis-item analysis-cons"><div class="change-summary-label">👎 Contras</div>'
-                       f'{items}</div>')
-    return f'<div class="analysis">{"".join(columns)}</div>' if columns else ""
-
-
-def risk_pill(info):
-    risk = info.get("risk")
-    return f'<span class="risk risk-{risk}">{RISK_LABELS[risk]}</span>' if risk else ""
-
-
-def repo_tag(f):
-    return f'<span class="repo-tag">{e(f["repo"]["name"])}</span>' if f.get("show_repo") else ""
-
-
-def file_entry(index, f, info):
-    status = STATUS[f["status"]]
-    path = f["path"] if f["status"] != "M" or f["old"] in (None, f["path"]) else f'{f["old"]} → {f["path"]}'
-    head = (f'<div class="file-header" onclick="toggleFile(this)"><span class="file-status {status[0]}">{status[1]}</span>'
-            f'{repo_tag(f)}<span class="file-path">{e(path)}</span>{risk_pill(info)}<span class="file-toggle">▼</span></div>')
-    if f["status"] == "A":
-        body = status_summary("A", info) + analysis(info) + code_block(f["after"])
-    elif f["status"] == "D":
-        body = status_summary("D", info) + analysis(info) + code_block(f["before"], dim=True)
+        items = [("ex-after", "✅ Por qué se crea", info.get("why"))]
+    elif status == "D":
+        items = [("ex-before", "🗑️ Por qué se elimina", info.get("why"))]
     else:
-        fid = f"f{index}"
+        items = [("ex-before", "⚠️ Antes", info.get("before")),
+                 ("ex-after", "✅ Después", info.get("after") or info.get("why"))]
+    cells = "".join(f'<div class="ex {kind}"><div class="k">{label}</div><p>{e(text)}</p></div>'
+                    for kind, label, text in items if text)
+    return f'<div class="explain">{cells}</div>' if cells else ""
+
+
+def pros_cons(info):
+    """Pros y contras del cambio, solo los que vienen con algo."""
+    cells = "".join(
+        f'<div class="ex {kind}"><div class="k">{label}</div><ul>{"".join(f"<li>{e(item)}</li>" for item in info[key])}'
+        "</ul></div>" for key, kind, label in (("pros", "ex-pros", "👍 Pros"), ("cons", "ex-cons", "👎 Contras"))
+        if info.get(key))
+    return f'<div class="proscons">{cells}</div>' if cells else ""
+
+
+STATUS = {"A": ("st-new", "Nuevo"), "M": ("st-modified", "Modificado"), "D": ("st-deleted", "Eliminado")}
+
+
+def file_entry(fid, f, info):
+    kind, label = STATUS[f["status"]]
+    path = f["path"] if f["status"] != "M" or f["old"] in (None, f["path"]) else f'{f["old"]} → {f["path"]}'
+    chips = chip(label, kind) + f'<code class="file-path">{e(path)}</code>'
+    if info.get("layer"):
+        chips += chip("Capa: " + info["layer"], "c-same")
+    if info.get("risk"):
+        chips += chip(RISK_LABELS[info["risk"]], "risk-" + info["risk"])
+    if f["warnings"]:
+        chips += chip("⚠️ " + plural(len(f["warnings"]), "aviso"), "c-warn")
+    notes = "".join(f'<div class="note warn">{e(text)}</div>' for text in f["warnings"])
+    body = explain(f["status"], info) + pros_cons(info) + (f'<div class="file-notes">{notes}</div>' if notes else "")
+    if f["status"] == "A":
+        body += code_block(f["after"])
+    elif f["status"] == "D":
+        body += code_block(f["before"], dim=True)
+    else:
         tabs = "".join(
-            f'<div class="panel-tab{" active" if t == "diff" else ""}" onclick="switchTab(\'{fid}\',\'{t}\')">{label}</div>'
-            for t, label in (("before", "Antes"), ("after", "Después"), ("diff", "Diff"))
-        )
-        panels = (f'<div class="panel-content" id="{fid}-before">{code_block(f["before"])}</div>'
-                  f'<div class="panel-content" id="{fid}-after">{code_block(f["after"])}</div>'
-                  f'<div class="panel-content active" id="{fid}-diff">{diff_block(f["before"], f["after"])}</div>')
-        body = status_summary("M", info) + analysis(info) + f'<div class="panel-tabs" id="tabs-{fid}">{tabs}</div>{panels}'
-    return f'<div class="file-entry open">{head}<div class="file-body">{body}</div></div>'
+            f'<button type="button" class="tab{" active" if name == "diff" else ""}" id="{fid}-tab-{name}" '
+            f'role="tab" aria-selected="{"true" if name == "diff" else "false"}" '
+            f'onclick="switchTab(\'{fid}\',\'{name}\')">{title}</button>'
+            for name, title in (("before", "Antes"), ("after", "Después"), ("diff", "Diff")))
+        body += (f'<div class="tabs" role="tablist">{tabs}</div>'
+                 f'<div class="panel" id="{fid}-before">{code_block(f["before"])}</div>'
+                 f'<div class="panel" id="{fid}-after">{code_block(f["after"])}</div>'
+                 f'<div class="panel active" id="{fid}-diff">{diff_block(f["before"], f["after"])}</div>')
+    return (f'<details class="file" open id="{fid}"><summary>{chips}</summary>'
+            f'<div class="file-body">{body}</div></details>')
 
 
 def group_for(path, groups):
@@ -866,168 +1629,30 @@ def group_for(path, groups):
     return None
 
 
-def group_entry(group, status, paths):
-    label = STATUS[status]
-    total = f"{len(paths)} archivo" + ("" if len(paths) == 1 else "s")
-    head = (f'<div class="file-header" onclick="toggleFile(this)"><span class="file-status {label[0]}">{label[1]}</span>'
-            f'<span class="file-path">{e(group["match"])} · {total}</span><span class="file-toggle">▼</span></div>')
-    listing = '<pre class="code-block">' + e("\n".join(paths)) + "</pre>"
-    return f'<div class="file-entry open">{head}<div class="file-body">{status_summary(status, group)}{listing}</div></div>'
+def group_entry(fid, group, status, paths):
+    kind, label = STATUS[status]
+    total = plural(len(paths), "archivo")
+    chips = chip(label, kind) + f'<code class="file-path">{e(group["match"])} · {total}</code>'
+    listing = '<pre class="code">' + e("\n".join(paths)) + "</pre>"
+    return (f'<details class="file" open id="{fid}"><summary>{chips}</summary>'
+            f'<div class="file-body">{explain(status, group)}{listing}</div></details>')
 
 
-def section(icon, title, entries, empty, count=None):
-    content = "".join(entries) or f'<div class="empty-state">{empty}</div>'
-    count = len(entries) if count is None else count
-    return (f'<div class="section"><div class="section-header"><span class="section-icon">{icon}</span>'
-            f'<span class="section-title">{title}</span><span class="section-count">{count}</span></div>{content}</div>')
-
-
-def plain_section(icon, title, content, count=None):
-    badge = f'<span class="section-count">{count}</span>' if count is not None else ""
-    return (f'<div class="section"><div class="section-header"><span class="section-icon">{icon}</span>'
-            f'<span class="section-title">{title}</span>{badge}</div>{content}</div>')
-
-
-def dod_section(steps):
+def dod_table(steps):
     if not steps:
         return ""
-    rows = ['<div class="dod-row dod-header"><div></div><div>Tarea</div><div>Comando</div><div>Resultado</div></div>']
-    outputs = []
-    for s in steps:
-        cls, label = PILLS.get(s.get("status", "skipped"), PILLS["skipped"])
-        note = f' · {e(s["note"])}' if s.get("note") else ""
-        rows.append(f'<div class="dod-row"><div>{e(s.get("icon", "•"))}</div><div>{e(s.get("name", ""))}</div>'
-                    f'<div>{e(s.get("command", ""))}</div><div><span class="pill {cls}">{label}</span>{note}</div></div>')
-        if s.get("output"):
-            outputs.append(f'<p style="margin:20px 0 8px"><strong>{e(s.get("name", ""))}</strong></p>{code_block(s["output"])}')
-    return (f'<div class="section"><div class="section-header"><span class="section-icon">✅</span>'
-            f'<span class="section-title">Definition of Done</span></div><div class="dod-grid">{"".join(rows)}</div>'
-            f'{"".join(outputs)}</div>')
-
-
-def preview_path(repo, task, image):
-    """La imagen de un preview: absoluta, relativa al repo (la ruta previews: que imprime --folder, aunque pase por un
-    enlace simbólico) o relativa a la carpeta de la tarea (previews/<archivo>)."""
-    path = pathlib.Path(os.path.expanduser(str(image)))
-    if path.is_absolute():
-        return path
-    candidates = [repo / path] + ([task.folder / path] if task is not None else [])
-    return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
-
-
-def preview_figure(repo, preview, missing, task=None):
-    path = preview_path(repo, task, preview.get("image", ""))
-    name, note = e(preview.get("name", path.stem)), e(preview.get("note", ""))
-    caption = f'<figcaption style="margin-top:8px;color:var(--text-secondary)"><strong>{name}</strong>{" · " + note if note else ""}</figcaption>'
-    mime = IMAGE_TYPES.get(path.suffix.lower())
-    if mime and path.is_file():
-        data = base64.b64encode(path.read_bytes()).decode("ascii")
-        body = (f'<img src="data:{mime};base64,{data}" alt="{name}" '
-                f'style="width:100%;max-width:360px;border:1px solid var(--border);border-radius:var(--radius-md)">')
-    else:
-        missing.append(str(path))
-        body = f'<div class="empty-state">No se encontró la imagen: {e(str(path))}</div>'
-    return f'<figure style="margin:0">{body}{caption}</figure>'
-
-
-def previews_section(repo, previews, missing, task=None):
-    """Imágenes incrustadas en base64: el reporte sigue siendo un solo archivo que se puede compartir."""
-    if not previews:
-        return ""
-    figures = "".join(preview_figure(repo, p, missing, task) for p in previews)
-    return (f'<div class="section"><div class="section-header"><span class="section-icon">🖼️</span>'
-            f'<span class="section-title">Previews de UI</span><span class="section-count">{len(previews)}</span></div>'
-            f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px">{figures}</div></div>')
-
-
-def version_cell(repo):
-    """La versión que fija la app frente a la del fuente, con un aviso si no coinciden."""
-    parts = []
-    if repo["pinned"]:
-        parts.append(f'fijada <code>{e(repo["pinned"])}</code>')
-    if repo["source"]:
-        parts.append(f'fuente <code>{e(repo["source"])}</code>')
-    flag = ' <span class="version-mismatch">⚠️ no coinciden</span>' if repo["version_mismatch"] else ""
-    return " · ".join(parts) + flag if parts else "—"
-
-
-def repos_section(repos, files):
-    """Con más de un repo: nombre, rama, base usada y conteos de cada uno; si alguno trae versiones, la fijada y la
-    del fuente, con un aviso arriba cuando no coinciden."""
-    if len(repos) < 2:
-        return ""
-    versions = any(repo["pinned"] or repo["source"] for repo in repos)
-    rows = ['<tr><th>Repo</th><th>Rama</th><th>Base</th>' + ("<th>Versión</th>" if versions else "") +
-            '<th>Nuevos</th><th>Modificados</th><th>Eliminados</th></tr>']
-    for repo in repos:
-        counts = [sum(1 for f in files if f["repo"] is repo and f["status"] == k) for k in "AMD"]
-        rows.append(f'<tr><td><span class="repo-tag">{e(repo["name"])}</span></td><td>{e(repo["branch"])}</td>'
-                    f'<td>{base_html(repo)}</td>' + (f"<td>{version_cell(repo)}</td>" if versions else "") +
-                    "".join(f"<td>{n}</td>" for n in counts) + "</tr>")
-    warnings = "".join(
-        f'<div class="note-block version-warning">⚠️ {e(repo["name"])}: el fuente ({e(repo["source"])}) no coincide '
-        f'con la versión que fija la app ({e(repo["pinned"])}). Lo probado en fuente puede no compilar o comportarse '
-        "distinto con lo publicado: revísalo antes de publicar.</div>"
-        for repo in repos if repo["version_mismatch"])
-    return plain_section("🗂️", "Repositorios", warnings + f'<div class="table-wrap"><table class="repos-table">'
-                         f'{"".join(rows)}</table></div>', len(repos))
-
-
-def base_line(repos):
-    """Con un solo repo no hay tabla de repositorios: la base usada va bajo la descripción."""
-    if len(repos) > 1:
-        return ""
-    return f'<p class="hero-base">Comparado con {base_html(repos[0])}</p>'
-
-
-def root_cause_section(meta):
-    text = meta.get("root_cause", "").strip()
-    return plain_section("🎯", "Causa raíz", f'<div class="note-block">{e(text)}</div>') if text else ""
-
-
-def impact_section(items):
-    if not items:
-        return ""
-    cards = "".join(f'<div class="stat-card"><div class="stat-label">{e(str(item["label"]))}</div>'
-                    f'<div class="impact-value">{e(str(item.get("value", "")))}</div></div>' for item in items)
-    return plain_section("📊", "Impacto", f'<div class="impact-grid">{cards}</div>', len(items))
-
-
-def diagrams_section(items):
-    """El código Mermaid va escapado en <pre class="mermaid">: sin conexión se lee como texto."""
-    if not items:
-        return ""
-    figures = []
-    for item in items:
-        title = f'<figcaption class="diagram-title">{e(str(item.get("title", "")))}</figcaption>' if item.get("title") else ""
-        desc = f'<p class="diagram-desc">{e(str(item["description"]))}</p>' if item.get("description") else ""
-        figures.append(f'<figure class="diagram">{title}<div class="diagram-body"><pre class="mermaid">'
-                       f'{e(item["mermaid"])}</pre></div>{desc}</figure>')
-    return plain_section("🧭", "Diagramas", "".join(figures), len(items))
-
-
-def temporary_section(items):
-    """Cambios de configuración que la tarea necesitó (por ejemplo, usar el código local de una dependencia):
-    no cuentan como cambios, no se commitean y dicen cómo revertirlos."""
-    if not items:
-        return ""
-    rows = []
-    for item in items:
-        why = f'<div>{e(str(item["why"]))}</div>' if item.get("why") else ""
-        revert = (f'<div class="temp-revert">Cómo revertirlo: <code>{e(str(item["revert"]))}</code></div>'
-                  if item.get("revert") else "")
-        rows.append(f'<div class="temp-item"><div class="file-path">{e(str(item["path"]))}</div>{why}{revert}</div>')
-    intro = ('<p class="temp-intro">No son parte de la tarea: no se cuentan ni se commitean. Los que la tarea hizo '
-             'dicen cómo revertirlos.</p>')
-    return plain_section("🔧", "Cambios temporales", intro + "".join(rows), len(items))
-
-
-def mermaid_scripts(items):
-    if not items:
-        return ""
-    return (f'<script src="{MERMAID_URL}" integrity="{MERMAID_SRI}" crossorigin="anonymous"></script>\n'
-            "<script>if (window.mermaid) { mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', "
-            "theme: 'dark' }); mermaid.run({ querySelector: 'pre.mermaid' }); }</script>")
+    rows, outputs = [], []
+    for step in steps:
+        kind, label = PILLS[step["status"]]
+        note = f' <span class="muted">· {e(step["note"])}</span>' if step.get("note") else ""
+        command = f'<code>{e(step["command"])}</code>' if step.get("command") else ""
+        rows.append(f'<tr><td>{e(step.get("icon", "•"))}</td><td>{e(step.get("name", ""))}</td><td>{command}</td>'
+                    f"<td>{chip(label, kind)}{note}</td></tr>")
+        if step.get("output"):
+            outputs.append(f'<details class="file" open><summary><code class="file-path">Salida de '
+                           f'{e(step.get("name", ""))}</code></summary>{code_block(step["output"])}</details>')
+    return ('<div class="table-wrap"><table class="dod"><thead><tr><th></th><th>Paso</th><th>Comando</th>'
+            f'<th>Resultado</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>{"".join(outputs)}')
 
 
 def dod_stat(steps):
@@ -1041,7 +1666,327 @@ def dod_stat(steps):
     return "PARTIAL", "orange"
 
 
+def dod_chip(steps):
+    value, color = dod_stat(steps)
+    kinds = {"green": "c-ok", "red": "c-ko", "orange": "c-warn"}
+    return chip(value, kinds[color]) if steps else '<span class="muted">—</span>'
+
+
+def dod_owner(step, repos):
+    """La unidad de un paso del DoD: su "unit" o el prefijo del nombre ("core-lib · Tests"); None si es del proyecto."""
+    label = step.get("unit")
+    if not label:
+        found = re.match(r"^\s*(.+?)\s+·\s+\S", step.get("name") or "")
+        label = found.group(1) if found else None
+    return next((repo for repo in repos if label and label.strip() in repo["aliases"]), None)
+
+
+def preview_path(repo, task, image):
+    """La imagen de un preview: absoluta, relativa al repo (la ruta previews: que imprime --folder, aunque pase por un
+    enlace simbólico) o relativa a la carpeta de la tarea (previews/<archivo>)."""
+    path = pathlib.Path(os.path.expanduser(str(image)))
+    if path.is_absolute():
+        return path
+    candidates_found = [repo / path] + ([task.folder / path] if task is not None else [])
+    return next((candidate for candidate in candidates_found if candidate.is_file()), candidates_found[0])
+
+
+def preview_figure(repo, preview, missing, task=None):
+    path = preview_path(repo, task, preview.get("image", ""))
+    name = e(str(preview.get("name") or path.stem))
+    note = e(str(preview.get("note") or ""))
+    caption = f'<figcaption><strong>{name}</strong>{" · " + note if note else ""}</figcaption>'
+    mime = IMAGE_TYPES.get(path.suffix.lower())
+    if mime and path.is_file():
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+        body = f'<img src="data:{mime};base64,{data}" alt="{name}">'
+    else:
+        missing.append(str(path))
+        body = f'<div class="empty-state">No se encontró la imagen: {e(str(path))}</div>'
+    return f"<figure>{body}{caption}</figure>"
+
+
+def previews_section(repo, previews, missing, task=None):
+    """Imágenes incrustadas en base64: el reporte sigue siendo un solo archivo que se puede compartir."""
+    if not previews:
+        return ""
+    figures = "".join(preview_figure(repo, p, missing, task) for p in previews)
+    return section("previews", "🖼️ Previews de UI", f'<div class="previews">{figures}</div>', len(previews))
+
+
+def section(anchor, title, content, count=None, extra=""):
+    badge = f' <span class="count">{count}</span>' if count is not None else ""
+    return f'<section id="{anchor}"{extra}><h2>{title}{badge}</h2>{content}</section>'
+
+
+def version_cell(repo):
+    """La versión que fija la app frente a la del fuente, con un aviso si no coinciden."""
+    parts = []
+    if repo["pinned"]:
+        parts.append(f'fijada <code>{e(repo["pinned"])}</code>')
+    if repo["source"]:
+        parts.append(f'fuente <code>{e(repo["source"])}</code>')
+    flag = " " + chip("⚠️ no coinciden", "c-warn") if repo["version_mismatch"] else ""
+    return " · ".join(parts) + flag if parts else "—"
+
+
+def branch_html(repo):
+    text = f'<code>{e(repo["branch"])}</code>'
+    before = repo.get("branch_before")
+    if repo.get("photo") is None or "branch" not in (repo.get("photo") or {}):
+        return text
+    if before == repo["branch"]:
+        return text + ' <span class="muted">· la misma del inicio</span>'
+    start = f"<code>{e(before)}</code>" if before else "otro commit (detached)"
+    return text + f' <span class="muted">· al empezar: {start}</span>'
+
+
+def counts_of(files):
+    return {k: sum(1 for f in files if f["status"] == k) for k in "AMD"}
+
+
+def unit_anchor(repo):
+    return "unidad-" + slug(repo["name"])
+
+
+def units_table(repos, by_repo, steps_by_repo):
+    versions = any(repo["pinned"] or repo["source"] for repo in repos)
+    head = ("<tr><th>Unidad</th><th>Rama</th><th>Base</th>" + ("<th>Versión</th>" if versions else "") +
+            "<th>Nuevos</th><th>Modificados</th><th>Eliminados</th><th>DoD</th></tr>")
+    rows = []
+    for repo in repos:
+        counts = counts_of(by_repo[repo["real"]])
+        tag = f'<span class="repo-tag">{e(repo["name"])}</span>'
+        name = f'<a href="#{unit_anchor(repo)}">{tag}</a>' if by_repo[repo["real"]] else tag  # sin archivos, sin sección
+        rows.append(f"<tr><td>{name}</td>"
+                    f'<td><code>{e(repo["branch"])}</code></td><td>{base_html(repo)}</td>' +
+                    (f"<td>{version_cell(repo)}</td>" if versions else "") +
+                    "".join(f'<td class="num">{counts[k]}</td>' for k in "AMD") +
+                    f"<td>{dod_chip(steps_by_repo.get(repo['real'], []))}</td></tr>")
+    return f'<div class="table-wrap"><table class="units"><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table></div>'
+
+
+def unit_section(repo, files, steps, group_defs, next_id):
+    counts = counts_of(files)
+    role = "principal" if repo["main"] else "vecino"
+    where = ("la raíz del proyecto" if repo["main"] else
+             f'<code>{e(display_path(repo["root"], repo["main_root"]))}</code>')
+    models = (" · unidades del modelo: " + ", ".join(f"<code>{e(u)}</code>" for u in repo["units"])
+              if repo["units"] else "")
+    fields = [("Rama", branch_html(repo)), ("Base", base_html(repo))]
+    if repo["pinned"] or repo["source"]:
+        fields.append(("Versión", version_cell(repo)))
+    fields.append(("Cambios", f'{plural(counts["A"], "nuevo")} · {plural(counts["M"], "modificado")} · '
+                              f'{plural(counts["D"], "eliminado")}'))
+    fields.append(("DoD de la unidad", dod_chip(steps)))
+    content = (f'<p class="sub">{where}{models}</p><div class="fields">' +
+               "".join(f'<div class="field"><div class="k">{k}</div><div class="x">{v}</div></div>' for k, v in fields) +
+               "</div>")
+    if repo["version_mismatch"]:
+        content += (f'<div class="note warn"><b>⚠️ El fuente no coincide con la versión que fija la app</b>'
+                    f'El fuente ({e(repo["source"])}) y la versión fijada ({e(repo["pinned"])}) no coinciden: lo '
+                    "probado en fuente puede no compilar o comportarse distinto con lo publicado. Revísalo antes de "
+                    "publicar.</div>")
+    if steps:
+        content += "<h3>✅ DoD de la unidad</h3>" + dod_table(steps)
+    for status, icon, title in (("A", "🆕", "Archivos nuevos"), ("M", "✏️", "Archivos modificados"),
+                                ("D", "🗑️", "Archivos eliminados")):
+        entries, grouped = [], {}
+        for f in files:
+            if f["status"] != status:
+                continue
+            if f["group"] is None:
+                entries.append(file_entry(next_id(), f, f["info"] or {}))
+            else:
+                grouped.setdefault(id(f["group"]), (f["group"], []))[1].append(f["path"])
+        entries += [group_entry(next_id(), group, status, paths) for group, paths in grouped.values()]
+        if entries:
+            content += f'<h3>{icon} {title} <span class="count">{counts[status]}</span></h3>' + "".join(entries)
+    title = f'<span class="repo-tag">{e(repo["name"])}</span> {chip(role, "c-same")}'
+    return section(unit_anchor(repo), title, content, extra=' class="unit"')
+
+
+def unattributed_section(items):
+    if not items:
+        return ""
+    by_repo = {}
+    for item in items:
+        by_repo.setdefault(item["repo"], []).append(item)
+    blocks = []
+    for name, entries in by_repo.items():
+        rows = "".join(f'<li><code class="file-path">{e(item["path"])}</code> <span class="muted">· '
+                       f'{e(item["reason"])}</span></li>' for item in entries[:LIST_LIMIT])
+        more = (f'<li class="muted">y {len(entries) - LIST_LIMIT} más</li>' if len(entries) > LIST_LIMIT else "")
+        blocks.append(f'<h3><span class="repo-tag">{e(name)}</span> <span class="count">{len(entries)}</span></h3>'
+                      f'<ul class="plain-list">{rows}{more}</ul>')
+    intro = ('<p class="sub">Ya estaban antes de la tarea, o están en repos que no se sabe si son de ella: no entran en '
+             "los conteos ni se proponen para commit con la tarea.</p>")
+    return (f'<section id="no-atribuidos"><details class="block"><summary><h2>🧾 Cambios no atribuidos '
+            f'<span class="count">{len(items)}</span></h2></summary>{intro}{"".join(blocks)}</details></section>')
+
+
+def temporary_section(items):
+    """Cambios de configuración que la tarea necesitó (por ejemplo, usar el código local de una dependencia):
+    no cuentan como cambios, no se commitean y dicen cómo revertirlos."""
+    if not items:
+        return ""
+    rows = []
+    for item in items:
+        why = f'<div>{e(str(item["why"]))}</div>' if item.get("why") else ""
+        revert = (f'<div class="temp-revert">Cómo revertirlo: <code>{e(str(item["revert"]))}</code></div>'
+                  if item.get("revert") else "")
+        rows.append(f'<div class="temp-item"><div class="file-path">{e(str(item["path"]))}</div>{why}{revert}</div>')
+    intro = ('<p class="sub">No son parte de la tarea: no se cuentan ni se commitean. Los que la tarea hizo dicen cómo '
+             "revertirlos.</p>")
+    return section("temporales", "🔧 Cambios temporales", intro + "".join(rows), len(items))
+
+
+def root_cause_section(meta):
+    text = meta.get("root_cause")
+    return section("causa", "🎯 Causa raíz", f'<div class="note-block">{e(text)}</div>') if text else ""
+
+
+def impact_section(items):
+    if not items:
+        return ""
+    cards = "".join(f'<div class="kpi"><div class="stat-label">{e(item["label"])}</div>'
+                    f'<div class="impact-value">{e(item.get("value", ""))}</div></div>' for item in items)
+    return section("impacto", "📊 Impacto", f'<div class="impact-grid">{cards}</div>', len(items))
+
+
+def diagrams_section(items):
+    """El código Mermaid va escapado en <pre class="mermaid">: sin conexión se lee como texto."""
+    if not items:
+        return ""
+    figures = []
+    for item in items:
+        title = f'<figcaption class="diagram-title">{e(item["title"])}</figcaption>' if item.get("title") else ""
+        desc = f'<p class="diagram-desc">{e(item["description"])}</p>' if item.get("description") else ""
+        figures.append(f'<figure class="diagram">{title}<div class="diagram-body"><pre class="mermaid">'
+                       f'{e(item["mermaid"])}</pre></div>{desc}</figure>')
+    return section("diagramas", "🧭 Diagramas", "".join(figures), len(items))
+
+
+def mermaid_scripts(items):
+    """Cada diagrama se dibuja dos veces, claro y oscuro: el tema elige cuál se ve y al imprimir sale el claro."""
+    if not items:
+        return ""
+    return (f'<script src="{MERMAID_URL}" integrity="{MERMAID_SRI}" crossorigin="anonymous"></script>\n'
+            "<script>\n"
+            "(async function () {\n"
+            "  if (!window.mermaid) return;\n"
+            "  var blocks = document.querySelectorAll('pre.mermaid');\n"
+            "  for (var i = 0; i < blocks.length; i++) {\n"
+            "    var block = blocks[i], code = block.textContent, boxes = [];\n"
+            "    for (var theme of ['default', 'dark']) {\n"
+            "      var id = 'hb-diagrama-' + i + '-' + theme;\n"
+            "      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: theme });\n"
+            "      try {\n"
+            "        var out = await mermaid.render(id, code);\n"
+            "        var box = document.createElement('div');\n"
+            "        box.className = 'diagram-svg ' + (theme === 'dark' ? 'diagram-dark' : 'diagram-light');\n"
+            "        box.innerHTML = out.svg;\n"
+            "        block.parentNode.insertBefore(box, block);\n"
+            "        boxes.push(box);\n"
+            "      } catch (err) {\n"
+            "        ['d' + id, id].forEach(function (left) { var node = document.getElementById(left); "
+            "if (node) node.remove(); });\n"
+            "      }\n"
+            "    }\n"
+            "    if (boxes.length === 2) block.classList.add('rendered');\n"
+            "    else boxes.forEach(function (box) { box.remove(); });\n"
+            "  }\n"
+            "})();\n"
+            "</script>")
+
+
+def skill_version():
+    try:
+        text = (HERE.parent / "SKILL.md").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    found = re.search(r'^\s+version:\s*"?([^"\s]+)"?\s*$', text, re.M)
+    return found.group(1) if found else ""
+
+
+def template_parts():
+    """Los bloques de la plantilla que empiezan una línea: una mención en un comentario no cuenta."""
+    template = TEMPLATE.read_text(encoding="utf-8")
+    early = re.search(r'^[ \t]*(<script id="theme-early">.*?</script>)', template, re.S | re.M).group(1)
+    style = re.search(r"^[ \t]*(<style>.*?</style>)", template, re.S | re.M).group(1)
+    script = re.search(r'^[ \t]*(<script id="behavior">.*?</script>)', template, re.S | re.M).group(1)
+    return early, style, script
+
+
+def summary_section(meta, cov, shown_repos, by_repo, steps_by_repo, all_files, dod, migrations, empty_repos):
+    counts = counts_of(all_files)
+    dod_value, dod_color = dod_stat(dod)
+    kpis = [("Archivos nuevos", counts["A"], "green"), ("Archivos modificados", counts["M"], "blue"),
+            ("Archivos eliminados", counts["D"], "red"), ("Unidades", len(shown_repos), ""),
+            ("DoD", dod_value, dod_color)]
+    content = '<div class="kpis">' + "".join(
+        f'<div class="kpi"><div class="stat-value {color}">{e(str(value))}</div><div class="stat-label">{label}</div>'
+        "</div>" for label, value, color in kpis) + "</div>"
+    if meta.get("branch_note"):
+        content += f'<div class="note"><b>🌿 Rama de trabajo</b>{e(meta["branch_note"])}</div>'
+    warnings = []
+    if not cov.photo:
+        warnings.append("La tarea no tiene foto inicial (empezó antes de hb-implement 1.7.0, o sin "
+                        "<code>report.py --folder</code> al empezar): entran el repo principal y <code>repos</code> del "
+                        "meta." + (" Los repos con cambios sin commit que no están ahí salen en «Cambios no "
+                                   "atribuidos»: " + ", ".join(f"<code>{e(p)}</code>" for p in cov.dirty_without_photo)
+                                   if cov.dirty_without_photo else ""))
+    if migrations:
+        items = "".join(f"<li><code>{e(migration_text(*m))}</code></li>" for m in migrations)
+        warnings.append("<b>⚠️ Posible migración de lenguaje que nadie pidió</b>Un archivo de código se borró o se "
+                        "vació y aparece otro con el mismo nombre en otro lenguaje. Confirma que el cambio de lenguaje "
+                        f"se pidió:<ul>{items}</ul>")
+    mixed = [f["key"] for f in all_files if MIXED_WARNING in f["warnings"]]
+    if mixed:
+        warnings.append("<b>⚠️ Archivos que ya tenían cambios antes de la tarea</b>Su diff mezcla esos cambios con los "
+                        "de la tarea: " + ", ".join(f"<code>{e(key)}</code>" for key in mixed))
+    for repo in cov.repos:  # también la de un repo sin archivos de la tarea: lo probado puede no ser lo publicado
+        if repo["version_mismatch"]:
+            warnings.append(f'<b>⚠️ {e(repo["name"])}: el fuente no coincide con la versión que fija la app</b>El '
+                            f'fuente ({e(repo["source"])}) y la versión fijada ({e(repo["pinned"])}) no coinciden: lo '
+                            "probado en fuente puede no compilar o comportarse distinto con lo publicado.")
+    content += "".join(f'<div class="note warn">{text}</div>' for text in warnings)
+    content += "<h3>🧩 Unidades</h3>" + units_table(cov.repos, by_repo, steps_by_repo)
+    if empty_repos:
+        content += ('<p class="sub" style="margin-top:8px">Sin archivos de la tarea (sus cambios son temporales o ya '
+                    "estaban antes): " + ", ".join(f'<span class="repo-tag">{e(r["name"])}</span>' for r in empty_repos)
+                    + "</p>")
+    if cov.unchanged:
+        content += ('<p class="sub" style="margin-top:8px">Sin cambios desde la foto inicial: ' +
+                    ", ".join(f'<span class="repo-tag">{e(r["name"])}</span>' for r in cov.unchanged) + "</p>")
+    return section("resumen", "📋 Resumen", content)
+
+
+def header_html(meta, project, date):
+    kind = meta.get("type") or "feature"
+    chips = [f'<span class="hchip">{e(TYPES.get(kind, TYPES["feature"]))}</span>']
+    if meta.get("severity"):
+        chips.append(f'<span class="hchip sev-{meta["severity"]}">{SEVERITY_LABELS[meta["severity"]]}</span>')
+    if meta.get("ticket"):
+        chips.append(f'<span class="hchip">🎫 {e(meta["ticket"])}</span>')
+    if meta.get("scope"):
+        chips.append(f'<span class="hchip"><code>{e(meta["scope"])}</code></span>')
+    lead = f'<p class="lead">{e(meta["description"])}</p>' if meta.get("description") else ""
+    return (f'<header><div class="inner"><button class="theme-btn" id="theme-btn" type="button">Tema</button>'
+            f'<p class="kicker">{e(project)} · Reporte de implementación · {e(date)}</p>'
+            f'<h1>{e(meta.get("title") or "Reporte")}</h1>{lead}<div class="badges">{"".join(chips)}</div></div></header>')
+
+
+def toc_html(entries):
+    links = "".join(f'<a href="#{anchor}">{e(label)}</a>' for anchor, label in entries)
+    return f'<nav class="toc" aria-label="Contenido">{links}</nav>'
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
+class EmptyReport(RuntimeError):
+    """No hay archivos de la tarea: el reporte no se escribe y el mensaje dice por qué y qué hacer."""
+
+
 def meta_type(path):
     """El "type" de un meta que ya existe, o None."""
     try:
@@ -1052,22 +1997,80 @@ def meta_type(path):
     return kind if isinstance(kind, str) and kind.strip() else None
 
 
+def unit_command(repo, args, task_slug, path):
+    """El comando para registrar una unidad, con la ruta real del script, listo para copiar."""
+    shown_path = path if path.startswith("<") else shlex.quote(path)
+    command = f"python3 -I {home(os.path.abspath(__file__))} --unit {shown_path} --folder {shlex.quote(task_slug)}"
+    if args.out:
+        command += f" --out {shlex.quote(args.out)}"
+    if os.path.realpath(os.getcwd()) != os.path.realpath(str(repo)):
+        command += f" --repo {home(repo)}"
+    return command
+
+
 def print_folder(repo, layout, args):
     task_slug = safe_slug(args.folder)
     date = args.date or datetime.date.today().isoformat()
     task = layout.task(task_slug, date)
-    real(task.folder).mkdir(parents=True, exist_ok=True)
+    folder = real(task.folder)
+    started = folder.is_dir() and any(real(task.file(kind)).exists() for kind in ("meta", "report", "bitacora"))
+    folder.mkdir(parents=True, exist_ok=True)
     meta_file = task.file("meta")
     warnings = [ensure_ignored(repo, layout.root, meta_file),
                 update_index(layout, task, meta_type(real(meta_file)), "en curso")]
+    photo_line, notes = None, []
+    if task.flat:
+        notes.append('ℹ️  La tarea está en el formato plano de antes: sin foto inicial, el reporte usa "repos" del meta.')
+    elif real(task.snapshot).is_file():
+        photo_line = "(ya existía: se conserva la del inicio de la tarea)"
+    elif started:
+        notes.append("ℹ️  La tarea empezó sin foto inicial (antes de hb-implement 1.7.0): no la tomo ahora, porque "
+                     "contaría sus propios cambios como previos. El reporte usa el repo principal y \"repos\" del "
+                     "meta: registra cada unidad que cambie con --unit.")
+    else:
+        snapshot = take_snapshot(repo, layout, structure_units(repo))
+        write_json(real(task.snapshot), snapshot, ascii_only=True)
+        photo_line = "(%s)" % photo_summary(snapshot)
+        if snapshot["unreadable"]:
+            listing = ", ".join("%s (%s)" % (item["path"], item["reason"]) for item in snapshot["unreadable"])
+            notes.append(f"ℹ️  No pude leer {plural(len(snapshot['unreadable']), 'carpeta')}: {listing}. Quedan fuera "
+                         "de la foto; si una es de la tarea, dale al agente acceso y vuelve a pedir la carpeta.")
+        failed = [entry for entry in snapshot["repos"] if "error" in entry]
+        if failed:
+            notes.append("ℹ️  No pude leer el estado de " + ", ".join(
+                "%s (%s)" % (entry["path"], entry["error"]) for entry in failed) + ".")
+        dirty = dirty_at_start(repo, snapshot)
+        if dirty:
+            notes.append("ℹ️  La foto inicial ya encuentra cambios sin commit en " + "; ".join(dirty) + ". Quedan "
+                         "como previos a la tarea: si no cambian, van a «Cambios no atribuidos». Si no son de esta "
+                         "tarea, avísale al usuario antes de empezar.")
     print(f"📁 Carpeta de la tarea: {shown(task.folder, repo)}" + (" (la tarea ya existía: sigue ahí)" if task.reused else ""))
     print(f"   meta: {shown(meta_file, repo)}")
     print(f"   bitácora, si hace falta: {shown(task.file('bitacora'), repo)}")
     print(f"   previews: {shown(task.previews, repo)}")
     print(f"   índice: {shown(layout.index, repo)}")
-    for warning in warnings:
+    if photo_line:
+        print(f"   foto inicial: {shown(task.snapshot, repo)} {photo_line}")
+    for warning in warnings + notes:
         if warning:
             print(warning, file=sys.stderr)
+
+
+def dirty_at_start(repo, snapshot):
+    """Los repos de la tarea (el principal y las unidades) que ya tienen cambios sin commit en la foto, sin contar la
+    configuración local modificada a propósito: ["app-shell: 2 archivos (a.txt, b.txt)"]."""
+    local = {os.path.realpath(os.path.join(str(repo), path)) for path in local_config(repo)}
+    found = []
+    for entry in snapshot["repos"]:
+        if entry.get("role") not in ("main", "unit"):
+            continue
+        paths = [path for path in sorted(entry.get("dirty") or {})
+                 if os.path.realpath(os.path.join(entry["real"], path)) not in local]
+        if paths:
+            name = os.path.basename(entry["real"])
+            shown_paths = ", ".join(paths[:5]) + (", …" if len(paths) > 5 else "")
+            found.append(f"{name}: {plural(len(paths), 'archivo')} ({shown_paths})")
+    return found
 
 
 def dod_state(steps):
@@ -1075,12 +2078,278 @@ def dod_state(steps):
     return "sin DoD" if value == "—" else "DoD " + value
 
 
+def empty_message(cov, temporary_count, previous_count, repo, args, task_slug):
+    causes, steps = [], []
+    if cov.others:
+        causes.append("Los cambios están en repos que no son unidades del modelo ni están registrados: " +
+                      ", ".join(f'{other["path"]} ({other["detail"]})' for other in cov.others) + ".")
+        steps.append("Pregúntale al usuario si alguno es de la tarea; si lo es, regístralo y vuelve a generar el "
+                     "reporte: " + "; ".join(unit_command(repo, args, task_slug, other["path"])
+                                             for other in cov.others[:5]))
+    if cov.dirty_without_photo:
+        causes.append("La tarea no tiene foto inicial y hay repos con cambios sin commit que no están en \"repos\" del "
+                      "meta: " + ", ".join(cov.dirty_without_photo) + ".")
+        steps.append("Si alguno es de la tarea, regístralo y vuelve a generar el reporte: " +
+                     "; ".join(unit_command(repo, args, task_slug, path) for path in cov.dirty_without_photo[:5]))
+    if previous_count:
+        causes.append(f"Los {plural(previous_count, 'cambio')} que hay ya estaban antes de la foto inicial (sin "
+                      "commit, o commiteados en la rama antes de empezar): la tarea no cambió nada después.")
+        steps.append("Si la carpeta (y con ella la foto) se pidió después de empezar a cambiar, esos cambios sí son de "
+                     "la tarea: vuelve a generar con --ignore-snapshot (entran el principal y \"repos\" del meta; "
+                     "registra con --unit cada repo vecino que cambió).")
+    if temporary_count and not causes:
+        causes.append(f"Todo lo que cambió es temporal o configuración local ({plural(temporary_count, 'archivo')}).")
+    if not causes and cov.photo and not cov.repos:
+        causes.append("Ningún repo de la tarea cambió después de la foto inicial (" +
+                      ", ".join(r["name"] for r in cov.unchanged) + ").")
+        steps.append("Si la tarea cambió un repo que no es unidad del modelo, regístralo y vuelve a generar el reporte: "
+                     + unit_command(repo, args, task_slug, "<ruta>"))
+    if not causes:
+        bases = "; ".join(f'{r["name"]}: {base_text(r)}' for r in cov.repos if "base_label" in r)
+        causes.append("Ningún repo de la tarea tiene cambios contra su base" + (f" ({bases})" if bases else "") + ".")
+        steps.append("Si la tarea ya está commiteada en la rama principal o en otra rama, pasa la base con --base (o "
+                      "\"base\" en \"repos\"). Si cambió un repo vecino, regístralo y vuelve a generar el reporte: " +
+                      unit_command(repo, args, task_slug, "<ruta>"))
+    if not steps:
+        steps.append("Si la tarea sí cambió archivos, revisa que estén en un repo de la tarea y vuelve a generar el "
+                     "reporte; si no cambió nada, no hace falta reporte.")
+    unchanged = [r["name"] for r in cov.unchanged]
+    lines = ["No genero el reporte: no encontré ningún archivo de la tarea, así que no escribí nada.",
+             "  Causa probable:"] + [f"    - {text}" for text in causes] + ["  Siguiente paso:"] + \
+        [f"    - {text}" for text in steps]
+    if unchanged:
+        lines.append("  Sin cambios desde la foto inicial: " + ", ".join(unchanged) + ".")
+    return "\n".join(lines)
+
+
+def generate(repo, layout, args):
+    meta_path = lexical(args.meta)
+    notes = []
+    meta = clean_meta(json.loads(meta_path.read_text(encoding="utf-8")), notes)
+    date = meta.get("date") or datetime.date.today().isoformat()
+    task_slug = safe_slug(meta["slug"]) if meta.get("slug") else slug(meta.get("title", "reporte"))
+    task = layout.task(task_slug, date, meta_path)
+    out = task.file("report")
+    snapshot = None if args.ignore_snapshot else load_snapshot(task, notes)
+    if args.ignore_snapshot:
+        notes.append("ℹ️  Genero sin la foto inicial (--ignore-snapshot): entran el repo principal y \"repos\" del meta.")
+    cov = coverage(repo, layout, args, meta, snapshot, structure_units(repo))
+    early, style, script = template_parts()
+
+    infos, group_defs = meta["files"], meta["groups"]
+    temporary = list(meta.get("temporary", []))
+    temporary_keys = {str(item["path"]) for item in temporary}
+    local = {os.path.realpath(os.path.join(str(repo), path)) for path in local_config(repo)}
+    files, temporary_found, temporary_count, previous_count = [], set(), 0, 0
+    main_root = repo
+
+    def keys_for(r, path):
+        if r["main"]:
+            return [path] + [f"{alias}:{path}" for alias in sorted(r["aliases"])]
+        return [f'{r["name"]}:{path}'] + [f"{alias}:{path}" for alias in sorted(r["aliases"] - {r["name"]})]
+
+    def temporary_or_local(r, path, key, aliases):
+        """True si el archivo es un cambio temporal del meta o configuración local (y lo anota)."""
+        nonlocal temporary_count
+        if any(alias in temporary_keys for alias in aliases):
+            temporary_found.update(aliases)
+            temporary_count += 1
+            return True
+        if os.path.realpath(os.path.join(str(r["root"]), path)) in local:
+            temporary.append({"path": key, "why": LOCAL_CONFIG_WHY})
+            temporary_count += 1
+            return True
+        return False
+
+    for r in cov.repos:
+        r["main_root"] = main_root
+        finish_repo(r)
+        pending = []
+        for f in changed_files(r, r["base"], layout):
+            f["repo"] = r
+            f["key"] = f["path"] if r["main"] else f'{r["name"]}:{f["path"]}'
+            if not temporary_or_local(r, f["path"], f["key"], keys_for(r, f["path"])):
+                pending.append(f)
+        verdicts = attribute(r, pending)
+        for f in pending:
+            verdict, reason = verdicts[id(f)]
+            if verdict == "previous":
+                previous_count += 1
+                cov.unattributed.append({"repo": r["name"], "path": f["path"], "reason": reason})
+                if any(explained(infos.get(alias)) for alias in keys_for(r, f["path"])):
+                    cov.claimed.append(f["key"])
+                continue
+            f["warnings"] = [MIXED_WARNING] if verdict == "mixed" else []
+            f["info"] = next((infos[alias] for alias in keys_for(r, f["path"]) if alias in infos), None)
+            f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None
+            f["after"] = decode(read_after(r["root"], f["path"])) if f["status"] != "D" else None
+            # Un archivo con su propia entrada en "files" se muestra aparte, aunque un grupo lo cubra.
+            f["group"] = None if f["info"] is not None else group_for(f["key"], group_defs)
+            files.append(f)
+    for r in cov.unchanged:  # lo que ya estaba sucio y no cambió: no es de la tarea
+        r["main_root"] = main_root
+        for path in sorted((r.get("state") or {}).get("dirty") or {}):
+            key = path if r["main"] else f'{r["name"]}:{path}'
+            if not temporary_or_local(r, path, key, keys_for(r, path)):
+                previous_count += 1
+                cov.unattributed.append({"repo": r["name"], "path": path,
+                                         "reason": "sin commit desde antes de la tarea; el repo no cambió después"})
+                if any(explained(infos.get(alias)) for alias in keys_for(r, path)):
+                    cov.claimed.append(key)
+
+    if not files:
+        raise EmptyReport(empty_message(cov, temporary_count, previous_count, repo, args, task.slug))
+
+    migrations = language_migrations(files)
+    for f, other, how in migrations:
+        text = "Posible migración de lenguaje que nadie pidió: " + migration_text(f, other, how) + \
+            ". Confirma que el cambio de lenguaje se pidió."
+        for target in {id(f): f, id(other): other}.values():
+            if text not in target["warnings"]:
+                target["warnings"].append(text)
+
+    by_repo = {r["real"]: [f for f in files if f["repo"] is r] for r in cov.repos}
+    shown_repos = [r for r in cov.repos if by_repo[r["real"]]]
+    empty_repos = [r for r in cov.repos if not by_repo[r["real"]]]
+    dod = meta["dod"]
+    steps_by_repo, project_steps = {}, []
+    for step in dod:
+        owner = dod_owner(step, shown_repos)
+        if owner is None:
+            project_steps.append(step)
+        else:
+            steps_by_repo.setdefault(owner["real"], []).append(step)
+    project = meta.get("project") or repo.name
+    missing_previews = []
+    previews = previews_section(repo, meta["previews"], missing_previews, task)
+    diagrams = meta["diagrams"]
+    counter = iter(range(1, 1 << 30))
+
+    def next_id():
+        return "f%d" % next(counter)
+
+    units_html = "".join(unit_section(r, by_repo[r["real"]], steps_by_repo.get(r["real"], []), group_defs, next_id)
+                         for r in shown_repos)
+    project_dod = ""
+    if project_steps:
+        sub = ('<p class="sub">Los pasos del proyecto; los de cada unidad están en su sección.</p>'
+               if steps_by_repo else "")
+        project_dod = section("dod", "✅ Definition of Done", sub + dod_table(project_steps))
+    toc = [("resumen", "Resumen")]
+    toc += [(anchor, label) for anchor, label, present in (
+        ("causa", "Causa raíz", meta.get("root_cause")), ("impacto", "Impacto", meta["impact"]),
+        ("diagramas", "Diagramas", diagrams), ("previews", "Previews", previews)) if present]
+    toc += [(unit_anchor(r), r["name"]) for r in shown_repos]
+    toc += [(anchor, label) for anchor, label, present in (
+        ("no-atribuidos", "No atribuidos", cov.unattributed), ("temporales", "Temporales", temporary),
+        ("dod", "DoD", project_dod)) if present]
+    version = skill_version()
+    page = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{e(project)} · {e(meta.get("title") or "Reporte")}</title>
+{early}
+{style}
+</head><body>
+{header_html(meta, project, date)}
+<main>
+{toc_html(toc)}
+{summary_section(meta, cov, shown_repos, by_repo, steps_by_repo, files, dod, migrations, empty_repos)}
+{root_cause_section(meta)}
+{impact_section(meta["impact"])}
+{diagrams_section(diagrams)}
+{previews}
+{units_html}
+{unattributed_section(cov.unattributed)}
+{temporary_section(temporary)}
+{project_dod}
+</main>
+<footer><div><strong>{e(project)}</strong> · Generado el {e(date)}</div>
+<div>Generado con <strong>hb-implement{" " + e(version) if version else ""}</strong> · No hacer commit sin revisión manual</div></footer>
+{script}
+{mermaid_scripts(diagrams)}
+</body></html>
+"""
+    real(out.parent).mkdir(parents=True, exist_ok=True)
+    real(out).write_text(page, encoding="utf-8")
+    print(f"📄 Reporte generado: {shown(out, repo)}")
+    print("🧩 Unidades en el reporte: " + ", ".join(f'{r["name"]} ({plural(len(by_repo[r["real"]]), "archivo")})'
+                                                   for r in shown_repos))
+    if task.reused:
+        print(f"ℹ️  Ya había una carpeta para «{task.slug}»: la tarea sigue en {shown(task.folder, repo)}"
+              + (" (formato plano de antes)" if task.flat else ""))
+    for r in cov.repos:
+        print(f"🔀 Base de {r['name']}: {base_text(r)}")
+    warnings = [ensure_ignored(repo, layout.root, out), update_index(layout, task, meta.get("type") or "feature",
+                                                                     dod_state(dod))]
+    print(f"🗂️  Índice: {shown(layout.index, repo)}")
+    report_notes(cov, files, meta, notes, warnings, missing_previews, group_defs, temporary_keys, temporary_found,
+                 migrations, repo, args, task, meta_path, layout)
+
+
+def report_notes(cov, files, meta, notes, warnings, missing_previews, group_defs, temporary_keys, temporary_found,
+                 migrations, repo, args, task, meta_path, layout):
+    """Los avisos de la salida, después del reporte: primero lo que cambia qué entra, después lo que falta completar."""
+    def say(text):
+        print(text, file=sys.stderr)
+    for text in warnings + cov.notes + notes + [w for r in cov.repos for w in r.get("warnings", [])]:
+        if text:
+            say(text)
+    if cov.others:
+        say("⚠️  Otros repos cambiaron durante la tarea y no son unidades del modelo ni están registrados (no entran al "
+            "reporte):")
+        for other in cov.others:
+            say(f'   - {other["path"]}: {other["detail"]}')
+        say("   Pregúntale al usuario si alguno es de la tarea; si lo es, regístralo y vuelve a generar el reporte: " +
+            "; ".join(unit_command(repo, args, task.slug, other["path"]) for other in cov.others[:5]))
+    if cov.dirty_without_photo:
+        say("⚠️  Repos con cambios sin commit que no están en \"repos\" del meta (van a «Cambios no atribuidos»): " +
+            ", ".join(cov.dirty_without_photo) + ". Si alguno es de la tarea, regístralo y vuelve a generar el "
+            "reporte: " + "; ".join(unit_command(repo, args, task.slug, path) for path in cov.dirty_without_photo[:5]))
+    if cov.claimed:
+        say("⚠️  El meta explica archivos que ya estaban así en la foto inicial (van a «Cambios no atribuidos»): " +
+            ", ".join(cov.claimed) + ". Si la foto se tomó después de empezar a cambiar, vuelve a generar con "
+            "--ignore-snapshot.")
+    quiet = [r["name"] for r in cov.unchanged if not r["main"]]
+    if quiet:
+        say("ℹ️  Sin cambios desde la foto inicial (no entran): " + ", ".join(quiet))
+    for f, other, how in migrations:
+        say(f"⚠️  Posible migración de lenguaje que nadie pidió: {migration_text(f, other, how)} "
+            f'({f["repo"]["name"]}). Confirma que se pidió.')
+    for path in missing_previews:
+        say(f"⚠️  Preview sin imagen: {path}")
+    missing = [f["key"] for f in files if not explained(f["info"]) and f["group"] is None]
+    if missing:
+        say("ℹ️  Archivos sin explicación en meta.json: " + ", ".join(missing))
+        if len(missing) > 5:
+            say('ℹ️  Si son archivos generados o masivos (goldens, fixtures), explícalos en grupo con "groups".')
+    report_fields, per_file = missing_analysis(meta, files)
+    if report_fields or per_file:
+        parts = ([", ".join(report_fields)] if report_fields else []) + \
+            (["risk, pros o cons de " + ", ".join(per_file)] if per_file else [])
+        say("ℹ️  Datos de análisis que faltan (complétalos si puedes sostenerlos con lo que viste en el código): " +
+            "; ".join(parts))
+    for group in group_defs:
+        if not any(f["group"] is group for f in files):
+            say(f'ℹ️  El grupo "{group.get("match", "")}" no cubre ningún archivo cambiado.')
+    for key in sorted(temporary_keys - temporary_found):
+        say(f'ℹ️  El cambio temporal "{key}" no aparece entre los cambios de git (si git lo ignora, está bien).')
+    if not task.flat and real(task.folder) != real(meta_path.parent):
+        say(f"ℹ️  Con una carpeta por tarea, el meta va en {shown(task.file('meta'), repo)} "
+            f"(report.py --folder {task.slug} te la da).")
+    if task.flat and meta_path.name == "meta.json" and real(meta_path.parent) == real(layout.root):
+        say(f"ℹ️  {shown(meta_path, repo)} lo pisa la siguiente tarea: usa un meta por tarea, en la carpeta que da "
+            f"report.py --folder <slug> ({shown(layout.root / SUBFOLDER, repo)}/<fecha>-<slug>/meta.json).")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    task_group = ap.add_mutually_exclusive_group(required=True)
+    task_group = ap.add_mutually_exclusive_group()
     task_group.add_argument("--meta", help="JSON con título, tipo, explicaciones por archivo y DoD")
     task_group.add_argument("--folder", metavar="SLUG",
-                            help="imprime y crea la carpeta de la tarea, sin generar el reporte")
+                            help="crea la carpeta de la tarea y toma la foto inicial, sin generar el reporte")
+    ap.add_argument("--unit", metavar="RUTA",
+                    help="con --folder: registra una unidad (la ruta de su fuente, relativa a la raíz del repo "
+                         "principal, o su identificador de ## Estructura) en \"repos\" del meta y en la foto")
     ap.add_argument("--base", help="ref del repo principal contra la que se compara (manda sobre --main-branch; por "
                                    "defecto, el merge-base de HEAD con la rama principal)")
     ap.add_argument("--main-branch", help="la rama principal del repo principal, la del modelo de AGENTS.md (por "
@@ -1089,150 +2358,33 @@ def main():
                                   "(por defecto, la de AGENTS.md o reports)")
     ap.add_argument("--repo", default=".", help="raíz del repositorio principal")
     ap.add_argument("--date", help="con --folder: la fecha AAAA-MM-DD (por defecto, hoy)")
+    ap.add_argument("--ignore-snapshot", action="store_true",
+                    help="con --meta: genera sin la foto inicial (solo si se tomó después de empezar a cambiar)")
     args = ap.parse_args()
+    if args.unit and not args.folder:
+        ap.error("--unit va con --folder <slug>: la tarea en la que se registra la unidad")
+    if not (args.meta or args.folder):
+        ap.error("falta --meta <meta.json> (generar el reporte) o --folder <slug> (la carpeta de la tarea)")
+    if args.ignore_snapshot and not args.meta:
+        ap.error("--ignore-snapshot va con --meta: es para generar el reporte")
 
     repo = toplevel(args.repo)
     layout = Layout(repo, args.out or agents_out(repo) or DEFAULT_OUT)
     check_worktree(repo, layout, with_agents=not args.out)
-    if args.folder:
+    if args.unit:
+        register_unit(repo, layout, args)
+    elif args.folder:
         print_folder(repo, layout, args)
-        return
+    else:
+        generate(repo, layout, args)
 
-    meta_path = lexical(args.meta)
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    validate(meta)
-    date = meta.get("date") or datetime.date.today().isoformat()
-    task_slug = safe_slug(meta["slug"]) if meta.get("slug") else slug(meta.get("title", "reporte"))
-    task = layout.task(task_slug, date, meta_path)
-    out = task.file("report")
-    repos = load_repos(repo, args.base, args.main_branch, meta.get("repos", []))
-    template = TEMPLATE.read_text(encoding="utf-8")
-    # Los bloques que empiezan una línea: una mención en un comentario de la plantilla no cuenta.
-    style = re.search(r"^[ \t]*(<style>.*?</style>)", template, re.S | re.M).group(1)
-    script = re.search(r"^[ \t]*(<script>.*?</script>)", template, re.S | re.M).group(1)
-
-    infos = meta.get("files", {})
-    group_defs = meta.get("groups", [])
-    temporary = list(meta.get("temporary", []))
-    temporary_keys = {str(item["path"]) for item in temporary}
-    local = {os.path.realpath(os.path.join(str(repo), path)) for path in local_config(repo)}
-    multi = len(repos) > 1
-    files, temporary_found = [], set()
-    for r in repos:
-        r["branch"] = branch(r["root"])
-        for f in changed_files(r, r["base"], layout):
-            f["repo"], f["show_repo"] = r, multi
-            f["key"] = f["path"] if r["main"] else f'{r["name"]}:{f["path"]}'
-            aliases = (f["key"], f'{r["name"]}:{f["path"]}')
-            if any(alias in temporary_keys for alias in aliases):
-                temporary_found.update(aliases)
-                continue
-            if os.path.realpath(os.path.join(str(r["root"]), f["path"])) in local:
-                temporary.append({"path": f["key"], "why": LOCAL_CONFIG_WHY})
-                continue
-            f["info"] = next((infos[alias] for alias in aliases if alias in infos), None)
-            f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None
-            f["after"] = decode(read_after(r["root"], f["path"])) if f["status"] != "D" else None
-            # Un archivo con su propia entrada en "files" se muestra aparte, aunque un grupo lo cubra.
-            f["group"] = None if f["info"] is not None else group_for(f["key"], group_defs)
-            files.append(f)
-
-    groups = {k: [] for k in "AMD"}
-    counts = {k: sum(1 for f in files if f["status"] == k) for k in "AMD"}
-    for k in "AMD":
-        grouped = {}
-        for i, f in enumerate(files):
-            if f["status"] != k:
-                continue
-            if f["group"] is None:
-                groups[k].append(file_entry(i, f, f["info"] or {}))
-            else:
-                grouped.setdefault(id(f["group"]), (f["group"], []))[1].append(f["key"])
-        groups[k].extend(group_entry(group, k, paths) for group, paths in grouped.values())
-    project = meta.get("project") or repo.name
-    badge_cls, badge_label = TYPES.get(meta.get("type", "feature"), TYPES["feature"])
-    dod = meta.get("dod", [])
-    dod_value, dod_color = dod_stat(dod)
-    scope = f'<span class="tag">{e(meta["scope"])}</span>' if meta.get("scope") else ""
-    severity = (f'<span class="badge severity severity-{meta["severity"]}">{SEVERITY_LABELS[meta["severity"]]}</span>'
-                if meta.get("severity") else "")
-    missing_previews = []
-    previews = previews_section(repo, meta.get("previews", []), missing_previews, task)
-    diagrams = meta.get("diagrams", [])
-
-    page = f"""<!DOCTYPE html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{e(project)} · {e(meta.get("title", "Reporte"))}</title>
-{style}
-</head><body>
-<div class="topbar"><span class="topbar-logo">{e(project)}</span><span class="topbar-sep">/</span>
-<span class="topbar-title">Implementation Report</span><div class="topbar-spacer"></div><span class="topbar-date">{e(date)}</span></div>
-<div class="container">
-<div class="hero"><div class="hero-eyebrow"><span class="badge {badge_cls}">{badge_label}</span>{severity}{scope}</div>
-<h1 class="hero-title">{e(meta.get("title", ""))}</h1><p class="hero-desc">{e(meta.get("description", ""))}</p>
-{base_line(repos)}
-<div class="stats-row">
-<div class="stat-card"><div class="stat-label">Archivos Nuevos</div><div class="stat-value green">{counts["A"]}</div></div>
-<div class="stat-card"><div class="stat-label">Archivos Modificados</div><div class="stat-value" style="color:var(--accent-blue)">{counts["M"]}</div></div>
-<div class="stat-card"><div class="stat-label">Archivos Eliminados</div><div class="stat-value red">{counts["D"]}</div></div>
-<div class="stat-card"><div class="stat-label">DoD</div><div class="stat-value {dod_color}">{dod_value}</div></div>
-</div></div>
-{repos_section(repos, files)}
-{root_cause_section(meta)}
-{impact_section(meta.get("impact", []))}
-{diagrams_section(diagrams)}
-{previews}
-{section("🆕", "Archivos Nuevos", groups["A"], "No hay archivos nuevos.", counts["A"])}
-{section("✏️", "Archivos Modificados", groups["M"], "No hay archivos modificados.", counts["M"])}
-{section("🗑️", "Archivos Eliminados", groups["D"], "Ningún archivo fue eliminado.", counts["D"])}
-{temporary_section(temporary)}
-{dod_section(dod)}
-<div class="footer"><div><span class="footer-brand">{e(project)}</span> &nbsp;·&nbsp; Generado el {e(date)}</div>
-<div>Generado con <strong>hb-implement</strong> · No hacer commit sin revisión manual</div></div>
-</div>
-{script}
-{mermaid_scripts(diagrams)}
-</body></html>
-"""
-    real(out.parent).mkdir(parents=True, exist_ok=True)
-    real(out).write_text(page, encoding="utf-8")
-    print(f"📄 Reporte generado: {shown(out, repo)}")
-    if task.reused:
-        print(f"ℹ️  Ya había una carpeta para «{task.slug}»: la tarea sigue en {shown(task.folder, repo)}"
-              + (" (formato plano de antes)" if task.flat else ""))
-    for r in repos:
-        print(f"🔀 Base de {r['name']}: {base_text(r)}")
-    warnings = [ensure_ignored(repo, layout.root, out), update_index(layout, task, meta.get("type") or "feature",
-                                                                     dod_state(dod))]
-    print(f"🗂️  Índice: {shown(layout.index, repo)}")
-    for warning in warnings + [w for r in repos for w in r["warnings"]]:
-        if warning:
-            print(warning, file=sys.stderr)
-    for path in missing_previews:
-        print(f"⚠️  Preview sin imagen: {path}", file=sys.stderr)
-    missing = [f["key"] for f in files if f["info"] is None and f["group"] is None]
-    if missing:
-        print("ℹ️  Archivos sin explicación en meta.json: " + ", ".join(missing), file=sys.stderr)
-        if len(missing) > 5:
-            print('ℹ️  Si son archivos generados o masivos (goldens, fixtures), explícalos en grupo con "groups".',
-                  file=sys.stderr)
-    for group in group_defs:
-        if not any(f["group"] is group for f in files):
-            print(f'ℹ️  El grupo "{group.get("match", "")}" no cubre ningún archivo cambiado.', file=sys.stderr)
-    for key in sorted(temporary_keys - temporary_found):
-        print(f'ℹ️  El cambio temporal "{key}" no aparece entre los cambios de git (si git lo ignora, está bien).',
-              file=sys.stderr)
-    if not task.flat and real(task.folder) != real(meta_path.parent):
-        print(f"ℹ️  Con una carpeta por tarea, el meta va en {shown(task.file('meta'), repo)} "
-              f"(report.py --folder {task.slug} te la da).", file=sys.stderr)
-    if task.flat and meta_path.name == "meta.json" and real(meta_path.parent) == real(layout.root):
-        print(f"ℹ️  {shown(meta_path, repo)} lo pisa la siguiente tarea: usa un meta por tarea, en la carpeta que da "
-              f"report.py --folder <slug> ({shown(layout.root / SUBFOLDER, repo)}/<fecha>-<slug>/meta.json).",
-              file=sys.stderr)
 
 if __name__ == "__main__":
     try:
         main()
+    except EmptyReport as err:
+        print(f"✖ {err}", file=sys.stderr)
+        sys.exit(1)
     except (RuntimeError, OSError, KeyError, ValueError) as err:
         print(f"✖ {err}", file=sys.stderr)
         sys.exit(1)
