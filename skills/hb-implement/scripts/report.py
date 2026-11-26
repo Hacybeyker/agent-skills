@@ -14,10 +14,12 @@ Cada tarea tiene su fila en <base>/INDEX.md (clave: hb-implement + slug): "en cu
 al generar el reporte. Las demás filas y líneas del índice no se tocan; se escribe sobre la ruta real (un enlace
 simbólico sigue siendo enlace).
 
-Foto inicial: --folder, al empezar la tarea, guarda snapshot.json con la rama, el HEAD y los archivos sucios (con su hash
-de contenido, el mismo que da `git hash-object --no-filters`) del repo principal, de cada repo git hermano (las
-subcarpetas directas de la carpeta padre del principal) y de las fuentes de las unidades de ## Estructura. Un solo
-`git status` por repo, en paralelo; una carpeta que no se puede leer queda anotada y no detiene nada.
+Foto inicial: --folder, al empezar la tarea, guarda snapshot.json con la rama, el HEAD y los archivos sucios del repo
+principal y de las fuentes de las unidades de ## Estructura (con su hash de contenido, el mismo que da `git hash-object
+--no-filters`) y de cada repo git hermano (las subcarpetas directas, no ocultas, de la carpeta padre del principal,
+salvo que sea la carpeta personal; de ellos solo tamaño y fecha, "st:<tamaño>:<fecha>"). Un submódulo o repo anidado
+que es unidad tiene su propia entrada; el repo de afuera solo mira su puntero. Un solo `git status` por repo, en
+paralelo; una carpeta que no se puede leer queda anotada y no detiene nada.
 --unit <ruta> --folder <slug> registra una unidad en "repos" del meta (y en la foto) en cuanto se pasa a fuente o se
 corre su DoD.
 
@@ -25,7 +27,9 @@ Al generar, cada repo se compara con la foto. Entran el principal, las unidades 
 (con --unit o en "repos"), si cambiaron después de la foto. Otro repo hermano que cambió no entra: se lista en la
 salida para que el flujo pregunte si es de la tarea. Un archivo que ya estaba sucio antes y no cambió va a "Cambios no
 atribuidos", fuera de los conteos; si además cambió, entra con un aviso. Sin foto (una tarea vieja), entran el
-principal y "repos" del meta, y los repos hermanos con cambios salen como no atribuidos.
+principal y "repos" del meta; las unidades del modelo con cambios salen como no atribuidas, y los repos hermanos que no
+son unidades solo se nombran en la salida, nunca en el HTML. Un repo de la tarea que git no lee queda fuera con un
+aviso (en la salida y en el HTML), salvo el principal o uno con base explícita, que cortan el reporte.
 Sin ningún archivo de la tarea no escribe el reporte: dice la causa probable y el siguiente paso.
 Avisa de un archivo de código borrado o vaciado cuyo equivalente (mismo nombre base) aparece con otra extensión de
 código: una migración de lenguaje que nadie pidió.
@@ -154,8 +158,8 @@ def git(repo, *args):
 
 
 def decode(data):
-    if data is None:
-        return None
+    if data is None or data is NO_PERMISSION:
+        return data
     if b"\0" in data[:8000]:
         return False  # binario
     try:
@@ -535,19 +539,35 @@ def write_json(path, data, ascii_only=False):
 @contextlib.contextmanager
 def task_lock(folder):
     """Bloquea la carpeta de la tarea mientras se lee, se cambia y se escribe el meta o la foto: varios --unit en
-    paralelo no pierden registros. Sin fcntl (Windows), sigue sin bloqueo."""
+    paralelo no pierden registros. El bloqueo es sobre la carpeta misma, sin archivo de bloqueo que git pueda ver. Si no
+    se puede bloquear (sin fcntl, como en Windows, o un disco de red que no lo admite), sigue sin bloqueo y lo avisa."""
+    folder.mkdir(parents=True, exist_ok=True)
     try:
         import fcntl
     except ImportError:
-        yield
-        return
-    folder.mkdir(parents=True, exist_ok=True)
-    with open(str(folder / ".lock"), "a") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        fcntl = None
+    handle = None
+    if fcntl is not None:
         try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle = os.open(str(folder), os.O_RDONLY)
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        except OSError as err:
+            if handle is not None:
+                os.close(handle)
+            handle = None
+            reason = err.strerror or str(err)
+            print(f"⚠️  No pude bloquear la carpeta de la tarea ({reason}): sigo sin bloqueo; no corras varios --unit "
+                  "a la vez.", file=sys.stderr)
+    else:
+        print("⚠️  Este sistema no permite bloquear la carpeta de la tarea: sigo sin bloqueo; no corras varios --unit "
+              "a la vez.", file=sys.stderr)
+    try:
+        yield
+    finally:
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            os.close(handle)
 
 
 # ── Índice de reportes (<base>/INDEX.md) ─────────────────────────────────────
@@ -748,18 +768,27 @@ def content_hash(path):
         return "unreadable"
 
 
-def nested_head(path):
+def nested_head(path, with_changes=True):
     """El "hash" de una carpeta: el HEAD de un repo anidado (un submódulo), así un cambio de su puntero se ve, más un
-    resumen de sus cambios sin commit, así también se ve un cambio dentro; "dir" en cualquier otra carpeta."""
+    resumen de sus cambios sin commit, así también se ve un cambio dentro; "dir" en cualquier otra carpeta. Sin
+    with_changes (la raíz de una unidad anidada, que tiene su propia foto), solo el HEAD. Con tiempo límite."""
     if not os.path.lexists(os.path.join(path, ".git")):
         return "dir"
-    result = subprocess.run(["git", "--no-optional-locks", "-C", path, "rev-parse", "-q", "--verify", "HEAD"],
-                            capture_output=True, text=True)
+    try:
+        result = subprocess.run(["git", "--no-optional-locks", "-C", path, "rev-parse", "-q", "--verify", "HEAD"],
+                                capture_output=True, text=True, timeout=STATUS_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unreadable"
     head = result.stdout.strip() if result.returncode == 0 else ""
     if not head:
         return "dir"
-    status = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain", "-z",
-                             "--untracked-files=all"], capture_output=True)
+    if not with_changes:
+        return head
+    try:
+        status = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain", "-z",
+                                 "--untracked-files=all"], capture_output=True, timeout=STATUS_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return head + "+?"
     if status.returncode != 0 or not status.stdout:
         return head
     digest = hashlib.sha1(status.stdout)
@@ -790,10 +819,12 @@ def current_value(root, path, before):
     return signature(full) if isinstance(before, str) and before.startswith("st:") else content_hash(full)
 
 
-def repo_state(root, exclude=None, cheap=False):
+def repo_state(root, exclude=None, cheap=False, nested=()):
     """La rama, el HEAD y los archivos sucios (modificados, borrados o sin rastrear, con su hash de contenido; con
     cheap, de un repo hermano ajeno, solo tamaño y fecha) de un repo, con un solo `git status` que no toma locks ni
-    reescribe el índice. Si git falla, {"error": motivo}."""
+    reescribe el índice. `nested`: las raíces de las unidades anidadas (submódulos o repos dentro de este), que tienen su
+    propia foto: de ellas solo cuenta su HEAD (el puntero) y nada de lo que tienen dentro. Si git falla, {"error":
+    motivo}."""
     command = ["git", "--no-optional-locks", "-C", str(root), "status", "--porcelain=v2", "--branch", "-z",
                "--untracked-files=all"]
     try:
@@ -834,22 +865,37 @@ def repo_state(root, exclude=None, cheap=False):
     dirty = {}
     for path in paths:
         path = path.rstrip("/")
-        if path and not (exclude and exclude(path)):
-            full = os.path.join(str(root), path)
+        if not path or (exclude and exclude(path)):
+            continue
+        full = os.path.join(str(root), path)
+        if path in nested:
+            dirty[path] = nested_head(full, with_changes=False)
+        elif any(path.startswith(inner + "/") for inner in nested):
+            continue
+        else:
             dirty[path] = signature(full) if cheap else content_hash(full)
     return {"branch": branch_name, "head": head, "dirty": dirty}
 
 
+def nested_paths(key, keys):
+    """Las rutas (relativas, con /) de los repos de `keys` que viven dentro del repo `key`: sus unidades anidadas."""
+    prefix = key.rstrip(os.sep) + os.sep
+    return {pathlib.Path(os.path.relpath(other, key)).as_posix() for other in keys
+            if other != key and other.startswith(prefix)}
+
+
 def states(roots, layout=None, cheap=()):
     """{clave: estado} de cada repo, en paralelo (hasta MAX_WORKERS a la vez). Sin los archivos de la carpeta de
-    reportes, en cualquier repo (también si vive en un repo hermano); los de `cheap`, con la firma barata."""
+    reportes, en cualquier repo (también si vive en un repo hermano); los de `cheap`, con la firma barata; de una unidad
+    anidada en otro repo de la lista, el repo de afuera solo mira su puntero."""
     if not roots:
         return {}
 
     def excluder(root):
         return (lambda path: layout.is_output(pathlib.Path(root) / path)) if layout is not None else None
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(roots)))) as pool:
-        futures = {key: pool.submit(repo_state, path, excluder(path), key in cheap) for key, path in roots.items()}
+        futures = {key: pool.submit(repo_state, path, excluder(path), key in cheap, nested_paths(key, roots))
+                   for key, path in roots.items()}
     return {key: future.result() for key, future in futures.items()}
 
 
@@ -1006,10 +1052,10 @@ def register_unit(repo, layout, args):
     if os.path.realpath(str(root)) == os.path.realpath(str(repo)):
         print(f"ℹ️  {args.unit} es del repo principal: ya entra al reporte, no hace falta registrarla.")
         return
-    warning = ensure_ignored(repo, layout.root, task.file("meta"))
-    if warning:
-        print(warning, file=sys.stderr)
-    with task_lock(real(task.folder)):
+    with task_lock(real(task.folder)):  # también .git/info/exclude: sin líneas repetidas con --unit en paralelo
+        warning = ensure_ignored(repo, layout.root, task.file("meta"))
+        if warning:
+            print(warning, file=sys.stderr)
         record_unit(repo, task, root, args)
 
 
@@ -1169,7 +1215,7 @@ def new_repo(root, name, role, main=False, base=None, main_branch=None, units=()
             "explicit": False, "photo": None, "state": None}
 
 
-def candidates(main, args, meta, snapshot, found, notes):
+def candidates(main, args, meta, snapshot, found, notes, skipped):
     """Los repos que pueden entrar al reporte, el principal primero: el principal, los de "repos" del meta, los
     registrados con --unit y, con foto, los de las unidades del modelo. {ruta real: repo}."""
     real_main = os.path.realpath(str(main))
@@ -1179,12 +1225,19 @@ def candidates(main, args, meta, snapshot, found, notes):
     for entry in meta.get("repos", []):
         path = pathlib.Path(os.path.expanduser(str(entry["path"])))
         path = path if path.is_absolute() else main / path
+        label = entry.get("name") or entry["path"]
+        if not os.path.lexists(str(path)):
+            raise RuntimeError(
+                f'No puedo leer el repo relacionado "{label}" ({path}): no existe. Si está en otra carpeta, dale al '
+                f'agente acceso a esa carpeta o corrige "path" en "repos" del meta.')
         try:
             root = toplevel(path)
-        except (RuntimeError, OSError) as err:
-            raise RuntimeError(
-                f'No puedo leer el repo relacionado "{entry.get("name") or entry["path"]}" ({path}): si existe, '
-                f'dale al agente acceso a esa carpeta; si no, corrige "path" en "repos" del meta. Detalle: {err}')
+        except (RuntimeError, OSError) as err:  # existe pero git no lo lee: queda fuera, sin cortar el reporte
+            reason = str(err).strip().splitlines()[-1] if str(err).strip() else "git no lo pudo leer"
+            skipped.append({"name": str(label), "reason": "git no lo pudo leer (%s)" % reason})
+            notes.append(f'⚠️  No puedo leer el repo de la unidad registrada "{label}" ({path}): {reason}. Queda fuera '
+                         "del reporte; si la tarea lo cambió, dale al agente acceso a esa carpeta y vuelve a generar.")
+            continue
         key = os.path.realpath(str(root))
         name = str(entry.get("name") or root.name)
         if key == real_main:
@@ -1221,17 +1274,19 @@ def candidates(main, args, meta, snapshot, found, notes):
 
 
 def nested_units(repo, repos):
-    """{ruta: puntero sin cambios} de los repos del reporte que viven dentro de este (un submódulo que es unidad): si
-    su HEAD es el mismo commit que guarda la base, el cambio está solo dentro y lo muestra su propia sección."""
+    """{ruta: se salta} de los repos de la tarea que viven dentro de este (un submódulo o un repo anidado que es
+    unidad). Se salta si no tiene puntero en la base (un repo anidado sin rastrear nunca es un archivo de este) o si su
+    HEAD es el commit que guarda la base: el cambio está solo dentro y lo muestra su propia sección. Un puntero que sí
+    cambió entra como un cambio del repo de afuera."""
     inside = {}
     root = os.path.realpath(str(repo["root"])).rstrip(os.sep) + os.sep
     for other in repos:
-        if other is not repo and other["real"].startswith(root):
+        if other["real"] != repo["real"] and other["real"].startswith(root):
             path = pathlib.Path(os.path.relpath(other["real"], root.rstrip(os.sep))).as_posix()
             recorded = blobs_at(repo["root"], repo.get("base"), [path]).get(path)
             head = subprocess.run(["git", "-C", str(other["root"]), "rev-parse", "-q", "--verify", "HEAD"],
                                   capture_output=True, text=True).stdout.strip()
-            inside[path] = bool(head) and recorded == head
+            inside[path] = recorded is None or recorded == "dir" or (bool(head) and recorded == head)
     return inside
 
 
@@ -1317,11 +1372,17 @@ def read_before(repo, base, path):
         return None
 
 
+NO_PERMISSION = object()  # un archivo que no se puede leer: se muestra así, sin cortar el reporte
+
+
 def read_after(repo, path):
     p = repo / path
-    if p.is_symlink():
-        return os.readlink(str(p)).encode("utf-8")  # git guarda el destino del enlace
-    return p.read_bytes() if p.is_file() else None
+    try:
+        if p.is_symlink():
+            return os.fsencode(os.readlink(str(p)))  # git guarda el destino del enlace, en bytes
+        return p.read_bytes() if p.is_file() else None
+    except PermissionError:
+        return NO_PERMISSION
 
 
 # ── Qué es de la tarea: comparación con la foto ──────────────────────────────
@@ -1360,7 +1421,7 @@ def blobs_at(root, head, paths):
     found = {}
     for path, line in zip(paths, result.stdout.decode("utf-8", "replace").splitlines()):
         parts = line.rsplit(" ", 1)
-        if len(parts) == 2 and parts[1] in ("blob", "commit"):  # commit: el puntero de un submódulo
+        if len(parts) == 2 and parts[1] in ("blob", "commit", "submodule"):  # el puntero de un submódulo
             found[path] = parts[0]
         elif len(parts) == 2 and parts[1] == "tree":
             found[path] = "dir"
@@ -1415,10 +1476,13 @@ class Coverage:
         self.others = []        # [{"path", "detail"}]: repos hermanos que cambiaron y no son de la tarea
         self.unattributed = []  # [{"repo", "path", "reason"}]: cambios que ya estaban o que no se sabe de quién son
         self.dirty_without_photo = []  # sin foto: repos (unidades y hermanos) con cambios sin commit, para la salida
-        self.dirty_units_without_photo = []  # sin foto: solo las unidades del modelo, para el HTML
+        self.dirty_units_without_photo = []  # sin foto: solo las unidades del modelo (van al HTML)
+        self.dirty_siblings_without_photo = []  # sin foto: repos hermanos que no son unidades (solo en la salida)
         self.claimed = []       # archivos que el meta explica y que ya estaban así en la foto
         self.notes = []
         self.unreadable = []
+        self.skipped = []       # [{"name", "reason"}]: repos de la tarea que quedaron fuera porque git no los leyó
+        self.nested = []        # los repos de la tarea, para saber cuáles viven dentro de otro
         self.photo = False
 
 
@@ -1426,7 +1490,9 @@ def coverage(main, layout, args, meta, snapshot, units):
     cov = Coverage()
     cov.photo = snapshot is not None
     found, _missing, cov.unreadable = discover(main, units)
-    ordered = candidates(main, args, meta, snapshot, found, cov.notes)
+    ordered = candidates(main, args, meta, snapshot, found, cov.notes, cov.skipped)
+    cov.nested = [{"real": key, "root": info["root"]} for key, info in found.items() if info["role"] == "unit"] + \
+        list(ordered.values())  # las unidades que pueden vivir dentro de otro repo de la tarea
     check_names(list(ordered.values()))
     if snapshot is not None:
         photo = {entry["real"]: entry for entry in snapshot.get("repos", [])
@@ -1441,9 +1507,10 @@ def coverage(main, layout, args, meta, snapshot, units):
             repo["photo"], repo["state"] = photo.get(key), now[key]
             if "error" in now[key]:
                 if repo["role"] == "unit":  # del modelo y sin registrar: si git no la lee, no corta el reporte
+                    cov.skipped.append({"name": repo["name"], "reason": "git no lo pudo leer (%s)" % now[key]["error"]})
                     cov.notes.append(f'⚠️  No pude leer {repo["name"]} ({now[key]["error"]}): es una unidad del modelo '
-                                     "que no está registrada y queda fuera del reporte. Si la tarea la cambió, "
-                                     "arregla el acceso y vuelve a generar.")
+                                     "que no está registrada y queda fuera del reporte. Si la tarea la cambió, dale al "
+                                     "agente acceso a esa carpeta y vuelve a generar.")
                     continue
                 cov.notes.append(f'⚠️  No pude leer el estado de {repo["name"]} ({now[key]["error"]}): lo comparo '
                                  "contra su base, sin la foto.")
@@ -1467,6 +1534,7 @@ def coverage(main, layout, args, meta, snapshot, units):
             where = display_path(path, main)
             cov.dirty_without_photo.append(where)
             if found[key]["role"] != "unit":  # un repo hermano ajeno: solo en la salida, nunca en el HTML
+                cov.dirty_siblings_without_photo.append(where)
                 continue
             cov.dirty_units_without_photo.append(where)
             for relative in sorted(dirty):
@@ -1485,7 +1553,10 @@ def stem(path):
 
 
 def has_code(text):
-    """Si el texto tiene código: algo más que comentarios, líneas vacías y declaraciones de paquete o imports."""
+    """Si el texto tiene código: algo más que comentarios, líneas vacías y declaraciones de paquete o imports. Un archivo
+    sin permiso de lectura cuenta como código: no se sabe que esté vacío."""
+    if text is NO_PERMISSION:
+        return True
     if not isinstance(text, str):
         return text is False  # un binario no es código fuente, pero tampoco está vacío
     body = re.sub(r"(?s)/\*.*?\*/|<!--.*?-->", "", text)
@@ -1709,6 +1780,8 @@ def chip(text, kind):
 
 
 def code_block(text, dim=False):
+    if text is NO_PERMISSION:
+        return '<div class="empty-state">Sin permiso de lectura: no se muestra el contenido.</div>'
     if text is False:
         return '<div class="empty-state">Archivo binario: no se muestra el contenido.</div>'
     if text is None:
@@ -1723,6 +1796,8 @@ def code_block(text, dim=False):
 
 
 def diff_block(before, after):
+    if before is NO_PERMISSION or after is NO_PERMISSION:
+        return '<div class="empty-state">Sin permiso de lectura: no se muestra el diff.</div>'
     if before is False or after is False:
         return '<div class="empty-state">Archivo binario: no se muestra el diff.</div>'
     rows, new_no = [], 0
@@ -2146,6 +2221,9 @@ def summary_section(meta, cov, shown_repos, by_repo, steps_by_repo, all_files, d
     if mixed:
         warnings.append("<b>⚠️ Archivos que ya tenían cambios antes de la tarea</b>Su diff mezcla esos cambios con los "
                         "de la tarea: " + ", ".join(f"<code>{e(key)}</code>" for key in mixed))
+    if cov.skipped:
+        warnings.append("<b>⚠️ Repos de la tarea que quedaron fuera del reporte</b>" + "; ".join(
+            f'<code>{e(item["name"])}</code>: {e(item["reason"])}' for item in cov.skipped))
     for repo in cov.repos + cov.unchanged:  # también sin archivos de la tarea: lo probado puede no ser lo publicado
         if repo.get("version_mismatch"):
             warnings.append(f'<b>⚠️ {e(repo["name"])}: el fuente no coincide con la versión que fija la app</b>El '
@@ -2275,12 +2353,14 @@ def dirty_at_start(repo, snapshot):
     """Los repos de la tarea (el principal y las unidades) que ya tienen cambios sin commit en la foto, sin contar la
     configuración local modificada a propósito: ["app-shell: 2 archivos (a.txt, b.txt)"]."""
     local = {os.path.realpath(os.path.join(str(repo), path)) for path in local_config(repo)}
+    keys = [entry["real"] for entry in snapshot["repos"] if isinstance(entry.get("real"), str)]
     found = []
     for entry in snapshot["repos"]:
         if entry.get("role") not in ("main", "unit"):
             continue
+        inner = nested_paths(entry["real"], keys)  # una unidad anidada tiene su propia línea
         paths = [path for path in sorted(entry.get("dirty") or {})
-                 if os.path.realpath(os.path.join(entry["real"], path)) not in local]
+                 if os.path.realpath(os.path.join(entry["real"], path)) not in local and path not in inner]
         if paths:
             name = os.path.basename(entry["real"])
             shown_paths = ", ".join(paths[:5]) + (", …" if len(paths) > 5 else "")
@@ -2295,6 +2375,11 @@ def dod_state(steps):
 
 def empty_message(cov, temporary_count, previous_count, repo, args, task_slug):
     causes, steps = [], []
+    if cov.skipped:
+        causes.append("Quedaron fuera del reporte: " + "; ".join(f'{item["name"]} ({item["reason"]})'
+                                                                for item in cov.skipped) + ".")
+        steps.append("Arregla lo que dejó fuera a esos repos (el acceso a su carpeta, o su rama principal o su base en "
+                     "\"repos\") y vuelve a generar el reporte.")
     if cov.others:
         causes.append("Los cambios están en repos que no son unidades del modelo ni están registrados: " +
                       ", ".join(f'{other["path"]} ({other["detail"]})' for other in cov.others) + ".")
@@ -2316,12 +2401,12 @@ def empty_message(cov, temporary_count, previous_count, repo, args, task_slug):
                      "registra con --unit cada repo vecino que cambió).")
     if temporary_count and not causes:
         causes.append(f"Todo lo que cambió es temporal o configuración local ({plural(temporary_count, 'archivo')}).")
-    if not causes and cov.photo and not cov.repos:
+    if not cov.skipped and not causes and cov.photo and not cov.repos:
         causes.append("Ningún repo de la tarea cambió después de la foto inicial (" +
                       ", ".join(r["name"] for r in cov.unchanged) + ").")
         steps.append("Si la tarea cambió un repo que no es unidad del modelo, regístralo y vuelve a generar el reporte: "
                      + unit_command(repo, args, task_slug, "<ruta>"))
-    if not causes:
+    if not causes or (cov.skipped and len(causes) == 1 and cov.repos):
         bases = "; ".join(f'{r["name"]}: {base_text(r)}' for r in cov.repos if "base_label" in r)
         causes.append("Ningún repo de la tarea tiene cambios contra su base" + (f" ({bases})" if bases else "") + ".")
         steps.append("Si la tarea ya está commiteada en la rama principal o en otra rama, pasa la base con --base (o "
@@ -2381,15 +2466,26 @@ def generate(repo, layout, args):
     readable = []
     for r in cov.repos:
         r["main_root"] = main_root
+        explicit_base = bool(r["base"])
         try:
             finish_repo(r)
             changed = changed_files(r, r["base"], layout)
-        except RuntimeError as err:  # un repo que git no lee no corta el reporte de los demás
-            cov.notes.append(f'⚠️  No pude leer {r["name"]} ({display_path(r["root"], repo)}): {err}. Queda fuera '
-                             "del reporte; si la tarea lo cambió, arregla el acceso y vuelve a generar.")
+        except RuntimeError as err:
+            if r["main"] or explicit_base:  # el principal o una base pedida: sin ellos el reporte no sirve
+                raise RuntimeError(f'{err}' if str(err).startswith(r["name"] + ":") else f'{r["name"]}: {err}')
+            # una unidad que git no lee no corta el reporte de los demás: queda fuera con su causa
+            text = str(err)
+            base_problem = "no pude comparar contra" in text
+            reason = ("no pude compararlo contra su base (%s)" % r.get("base") if base_problem
+                      else "git no lo pudo leer (%s)" % (text.splitlines()[-1] if text else "sin detalle"))
+            cov.skipped.append({"name": r["name"], "reason": reason})
+            cov.notes.append(f'⚠️  {r["name"]} ({display_path(r["root"], repo)}) queda fuera del reporte: {reason}. ' +
+                             ('Pasa su rama principal o su base ("main_branch" o "base" en "repos") y vuelve a generar.'
+                              if base_problem else "Si la tarea lo cambió, dale al agente acceso a esa carpeta y vuelve "
+                              "a generar."))
             continue
         readable.append(r)
-        nested = nested_units(r, cov.repos)
+        nested = nested_units(r, cov.nested)
         pending = []
         for f in changed:
             if f["path"] in nested and nested[f["path"]]:
@@ -2423,7 +2519,10 @@ def generate(repo, layout, args):
                 check_version(r)
             except RuntimeError:
                 pass
+        inner = nested_paths(r["real"], [other["real"] for other in cov.nested])  # tienen su propia sección
         for path in sorted((r.get("state") or {}).get("dirty") or {}):
+            if path in inner:
+                continue
             key = path if r["main"] else f'{r["name"]}:{path}'
             if not temporary_or_local(r, path, key, keys_for(r, path)):
                 previous_count += 1
@@ -2536,10 +2635,15 @@ def report_notes(cov, files, meta, notes, warnings, missing_previews, group_defs
             say(f'   - {other["path"]}: {other["detail"]}')
         say("   Pregúntale al usuario si alguno es de la tarea; si lo es, regístralo y vuelve a generar el reporte: " +
             "; ".join(unit_command(repo, args, task.slug, other["path"]) for other in cov.others[:5]))
+    if cov.dirty_units_without_photo:
+        say("⚠️  Unidades del modelo con cambios sin commit que no están en \"repos\" del meta (van a «Cambios no "
+            "atribuidos»): " + ", ".join(cov.dirty_units_without_photo) + ".")
+    if cov.dirty_siblings_without_photo:
+        say("⚠️  Repos hermanos con cambios sin commit que no son unidades del modelo (no entran al reporte; solo se "
+            "nombran aquí): " + ", ".join(cov.dirty_siblings_without_photo) + ".")
     if cov.dirty_without_photo:
-        say("⚠️  Repos con cambios sin commit que no están en \"repos\" del meta (van a «Cambios no atribuidos»): " +
-            ", ".join(cov.dirty_without_photo) + ". Si alguno es de la tarea, regístralo y vuelve a generar el "
-            "reporte: " + "; ".join(unit_command(repo, args, task.slug, path) for path in cov.dirty_without_photo[:5]))
+        say("   Si alguno es de la tarea, regístralo y vuelve a generar el reporte: " +
+            "; ".join(unit_command(repo, args, task.slug, path) for path in cov.dirty_without_photo[:5]))
     if cov.claimed:
         say("⚠️  El meta explica archivos que ya estaban así en la foto inicial (van a «Cambios no atribuidos»): " +
             ", ".join(cov.claimed) + ". Si la foto se tomó después de empezar a cambiar, vuelve a generar con "

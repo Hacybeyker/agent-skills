@@ -1154,8 +1154,10 @@ class OldTaskWithoutPhotoTest(WorkspaceTest):
             self.assertIn(path, unattributed)
         for path in ("billing-tools", "borrador.txt"):  # un repo hermano ajeno: solo en la salida, nunca en el HTML
             self.assertNotIn(path, html)
-        self.assertIn("Repos con cambios sin commit que no están en \"repos\" del meta", result.stderr)
-        self.assertIn("../billing-tools", result.stderr)
+        self.assertIn("Unidades del modelo con cambios sin commit que no están en \"repos\" del meta (van a «Cambios "
+                      "no atribuidos»): ../shop-auth", result.stderr)
+        self.assertIn("Repos hermanos con cambios sin commit que no son unidades del modelo (no entran al reporte; solo "
+                      "se nombran aquí): ../billing-tools", result.stderr)
         self.assertIn("--unit ../shop-auth --folder fix-login", result.stderr)
         self.assertEqual(self.stat(html, "Archivos nuevos"), "1")  # src/Nuevo.kt
 
@@ -1814,6 +1816,195 @@ class MigrationFalsePositivesTest(LanguageMigrationTest):
         js = self.entry("D", "src/app/index.js", before="run()\n")
         ts = self.entry("A", "src/app/index.ts", after="run()\n")
         self.assertEqual(self.found(js, ts), [("src/app/index.js", "src/app/index.ts", "borrado")])
+
+
+class VerificationFindingsTest(WorkspaceTest):
+    """Lo que dejó la verificación de las correcciones de 1.7.0."""
+
+    def unit_html(self, html, name):
+        return html.split('<section id="unidad-%s"' % name, 1)[1].split("</section>", 1)[0]
+
+    def break_git(self, repo):
+        """El repo queda con un .git que git no puede leer (un worktree huérfano)."""
+        shutil.move(str(repo / ".git"), str(self.ws.parent / (repo.name + "-git-movido")))
+        write(repo / ".git", "gitdir: /no/existe/x\n")
+
+    def submodule(self):
+        library = self.ws.mkdir("core-src")
+        init_repo(library)
+        write(library / "README.md", "# Núcleo\n")
+        commit_all(library, "v1")
+        git(self.ws.app, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "core")
+        commit_all(self.ws.app, "submódulo")
+        add_unit_row(self.ws, "| `core` | `core` | En fuente (módulo del build) | — | `make core` | este repo, `main` | "
+                              "con la app |")
+
+    def test_v1_una_base_invalida_del_principal_corta_el_reporte_y_la_nombra(self):
+        self.ok(self.ws.folder())
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        self.ws.write_meta()
+        result = self.ws.generate("--base", "origin/no-existe")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("app-shell", result.stderr)
+        self.assertIn("origin/no-existe", result.stderr)
+        self.assertFalse((self.ws.task / "report.html").exists())
+
+    def test_v1_una_base_explicita_invalida_de_una_unidad_tambien_corta(self):
+        self.ok(self.ws.folder())
+        self.ws.fix_login()
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        self.ws.write_meta(repos=[{"path": "../shop-auth", "base": "no-existe"}])
+        result = self.ws.generate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("shop-auth", result.stderr)
+        self.assertIn("no-existe", result.stderr)
+
+    def test_v1_y_v3_lo_que_queda_fuera_sale_en_el_html_y_en_el_mensaje_sin_reporte(self):
+        self.ok(self.ws.folder())
+        self.ok(self.ws.unit("../shop-auth"))
+        self.ws.fix_login()
+        write(self.ws.app / "src" / "Nuevo.kt", "class Nuevo\n")
+        self.break_git(self.ws.auth)
+        self.ws.write_meta(repos=json.loads((self.ws.task / "meta.json").read_text(encoding="utf-8"))["repos"])
+        result = self.ok(self.ws.generate())  # una unidad registrada que git no lee no corta el reporte
+        self.assertIn('No puedo leer el repo de la unidad registrada "shop-auth"', result.stderr)
+        summary = self.ws.html().split('id="resumen"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("Repos de la tarea que quedaron fuera del reporte", summary)
+        self.assertIn("shop-auth", summary)
+        (self.ws.app / "src" / "Nuevo.kt").unlink()
+        result = self.ws.generate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Quedaron fuera del reporte: shop-auth (git no lo pudo leer", result.stderr)
+        self.assertNotIn("Ningún repo de la tarea cambió después de la foto inicial", result.stderr)
+
+    def test_v2_el_puntero_de_un_submodulo_sin_cambio_no_sale_en_el_principal(self):
+        self.submodule()
+        self.ok(self.ws.folder())
+        write(self.ws.app / "core" / "README.md", "# Núcleo compartido\n")
+        write(self.ws.app / "core" / "C.kt", "class C\n")
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        html = self.ws.html()
+        self.assertNotIn('class="file-path">core</code>', html)
+        self.assertIn("C.kt", self.unit_html(html, "core"))
+        line = next(l for l in result.stdout.splitlines() if l.startswith("🧩 Unidades en el reporte"))
+        self.assertNotIn("app-shell", line)
+        self.assertNotIn("core", self.ws.snapshot()["repos"][0].get("dirty", {}))
+
+    def test_v2_un_cambio_real_del_puntero_si_sale_en_el_principal(self):
+        self.submodule()
+        self.ok(self.ws.folder())
+        write(self.ws.app / "core" / "C.kt", "class C\n")
+        commit_all(self.ws.app / "core", "nuevo commit del núcleo")
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        self.assertIn('class="file-path">core</code>', self.unit_html(self.ws.html(), "app-shell"))
+
+    def test_v2_un_repo_anidado_sin_rastrear_que_es_unidad_no_es_un_archivo_del_principal(self):
+        nested = self.ws.app / "libs" / "nucleo"
+        nested.mkdir(parents=True)
+        init_repo(nested)
+        write(nested / "a.txt", "a\n")
+        commit_all(nested)
+        add_unit_row(self.ws, "| `libs/nucleo` | `libs/nucleo` | En fuente (módulo del build) | — | `make` | este "
+                              "repo, `main` | con la app |")
+        folder = self.ok(self.ws.folder())
+        self.assertNotIn("libs/nucleo)", folder.stdout + folder.stderr)
+        write(nested / "b.txt", "b\n")
+        self.ws.write_meta()
+        result = self.ok(self.ws.generate())
+        html = self.ws.html()
+        self.assertNotIn('class="file-path">libs/nucleo</code>', html)
+        self.assertIn("b.txt", self.unit_html(html, "nucleo"))
+        line = next(l for l in result.stdout.splitlines() if l.startswith("🧩 Unidades en el reporte"))
+        self.assertNotIn("app-shell", line)
+
+    def test_v5_un_enlace_con_destino_que_no_es_utf8_no_corta(self):
+        self.ok(self.ws.folder())
+        try:
+            os.symlink(b"destino\xff", os.fsencode(str(self.ws.app / "enlace")))
+        except OSError as err:
+            self.skipTest("el sistema no admite ese destino: %s" % err)
+        self.ws.write_meta()
+        self.ok(self.ws.generate())
+        self.assertIn('class="file-path">enlace</code>', self.ws.html())
+
+    def test_v6_unit_en_paralelo_antes_de_folder_no_repite_el_exclude_ni_deja_lock(self):
+        names = ["lib-%d" % n for n in range(8)]
+        for name in names:
+            path = init_repo(self.ws.mkdir(name))
+            write(path / "a.txt", "a\n")
+            commit_all(path)
+        command = [sys.executable, "-I", str(SCRIPT), "--repo", str(self.ws.app)]
+        processes = [subprocess.Popen(command + ["--unit", "../" + name, "--folder", self.ws.slug, "--date",
+                                                 self.ws.date], cwd=str(self.ws.app), env=ENV,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) for name in names]
+        outputs = [process.communicate() for process in processes]
+        self.assertEqual([process.returncode for process in processes], [0] * len(names),
+                         [err.decode("utf-8", "replace") for _, err in outputs])
+        exclude = (self.ws.app / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertEqual(exclude.splitlines().count("/reports/"), 1)
+        self.assertEqual([p for p in (self.ws.app / "reports").rglob("*") if p.name.endswith(".lock")], [])
+        self.assertNotIn("reports", run(["git", "status", "--porcelain"], self.ws.app).stdout)
+
+    def test_v7_si_no_se_puede_bloquear_sigue_con_un_aviso(self):
+        import contextlib
+        import errno
+        import io
+        import types
+        fake = types.ModuleType("fcntl")
+        fake.LOCK_EX, fake.LOCK_UN = 2, 8
+
+        def flock(*_):
+            raise OSError(errno.ENOLCK, "No locks available")
+        fake.flock = flock
+        saved = sys.modules.get("fcntl")
+        sys.modules["fcntl"] = fake
+        err, ran = io.StringIO(), []
+        try:
+            with contextlib.redirect_stderr(err):
+                with report_module.task_lock(Path(self.tmp.name) / "tarea"):
+                    ran.append(True)
+        finally:
+            if saved is None:
+                sys.modules.pop("fcntl", None)
+            else:
+                sys.modules["fcntl"] = saved
+        self.assertEqual(ran, [True])
+        self.assertIn("No pude bloquear la carpeta de la tarea (No locks available): sigo sin bloqueo", err.getvalue())
+
+    def test_v8_nested_head_tiene_tiempo_limite(self):
+        from unittest import mock
+        nested = init_repo(self.ws.mkdir("anidado"))
+        write(nested / "a.txt", "a\n")
+        commit_all(nested)
+        head = git(nested, "rev-parse", "HEAD").strip()
+        self.assertEqual(report_module.nested_head(str(nested), with_changes=False), head)
+        calls = []
+        real_run = subprocess.run
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            return real_run(*args, **kwargs)
+        with mock.patch.object(report_module.subprocess, "run", side_effect=spy):
+            report_module.nested_head(str(nested))
+        self.assertTrue(calls and all(timeout == report_module.STATUS_TIMEOUT_S for timeout in calls), calls)
+        with mock.patch.object(report_module.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("git", report_module.STATUS_TIMEOUT_S)):
+            self.assertEqual(report_module.nested_head(str(nested)), "unreadable")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "como root se puede leer todo")
+    def test_v9_un_archivo_sin_permiso_no_corta_el_reporte(self):
+        self.ok(self.ws.folder())
+        secret = self.ws.app / "src" / "Secreto.kt"
+        write(secret, "class Secreto\n")
+        os.chmod(str(secret), 0)
+        try:
+            self.ws.write_meta()
+            self.ok(self.ws.generate())
+            self.assertIn("Sin permiso de lectura", self.unit_html(self.ws.html(), "app-shell"))
+        finally:
+            os.chmod(str(secret), 0o644)
 
 
 if __name__ == "__main__":
