@@ -51,6 +51,9 @@ Uso:
   python3 -I report.py --unit <ruta> --folder <slug> [--out <carpeta>] [--repo .]
       (registra una unidad: la ruta de su fuente, relativa a la raíz del repo principal, o su identificador)
   python3 -I report.py --meta <meta.json> [--base <ref> | --main-branch <rama>] [--out <carpeta>] [--repo .]
+  python3 -I report.py --meta <meta.json> --attribution [--base <ref> | --main-branch <rama>] [--repo .]
+      (qué es de la tarea, repo por repo, en JSON y sin escribir nada: lo usa hb-review. El meta puede no existir
+      todavía si su carpeta ya tiene la foto)
 """
 import argparse
 import base64
@@ -2424,20 +2427,28 @@ def empty_message(cov, temporary_count, previous_count, repo, args, task_slug):
     return "\n".join(lines)
 
 
-def generate(repo, layout, args):
-    meta_path = lexical(args.meta)
-    notes = []
-    meta = clean_meta(json.loads(meta_path.read_text(encoding="utf-8")), notes)
+class Collected:
+    """Qué es de la tarea, repo por repo, sin escribir nada: lo que usan el reporte y --attribution."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+def task_and_snapshot(repo, layout, args, meta, meta_path, notes):
+    """La tarea del meta y su foto inicial (None sin foto o con --ignore-snapshot)."""
     date = meta.get("date") or datetime.date.today().isoformat()
     task_slug = safe_slug(meta["slug"]) if meta.get("slug") else slug(meta.get("title", "reporte"))
     task = layout.task(task_slug, date, meta_path)
-    out = task.file("report")
     snapshot = None if args.ignore_snapshot else load_snapshot(task, notes)
     if args.ignore_snapshot:
         notes.append("ℹ️  Genero sin la foto inicial (--ignore-snapshot): entran el repo principal y \"repos\" del meta.")
-    cov = coverage(repo, layout, args, meta, snapshot, structure_units(repo))
-    early, style, script = template_parts()
+    return task, snapshot
 
+
+def collect(repo, layout, args, meta, snapshot):
+    """Los archivos de la tarea, los no atribuidos y lo excluido (temporales y configuración local), como los decide el
+    reporte. Solo lee: ni el contenido de los archivos ni nada en disco."""
+    cov = coverage(repo, layout, args, meta, snapshot, structure_units(repo))
     infos, group_defs = meta["files"], meta["groups"]
     temporary = list(meta.get("temporary", []))
     temporary_keys = {str(item["path"]) for item in temporary}
@@ -2505,8 +2516,6 @@ def generate(repo, layout, args):
                 continue
             f["warnings"] = {"mixed": [MIXED_WARNING], "mixed-committed": [MIXED_COMMITTED_WARNING]}.get(verdict, [])
             f["info"] = next((infos[alias] for alias in keys_for(r, f["path"]) if alias in infos), None)
-            f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None
-            f["after"] = decode(read_after(r["root"], f["path"])) if f["status"] != "D" else None
             # Un archivo con su propia entrada en "files" se muestra aparte, aunque un grupo lo cubra.
             f["group"] = None if f["info"] is not None else group_for(f["key"], group_defs)
             files.append(f)
@@ -2531,8 +2540,29 @@ def generate(repo, layout, args):
                 if any(explained(infos.get(alias)) for alias in keys_for(r, path)):
                     cov.claimed.append(key)
 
+    return Collected(cov=cov, files=files, temporary=temporary, temporary_keys=temporary_keys,
+                     temporary_found=temporary_found, temporary_count=temporary_count, previous_count=previous_count,
+                     infos=infos, group_defs=group_defs)
+
+
+def generate(repo, layout, args):
+    meta_path = lexical(args.meta)
+    notes = []
+    meta = clean_meta(json.loads(meta_path.read_text(encoding="utf-8")), notes)
+    date = meta.get("date") or datetime.date.today().isoformat()
+    task, snapshot = task_and_snapshot(repo, layout, args, meta, meta_path, notes)
+    out = task.file("report")
+    found = collect(repo, layout, args, meta, snapshot)
+    cov, files, temporary = found.cov, found.files, found.temporary
+    temporary_keys, temporary_found, group_defs = found.temporary_keys, found.temporary_found, found.group_defs
+    early, style, script = template_parts()
+    for f in files:
+        r = f["repo"]
+        f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None
+        f["after"] = decode(read_after(r["root"], f["path"])) if f["status"] != "D" else None
+
     if not files:
-        raise EmptyReport(empty_message(cov, temporary_count, previous_count, repo, args, task.slug))
+        raise EmptyReport(empty_message(cov, found.temporary_count, found.previous_count, repo, args, task.slug))
 
     migrations = language_migrations(files)
     for f, other, how in migrations:
@@ -2620,6 +2650,65 @@ def generate(repo, layout, args):
                  migrations, repo, args, task, meta_path, layout)
 
 
+ATTRIBUTION_NOTE = {
+    "mixed": "ya tenía cambios sin commit al empezar la tarea: el diff contra la base mezcla esos cambios con los de la "
+             "tarea, y la foto no guarda el contenido previo (solo su hash)",
+    "mixed-committed": "ya tenía cambios commiteados en la rama antes de la tarea: lo de la tarea es el diff desde "
+                       "task_diff_from (el HEAD de la foto)",
+}
+
+
+def attribution(repo, layout, args):
+    """--attribution: qué es de la tarea, repo por repo, en JSON, con la misma lógica del reporte. No escribe nada (ni
+    el reporte, ni el índice, ni el meta). El meta puede no existir todavía si su carpeta ya tiene la foto."""
+    meta_path = lexical(args.meta)
+    notes = []
+    if real(meta_path).is_file():
+        meta = clean_meta(json.loads(real(meta_path).read_text(encoding="utf-8")), notes)
+    elif real(meta_path.parent / SNAPSHOT).is_file():
+        meta = clean_meta({}, notes)  # la tarea empezó (tiene foto) y todavía no escribió su meta
+    else:
+        raise RuntimeError(f"no encuentro {shown(meta_path, repo)} ni la foto inicial en su carpeta: pasa el meta.json "
+                           "de la tarea (report.py --folder <slug> dice su ruta)")
+    task, snapshot = task_and_snapshot(repo, layout, args, meta, meta_path, notes)
+    found = collect(repo, layout, args, meta, snapshot)
+    cov = found.cov
+    repos = []
+    for r in cov.repos:
+        photo = r.get("photo") if isinstance(r.get("photo"), dict) else {}
+        files = []
+        for f in sorted((f for f in found.files if f["repo"] is r), key=lambda item: item["path"]):
+            verdict = "mixed" if MIXED_WARNING in f["warnings"] else (
+                "mixed-committed" if MIXED_COMMITTED_WARNING in f["warnings"] else "task")
+            entry = {"path": f["path"], "status": f["status"], "old": f["old"] if f["old"] != f["path"] else None,
+                     "attribution": verdict}
+            if verdict != "task":
+                entry["note"] = ATTRIBUTION_NOTE[verdict]
+            if verdict == "mixed-committed":
+                entry["task_diff_from"] = photo.get("head")
+            files.append(entry)
+        repos.append({"name": r["name"], "path": display_path(r["root"], repo), "main": bool(r["main"]),
+                      "units": list(r["units"]), "branch": r.get("branch"), "base": r["base"], "base_text": base_text(r),
+                      "photo_head": photo.get("head"), "files": files})
+    data = {
+        "task": {"slug": task.slug, "folder": shown(task.folder, repo), "meta": shown(meta_path, repo)},
+        "photo": cov.photo,
+        "repos": repos,
+        "unattributed": [{"repo": item["repo"], "path": item["path"], "reason": item["reason"]}
+                         for item in cov.unattributed],
+        "excluded": [{"path": str(item.get("path")), "why": item.get("why") or "cambio temporal de la tarea"}
+                     for item in found.temporary],
+        "unchanged": [r["name"] for r in cov.unchanged],
+        "skipped": list(cov.skipped),
+        "others": list(cov.others),
+        "notes": [text for text in notes + cov.notes + [w for r in cov.repos + cov.unchanged
+                                                         for w in r.get("warnings", [])] if text],
+        "empty": None if found.files else empty_message(cov, found.temporary_count, found.previous_count, repo, args,
+                                                         task.slug),
+    }
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
 def report_notes(cov, files, meta, notes, warnings, missing_previews, group_defs, temporary_keys, temporary_found,
                  migrations, repo, args, task, meta_path, layout):
     """Los avisos de la salida, después del reporte: primero lo que cambia qué entra, después lo que falta completar."""
@@ -2701,6 +2790,9 @@ def main():
     ap.add_argument("--date", help="con --folder: la fecha AAAA-MM-DD (por defecto, hoy)")
     ap.add_argument("--ignore-snapshot", action="store_true",
                     help="con --meta: genera sin la foto inicial (solo si se tomó después de empezar a cambiar)")
+    ap.add_argument("--attribution", action="store_true",
+                    help="con --meta: imprime en JSON qué es de la tarea, repo por repo (la misma lógica del reporte), "
+                         "sin escribir nada; lo usa hb-review")
     args = ap.parse_args()
     if args.unit and not args.folder:
         ap.error("--unit va con --folder <slug>: la tarea en la que se registra la unidad")
@@ -2708,6 +2800,8 @@ def main():
         ap.error("falta --meta <meta.json> (generar el reporte) o --folder <slug> (la carpeta de la tarea)")
     if args.ignore_snapshot and not args.meta:
         ap.error("--ignore-snapshot va con --meta: es para generar el reporte")
+    if args.attribution and not args.meta:
+        ap.error("--attribution va con --meta <meta.json>: el de la tarea que se revisa")
 
     repo = toplevel(args.repo)
     layout = Layout(repo, args.out or agents_out(repo) or DEFAULT_OUT)
@@ -2716,6 +2810,8 @@ def main():
         register_unit(repo, layout, args)
     elif args.folder:
         print_folder(repo, layout, args)
+    elif args.attribution:
+        attribution(repo, layout, args)
     else:
         generate(repo, layout, args)
 

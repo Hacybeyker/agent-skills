@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose, y conexión al abrir un reporte con diagramas."
 metadata:
   author: hacybeyker
-  version: "1.7.0"
+  version: "1.8.0"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -197,6 +197,7 @@ Se genera siempre, salvo que el usuario diga que no. El reporte es de esta skill
    ```
    - **Qué entra:** el script compara cada repo con la foto. Entran el principal, las unidades del modelo y las registradas, si cambiaron después de la foto; lo que ya estaba sin commit antes y no cambió va a "Cambios no atribuidos", fuera de los conteos. El reporte empieza con un resumen global y sigue con una sección por unidad.
    - **Otros repos que cambiaron:** si el script lista un repo hermano que cambió y no es unidad (la carpeta padre puede tener proyectos ajenos), pregúntale al usuario si es de la tarea; si dice que sí, regístralo con `--unit` y vuelve a generar el reporte.
+   - **Para `hb-review`:** `report.py --meta <meta.json> --attribution` dice en JSON, sin escribir nada, qué es de la tarea, con la misma lógica del reporte ([reporte.md](references/reporte.md)).
    - **Sin archivos de la tarea no hay reporte:** el script no lo escribe y dice la causa probable y el siguiente paso (registrar una unidad, pasar la base o, si la foto se tomó después de empezar a cambiar, `--ignore-snapshot`). Síguelo; no entregues un reporte vacío.
    - **Base:** sin `--base`, compara contra el `merge-base` de `HEAD` con la rama principal, así entra lo ya commiteado en la rama de trabajo. Pásale la rama principal del modelo con `--main-branch`; sin ella, toma la de `## Estructura` o prueba `origin/HEAD`, `origin/main`, `origin/master`, `main` y `master`, y si no encuentra ninguna compara contra `HEAD` y avisa. Si `AGENTS.md` fija otra base, pásala con `--base`, que manda. El reporte muestra la base usada.
    - El script saca el antes, el después y el diff de git (contra la base, incluidos los archivos nuevos sin trackear): **no copies código en el meta**. Al terminar, deja en la fila del índice el resultado del DoD (`DoD PASS`, `DoD FAIL`, `DoD PARTIAL` o `sin DoD`).
