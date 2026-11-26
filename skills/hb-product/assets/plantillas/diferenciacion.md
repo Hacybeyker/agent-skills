@@ -10,9 +10,9 @@
 
 ## Frente al rival
 
-El rival es la alternativa gratis más fuerte que marcó 1a (`competidor --rival`), sea otra app o un sustituto, y los sustitutos gratuitos o nativos que ya resuelven la necesidad. Cada diferenciador lo **supera**, lo **iguala** (paridad: básico en Kano, no cuenta como viable) o **no**, registrado con `producto.py frente` y sus hallazgos. Prueba de elección: todos esos hallazgos triangulados y en confianza alta, y ninguna hipótesis sobre el diferenciador débil o refutada.
+El rival es la alternativa gratis más fuerte que marcó 1a (`competidor --rival`), sea otra app o un sustituto, una por tienda del objetivo si no es la misma, y los sustitutos gratuitos o nativos que ya resuelven la necesidad. Cada diferenciador lo **supera**, lo **iguala** (paridad: básico en Kano, no cuenta como viable) o **no**, registrado con `producto.py frente` y sus hallazgos, frente al rival de cada tienda. Prueba de elección: todos esos hallazgos triangulados y en confianza alta, al menos uno distinto del dolor, y ninguna hipótesis sobre el diferenciador débil o refutada; un hallazgo de elección sin triangular queda como prueba pendiente y no baja su estado.
 
-- **Rival:** <por completar: C-… y por qué es la alternativa gratis más fuerte, o el motivo de `--sin-rival`>
+- **Rival:** <por completar: por cada tienda del objetivo, C-… y por qué es la alternativa gratis más fuerte, o el motivo de `--sin-rival`>
 
 | Diferenciador | Frente al rival (supera, iguala o no) | En qué | Hallazgos | ¿Prueba de elección? |
 | --- | --- | --- | --- | --- |

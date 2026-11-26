@@ -34,8 +34,10 @@ def setUpModule():
 class Base(base.Base):
     def con_diferenciadores(self, *specs):
         """Sesiones 1a a 1g con un diferenciador por cada (se_ve, copiable, probar). Todos citan el mismo dolor
-        triangulado y superan al rival; con probar=True, la comparación cita además un hallazgo sin triangular: queda
-        viable con confianza baja y se puede probar (le falta solo la prueba de elección)."""
+        triangulado y superan al rival; con probar=True, la comparación cita además un hallazgo del dolor sin
+        triangular (una sola de sus fuentes): queda viable con confianza baja y se puede probar (le falta solo la prueba
+        de elección). Un hallazgo de elección sin triangular ya no lo dejaría así: es prueba de elección pendiente y no
+        baja su estado (feedback #81)."""
         self.sesion0()
         fuentes = self.fuente("competencia", 3, "medido")
         self.p("tipo", "--existente", "--motivo", "Hay dos apps directas con más de 100k descargas")
@@ -51,7 +53,8 @@ class Base(base.Base):
             self.linea(sesion, nombre)
         eleccion, _ = self.hallazgo("diferenciacion", self.fuente("diferenciacion", 3), "--critico", "--sin-contra",
                                     "Se buscó y no apareció")
-        suelto, _ = self.hallazgo("diferenciacion", self.fuente("diferenciacion", 1))  # sin triangular
+        del_dolor = self.datos("01-investigacion/voz-del-usuario.json")["hallazgos"][0]["fuentes"][:1]
+        suelto, _ = self.hallazgo("diferenciacion", del_dolor)  # del dolor (sus mismas fuentes) y sin triangular
         for numero, (se_ve, copiable, probar) in enumerate(specs, 1):
             self.p("diferenciador", "--vector", "usabilidad", "--texto", "Diferenciador inventado %d" % numero,
                    "--hallazgos", voz, "--se-ve", se_ve, "--copiable", copiable, "--motivo", "Motivo inventado",
