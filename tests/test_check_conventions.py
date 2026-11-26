@@ -59,6 +59,23 @@ class DocsTest(unittest.TestCase):
                          [("README.md", "no lista la skill hb-stack con su versión"),
                           ("CATALOG.md", "no lista la skill hb-stack con su versión")])
 
+    def test_casos_borde_de_markdown(self):
+        table = "| Skill | Tipo | Versión |\n| --- | --- | --- |\n| `hb-uno` | Flujo | 1.2.0 |\n"
+        cases = {
+            "un cierre con info string no cierra": "```\n```kotlin\n" + table + "```\n",
+            "un cierre más corto no cierra": "````\n```\n" + table + "````\n",
+            "bloque indentado": "    | Skill | Tipo | Versión |\n    | --- | --- | --- |\n    | `hb-uno` | Flujo | 0.1.0 |\n",
+            "comentario HTML": "<!--\n" + table + "-->\n",
+        }
+        for label, hidden in cases.items():
+            with self.subTest(label):
+                self.assertEqual(conventions.skill_rows(hidden + "\n" + CATALOG), [("hb-uno", "1.2.0"),
+                                                                                  ("hb-dos", "0.3.1")])
+
+    def test_una_barra_escapada_no_corta_la_celda(self):
+        text = "| Skill | Qué hace | Versión |\n| --- | --- | --- |\n| `hb-uno` | lee a \\| b | 1.2.0 |\n"
+        self.assertEqual(conventions.skill_rows(text), [("hb-uno", "1.2.0")])
+
     def test_el_readme_y_el_catalogo_del_repo_tienen_la_version_de_cada_skill(self):
         found = {}
         for skill in sorted((ROOT / "skills").iterdir()):

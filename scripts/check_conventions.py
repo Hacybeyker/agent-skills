@@ -104,21 +104,26 @@ def check_repo_scripts():
 
 
 def skill_rows(text):
-    """Las filas de las tablas con columnas "Skill" y "Versión", fuera de los bloques de código: [(skill, versión)]. La
-    skill es lo primero entre acentos graves de su celda ([`hb-x`](skills/hb-x) o `hb-x`); las columnas se ubican por
-    la cabecera, en cualquier orden. Las demás tablas no cuentan."""
+    """Las filas de las tablas con columnas "Skill" y "Versión": [(skill, versión)]. La skill es lo primero entre
+    acentos graves de su celda ([`hb-x`](skills/hb-x) o `hb-x`); las columnas se ubican por la cabecera, en cualquier
+    orden. No cuentan las demás tablas ni lo que está en un bloque de código (con cercas o indentado) o en un
+    comentario HTML. Un `\\|` dentro de una celda no la corta."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     rows, columns, fence = [], None, None
     for line in text.splitlines():
-        stripped = line.strip()
-        mark = re.match(r"^(`{3,}|~{3,})", stripped)
-        if mark:
-            fence = None if fence and mark.group(1)[0] == fence[0] else (fence or mark.group(1))
+        opened = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is None and opened and not (opened.group(1)[0] == "`" and "`" in opened.group(2)):
+            fence, columns = opened.group(1), None
+            continue
+        if fence is not None:
+            closed = re.match(r"^ {0,3}(`{3,}|~{3,})\s*$", line)
+            if closed and closed.group(1)[0] == fence[0] and len(closed.group(1)) >= len(fence):
+                fence = None
+            continue
+        if re.match(r"^(?: {4}|\t)", line) or not line.strip().startswith("|"):  # código indentado o fuera de tabla
             columns = None
             continue
-        if fence or not stripped.startswith("|"):
-            columns = None
-            continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
         if columns is None:
             names = [cell.lower().replace("ó", "o") for cell in cells]
             columns = (names.index("skill"), names.index("version")) if "skill" in names and "version" in names \
