@@ -227,15 +227,18 @@ class UmbralContraEscenariosTest(Base):
 
     def test_avisa_si_el_umbral_queda_bajo_el_pesimista(self):
         salida = self.puerta2("Descarta con menos de 1 000 al mes")
-        self.assertIn("🟢  PUERTA 2 · VIABLE", salida)  # no cambia el veredicto
+        self.assertIn("🟢  PUERTA 2 · VIABLE", salida)  # no cambia el veredicto; desde #79 f cita la fuente del caso
         self.assertIn("⚠ El umbral de descarte de HIP-02 contradice los escenarios: menos de 1 000 instalaciones al mes "
-                      "queda por debajo del caso pesimista (5 000): un lanzamiento peor que el peor caso no se "
+                      "queda por debajo del caso pesimista (5 000, según S-MON-3): un lanzamiento peor que el peor caso "
+                      "no se "
                       "descartaría. No cambia el veredicto: revisa el umbral (sesión 3) o los escenarios (sesión 2).",
                       salida)
 
     def test_avisa_si_el_umbral_queda_sobre_el_base(self):
         salida = self.puerta2("Confirma con 15.000 al mes; descarta con menos de 12.000 instalaciones orgánicas al mes")
-        self.assertIn("menos de 12 000 instalaciones al mes queda por encima del caso base (10 000): el resultado que "
+        # la fuente del caso, desde #79 f
+        self.assertIn("menos de 12 000 instalaciones al mes queda por encima del caso base (10 000, según S-MON-3): el "
+                      "resultado que "
                       "esperan los escenarios ya se descartaría", salida)
 
     def test_sin_aviso_entre_el_pesimista_y_el_base_o_si_no_se_puede_leer(self):

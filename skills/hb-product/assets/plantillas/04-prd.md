@@ -30,9 +30,11 @@
 
 ## Métricas HEART
 
+Si una métrica pone a prueba una hipótesis o la monetización, su columna Métrica lo nombra: «Mide HIP-…» o «Mide la monetización». La puerta 3 lo lee para decir dónde quedó cada riesgo a medir de la puerta 2; la columna Hipótesis de una funcionalidad no basta.
+
 | ID | Dimensión | Métrica | Meta |
 | --- | --- | --- | --- |
-| M-01 | <por completar: Felicidad, Interacción, Adopción, Retención o Tarea> | <por completar: qué se mide y cómo> | <por completar: valor y plazo> |
+| M-01 | <por completar: Felicidad, Interacción, Adopción, Retención o Tarea> | <por completar: qué se mide y cómo; «Mide HIP-…» o «Mide la monetización» si pone a prueba un riesgo> | <por completar: valor y plazo> |
 
 ## Plan de eventos de analítica
 

@@ -49,7 +49,7 @@ python3 -I <skill>/scripts/producto.py hallazgo --linea demanda --texto "La gent
   --fuentes S-DEM-1,S-DEM-2,S-DEM-3 --critico --sin-contra "Busqué «apps de riego compartido cerradas»: sin resultados"
 ```
 
-- **`--critico`** marca un **hallazgo clave**: uno del que dependen el puntaje o una puerta. Solo los clave entran en `triangulacion` y en la confianza del puntaje, así que marca los que de verdad sostienen la decisión.
+- **`--critico`** marca un **hallazgo clave**: uno del que dependen el puntaje o una puerta. Solo los clave entran en `triangulacion` y en la confianza del puntaje, así que marca los que de verdad sostienen la decisión. Se marca por si la decisión depende de él, no por hacia dónde apunta: uno mayormente en contra de una hipótesis también puede ser clave, pero no va en su columna Hallazgos, que son los a favor, y pesa en la confianza de la fila solo si sus fuentes se registran en contra (`--en-contra`) del hallazgo a favor que contradice ([validacion.md](validacion.md)).
 - **`--en-contra S-…`** registra las fuentes que lo contradicen; **`--sin-contra "<qué buscaste>"`**, que buscaste y no apareció nada. Un hallazgo clave necesita una de las dos.
 - **`--competidor C-1,C-3`** (o `--competidores`) enlaza el hallazgo con filas de la matriz **por su ID**. Sin fila todavía, por la URL de su ficha; un nombre que ya tiene fila se guarda como su ID. Un nombre que no coincide con la matriz se enlaza por la URL de la ficha si una fuente del hallazgo es esa ficha; si no, `matriz` lo avisa. Sirve para las quejas por competidor y para la viabilidad de un diferenciador.
 

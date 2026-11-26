@@ -38,7 +38,7 @@ Define el producto mínimo que se va a construir, con cada funcionalidad enlazad
 - **Las funcionalidades básicas** (Kano), aunque no diferencien: sin ellas la app no compite.
 - **En una idea nueva,** lo que pone a prueba la hipótesis más riesgosa, y poco más: un MVP más chico, centrado en aprender.
 - **Si la puerta 1 fue Viable para probar,** la funcionalidad del diferenciador principal cita en su columna Hipótesis la más riesgosa (el criterio de descarte) y la mide con su métrica y su umbral: la puerta 3 lo pide, igual que en una idea nueva.
-- **Si la puerta 2 fue Viable para probar** (lo que sostiene el negocio quedó débil o en baja y otra búsqueda no lo subía), cada riesgo que nombra (una hipótesis o la monetización) se mide después del lanzamiento: lleva su métrica y su umbral en las métricas HEART, los de su fila de `03-validacion.md` o, si no los tiene, los que defina esta sesión. El texto de la sesión los nombra.
+- **Si la puerta 2 fue Viable para probar** (lo que sostiene el negocio quedó débil o en baja y otra búsqueda no lo subía), cada riesgo que nombra (una hipótesis o la monetización) se mide después del lanzamiento: lleva su métrica y su umbral en las métricas HEART, los de su fila de `03-validacion.md` o, si no los tiene, los que defina esta sesión, y la métrica lo nombra («Mide HIP-04», «Mide la monetización»; abajo). El texto de la sesión los nombra, y la puerta 3 dice dónde quedó cada uno («HIP-04 en M-05») y pide definir solo los que siguen sin métrica.
 
 ## RICE
 
@@ -61,6 +61,13 @@ Cinco dimensiones para medir la experiencia: felicidad, interacción, adopción,
 | M-02 | Tarea | Turnos marcados como hechos sin recordatorio extra | 80 % |
 
 Cada métrica necesita la dimensión, qué se mide y una meta con valor y plazo. La de la hipótesis más riesgosa usa la métrica y el umbral de `03-validacion.md`.
+
+**Qué riesgo mide cada una.** Una métrica que pone a prueba una hipótesis o la monetización lo dice en su columna Métrica: «Mide HIP-04» (o «Mide HIP-03 e HIP-06», si son varias) y «Mide la monetización». El script lo lee así: cada `HIP-…` de la columna Métrica y «mide … monetización» en una misma frase. Solo cuenta lo que dice la propia métrica, y solo si está completa (dimensión, métrica y meta): la columna Hipótesis de una funcionalidad dice qué pone a prueba esa funcionalidad, no que su métrica mida la hipótesis, así que no basta. Con eso, las puertas 2 y 3 y el reporte dicen dónde quedó cada riesgo a medir de la puerta 2 («HIP-04 en M-05; la monetización en M-07») y piden definir en el PRD solo los que siguen sin una.
+
+| ID | Dimensión | Métrica | Meta |
+| --- | --- | --- | --- |
+| M-03 | Adopción | Compras del pago único sobre instalaciones nuevas del mes. Mide HIP-02 | 2 % o más a los 60 días; por debajo de 1 %, se revisa el precio |
+| M-04 | Adopción | Ingresos netos al mes del pago único. Mide la monetización | El caso base de los escenarios a los 90 días |
 
 ## Historias y criterios de aceptación
 

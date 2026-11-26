@@ -220,7 +220,9 @@ class ResumenCortadoTest(base.Base):
         lineas = self.p("triangulacion").split("\n")
         cortado = next(linea for linea in lineas if linea.startswith("    Un hallazgo inventado"))
         self.assertTrue(cortado.endswith("…"), cortado)
-        self.assertEqual(len(cortado.strip()), 160)
+        # como mucho 160 caracteres y en un límite de palabra (feedback #79 b): antes, justo 160
+        self.assertLessEqual(len(cortado.strip()), 160)
+        self.assertTrue(largo.startswith(cortado.strip()[:-1] + " "), cortado)
         self.assertIn("    Corto e inventado", lineas)
 
 
