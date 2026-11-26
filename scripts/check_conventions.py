@@ -103,23 +103,48 @@ def check_repo_scripts():
             error(script, "no es ejecutable (chmod +x)")
 
 
-def listed_version(text, name):
-    """La versión de la fila de una skill en una tabla `| Skill | Tipo | Versión | ...`: el nombre entre acentos graves,
-    con o sin enlace ([`hb-x`](skills/hb-x)). None si no hay fila con versión."""
-    row = re.search(rf"^\|\s*\[?`{re.escape(name)}`\]?(?:\([^)]*\))?\s*\|[^|]*\|\s*([^|\s]+)\s*\|", text, re.M)
-    return row.group(1) if row else None
+def skill_rows(text):
+    """Las filas de las tablas con columnas "Skill" y "Versión", fuera de los bloques de código: [(skill, versión)]. La
+    skill es lo primero entre acentos graves de su celda ([`hb-x`](skills/hb-x) o `hb-x`); las columnas se ubican por
+    la cabecera, en cualquier orden. Las demás tablas no cuentan."""
+    rows, columns, fence = [], None, None
+    for line in text.splitlines():
+        stripped = line.strip()
+        mark = re.match(r"^(`{3,}|~{3,})", stripped)
+        if mark:
+            fence = None if fence and mark.group(1)[0] == fence[0] else (fence or mark.group(1))
+            columns = None
+            continue
+        if fence or not stripped.startswith("|"):
+            columns = None
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if columns is None:
+            names = [cell.lower().replace("ó", "o") for cell in cells]
+            columns = (names.index("skill"), names.index("version")) if "skill" in names and "version" in names \
+                else False
+            continue
+        if columns is False or all(re.match(r"^:?-+:?$", cell) for cell in cells if cell):
+            continue
+        name = re.search(r"`([^`]+)`", cells[columns[0]]) if columns[0] < len(cells) else None
+        if name:
+            rows.append((name.group(1), cells[columns[1]] if columns[1] < len(cells) else ""))
+    return rows
 
 
 def docs_errors(found, readme, catalog):
-    """[(archivo, mensaje)]: cada skill con su fila y su versión actual en la tabla de README.md y en CATALOG.md."""
+    """[(archivo, mensaje)]: cada skill con una sola fila y su versión actual en la tabla de README.md y en CATALOG.md."""
     out = []
-    for name, version in found.items():
-        for file, text in (("README.md", readme), ("CATALOG.md", catalog)):
-            listed = listed_version(text, name)
-            if listed is None:
+    for file, text in (("README.md", readme), ("CATALOG.md", catalog)):
+        rows = skill_rows(text)
+        for name, version in found.items():
+            listed = [value for skill, value in rows if skill == name]
+            if not listed:
                 out.append((file, f"no lista la skill {name} con su versión"))
-            elif listed != version:
-                out.append((file, f"{name} figura con la versión {listed}, pero la skill está en {version}"))
+            elif len(listed) > 1:
+                out.append((file, f"lista la skill {name} {len(listed)} veces"))
+            elif listed[0] != version:
+                out.append((file, f"{name} figura con la versión {listed[0]}, pero la skill está en {version}"))
     return out
 
 
