@@ -1,0 +1,41 @@
+{
+  "_leeme": "Supuestos de los escenarios de ingresos de {{NOMBRE}}. Los valores de ejemplo son inventados: reemplázalos. Cada supuesto lleva pesimista, base y optimista, y en `fuente` el ID de la fuente que lo respalda (S-…) o, si son varias, una lista ([\"S-…\", \"S-…\"]); si cada caso sale de una fuente distinta, un objeto con la de cada uno ({\"pesimista\": \"S-…\", \"base\": \"S-…\", \"optimista\": [\"S-…\", \"S-…\"]}); sin fuente, el escenario queda como estimación. `instalaciones_mes` son las instalaciones nuevas de cada mes (un pago único se cobra una vez, sobre ellas); `retencion`, la proporción de los que instalan que vuelve el día 1, 7 y 30: con ella el script deriva los usuarios activos diarios de una app nueva (los anuncios se calculan sobre ellos). Si tienes los usuarios activos medidos de esta app, usa `dau` en vez de `retencion`; tomados de un comparable que ya está en la tienda, inflan el caso base y el script lo avisa; `dau_mau`, la proporción de los usuarios del mes que entra cada día (una suscripción se cobra cada mes a los usuarios del mes que pagan). Cada compra lleva `tipo`: `pago-unico` (`conversion` = proporción de las instalaciones nuevas que compra) o `suscripcion` (`conversion` = proporción de los usuarios del mes que paga; `periodo` mes o anio). `comision` es la comisión de la tienda como proporción: la tasa que aplica a tu programa y a tu mercado (no siempre es 0.15 o 0.30), con su fuente oficial registrada (`fuente --tipo oficial`) y citada en este texto; si aplican varias, la más alta. Deja solo los mercados, los formatos y las compras que apliquen.",
+  "moneda": "USD",
+  "analogia": false,
+  "mercados": [
+    {
+      "mercado": "Mercado de ejemplo",
+      "instalaciones_mes": {"pesimista": 500, "base": 1500, "optimista": 4000, "fuente": ""},
+      "retencion": {
+        "d1": {"pesimista": 0.2, "base": 0.3, "optimista": 0.4, "fuente": ""},
+        "d7": {"pesimista": 0.06, "base": 0.1, "optimista": 0.15, "fuente": ""},
+        "d30": {"pesimista": 0.02, "base": 0.04, "optimista": 0.06, "fuente": ""}
+      },
+      "dau_mau": {"pesimista": 0.1, "base": 0.15, "optimista": 0.2, "fuente": ""},
+      "anuncios": [
+        {
+          "formato": "banner",
+          "impresiones_por_dau": {"pesimista": 3, "base": 5, "optimista": 8, "fuente": ""},
+          "ecpm": {"pesimista": 0.2, "base": 0.4, "optimista": 0.8, "fuente": ""}
+        }
+      ],
+      "compras": [
+        {
+          "nombre": "Sin anuncios",
+          "tipo": "pago-unico",
+          "conversion": {"pesimista": 0.01, "base": 0.02, "optimista": 0.04, "fuente": ""},
+          "precio": 2.99,
+          "comision": 0.15
+        },
+        {
+          "nombre": "Pro",
+          "tipo": "suscripcion",
+          "periodo": "mes",
+          "conversion": {"pesimista": 0.005, "base": 0.01, "optimista": 0.02, "fuente": ""},
+          "precio": 1.99,
+          "comision": 0.15
+        }
+      ]
+    }
+  ]
+}

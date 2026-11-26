@@ -14,6 +14,10 @@ También deja fuera de git (en .git/info/exclude) los archivos locales de las he
 versionados ni ignorados (.claude/settings.local.json, CLAUDE.local.md, los de aider), y revisa la sección de
 rendimiento de AGENTS.md que mantiene hb-performance sin reescribirla.
 
+`producto` lee la sección `## Producto` de AGENTS.md que usa hb-product (se conserva tal cual) y su línea `Carpeta:`
+(por defecto product), e imprime la fila de `<carpeta>/04-prd.md` para "Documentos" de ## Estructura. No escribe nada
+y nunca crea la sección.
+
 `units` es el inventario de solo lectura para ## Estructura: las unidades candidatas del repo (módulos del build,
 paquetes de un espacio de trabajo, carpetas de feature), los repos vecinos clonados y sin clonar que nombra la
 configuración, los archivos versionados modificados que nombran a esos vecinos y lo que no coincide con el modelo que
@@ -25,6 +29,7 @@ Uso:
                                   [--reportes <ruta>] [--claude auto|si|no] [--module-maps local|versioned] [--repo .]
   python3 -I contexto.py units [--repo .]
   python3 -I contexto.py rendimiento [--repo .]
+  python3 -I contexto.py producto [--repo .]
 """
 import argparse
 import glob
@@ -47,6 +52,11 @@ SERIALS = ((re.compile(r"\bANDROID_SERIAL=(?!<)[^\s`'\"]+"), "ANDROID_SERIAL=<se
            (re.compile(r"\badb\s+-s\s+(?!<)[^\s`'\"]+"), "adb -s <serial>"),
            (re.compile(r"--serial(?:\s+|=)(?!<)[^\s`'\"]+"), "--serial <serial>"),
            (re.compile(r"(?<![\w-])emulator-\d{2,5}(?![\w-])"), "<serial>"))
+# La sección ## Producto de hb-product y su línea Carpeta:, leídas igual que producto.py (carpeta_de_agents)
+PRODUCT_SECTION = re.compile(r"^## Producto[^\n]*\n(.*?)(?=^## |\Z)", re.M | re.S)
+PRODUCT_FOLDER = re.compile(r"^[\s*-]*\**Carpeta:?\**:?\s*`?([^`\n]+?)`?\s*$", re.M)
+PRODUCT_DEFAULT = "product"
+PRD_FILE = "04-prd.md"
 MARKER = re.compile(r"\{(?:fecha|slug)\}")
 SIBLING_REF = re.compile(r"\.\./([A-Za-z0-9._-]+)")
 # Una ruta relativa que puede salir del repo: uno o más "../" y un nombre (../core-lib, ../../core-lib)
@@ -601,6 +611,47 @@ def performance(args):
     return 0
 
 
+def product_section(text):
+    """La carpeta de producto de la sección `## Producto` de un AGENTS.md: (carpeta, tiene línea `Carpeta:`), o None
+    si no hay sección. Sin la línea, la carpeta es la de hb-product por defecto (product)."""
+    section = PRODUCT_SECTION.search(text)
+    if not section:
+        return None
+    line = PRODUCT_FOLDER.search(section.group(1))
+    return (line.group(1).strip(), True) if line else (PRODUCT_DEFAULT, False)
+
+
+def product(args):
+    """La sección `## Producto` de hb-product: se conserva tal cual al migrar AGENTS.md, y su PRD va como fila de
+    "Documentos" en ## Estructura. No escribe nada; sin la sección no propone crearla."""
+    repo = toplevel(args.repo)
+    path = repo / "AGENTS.md"
+    found = product_section(path.read_text(encoding="utf-8")) if path.is_file() else None
+    if found is None:
+        print("AGENTS.md no tiene `## Producto`: no hay nada de hb-product que conservar ni fila que agregar "
+              "(hb-setup no crea esa sección)")
+        return 0
+    folder, own = found
+    print("`## Producto` es de hb-product: consérvala tal cual al migrar AGENTS.md, con su título y su contenido "
+          "(hb-product lee de ahí su carpeta)")
+    print("Carpeta de producto: `%s` (%s)" % (folder, "de la línea `Carpeta:`" if own
+                                              else "por defecto: la sección no tiene línea `Carpeta:`"))
+    if os.path.isabs(os.path.expanduser(folder)):
+        print("⚠ Es una ruta de la máquina, y AGENTS.md no lleva rutas de la máquina. Para el resumen: propón cambiarla "
+              "por una relativa a la raíz del proyecto (no reescribas la sección); mientras tanto, la fila del PRD no va "
+              "en \"Documentos\"")
+        return 0
+    prd = os.path.normpath(os.path.join(folder, PRD_FILE)).replace(os.sep, "/")
+    if (repo / prd).is_file():
+        print("PRD: `%s` existe" % prd)
+    else:
+        print("PRD: `%s` todavía no existe (lo escribe la sesión 4 de hb-product); la fila va igual: solo se usa "
+              "cuando hay funcionalidades `F-…`, y así no hace falta volver a correr hb-setup" % prd)
+    print("Para ## Estructura, en ### Documentos (la fila tal cual):")
+    print("  | `%s` | Vayas a implementar una funcionalidad `F-…` del producto o a cambiar su alcance |" % prd)
+    return 0
+
+
 def submodules(repo):
     listing = git(repo, "config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$")
     return [line.split(" ", 1)[1] for line in listing.stdout.splitlines() if " " in line]
@@ -830,12 +881,17 @@ def main(argv=None):
     perf = sub.add_parser("rendimiento", help="el bloque de hb-performance que se conserva y lo que conviene cambiar en "
                                               "la sección de rendimiento (no escribe nada)")
     perf.add_argument("--repo", default=".", help="raíz del repositorio")
+    prod = sub.add_parser("producto", help="la sección ## Producto de hb-product que se conserva y la fila de su PRD "
+                                           "para Documentos (no escribe nada)")
+    prod.add_argument("--repo", default=".", help="raíz del repositorio")
     args = ap.parse_args(argv)
     if args.command == "estado":
         status(args)
         return 0
     if args.command == "rendimiento":
         return performance(args)
+    if args.command == "producto":
+        return product(args)
     if args.command == "units":
         return units(args)
     return prepare(args)

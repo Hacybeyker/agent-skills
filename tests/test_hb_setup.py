@@ -437,6 +437,98 @@ class WorktreeTest(Base):
         self.assertNotIn("Worktree enlazado", result.stdout)
 
 
+def load_script(name, path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ProductTest(Base):
+    """La sección ## Producto de hb-product: se conserva tal cual y su PRD va como fila de "Documentos"."""
+
+    PRODUCT_LINE = "| Vayas a implementar una funcionalidad `F-…` del producto o a cambiar su alcance |"
+
+    def producto(self, agents):
+        write(self.repo / "AGENTS.md", agents)
+        commit_all(self.repo, "agents")
+        result = self.contexto("producto")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(encoding="utf-8"), agents)  # no escribe nada
+        self.assertEqual(self.status(), "")
+        return result.stdout
+
+    def test_con_carpeta_da_la_fila_del_prd_de_esa_carpeta(self):
+        write(self.repo / "docs" / "producto" / "04-prd.md", "# PRD de prueba\n")
+        out = self.producto("# Riego\n\n## Producto\n\n- **Carpeta:** `./docs/producto/`\n\n## Git\n\n- nada\n")
+        self.assertIn("consérvala tal cual", out)
+        self.assertIn("Carpeta de producto: `./docs/producto/` (de la línea `Carpeta:`)", out)
+        self.assertIn("PRD: `docs/producto/04-prd.md` existe", out)
+        self.assertIn("  | `docs/producto/04-prd.md` " + self.PRODUCT_LINE, out)
+        self.assertNotIn("product/04-prd.md", out)
+
+    def test_sin_carpeta_usa_product_y_la_fila_va_aunque_el_prd_no_exista(self):
+        out = self.producto("# Riego\n\n## Producto\n\nIdea de riego por turnos.\n\n## Git\n\n- Carpeta: otra\n")
+        self.assertIn("Carpeta de producto: `product` (por defecto", out)
+        self.assertIn("`product/04-prd.md` todavía no existe", out)
+        self.assertIn("la fila va igual", out)
+        self.assertIn("  | `product/04-prd.md` " + self.PRODUCT_LINE, out)
+        self.assertFalse((self.repo / "product").exists())
+
+    def test_sin_la_seccion_no_propone_nada_ni_la_crea(self):
+        for agents in ("# Riego\n\n## Stack\n\n- Carpeta: docs/producto\n", "# Riego\n\n### Producto\n\n- x\n"):
+            out = self.producto(agents)
+            self.assertIn("AGENTS.md no tiene `## Producto`", out)
+            self.assertIn("hb-setup no crea esa sección", out)
+            self.assertNotIn("04-prd.md", out)
+        (self.repo / "AGENTS.md").unlink()
+        commit_all(self.repo, "sin agents")
+        result = self.contexto("producto")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no tiene `## Producto`", result.stdout)
+        self.assertFalse((self.repo / "AGENTS.md").exists())
+
+    def test_una_carpeta_con_ruta_de_la_maquina_no_va_a_documentos(self):
+        out = self.producto("# Riego\n\n## Producto\n\nCarpeta: /ruta/inventada/producto\n")
+        self.assertIn("⚠ Es una ruta de la máquina", out)
+        self.assertNotIn("04-prd.md", out)
+
+    def test_lee_la_carpeta_igual_que_hb_product(self):
+        contexto = load_script("contexto_hb_setup", SCRIPT)
+        producto = load_script("producto_hb_product", ROOT / "skills" / "hb-product" / "scripts" / "producto.py")
+        for line in ("Carpeta: docs/producto", "- **Carpeta:** `docs/producto`", "* Carpeta: docs/producto"):
+            agents = "## Stack\n\n- x\n\n## Producto\n\n%s\n\n## Git\n" % line
+            write(self.base / "lectura" / "AGENTS.md", agents)
+            expected = producto.carpeta_de_agents(self.base / "lectura")
+            self.assertEqual(self.base / "lectura" / contexto.product_section(agents)[0], expected, line)
+        self.assertEqual(contexto.product_section("## Producto\n\n- x\n"), ("product", False))
+        self.assertIsNone(contexto.product_section("## Stack\n\n- Carpeta: otra\n"))
+
+    def test_los_demas_comandos_no_cambian_con_la_seccion(self):
+        outputs = []
+        for name, agents in (("sin", "# Riego\n\n## Stack\n\n- x\n"),
+                             ("con", "# Riego\n\n## Stack\n\n- x\n\n## Producto\n\n- Carpeta: `docs/producto`\n")):
+            parent = self.base / name
+            (parent / "proyecto").mkdir(parents=True)
+            repo = init_repo(parent / "proyecto")
+            write(repo / "src" / "principal.txt", "codigo\n")
+            write(repo / "AGENTS.md", agents)
+            commit_all(repo, "base")
+            found = []
+            for command in (["estado"], ["units"], ["rendimiento"], ["preparar", "--modo", "versionado"]):
+                result = run([sys.executable, "-I", SCRIPT, *command, "--repo", repo], repo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                text = result.stdout
+                for prefix in (str(parent.resolve()), str(parent)):
+                    text = text.replace(prefix, "<base>")
+                found.append(text)
+            found.append((repo / "AGENTS.md").read_text(encoding="utf-8") == agents)
+            outputs.append(found)
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertTrue(outputs[1][-1])
+
+
 class TemplateTest(unittest.TestCase):
     """La plantilla de hb-setup escribe lo que hb-implement lee."""
 

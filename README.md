@@ -24,6 +24,7 @@ No hace falta recordar nombres: las skills se activan por intención ("implement
 | [`hb-implement`](skills/hb-implement) | Flujo | Implementa features, bugfixes, mejoras y refactors por capas, con tests, DoD por unidad, previews de UI (Compose) y reporte HTML (también de varios repos, con análisis y diagramas); pasa a fuente, clona y prepara las ramas de las unidades que toca |
 | [`hb-review`](skills/hb-review) | Flujo | Code review contra `AGENTS.md`, el perfil y la guía de Google, con Conventional Comments, de cada repo de la tarea; guarda el review en la carpeta de reportes |
 | [`hb-performance`](skills/hb-performance) | Flujo | Investiga problemas de rendimiento en apps Android con cualquier stack (arranque en frío, jank, hilo principal, red, memoria): mide antes y después con scripts, arma el diagnóstico con consultas listas sobre las trazas, propone un plan que decides tú y demuestra la mejora con estadística, en sesiones cortas para gastar pocos tokens; con el modo orquestado, un solo chat la recorre entera con un subagente por sesión |
+| [`hb-product`](skills/hb-product) | Flujo | Lleva una idea de app hasta un producto definido y sustentado con evidencia pública: investiga en paralelo competencia, voz del usuario, demanda, monetización y políticas (por analogía si la idea es nueva), busca cómo diferenciarse si el mercado está saturado, arma la estrategia, valida con abogado del diablo y escribe un PRD donde cada funcionalidad enlaza a su evidencia, con puertas donde la skill recomienda y decides tú, y un reporte HTML de cada idea; con el modo orquestado, un solo chat la recorre entera con un subagente por sesión, y con el modo autónomo, sin preguntas ni paradas en las puertas (las decisiones automáticas quedan marcadas para revisarlas) |
 | [`hb-commit`](skills/hb-commit) | Flujo | Commits (Conventional Commits), push, PRs y limpieza de ramas |
 | [`hb-release`](skills/hb-release) | Flujo | Changelog, versión SemVer, tag, GitHub release y notas de tienda |
 | [`hb-stack-mobile-kotlin`](skills/hb-stack-mobile-kotlin) | Perfil | Android y KMP con Clean Architecture + MVVM (UDF) por features |
@@ -46,7 +47,8 @@ Las skills externas y los plugins que las complementan están en [CATALOG.md](CA
 
 - `git` y `bash`, para instalar con un clon. En macOS vienen con las Command Line Tools (`xcode-select --install`); en Linux, con el gestor de paquetes.
 - Node.js y pnpm, para instalar sin clonar (detalle en esa sección).
-- `python3`, solo con su librería estándar, para los scripts de `hb-setup`, `hb-implement`, `hb-performance` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
+- `python3`, solo con su librería estándar, para los scripts de `hb-setup`, `hb-implement`, `hb-performance`, `hb-product` y `hb-coach`. En macOS viene con las Command Line Tools; en Linux, con la distribución.
+- Para `hb-product`, además: un agente con búsqueda y lectura web; opcional, herramientas de navegador para las reseñas y los foros que se cargan con JavaScript (o un CSV de reseñas que aportes). No usa APIs de pago ni instala nada.
 - Para `hb-performance`, además: `git`, `adb` (platform-tools del SDK de Android) y `trace_processor` de Perfetto; según el caso, Java 17 o superior; opcionales, `retrace` y Maestro. La skill las busca donde ya estén, también fuera del `PATH`, y dice cuál falta, pero no las instala ni cambia la configuración de tu shell.
 
 Hay dos formas. Usa **una sola** por máquina.
@@ -122,7 +124,7 @@ Cada push y cada PR pasan por el workflow `Validate`:
 - `agentskills validate` (de [skills-ref](https://pypi.org/project/skills-ref/), la referencia oficial) contra la especificación de Agent Skills.
 - `scripts/check_conventions.py` con las convenciones de este repo: prefijo `hb-`, metadata, SemVer, máximo de 500 líneas por `SKILL.md`, enlaces rotos, scripts ejecutables y con sintaxis válida, y que `README.md` y `CATALOG.md` estén al día.
 - `scripts/check_version_bump.py`, en cada PR: toda skill cambiada sube su `metadata.version` (SemVer) respecto de la rama base.
-- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `contexto.py` y `dod.py` de `hb-setup`, `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `coach.py` de `hb-coach`, `check_version_bump.py` y `run_tests.py`. `scripts/run_tests.py` los reparte entre varios procesos (una clase de test por proceso) y da el mismo resultado que `python3 -m unittest discover -s tests` en menos tiempo.
+- Tests de los scripts en `tests/`, con `unittest` de Python y sin dependencias: `contexto.py` y `dod.py` de `hb-setup`, `report.py` de `hb-implement`, `perf.py` de `hb-performance`, `producto.py` de `hb-product`, `coach.py` de `hb-coach`, `check_version_bump.py` y `run_tests.py`. `scripts/run_tests.py` los reparte entre varios procesos (una clase de test por proceso) y da el mismo resultado que `python3 -m unittest discover -s tests` en menos tiempo.
 - `scripts/test_install.sh`: test de contrato de `install.sh` en un `HOME` temporal (instala dos veces, desinstala y comprueba que no toca carpetas ni enlaces ajenos). Es la interfaz pública que usan los instaladores externos, así que no cambia.
 - `shellcheck` sobre los scripts de shell.
 
