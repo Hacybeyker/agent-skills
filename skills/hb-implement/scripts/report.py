@@ -70,6 +70,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -1441,17 +1442,50 @@ def merge_base(root, one, other):
         return None
 
 
+def is_ancestor(root, older, newer):
+    return subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", older, newer],
+                          capture_output=True).returncode == 0
+
+
 def isolated_since(root, head):
-    """Si el diff desde `head` es solo de la rama: `head` es ancestro de HEAD y no hay merges en medio (sin rebase ni
-    merge de la rama principal después)."""
-    if not head:
+    """Si el diff desde `head` es solo de la rama: `head` es ancestro de HEAD (sin rebase) y cada merge en medio une
+    ramas que salieron de `head` (el de un subagente sí; el de la rama principal, no)."""
+    if not head or not is_ancestor(root, head, "HEAD"):
         return False
-    if subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", head, "HEAD"],
-                      capture_output=True).returncode != 0:
+    merges = subprocess.run(["git", "-C", str(root), "rev-list", "--merges", "--parents", head + "..HEAD"],
+                            capture_output=True, text=True)
+    if merges.returncode != 0:
         return False
-    merges = subprocess.run(["git", "-C", str(root), "rev-list", "--merges", head + "..HEAD"], capture_output=True,
-                            text=True)
-    return merges.returncode == 0 and not merges.stdout.strip()
+    return all(is_ancestor(root, head, parent) for line in merges.stdout.splitlines() for parent in line.split()[1:])
+
+
+def without_task(root, photo_blob, photo_base_blob, base_blob):
+    """El hash que tendría un archivo sin la tarea después de un rebase o un merge de la rama principal: lo de la foto
+    llevado a la base de ahora con un merge de tres vías. None si falta un lado o hay conflicto: no se sabe."""
+    if base_blob == photo_base_blob:
+        return photo_blob
+    if photo_blob == photo_base_blob:
+        return base_blob  # la rama no lo tocaba: sin la tarea, es lo de la base
+    if not (photo_blob and photo_base_blob and base_blob) or "dir" in (photo_blob, photo_base_blob, base_blob):
+        return None
+    folder = tempfile.mkdtemp(prefix="hb-implement-")
+    try:
+        sides = []
+        for name, blob in (("foto", photo_blob), ("base-foto", photo_base_blob), ("base", base_blob)):
+            side = os.path.join(folder, name)
+            with open(side, "wb") as handle:
+                handle.write(git(root, "cat-file", "blob", blob))
+            sides.append(side)
+        merged = subprocess.run(["git", "merge-file", "-p"] + sides, capture_output=True, cwd=folder)
+        if merged.returncode != 0:  # conflicto o error
+            return None
+        hashed = subprocess.run(["git", "-C", str(root), "hash-object", "--no-filters", "--stdin"], input=merged.stdout,
+                                capture_output=True)
+        return hashed.stdout.decode().strip() or None if hashed.returncode == 0 else None
+    except (OSError, RuntimeError):
+        return None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def attribute(repo, files):
@@ -1473,6 +1507,7 @@ def attribute(repo, files):
     # un merge de la rama principal, la base actual trae cambios ajenos. Sin commits en la foto, no había nada previo.
     photo_base = merge_base(repo["root"], photo.get("head"), repo.get("base"))
     at_photo_base = blobs_at(repo["root"], photo_base, names) if photo_base else at_photo
+    at_base = blobs_at(repo["root"], repo.get("base"), names) if photo_base else {}
     verdicts = {}
     for f in files:
         paths = [f["path"]] + ([f["old"]] if f["old"] and f["old"] != f["path"] else [])
@@ -1484,9 +1519,16 @@ def attribute(repo, files):
         clean_now = dirty_now is not None and not any(path in dirty_now for path in paths)
         before = {path: at_photo.get(path) for path in paths}
         if clean_now:
-            changed = before != {path: at_now.get(path) for path in paths}
+            now = {path: at_now.get(path) for path in paths}
         else:
-            changed = before != {path: content_hash(repo["root"] / path) for path in paths}
+            now = {path: content_hash(repo["root"] / path) for path in paths}
+        changed = before != now
+        if changed and photo_base and any(at_base.get(path) != at_photo_base.get(path) for path in paths):
+            # la base se movió (rebase o merge de la rama principal): lo de la foto llevado a la base de ahora es lo
+            # que habría sin la tarea; si coincide con lo de ahora, la tarea no lo tocó
+            expected = {path: without_task(repo["root"], at_photo.get(path), at_photo_base.get(path),
+                                           at_base.get(path)) for path in paths}
+            changed = expected != now
         if not changed:
             verdicts[id(f)] = ("previous", "commiteado en la rama antes de la tarea")
         elif any(at_photo_base.get(path) != at_photo.get(path) for path in paths):
@@ -2538,7 +2580,7 @@ def collect(repo, layout, args, meta, snapshot):
             verdict, reason = verdicts[id(f)]
             if verdict == "previous":
                 previous_count += 1
-                cov.unattributed.append({"repo": r["name"], "path": f["path"], "reason": reason})
+                cov.unattributed.append({"repo": r["name"], "path": f["path"], "reason": reason, "key": f["key"]})
                 if any(explained(infos.get(alias)) for alias in keys_for(r, f["path"])):
                     cov.claimed.append(f["key"])
                 continue
@@ -2563,7 +2605,7 @@ def collect(repo, layout, args, meta, snapshot):
             key = path if r["main"] else f'{r["name"]}:{path}'
             if not temporary_or_local(r, path, key, keys_for(r, path)):
                 previous_count += 1
-                cov.unattributed.append({"repo": r["name"], "path": path,
+                cov.unattributed.append({"repo": r["name"], "path": path, "key": key,
                                          "reason": "sin commit desde antes de la tarea; el repo no cambió después"})
                 if any(explained(infos.get(alias)) for alias in keys_for(r, path)):
                     cov.claimed.append(key)
@@ -2684,8 +2726,9 @@ ATTRIBUTION_NOTE = {
     "mixed-committed": "ya tenía cambios commiteados en la rama antes de la tarea: lo de la tarea es el diff desde "
                        "task_diff_from (el HEAD de la foto)",
 }
-ATTRIBUTION_NOT_ISOLATED = ("ya tenía cambios commiteados en la rama antes de la tarea, y la rama se rebasó o recibió un "
-                            "merge después de la foto: no se puede aislar el diff de la tarea (trátalo como mixed)")
+ATTRIBUTION_NOT_ISOLATED = ("ya tenía cambios commiteados en la rama antes de la tarea, y después de la foto la rama se "
+                            "rebasó o recibió un merge de una rama que no salió de la foto (como la principal): no se "
+                            "puede aislar el diff de la tarea (trátalo como mixed)")
 
 
 def attribution(repo, layout, args):
@@ -2702,21 +2745,29 @@ def attribution(repo, layout, args):
     else:
         raise RuntimeError(f"no encuentro {shown(meta_path, repo)} ni la foto inicial en su carpeta: pasa el meta.json "
                            "de la tarea (report.py --folder <slug> dice su ruta)")
-    task, snapshot = task_and_snapshot(repo, layout, args, meta, meta_path, notes, verb="Atribuyo")
-    if real(own / SNAPSHOT).is_file() and real(task.folder) != real(own):
-        # la carpeta del meta tiene su foto (por ejemplo, con otra carpeta de reportes): manda esa
+    first = []
+    task, snapshot = task_and_snapshot(repo, layout, args, meta, meta_path, first, verb="Atribuyo")
+    if real(own / SNAPSHOT).is_file() and real(task.folder) != real(own) and not args.ignore_snapshot:
+        # la carpeta del meta tiene su foto (por ejemplo, con otra carpeta de reportes): manda esa, sin los avisos de
+        # la otra
         named = re.match(r"^(\d{4}-\d{2}-\d{2})-(.+)$", own.name)
         task = Task(own, named.group(1) if named else task.date, named.group(2) if named else task.slug)
-        snapshot = None if args.ignore_snapshot else load_snapshot(task, notes)
+        snapshot = load_snapshot(task, notes)
+    else:
+        notes.extend(first)
     found = collect(repo, layout, args, meta, snapshot)
     cov = found.cov
     paths = {r["name"]: display_path(r["root"], repo) for r in cov.repos + cov.unchanged}
     repos = []
     for r in cov.repos:
-        photo = r.get("photo") if isinstance(r.get("photo"), dict) and "error" not in r["photo"] else {}
+        raw = r.get("photo") if isinstance(r.get("photo"), dict) else None
+        photo = raw if raw is not None and "error" not in raw else {}
         in_photo = bool(photo)
         isolated = isolated_since(r["root"], photo.get("head"))
-        if cov.photo and not in_photo:
+        if cov.photo and raw is not None and "error" in raw:
+            notes.append(f'⚠️  La foto inicial no pudo leer {r["name"]} ({raw["error"]}): todo su diff cuenta como de '
+                         "la tarea.")
+        elif cov.photo and not in_photo:
             notes.append(f'⚠️  {r["name"]} no estaba en la foto inicial: todo su diff cuenta como de la tarea.')
         files = []
         for f in sorted((f for f in found.files if f["repo"] is r), key=lambda item: item["path"]):
@@ -2742,9 +2793,8 @@ def attribution(repo, layout, args):
     unattributed = []
     for item in cov.unattributed:
         repo_path = paths.get(item["repo"], item["repo"])
-        keys = {item["path"], "%s:%s" % (item["repo"], item["path"])}
         unattributed.append({"repo": item["repo"], "repo_path": repo_path, "path": item["path"],
-                             "reason": item["reason"], "claimed_by_meta": bool(keys & claimed)})
+                             "reason": item["reason"], "claimed_by_meta": item.get("key") in claimed})
     others = list(cov.others) + [{"path": where, "detail": "cambios sin commit (sin foto: no se sabe si son de la "
                                                            "tarea)"} for where in cov.dirty_siblings_without_photo]
     empty = None
