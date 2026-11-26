@@ -37,7 +37,7 @@ Cada repo vecino y cada dependencia publicada con código local es una fila de l
 - "Cómo se consume" dice qué se publica (coordenada o nombre) y el archivo donde se fija su versión, sin el número: cambia con cada bump.
 - "Pasar a fuente y volver" es el cambio exacto para cada sentido, con el archivo y la línea, o el comando. Si no hay ningún mecanismo, "sin mecanismo": `hb-implement` trabaja entonces solo en el repo de la unidad y avisa que el cambio llega a la app al publicarse.
 - Si ese cambio toca un archivo versionado y queda hecho en la máquina, va también en "Configuración local modificada a propósito": las skills no lo cuentan como cambio ajeno ni lo proponen para commit. Si `AGENTS.md` pide revertirlo al terminar cada tarea, anótalo en la misma celda.
-- Debajo de la tabla, la línea de acceso a las carpetas y la línea `Repos vecinos` (clonar y crear ramas, o no).
+- Debajo de la tabla, la línea de acceso a las carpetas y la línea `Repos vecinos` (clonar los que falten y preguntar la rama de trabajo, o no clonar ni crear ramas).
 
 Un `AGENTS.md` anterior lo tiene en `### Repos relacionados` de `## Arquitectura`: las skills lo siguen leyendo como respaldo, y al migrar sus filas pasan a esta tabla.
 

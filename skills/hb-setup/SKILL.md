@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git. Para preparar el contexto de IA, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools)."
 metadata:
   author: hacybeyker
-  version: "1.5.0"
+  version: "1.6.0"
   category: flow
 ---
 
@@ -87,7 +87,7 @@ Haz todas las preguntas juntas y propone un valor por defecto:
 - ¿Se versiona el contexto de IA (`AGENTS.md`, sus docs y las salidas)? Por defecto: **sí**. Si no: **local** (en el repo, excluido de git) o en una **carpeta externa** que indicas ([contexto.md](references/contexto.md)).
 - ¿Dónde van los reportes de las skills? Es una **base común**: `hb-implement` escribe en `<base>/implementation/<fecha>-<slug>/`, `hb-performance` en `<base>/performance/` y `hb-review` en `<base>/review/<fecha>-<slug>/`, y cada una deja su fila en `<base>/INDEX.md`. Por defecto: `reports`, o `contexto/reports` si el contexto no se versiona. ¿Cómo se arma el slug? Por defecto, el título en minúsculas con guiones (otra convención: `<ticket>-<descripción-corta>`). Una ruta con `{fecha}` y `{slug}` se sigue aceptando: `hb-implement` la usa tal cual.
 - Si el contexto se versiona: ¿los mapas del módulo también? Por defecto: **no**, quedan en `.git/info/exclude`.
-- ¿El agente puede clonar los repos vecinos que falten y crear ramas de trabajo? Por defecto: **sí**. Si no, la línea `Repos vecinos: no clonar ni crear ramas` lo apaga.
+- ¿El agente puede clonar los repos vecinos que falten? Por defecto: **sí**. La rama de trabajo nunca la crea por su cuenta: al empezar cada tarea pregunta, una sola vez, si sigue en la rama actual de cada repo o crea una con el nombre que des, y sin respuesta sigue en la actual (`Repos vecinos: clonar los que falten y preguntar la rama de trabajo`). Si no quieres ni eso, la línea `Repos vecinos: no clonar ni crear ramas` lo apaga.
 - Lo que el inventario de la estructura no resolvió ([estructura.md](references/estructura.md)): las unidades dudosas, la URL de cada repo vecino sin clonar, cómo pasar una unidad a fuente y volver, quién publica y versiona cada una, qué variante tiene servicios funcionales y cuál se usa para probar y medir, y si cada archivo modificado que nombra repos vecinos queda así a propósito.
 - Reglas propias que no aparecen en el código (datos sensibles, restricciones del negocio).
 

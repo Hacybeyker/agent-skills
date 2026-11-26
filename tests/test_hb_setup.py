@@ -556,10 +556,27 @@ class TemplateTest(unittest.TestCase):
         for title in ("### Unidades", "### Variantes y entornos", "### Cliente HTTP",
                       "### Configuración local modificada a propósito", "### Documentos", "### Mapas del módulo"):
             self.assertIn(title, structure)
-        self.assertIn("- Repos vecinos: <clonar los que falten y crear ramas de trabajo | no clonar ni crear ramas>",
+        self.assertIn("- Repos vecinos: <clonar los que falten y preguntar la rama de trabajo | no clonar ni crear ramas>",
                       structure)
         self.assertIn("| Documento | Léelo cuando… |", structure)
         self.assertIn("| Variante o entorno | Para qué sirve | Servicios funcionales | Para probar y medir |", structure)
+
+    def test_por_defecto_ninguna_skill_crea_ramas_sin_preguntar(self):
+        """hb-setup 1.6.0: la línea por defecto ya no autoriza a crear ramas; la rama se pregunta una vez."""
+        estructura = (SKILL / "references" / "estructura.md").read_text(encoding="utf-8")
+        relacionados = (SKILL / "references" / "repos-relacionados.md").read_text(encoding="utf-8")
+        self.assertRegex(self.skill, r'(?m)^  version: "1\.6\.0"$')
+        for text in (self.text, estructura, relacionados, self.skill):
+            self.assertNotIn("clonar los que falten y crear ramas de trabajo`", text.replace(
+                "(`clonar los que falten y crear ramas de trabajo`)", ""))  # solo se nombra para migrarla
+            self.assertNotIn("clonar los que falten y crear ramas de trabajo.", text)
+            self.assertNotIn("crear ramas de trabajo?", text)
+        self.assertIn("- Repos vecinos: clonar los que falten y preguntar la rama de trabajo.", estructura)
+        self.assertIn("ninguna skill crea una rama por su cuenta", estructura)
+        self.assertIn("si nadie responde, sigue en la actual", estructura)
+        self.assertIn("`pull`, `merge` ni `rebase`", estructura)
+        self.assertIn("Al actualizar un `AGENTS.md` con la línea de antes", estructura)
+        self.assertIn("La rama de trabajo nunca la crea por su cuenta", self.skill)
 
     def test_estructura_va_entre_arquitectura_y_modernizacion(self):
         headings = re.findall(r"(?m)^## (.+)$", self.text)

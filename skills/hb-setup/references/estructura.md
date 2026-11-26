@@ -47,7 +47,7 @@ Va entre `## Arquitectura` y `## Modernización`, con estas subsecciones y en es
 | `core-lib` | `../core-lib` | Publicada: `com.example:core-lib`, versión fijada en `gradle/libs.versions.toml` | A fuente: `"core-lib": true` en `local-modules.json`; volver: `false` | `cd <ruta del proyecto>/../core-lib && ./gradlew check` | `https://git.example.com/team/core-lib.git`, `main` | su repo: el workflow `publish` al crear el tag `vX.Y.Z` |
 
 - El agente necesita **acceso a la carpeta** de cada unidad que está fuera del repo (cada agente tiene su forma de sumar directorios de trabajo). Si no puede leer una, lo dice y se detiene.
-- Repos vecinos: clonar los que falten y crear ramas de trabajo.
+- Repos vecinos: clonar los que falten y preguntar la rama de trabajo.
 
 ### Variantes y entornos
 
@@ -96,7 +96,7 @@ En un proyecto de un solo paquete con features por carpetas (por ejemplo, un esp
 - **DoD de la unidad:** el comando acotado, con `cd` a su repo (`./gradlew :<módulo>:check`, `pnpm --filter web test -- src/features/payments`, `go test ./<carpeta>/...`). Si no se puede acotar, "el `## DoD` del proyecto". Las skills corren además el `## DoD` del proyecto cuando el cambio toca la app, algo de ninguna unidad, un contrato que otras consumen o una unidad sin build propio.
 - **Repo y rama principal:** "este repo" o la URL del remoto (sirve para clonarlo), y la rama principal.
 - **Publica y versiona:** quién y cómo: "con la app", "la persona, con `hb-release`", "el workflow `<nombre>` al crear el tag".
-- Debajo de la tabla, la línea de acceso a las carpetas y la línea **Repos vecinos**: `Repos vecinos: clonar los que falten y crear ramas de trabajo` (por defecto) o `Repos vecinos: no clonar ni crear ramas`. Con la segunda, ninguna skill clona un repo ni crea ramas en ningún repo de la tarea, tampoco en el principal: propone el comando y sigue. Commit y push siguen las reglas de `## Git`.
+- Debajo de la tabla, la línea de acceso a las carpetas y la línea **Repos vecinos**: `Repos vecinos: clonar los que falten y preguntar la rama de trabajo` (por defecto) o `Repos vecinos: no clonar ni crear ramas`. Con la primera, ninguna skill crea una rama por su cuenta: al empezar, pregunta una sola vez, para todos los repos que va a modificar, si sigue en la rama actual de cada uno o crea una nueva con el nombre que dé el usuario; si nadie responde, sigue en la actual. Ninguna hace `pull`, `merge` ni `rebase` para preparar la rama. Con la segunda, ninguna skill clona un repo ni crea ramas en ningún repo de la tarea, tampoco en el principal: propone el comando y sigue. Commit y push siguen las reglas de `## Git`. Al actualizar un `AGENTS.md` con la línea de antes (`clonar los que falten y crear ramas de trabajo`), cámbiala por la primera: las skills ya la leen así.
 
 ### Las demás subsecciones
 

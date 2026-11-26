@@ -8,7 +8,7 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 
 | Skill | Tipo | Versión |
 | --- | --- | --- |
-| `hb-setup` | Flujo | 1.5.0 |
+| `hb-setup` | Flujo | 1.6.0 |
 | `hb-implement` | Flujo | 1.6.0 |
 | `hb-review` | Flujo | 1.2.0 |
 | `hb-performance` | Flujo | 0.20.0 |
