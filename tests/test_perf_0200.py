@@ -258,7 +258,7 @@ class UnitReposTest(CaptureBase):
         write(self.lib / "src" / "Core.kt", "object Core\n")
         commit_all(self.lib, "core")
         git(self.lib, "tag", "v1.2.0")
-        git(self.lib, "switch", "-q", "-c", "perf/inv")
+        git(self.lib, "switch", "-q", "-c", "medir-login")
         self.plan_with(modulos=[{"nombre": "com.example:core-lib", "tipo": "codigo", "carpeta": "libs/core-lib",
                                  "artefacto": "com.example:core-lib:1.2.0"}])
 
@@ -266,7 +266,7 @@ class UnitReposTest(CaptureBase):
         self.capture(runs=3)
         repos = self.phases()["antes"][perf.UNIT_REPOS]
         head = git(self.lib, "rev-parse", "HEAD").strip()
-        self.assertEqual(repos["libs/core-lib"], {"rama": "perf/inv", "commit": head, "sucio": False,
+        self.assertEqual(repos["libs/core-lib"], {"rama": "medir-login", "commit": head, "sucio": False,
                                                   "version_fuente": "v1.2.0"})
         self.assertEqual(repos["."]["rama"], "main")
         self.assertEqual(repos["."]["commit"], git(self.dir, "rev-parse", "HEAD").strip())
@@ -279,7 +279,7 @@ class UnitReposTest(CaptureBase):
         self.assertIn("el código de libs/core-lib cambió entre antes y control", out)
         table = (self.folder / "comparacion.md").read_text(encoding="utf-8")
         self.assertIn("Código de las unidades en fuente, por fase:", table)
-        self.assertIn("| antes | libs/core-lib | perf/inv | %s | v1.2.0 | no |" % head[:12], table)
+        self.assertIn("| antes | libs/core-lib | medir-login | %s | v1.2.0 | no |" % head[:12], table)
 
     def test_una_segunda_tanda_conserva_el_codigo_de_la_primera_y_avisa(self):
         self.capture(runs=2)
@@ -297,7 +297,7 @@ class UnitReposTest(CaptureBase):
         git(self.lib, "switch", "-q", "-c", "otra-rama")
         notes = perf.unit_phase_notes(self.phases(), self.dir, perf.units_state(self.folder, self.dir, perf.load_plan(
             self.plan)), "despues")
-        self.assertEqual(notes, ["la rama de libs/core-lib cambió entre antes y después (perf/inv → otra-rama): después "
+        self.assertEqual(notes, ["la rama de libs/core-lib cambió entre antes y después (medir-login → otra-rama): después "
                                  "mide otro código que el de la línea base"])
 
     def test_el_reporte_tecnico_lo_muestra_como_codigo_medido(self):
@@ -306,7 +306,7 @@ class UnitReposTest(CaptureBase):
         data = perf.ReportData(self.folder, plan, perf.read_rows(self.folder / "metricas.csv"), {}, None)
         rows = dict(perf.conditions_rows(data))
         self.assertIn("Código medido", rows)
-        self.assertIn("libs/core-lib perf/inv @ %s" % git(self.lib, "rev-parse", "HEAD").strip()[:12], rows["Código medido"])
+        self.assertIn("libs/core-lib medir-login @ %s" % git(self.lib, "rev-parse", "HEAD").strip()[:12], rows["Código medido"])
 
 
 # ── Decisión 2: pasar a fuente en la sesión 1, desde el tag de la versión fijada (hallazgo 26) ──
@@ -322,16 +322,13 @@ class PassToSourceTest(ModulesBase):
             git(self.sibling, "tag", tag)
         self.assertEqual(perf.version_tags(self.sibling, "1.2.0"), ["v1.2.0", "modulo-pagos-1.2.0"])
         self.assertEqual(perf.version_tags(self.sibling, "9.9.9"), [])
-        self.assertEqual(perf.work_branch(self.folder), "perf/pagos")
-        self.assertEqual(perf.work_branch(self.dir / "inv"), "perf/inv")
 
     def test_el_registro_da_el_comando_desde_el_tag_y_nunca_edita(self):
         git(self.sibling, "tag", "v1.2.0")
         before = {name: (self.root / name).read_bytes() for name in ("settings.gradle.kts", "modulos-locales.json")}
         out = self.register(self.binary, "com.example:modulo-pagos")
         self.assertIn("perf.py nunca lo edita: lo pasa a fuente la sesión 1, antes de medir, con el mecanismo del modelo", out)
-        self.assertIn("para pasarlo a fuente (sesión 1, antes de medir): `git -C ../modulo-pagos switch -c perf/pagos "
-                      "v1.2.0`", out)
+        self.assertIn("`git -C ../modulo-pagos switch -c <rama que elija el usuario> v1.2.0`", out)  # 0.21.0
         self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
         self.assertEqual(git(self.sibling, "branch", "--show-current").strip(), "main")  # perf.py no cambia de rama
 
@@ -339,14 +336,18 @@ class PassToSourceTest(ModulesBase):
         out = self.register(self.binary, "com.example:modulo-pagos")
         self.assertIn("../modulo-pagos no tiene un tag de la versión fijada (1.2.0): si se pasa a fuente, la línea base "
                       "mide otro código que el publicado", out)
+        # 0.21.0: sin tag, la pregunta de la rama igual se hace, desde la rama actual y sin inventar el nombre
+        self.assertIn("sigue en la rama actual de ../modulo-pagos (`main`) o crea una nueva desde ella con el nombre que "
+                      "dé el usuario (`git -C ../modulo-pagos switch -c <rama que elija el usuario>`; no lo inventes)", out)
+        self.assertIn("Después, el cambio del modelo (`## Estructura` · Pasar a fuente y volver)", out)
 
     def test_al_pasar_a_fuente_comprueba_el_tag(self):
         git(self.sibling, "tag", "v1.2.0")
         self.register(self.binary, "com.example:modulo-pagos")
-        git(self.sibling, "switch", "-q", "-c", "perf/pagos", "v1.2.0")  # lo que hace la sesión 1
+        git(self.sibling, "switch", "-q", "-c", "medir-pagos", "v1.2.0")  # lo que hace la sesión 1
         out = self.register(self.code, "com.example:modulo-pagos")
         head = git(self.sibling, "rev-parse", "HEAD").strip()[:12]
-        self.assertIn("✔ com.example:modulo-pagos quedó en fuente en ../modulo-pagos perf/pagos @ %s, en el tag v1.2.0 de "
+        self.assertIn("✔ com.example:modulo-pagos quedó en fuente en ../modulo-pagos medir-pagos @ %s, en el tag v1.2.0 de "
                       "la versión fijada" % head, out)
         item = self.modules()["com.example:modulo-pagos"]
         self.assertEqual((item["tipo"], item["version_fijada"], item["tag_fijado"]), ("codigo", "1.2.0", "v1.2.0"))

@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git y, para el reporte HTML, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools). Opcional: la CLI android de Google para dibujar los previews de Compose, y conexión al abrir un reporte con diagramas."
 metadata:
   author: hacybeyker
-  version: "1.6.0"
+  version: "1.7.0"
   category: flow
   origin: "basada en feature-implementation (Android y KMP)"
 ---
@@ -25,17 +25,17 @@ El flujo es el mismo para cualquier stack. La arquitectura, los comandos y las r
 4. **Mapa del módulo.** Antes de tocar o revisar una unidad, lee su mapa en la carpeta que dice la línea "Mapas del módulo" de `## Estructura` (`<carpeta de contexto>/modules/<identificador>.md`, con las subcarpetas del identificador). Si su `Commit analizado` no es el `HEAD` del repo de la unidad, mira solo `git -C <repo> diff <commit>..HEAD -- <ruta de la unidad>`. Si el mapa no existe o quedó atrás, créalo o actualízalo con lo que ya leíste, en su ruta real: arriba, `Commit analizado: <sha>` y la ruta de la unidad; después, Qué hace, Puntos de entrada, Flujos principales, Servicios que llama, Datos y persistencia, Patrones y convenciones, DoD de la unidad y Cuidado con. `hb-review` solo lo lee.
 5. Carga el perfil y **solo** las referencias que la tarea necesita.
 6. Clasifica la tarea: `feature`, `bugfix`, `enhancement` o `refactor`.
-7. **Antes de cambiar nada**, revisa `git status` de cada repo que vas a tocar. Los archivos de "Configuración local modificada a propósito" no son cambios ajenos: no avises por ellos. Si hay otros cambios que no son de esta tarea, avísalo antes de empezar. El reporte compara cada repo contra el `merge-base` con su rama principal, o contra la base que fije `AGENTS.md` (sección 6).
+7. **Antes de cambiar nada**, pide la carpeta de la tarea: `report.py --folder <slug>` (sección 6). El slug no cambia después: si su convención lleva el código de la tarea (`<ticket>-<descripción>`) y todavía no lo tienes, pregúntalo antes de pedir la carpeta (puede ir en la misma pregunta que la rama de trabajo). La crea y toma la **foto inicial**: la rama, el `HEAD` y los archivos sin commit de cada repo (el principal, sus repos hermanos y las fuentes de las unidades del modelo). Con ella el reporte sabe, sin depender de tu memoria, qué cambió la tarea. Si la tarea ya tenía carpeta, se conserva la foto del inicio. Después revisa `git status` de cada repo que vas a tocar: los archivos de "Configuración local modificada a propósito" no son cambios ajenos y no avisas por ellos; si hay otros que no son de esta tarea (el script lista los que la foto ya encuentra), avísalo antes de empezar. El reporte compara cada repo contra el `merge-base` con su rama principal, o contra la base que fije `AGENTS.md` (sección 6).
 8. **Unidades**, con el modelo (detalle en [unidades.md](references/unidades.md)). Antes del plan:
    - Decide qué unidades **cambia** la tarea, cuáles necesita en fuente sin cambiarlas y cuáles solo lee, y confirma que el código que vas a editar entra en el build: con el modelo y, si no alcanza, con la herramienta de build del proyecto.
-   - Deja listo cada repo vecino que vas a tocar: si no está, clónalo con la URL del modelo; si está limpio y atrasado, `git pull --ff-only`; **pregunta** solo si tiene cambios sin commit o está en otra rama. Si no puedes leer su carpeta, detente y di qué acceso falta.
+   - Deja listo cada repo vecino que vas a tocar: si no está, clónalo con la URL del modelo; si está atrasado respecto de su remoto, dilo y sigue con lo que hay; **pregunta** solo si tiene cambios sin commit que no son de esta tarea. Si no puedes leer su carpeta, detente y di qué acceso falta.
    - Avisa si el fuente de una unidad publicada no coincide con la versión que fija la app.
+   - **La rama de trabajo, en una sola pregunta** para todos los repos que vas a modificar: muestra la rama actual de cada uno y ofrece (a) seguir en esa rama o (b) crear una rama nueva con el nombre que dé el usuario. Los nombres suelen llevar el código de la tarea: no lo inventes; si elige (b) sin dar el nombre, pregúntaselo. **Si nadie responde** (modo autónomo o sin usuario), sigue en la rama actual de cada repo, sin crear ni cambiar ramas, y dilo en la entrega y en el reporte (`branch_note`). Nunca hagas `pull`, `merge` ni `rebase` para preparar la rama.
 
    Antes de editar cada repo:
-   - Una unidad **publicada** que vas a cambiar se pasa a fuente **sin preguntar**, con el mecanismo del modelo; compila para comprobarlo y sigue. Ese cambio es temporal (`temporary` del meta). Si es `sin mecanismo`, trabaja solo en el repo de la unidad y avisa que el cambio llega a la app cuando se publique.
-   - Crea la **rama de trabajo** en cada repo que vas a modificar, con el nombre de `## Git` o `<tipo>/<slug>` (`feat`, `fix` o `refactor`), la misma en todos; si ya estás en una rama que no es la principal, sigue en ella.
+   - Una unidad **publicada** que vas a cambiar se pasa a fuente **sin preguntar**, con el mecanismo del modelo; compila para comprobarlo y sigue. Ese cambio es temporal (`temporary` del meta). En cuanto la pasas a fuente, **regístrala**: `report.py --unit <su fuente> --folder <slug>` (sección 6). Si es `sin mecanismo`, trabaja solo en el repo de la unidad y avisa que el cambio llega a la app cuando se publique.
 
-   Con `Repos vecinos: no clonar ni crear ramas`, o si `## Git` dice que la IA no cambia de rama, no clones, no actualices ni crees ramas: propón los comandos y sigue.
+   Con `Repos vecinos: no clonar ni crear ramas`, o si `## Git` dice que la IA no cambia de rama, no clones ni crees ramas, ni hagas la pregunta de la rama: sigue en la rama actual de cada repo, propón los comandos y sigue.
 
 ## 1. Plan
 
@@ -107,6 +107,7 @@ El DoD no ve los fallos de diseño. Antes de correrlo, relee tu diff contra el *
 
 ### Definition of Done
 
+- Antes de correr el DoD de una unidad de otro repo, regístrala si no lo hiciste al pasarla a fuente: `report.py --unit <su fuente> --folder <slug>` (no la duplica).
 - Corre **el DoD de cada unidad que tocaste**: la columna "DoD de la unidad" del modelo, con su `cd`, y el `## DoD` del proyecto, que compila la app con todo, si cambiaste la app, pasaste unidades a fuente, cambiaste algo que no es de ninguna unidad o un contrato que otras consumen, o la unidad no tiene build propio (una carpeta de feature). Sin modelo, los comandos de `## DoD`, en orden. En un repo vecino sin DoD en el modelo, el `## DoD` de su `AGENTS.md` ([unidades.md](references/unidades.md)).
 - Si un paso falla, corrige y repite desde ese paso. **Si el mismo paso falla tres veces, detente** y reporta el error con tu diagnóstico.
 - Un paso que el entorno no permite (por ejemplo, compilar iOS sin macOS) se marca `skipped` con el motivo. Nunca cuenta como `pass`.
@@ -137,31 +138,39 @@ El DoD no ve los fallos de diseño. Antes de correrlo, relee tu diff contra el *
 
 ## 6. Reporte HTML
 
-Se genera siempre, salvo que el usuario diga que no.
+Se genera siempre, salvo que el usuario diga que no. El reporte es de esta skill: lo que git sabe (qué repos y qué archivos cambió la tarea, el antes, el después y el diff) lo calcula el script; el meta aporta lo que git no sabe.
 
-1. Deja la carpeta de reportes fuera de git sin tocar el `.gitignore` del proyecto. La línea `Carpeta de reportes: <ruta>` de `AGENTS.md` (o, si no la hay, `reports`) es la **base** común de las skills: esta tarea va en `<base>/implementation/<fecha>-<slug>/`, con `meta.json`, `report.html`, `bitacora.md` y `previews/`. Antes de escribir el meta, pídele al script la carpeta de la tarea (la ruta del script es relativa a la carpeta de la skill): la crea, la agrega a `.git/info/exclude` si git no la ignora (local; también en un worktree), deja la fila de la tarea "en curso" en `<base>/INDEX.md` e imprime las rutas del meta, la bitácora, los previews y el índice. **Usa esas rutas tal cual.**
+1. **La carpeta de la tarea**, al empezar (sección 0). La línea `Carpeta de reportes: <ruta>` de `AGENTS.md` (o, si no la hay, `reports`) es la **base** común de las skills: esta tarea va en `<base>/implementation/<fecha>-<slug>/`, con `meta.json`, `report.html`, `snapshot.json`, `bitacora.md` y `previews/`. El script la crea y la deja fuera de git sin tocar el `.gitignore` del proyecto: la agrega a `.git/info/exclude` si git no la ignora (local; también en un worktree), deja la fila de la tarea "en curso" en `<base>/INDEX.md`, toma la foto inicial e imprime las rutas del meta, la bitácora, los previews, el índice y la foto. **Usa esas rutas tal cual.** La ruta del script es relativa a la carpeta de la skill:
    ```bash
    python3 -I <carpeta-de-la-skill>/scripts/report.py --folder <slug>
    ```
    - El slug sigue la convención de `AGENTS.md`; si no hay, el título en minúsculas con guiones.
-   - Si ya existe una carpeta con ese slug de otro día, la tarea sigue ahí. Una tarea vieja en el formato plano de antes (`<base>/<fecha>-<slug>.meta.json`) sigue plana, en la base. Con `{fecha}` y `{slug}` en la línea, la ruta se respeta tal cual.
+   - Si ya existe una carpeta con ese slug de otro día, la tarea sigue ahí y conserva su foto. Una tarea vieja en el formato plano de antes (`<base>/<fecha>-<slug>.meta.json`) sigue plana, en la base. Con `{fecha}` y `{slug}` en la línea, la ruta se respeta tal cual. Una tarea empezada antes de 1.7.0 no tiene foto: el script no la toma tarde y el reporte usa `repos` del meta.
    - Si la ruta pasa por un enlace simbólico (una carpeta de contexto fuera del repo), el script escribe en la ruta real, solo comprueba que git ignore el enlace y avisa si no.
    - En un `git worktree` al que le faltan `AGENTS.md` o el enlace de la carpeta de contexto que el principal tiene fuera de git, el script se detiene sin escribir y da el `ln -s` para recrearlos: pásaselo al usuario; no los crees sin que él o el proyecto lo pidan.
    - Detalle: [reporte.md](references/reporte.md).
-2. Escribe un meta **por tarea** en la ruta `meta:` que imprimió el script. Un `meta.json` compartido en la base lo pisa el siguiente bloque. Si el slug no es el título en minúsculas con guiones, ponlo en `slug`.
+2. **Registra cada unidad en el momento**, en cuanto la pasas a fuente o corres su DoD: la ruta de su fuente (relativa a la raíz del repo principal) o su identificador del modelo. La anota en `repos` del meta (lo crea si falta) y en la foto; repetirlo no la duplica. El repo principal y las unidades del modelo entran solos si cambiaron.
+   ```bash
+   python3 -I <carpeta-de-la-skill>/scripts/report.py --unit <ruta> --folder <slug>
+   ```
+3. Escribe un meta **por tarea** en la ruta `meta:` que imprimió el script. Si ya existe (lo crea `--unit`), léelo y complétalo: **conserva `repos`**. Un `meta.json` compartido en la base lo pisa el siguiente bloque. Si el slug no es el título en minúsculas con guiones, ponlo en `slug`.
 
 ```json
 {
   "project": "<nombre del proyecto>",
   "title": "Perfil de usuario",
   "type": "feature",
+  "ticket": "<el código que dio el usuario o el del nombre de la rama>",
   "scope": "feature/profile",
   "description": "Una o dos oraciones sobre qué se hizo y por qué.",
   "date": "AAAA-MM-DD",
+  "branch_note": "El usuario eligió seguir en la rama actual de cada repo.",
+  "impact": [{ "label": "Pantallas afectadas", "value": "Perfil y edición del perfil" }],
+  "diagrams": [{ "title": "Carga del perfil", "mermaid": "flowchart LR\n  A[Pantalla] --> B[ViewModel] --> C[Repositorio]", "description": "Qué muestra." }],
   "files": {
-    "ruta/al/ArchivoNuevo.kt": { "why": "Qué aporta al diseño." },
-    "ruta/al/modulo_modificado.py": { "before": "Qué limitación había.", "after": "Qué mejora el cambio." },
-    "ruta/al/componente-eliminado.ts": { "why": "Por qué se elimina." }
+    "ruta/al/ArchivoNuevo.kt": { "why": "Qué aporta al diseño.", "layer": "dominio", "risk": "medio", "pros": ["Lo que gana"], "cons": ["Lo que cuesta"] },
+    "ruta/al/modulo_modificado.py": { "before": "Qué limitación había.", "after": "Qué mejora el cambio.", "layer": "datos", "risk": "alto", "pros": ["…"], "cons": ["…"] },
+    "ruta/al/componente-eliminado.ts": { "why": "Por qué se elimina.", "risk": "bajo", "pros": ["…"], "cons": ["…"] }
   },
   "groups": [
     { "match": "tests/screenshots/", "why": "Goldens regrabados de las pantallas del perfil." }
@@ -176,17 +185,22 @@ Se genera siempre, salvo que el usuario diga que no.
 ```
    - `type`: `feature`, `bugfix`, `enhancement` o `refactor`. `status`: `pass`, `fail` o `skipped`. `date`: la fecha local.
    - Una explicación por archivo, sobre el impacto, no sobre el código. `output` solo en pasos que fallaron.
+   - **Datos de análisis: complétalos siempre que puedas sostenerlos con lo que viste en el código.** Por archivo: `why` (o `before` y `after`), `risk` (`critico`, `alto`, `medio`, `bajo`), `pros` y `cons`, y `layer`, la capa según la arquitectura de `AGENTS.md`. Por reporte: al menos un diagrama Mermaid del flujo afectado en `diagrams`, `impact` y, en un bugfix, `severity` y `root_cause`; y `ticket`, el que dé el usuario o el que aparezca en el nombre de la rama. Lo que no puedas sostener, déjalo fuera: el script no muestra lo que falta ni lo vacío, ignora con un aviso un valor con formato inválido y nunca falla por ellos ([reporte.md](references/reporte.md)). Si analizaste un archivo y no tiene contras, escribe `"cons": []`: el reporte dice "Sin contras identificados"; sin el campo, no muestra nada. Si no tiene pros, `"pros": []`: no se muestra, pero cuenta como analizado; nunca inventes pros para completar el campo.
+   - `branch_note`: qué se decidió con la rama (sección 0), sobre todo si nadie respondió y se siguió en la rama actual.
    - Los archivos masivos o generados (goldens, fixtures, snapshots) **no llevan una explicación cada uno**: se explican en grupo con `groups`. `match` es una carpeta (termina en `/`) o un patrón (`*.png`), y el grupo sale como una sola entrada con su lista de rutas. Un archivo con entrada propia en `files` se muestra aparte del grupo.
    - `previews` es opcional (sección 5). `image` es la ruta que devolvió `android preview render`: absoluta, relativa al repo o relativa a la carpeta de la tarea (`previews/<archivo>`). El script incrusta la imagen en el reporte.
-   - **Análisis del cambio**, opcional: en un bugfix, `severity` y `root_cause`; si el cambio tiene un efecto que se puede contar, `impact`; si cambia un flujo o una arquitectura, un diagrama Mermaid en `diagrams`; y en los archivos que el revisor debe mirar con cuidado, `risk` (`critico`, `alto`, `medio`, `bajo`) con `pros` y `cons`. Solo se muestran si vienen ([reporte.md](references/reporte.md)).
-   - **Varios repos:** si la tarea cambió repos vecinos, lístalos en `repos` con su `main_branch` y, para cada unidad publicada que está en fuente, su `pinned_version`; explica sus archivos con la clave `<nombre>:<ruta>`. El cambio que pasa una unidad a fuente va en `temporary`, con cómo revertirlo: no cuenta como cambio. Los archivos de "Configuración local modificada a propósito" el script ya los deja fuera solo ([unidades.md](references/unidades.md)).
-3. Genera el reporte con el script de esta skill:
+   - **Varios repos:** las claves de un vecino son `<nombre>:<ruta>`. En `repos` puedes ponerle a cada unidad su `main_branch` y, si es publicada y está en fuente, su `pinned_version`. El cambio que pasa una unidad a fuente va en `temporary`, con cómo revertirlo: no cuenta como cambio. Los archivos de "Configuración local modificada a propósito" el script ya los deja fuera solo ([unidades.md](references/unidades.md)).
+   - **DoD por unidad:** cada paso de una unidad lleva su nombre delante (`core-lib · Tests`) o `"unit": "<unidad>"`, y sale en la sección de esa unidad; los demás, en el DoD del proyecto.
+4. Genera el reporte con el script de esta skill:
    ```bash
    python3 -I <carpeta-de-la-skill>/scripts/report.py --meta <ruta-del-meta> [--main-branch <rama>] [--base <base>]
    ```
-   - **Base:** sin `--base`, compara contra el `merge-base` de `HEAD` con la rama principal, así entra lo ya commiteado en la rama de trabajo. Pásale la rama principal del modelo con `--main-branch`; sin ella, prueba `origin/HEAD`, `origin/main`, `origin/master`, `main` y `master`, y si no encuentra ninguna compara contra `HEAD` y avisa. Si `AGENTS.md` fija otra base, pásala con `--base`, que manda. El reporte muestra la base usada.
+   - **Qué entra:** el script compara cada repo con la foto. Entran el principal, las unidades del modelo y las registradas, si cambiaron después de la foto; lo que ya estaba sin commit antes y no cambió va a "Cambios no atribuidos", fuera de los conteos. El reporte empieza con un resumen global y sigue con una sección por unidad.
+   - **Otros repos que cambiaron:** si el script lista un repo hermano que cambió y no es unidad (la carpeta padre puede tener proyectos ajenos), pregúntale al usuario si es de la tarea; si dice que sí, regístralo con `--unit` y vuelve a generar el reporte.
+   - **Sin archivos de la tarea no hay reporte:** el script no lo escribe y dice la causa probable y el siguiente paso (registrar una unidad, pasar la base o, si la foto se tomó después de empezar a cambiar, `--ignore-snapshot`). Síguelo; no entregues un reporte vacío.
+   - **Base:** sin `--base`, compara contra el `merge-base` de `HEAD` con la rama principal, así entra lo ya commiteado en la rama de trabajo. Pásale la rama principal del modelo con `--main-branch`; sin ella, toma la de `## Estructura` o prueba `origin/HEAD`, `origin/main`, `origin/master`, `main` y `master`, y si no encuentra ninguna compara contra `HEAD` y avisa. Si `AGENTS.md` fija otra base, pásala con `--base`, que manda. El reporte muestra la base usada.
    - El script saca el antes, el después y el diff de git (contra la base, incluidos los archivos nuevos sin trackear): **no copies código en el meta**. Al terminar, deja en la fila del índice el resultado del DoD (`DoD PASS`, `DoD FAIL`, `DoD PARTIAL` o `sin DoD`).
-4. Si el script avisa de archivos sin explicación, complétalos (o agrúpalos) y vuelve a generarlo.
+5. Si el script avisa de archivos sin explicación o de datos de análisis que faltan, complétalos (o agrupa los archivos) y vuelve a generarlo. Si avisa de una **posible migración de lenguaje** (un archivo de código borrado o vaciado cuyo equivalente aparece en otro lenguaje), confirma con el usuario que se pidió; si no, pregúntale antes de deshacerla (el aviso compara archivos del mismo lugar y con el mismo nombre: puede ser un cambio legítimo).
 
 ## 7. Entrega
 
@@ -197,7 +211,7 @@ Se genera siempre, salvo que el usuario diga que no.
   - Los archivos creados, modificados y eliminados.
   - El resultado del DoD por paso.
   - La ruta del reporte (con los previews de UI, si los hubo) y la de la bitácora, si la hubo.
-  - La **rama de trabajo** de cada repo que modificaste (o el nombre propuesto, si no se podían crear ramas).
+  - La **rama de trabajo** de cada repo que modificaste: la que eligió el usuario o, si nadie respondió, la actual de cada uno, dicho así (o el comando propuesto, si el proyecto no deja crear ramas).
   - Los commits propuestos, agrupados por unidad funcional y con mensajes según `hb-commit`; con varios repos, por repo y en el orden en que se integran.
   - El **orden de integración** de cada unidad publicada que cambiaste: PR del módulo → release del módulo (con `hb-release` en su repo) → PR de bump de la versión fijada en la app. La configuración que pasa a fuente nunca se commitea. Sin mecanismo de paso a fuente: el cambio llega a la app cuando se publique ([unidades.md](references/unidades.md)).
   - Los **cambios temporales** (por ejemplo, pasar una unidad a fuente) y cómo revertirlos, o "revertido" si `AGENTS.md` pide revertirlos.
@@ -220,7 +234,9 @@ Lista solo lo que el DoD y los tests no ven: el ciclo de vida real, los permisos
 ## Checklist
 
 - [ ] `AGENTS.md`, modelo de estructura, perfil y referencias necesarias leídos; mapa del módulo de cada unidad que tocas, leído y al día.
-- [ ] Unidades decididas y su código confirmado en el build; repos vecinos listos (o el acceso que falta, pedido); unidades publicadas en fuente con el mecanismo del modelo, como cambio temporal; rama de trabajo en cada repo que modificas (salvo que el proyecto lo impida).
+- [ ] Carpeta de la tarea pedida antes de cambiar nada (`report.py --folder`, con su foto inicial).
+- [ ] Unidades decididas y su código confirmado en el build; repos vecinos listos sin `pull`, `merge` ni `rebase` (o el acceso que falta, pedido); unidades publicadas en fuente con el mecanismo del modelo, como cambio temporal, y registradas con `--unit` al pasarlas a fuente o al correr su DoD.
+- [ ] La rama de trabajo, en una sola pregunta (seguir en la actual o crear una con el nombre del usuario); sin respuesta, la actual de cada repo, dicho en la entrega y en el reporte (salvo que el proyecto no deje crear ramas).
 - [ ] Criterios de aceptación claros; plan confirmado si hacía falta (también en un bug complejo, con su bitácora).
 - [ ] Estructura y regla de dependencias del perfil respetadas.
 - [ ] Tests nuevos con las librerías y el estilo de `AGENTS.md` (si no fija nada, los del perfil, con fakes); en un bugfix, el test que reproduce el bug o la reproducción manual.
@@ -230,7 +246,8 @@ Lista solo lo que el DoD y los tests no ven: el ciclo de vida real, los permisos
 - [ ] Autorrevisión contra el alcance completo: estado y persistencia, `catch`, dependencias, casos pedidos y reglas del `AGENTS.md`.
 - [ ] DoD de cada unidad tocada completo: cada paso en `pass` o `skipped` con motivo.
 - [ ] Previews solo si `## Stack` es Android o KMP y el cambio toca UI de Compose: con `Surface`, dibujados en la ruta `previews:` del script, revisados e incluidos en el reporte. Si no aplica, sin fila en el DoD.
-- [ ] Reporte generado en la carpeta de la tarea, con su fila en el índice, y ruta entregada; cambios temporales fuera del reporte y con cómo revertirlos.
+- [ ] Reporte generado en la carpeta de la tarea, con su fila en el índice, y ruta entregada; cambios temporales fuera del reporte y con cómo revertirlos; los otros repos que el script listó, preguntados; nunca un reporte vacío.
+- [ ] Datos de análisis completos donde se pueden sostener con el código: por archivo, `why`, `risk`, `pros`, `cons` y `layer`; por reporte, un diagrama Mermaid del flujo afectado, `impact` y, en un bugfix, `severity` y `root_cause`.
 - [ ] Orden de integración por unidad publicada (PR del módulo → release → bump) y aviso si el fuente no coincide con la versión fijada.
 - [ ] Ítems de verificación en el dispositivo priorizados, con tope, y cada uno con su test o "sin test".
 - [ ] Entrega en el idioma del proyecto.

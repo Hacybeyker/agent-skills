@@ -1,4 +1,5 @@
-"""Tests del reporte HTML de hb-implement (skills/hb-implement/scripts/report.py)."""
+"""Tests del reporte HTML de hb-implement (skills/hb-implement/scripts/report.py). Estos repos no piden la carpeta
+con --folder: son tareas sin foto inicial, donde entran el repo principal y "repos" del meta, como hasta 1.6.0."""
 import base64
 import json
 import re
@@ -52,7 +53,9 @@ class ReportTest(unittest.TestCase):
         return self.out.read_text(encoding="utf-8")
 
     def stat(self, html, label):
-        return re.search(r"%s</div><div class=\"stat-value[^\"]*\"[^>]*>([^<]+)<" % label, html).group(1)
+        """El número de una tarjeta del resumen ("Archivos Nuevos", "DoD"…)."""
+        return re.search(r'<div class="stat-value[^"]*">([^<]+)</div><div class="stat-label">%s</div>' % label, html,
+                         re.I).group(1)
 
     def test_genera_el_reporte_en_la_carpeta_de_la_tarea_con_la_fecha_y_el_titulo(self):
         result = self.generate()
@@ -75,7 +78,7 @@ class ReportTest(unittest.TestCase):
 
     def test_muestra_el_tipo_y_las_explicaciones(self):
         html = self.html()
-        self.assertIn("🐛 Bug Fix", html)
+        self.assertIn("🐛 Bugfix", html)
         self.assertIn("después", html)
 
     def test_un_paso_del_dod_fallido_deja_el_resultado_en_fail(self):
@@ -194,7 +197,7 @@ class ReportTest(unittest.TestCase):
             image.write_bytes(b"\x89PNG\x00" + name.encode("ascii"))
 
     def count(self, html, title):
-        return re.search(r"%s</span><span class=\"section-count\">(\d+)<" % title, html).group(1)
+        return re.search(r"%s <span class=\"count\">(\d+)<" % title, html, re.I).group(1)
 
     def test_agrupa_los_archivos_de_una_carpeta_sin_exigir_una_explicacion_cada_uno(self):
         self.add_shots()
@@ -207,7 +210,7 @@ class ReportTest(unittest.TestCase):
         self.assertIn("shots/g1.png", html)  # la lista de rutas del grupo
         self.assertEqual(html.count('class="file-path">shots/g'), 0)  # y ninguna entrada propia
         self.assertEqual(self.stat(html, "Archivos Nuevos"), "5")  # 2 de siempre + 3 del grupo
-        self.assertEqual(self.count(html, "Archivos Nuevos"), "5")
+        self.assertEqual(self.count(html, "Archivos nuevos"), "5")
         self.assertNotIn("g0.png", result.stderr)
         self.assertIn("b.txt", result.stderr)  # los demás siguen pidiendo su explicación
 
@@ -282,17 +285,19 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("✖", result.stderr)
 
-    def test_copia_el_script_de_la_plantilla_entero_y_no_el_comentario(self):
+    def test_copia_los_scripts_de_la_plantilla_enteros_y_no_el_comentario(self):
         html = self.html()
-        self.assertEqual(html.count("<script>"), 1)
-        self.assertNotIn("<script>. -->", html)
-        self.assertRegex(html, r"<script>\s*/\* Toggle collapsible file entries \*/")
+        self.assertEqual(html.count("<script"), 2)  # el del tema antes de pintar y el del final
+        self.assertRegex(html.split("<style>", 1)[0], r'<script id="theme-early">\s*/\* Aplica el tema guardado')
+        self.assertRegex(html, r'<script id="behavior">\s*/\* Tema: el del sistema por defecto')
+        self.assertIn("function switchTab(", html)
+        self.assertNotIn("solo se usan los bloques", html)
         self.assertEqual(html.count("<style>"), 1)
 
-    def test_un_meta_de_antes_no_agrega_secciones_nuevas_ni_carga_nada_remoto(self):
+    def test_un_meta_de_antes_no_agrega_secciones_de_analisis_ni_carga_nada_remoto(self):
         html = self.html()
-        for text in ("Repositorios", "Causa raíz", "Impacto", "Diagramas", "Cambios temporales", "Riesgo ",
-                     "Severidad", "repo-tag", 'class="analysis"'):
+        for text in ("Causa raíz", "Impacto", "Diagramas", "Cambios temporales", "Riesgo ", "Severidad", "Capa:",
+                     "Pros", "Contras", "Cambios no atribuidos", "🎫"):
             self.assertNotIn(text, html.split("</style>", 1)[1])
         self.assertNotIn("<script src=", html)
         self.assertNotIn("mermaid", html.split("</style>", 1)[1])
@@ -346,7 +351,9 @@ class Base(unittest.TestCase):
         return run(["git", "status", "--porcelain", "--untracked-files=all"], self.repo).stdout
 
     def stat(self, html, label):
-        return re.search(r"%s</div><div class=\"stat-value[^\"]*\"[^>]*>([^<]+)<" % label, html).group(1)
+        """El número de una tarjeta del resumen ("Archivos Nuevos", "DoD"…)."""
+        return re.search(r'<div class="stat-value[^"]*">([^<]+)</div><div class="stat-label">%s</div>' % label, html,
+                         re.I).group(1)
 
 
 class ReportFolderTest(Base):
@@ -547,13 +554,14 @@ class MultiRepoTest(Base):
         self.with_meta(repos=self.repos, files={"a.txt": {"why": "principal"}, "modulo-a:x.txt": {"why": "del modulo"}})
         result = self.ok()
         html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
-        self.assertIn("Repositorios", html)
-        self.assertIn('<td><span class="repo-tag">modulo-a</span></td><td>trabajo</td><td><code>main</code></td>'
-                      "<td>1</td><td>2</td><td>0</td>", html)
-        head = git(self.repo, "rev-parse", "--short", "HEAD").strip()  # sin --base: el merge-base con main
-        self.assertIn('<td><span class="repo-tag">repo-principal</span></td><td>main</td>'
-                      "<td>merge-base con <code>main</code> · <code>%s</code></td><td>1</td><td>1</td><td>0</td>" % head,
+        self.assertIn('<span class="repo-tag">modulo-a</span></a></td><td><code>trabajo</code></td>'
+                      '<td><code>main</code></td><td class="num">1</td><td class="num">2</td><td class="num">0</td>',
                       html)
+        head = git(self.repo, "rev-parse", "--short", "HEAD").strip()  # sin --base: el merge-base con main
+        self.assertIn('<span class="repo-tag">repo-principal</span></a></td><td><code>main</code></td>'
+                      "<td>merge-base con <code>main</code> · <code>%s</code></td><td class=\"num\">1</td>"
+                      '<td class="num">1</td><td class="num">0</td>' % head, html)
+        self.assertIn('<section id="unidad-modulo-a" class="unit">', html)  # una sección por unidad
         self.assertEqual(self.stat(html, "Archivos Nuevos"), "2")  # b.txt y modulo-a:y.txt
         self.assertEqual(self.stat(html, "Archivos Modificados"), "3")  # a.txt, x.txt (commit) y config.txt
         self.assertIn("commit de la rama", html)  # el diff contra main incluye lo commiteado en la rama
@@ -570,7 +578,7 @@ class MultiRepoTest(Base):
         html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
         self.assertIn("nuevo en el principal", html)
         self.assertIn("cambia en el modulo", html)
-        self.assertEqual(html.count('class="file-path">config.txt'), 2)
+        self.assertEqual(html.count('class="file-path">config.txt'), 2)  # una en cada sección de unidad
 
     def test_repo_relacionado_inaccesible_termina_y_dice_que_carpeta_hace_falta(self):
         self.with_meta(repos=[{"path": "../no-esta", "name": "pagos"}])
@@ -608,7 +616,8 @@ class MultiRepoTest(Base):
         self.with_meta(repos=[{"path": ".", "name": "principal", "base": "HEAD~1"}] + self.repos)
         self.ok()
         html = (self.repo / "reports" / "implementation" / "2026-01-02-prueba-x" / "report.html").read_text(encoding="utf-8")
-        self.assertIn('<span class="repo-tag">principal</span></td><td>main</td><td><code>HEAD~1</code>', html)
+        self.assertIn('<span class="repo-tag">principal</span></a></td><td><code>main</code></td>'
+                      "<td><code>HEAD~1</code>", html)
         self.assertIn("b.txt", html)  # commiteado después de HEAD~1: entra por la base
 
     def test_dos_repos_con_el_mismo_nombre_fallan(self):
@@ -647,8 +656,8 @@ class AnalysisTest(Base):
         self.assertIn("Impacto", html)
         self.assertIn("Causa raíz", html)
         self.assertIn("Diagramas", html)
-        self.assertIn("Sin contras identificados", html)  # b.txt trae "cons": []
-        self.assertEqual(html.count("Sin contras identificados"), 1)  # a.txt sí tiene contras
+        self.assertEqual(html.count("👎 Contras"), 2)  # b.txt trae "cons": []: se analizó y no hubo contras
+        self.assertEqual(html.count("Sin contras identificados"), 1)
 
     def test_escapa_el_html_de_todos_los_campos_nuevos_incluido_mermaid(self):
         self.with_meta(**self.FULL)
@@ -672,7 +681,7 @@ class AnalysisTest(Base):
         self.with_meta(**dict(self.FULL, diagrams=[]))
         self.ok()
         self.assertNotIn("<script src=", self.html())
-        self.assertNotIn("Diagramas", self.html())
+        self.assertNotIn("Diagramas", self.html().split("</style>", 1)[1])
 
     def test_cons_ausente_no_muestra_el_bloque(self):
         self.with_meta(files={"a.txt": {"why": "x", "pros": ["uno"]}})
@@ -680,23 +689,33 @@ class AnalysisTest(Base):
         self.assertIn("👍 Pros", self.html())
         self.assertNotIn("Contras", self.html())
 
-    def test_valores_invalidos_fallan_con_un_error_claro_y_sin_escribir(self):
+    def test_un_dato_de_analisis_invalido_se_ignora_con_un_aviso_sin_cortar_el_reporte(self):
         cases = (
-            {"files": {"a.txt": {"risk": "grave"}}},
-            {"severity": "urgente"},
-            {"files": {"a.txt": {"pros": "no es lista"}}},
-            {"impact": [{"value": "sin label"}]},
-            {"diagrams": [{"title": "sin código"}]},
-            {"repos": [{"name": "sin path"}]},
+            ({"files": {"a.txt": {"risk": "grave"}}}, '"risk" de a.txt debe ser critico, alto, medio o bajo'),
+            ({"severity": "urgente"}, '"severity" debe ser critico, alto, medio o bajo (llegó "urgente")'),
+            ({"files": {"a.txt": {"pros": "no es lista"}}}, '"pros" de a.txt debe ser una lista de textos'),
+            ({"impact": [{"value": "sin label"}]}, 'La entrada 1 de "impact" no trae label'),
+            ({"diagrams": [{"title": "sin código"}]}, 'La entrada 1 de "diagrams" no trae mermaid'),
+            ({"files": {"a.txt": {"layer": ["no es texto"]}}}, '"layer" de a.txt debe ser un texto'),
+            ({"ticket": {"no": "es texto"}}, '"ticket" debe ser un texto'),
         )
-        for extra in cases:
+        for extra, warning in cases:
             self.with_meta(**extra)
             result = self.generate()
-            self.assertEqual(result.returncode, 1, extra)
-            self.assertIn("✖", result.stderr)
-            self.assertFalse((self.repo / "reports").exists(), extra)
-        self.with_meta(severity="urgente")
-        self.assertIn('critico, alto, medio o bajo (llegó "urgente")', self.generate().stderr)
+            self.assertEqual(result.returncode, 0, (extra, result.stderr))
+            self.assertIn(warning, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            html = self.html()
+            for text in ("Riesgo ", "Severidad", "Impacto", "Diagramas", "👍 Pros", "Capa:", "🎫"):
+                self.assertNotIn(text, html.split("</style>", 1)[1], extra)
+
+    def test_un_repo_sin_path_sigue_fallando_antes_de_escribir(self):
+        """"repos" decide qué entra al reporte: no es un dato de análisis."""
+        self.with_meta(repos=[{"name": "sin path"}])
+        result = self.generate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('cada entrada de "repos" necesita path', result.stderr)
+        self.assertFalse((self.repo / "reports").exists())
 
 
 if __name__ == "__main__":

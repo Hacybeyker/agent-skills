@@ -24,6 +24,7 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py 
 
 - `estado` no cambia nada: el modo actual, las señales de Claude Code, la carpeta de contexto, los submódulos, los repos hermanos que el proyecto nombra y, en un worktree enlazado, lo que falta del contexto.
 - `units` tampoco cambia nada: el inventario para `## Estructura` ([estructura.md](estructura.md)).
+- `fuentes` y `verificar` tampoco: el contexto de IA que el proyecto ya tiene, el inventario de traspaso y la comprobación de que nada se pierde ([migracion.md](migracion.md)). `rendimiento` y `producto` buscan su sección en `AGENTS.md` y, si no está, en las fuentes previas.
 - `preparar` revisa todo antes de cambiar algo. Con un conflicto, sale con error y no toca nada.
 - **No pisa.** En el modo externo, si la carpeta externa ya tiene `AGENTS.md` o contenido en `contexto/`, lo usa tal cual y lo avisa. Si en el repo ya hay un `AGENTS.md` real, o uno versionado (en los modos local y externo), se detiene: moverlo o sacarlo de git es una decisión del usuario.
 - **Escribe en el destino, no sobre el enlace.** Algunas herramientas reemplazan un enlace por un archivo al guardar: en el modo externo, escribe `AGENTS.md` en la ruta que imprime el script.

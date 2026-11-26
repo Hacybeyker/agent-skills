@@ -70,5 +70,25 @@ class StructureModelTest(unittest.TestCase):
         self.assertIn("**La configuración que pasa a fuente no se commitea**", order)
 
 
+class BranchRuleTest(unittest.TestCase):
+    """1.1.1: ninguna skill crea una rama por su cuenta ni inventa su nombre; hb-commit la propone con el push."""
+
+    def setUp(self):
+        self.text = SKILL.read_text(encoding="utf-8")
+        self.push = section(self.text, "## 5. Push y pull request", "## 6. Limpiar ramas")
+
+    def test_version(self):
+        self.assertRegex(self.text, r'(?m)^  version: "1\.1\.1"$')
+
+    def test_propone_la_rama_y_la_crea_solo_con_confirmacion(self):
+        self.assertIn("en la misma confirmación del push, y créala solo cuando el usuario la confirme o te dé el nombre",
+                      self.push)
+        self.assertIn("El código de la tarea no lo inventes", self.push)
+        self.assertIn("la que eligió el usuario al empezar con `hb-implement`", self.push)
+        self.assertNotIn("la que creó `hb-implement`", self.push)
+        self.assertIn("si fija un formato de nombre, manda sobre el de aquí", self.push)
+        self.assertIn("la rama nueva se confirma igual", self.push)
+
+
 if __name__ == "__main__":
     unittest.main()

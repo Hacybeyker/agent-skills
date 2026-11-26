@@ -5,7 +5,7 @@ license: MIT
 allowed-tools: Bash
 metadata:
   author: hacybeyker
-  version: "1.1.0"
+  version: "1.1.1"
   category: flow
   origin: "basada en git-commit (comunidad)"
 ---
@@ -110,7 +110,7 @@ Usa el idioma y el estilo del archivo. Una línea por cambio, en lenguaje claro.
 ## 5. Push y pull request
 
 - **Pide confirmación antes de `git push`**, salvo que el usuario ya lo haya pedido en este mismo mensaje.
-- **Rama:** la convención de `## Git`. Si no fija ninguna y el proyecto trabaja con PR, no hagas push a la rama principal: crea una rama de vida corta `<type>/<issue>-<descripcion>` (`feat/123-login-biometrico`, o sin número si no hay issue). Si ya estás en una rama de trabajo (por ejemplo, la que creó `hb-implement`), sigue en ella. Con varios repos, la misma rama en cada repo que la tarea modifica.
+- **Rama:** la convención de `## Git` (si fija un formato de nombre, manda sobre el de aquí). Si estás en la rama principal y el proyecto trabaja con PR, no hagas push ahí: propón una rama de vida corta `<type>/<issue>-<descripcion>` (`feat/123-login-biometrico`, o sin número si no hay issue) en la misma confirmación del push, y créala solo cuando el usuario la confirme o te dé el nombre. Aunque el usuario ya haya pedido el push en su mensaje, la rama nueva se confirma igual: pedir el push no es elegir su nombre. El código de la tarea no lo inventes: si no lo sabes, pregúntalo. Si ya estás en una rama de trabajo (por ejemplo, la que eligió el usuario al empezar con `hb-implement`), sigue en ella. Con varios repos, la misma rama en cada repo que la tarea modifica.
 - **Sin crear ramas:** con `Repos vecinos: no clonar ni crear ramas` en `## Estructura`, o si `## Git` dice que la IA no cambia de rama, no crees ninguna en ningún repo de la tarea: propón el comando y sigue. Si eso te deja en la rama principal de un proyecto que integra por PR, no hagas push ahí: dilo.
 - **PRs pequeños y de un solo propósito.** Si superan unas 400 líneas cambiadas o mezclan objetivos, propón dividirlos.
 - **El título del PR sigue Conventional Commits**: al hacer *squash and merge* se convierte en el commit de la rama principal. Usa *squash and merge* salvo que el proyecto diga otra cosa.
