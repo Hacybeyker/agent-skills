@@ -872,9 +872,26 @@ class Registro:
     def rivales(self):
         """Lo que cada diferenciador tiene que superar: la alternativa gratis más fuerte que marcó la sesión 1a
         (`competidor --rival`, sea sustituto o competidor directo) y los sustitutos gratuitos o nativos que ya
-        resuelven la necesidad."""
+        resuelven la necesidad. Con tiendas en el objetivo, solo los que son rivales de alguna de ellas (feedback
+        #83): el rival de una tienda que se quitó del objetivo ya no cuenta. Si ninguno lo es, todos, y la puerta dice
+        qué tienda se quedó sin rival."""
         marcados = [c for c in self.competidores.values() if c.get("rival")]
-        return marcados + [c for c in self.sustitutos_fuertes() if c not in marcados]
+        todos = marcados + [c for c in self.sustitutos_fuertes() if c not in marcados]
+        tiendas = (self.objetivo or {}).get("tiendas") or []
+        de_tiendas = [c for c in todos if any(c in self.rivales_de_tienda(t) for t in tiendas)]
+        return de_tiendas if tiendas and de_tiendas else todos
+
+    @contextlib.contextmanager
+    def sin_tiendas(self, tiendas):
+        """El registro como quedaría si se quitan esas tiendas del objetivo (feedback #83): para decir en la puerta 1
+        qué cambiaría ese cambio de criterio, sin escribir nada."""
+        anterior = self.objetivo
+        quitar = {normal(t) for t in tiendas}
+        self.objetivo = dict(anterior, tiendas=[t for t in anterior["tiendas"] if normal(t) not in quitar])
+        try:
+            yield self
+        finally:
+            self.objetivo = anterior
 
     def rival_pendiente(self):
         """True si nadie marcó la alternativa gratis más fuerte ni dijo que no la hay (`competidor --sin-rival`, para
@@ -2384,6 +2401,71 @@ def tiendas_que_no_supera(registro, diferenciador):
             if any(not registro.superacion(diferenciador, r)[0] for r in registro.rivales_de_tienda(t))]
 
 
+def sin_cada_tienda(producto, registro):
+    """Lo que cambiaría en la diferenciación si se quita una tienda del objetivo (feedback #83 b): por cada tienda cuyo
+    rival deja fuera a algún diferenciador que, sin ella, sería viable (o se podría probar), {tienda, nuevos (los que
+    pasarían a contar), maximo (el tope de diferenciación sin esa tienda, #75), rivales (los que dejarían de
+    serlo)}. Solo con dos tiendas o más: quitar la única no es un cambio de criterio que se pueda ofrecer. No escribe
+    nada; quitarla lo decide el usuario (`objetivo --tiendas … --motivo`)."""
+    tiendas = (registro.objetivo or {}).get("tiendas") or []
+    if len(tiendas) < 2 or not producto.get("objetivo"):
+        return []
+    antes = {d["id"] for d in limite_diferenciacion(producto, registro)[1]}
+    rivales = registro.rivales()
+    resultado = []
+    for tienda in tiendas:
+        sin = dict(producto, objetivo=dict(producto["objetivo"], tiendas=[t for t in tiendas if t != tienda]))
+        with registro.sin_tiendas([tienda]):
+            (_, maximo, _), contables = limite_diferenciacion(sin, registro)
+            quedan = registro.rivales()
+        nuevos = [d for d in contables if d["id"] not in antes]
+        if nuevos:
+            resultado.append({"tienda": tienda, "nuevos": nuevos, "maximo": maximo, "tambien": bool(antes),
+                              "rivales": [r for r in rivales if r not in quedan]})
+    return resultado
+
+
+def rivales_con_tienda(registro, rivales):
+    """'al rival C-4 (…) en Google Play': cada rival con las tiendas del objetivo de las que es rival, si no es de
+    todas (feedback #83 a)."""
+    tiendas = (registro.objetivo or {}).get("tiendas") or []
+    partes = []
+    for rival in rivales:
+        suyas = registro.tiendas_del_rival(rival)
+        partes.append("al %s %s%s" % ("rival" if rival.get("rival") else "sustituto", nombre_fila(rival), (
+            " en %s" % y_lista(nombre_tienda(t) for t in suyas)) if suyas and len(suyas) < len(tiendas) else ""))
+    return unir(partes, "y")
+
+
+def texto_paridad(registro, paridad):
+    """'D-1 y D-3 solo igualan al rival C-4 (…) en Google Play' (feedback #83 a): cada diferenciador en paridad con
+    los rivales que solo iguala o que no supera, por tienda, y no con los que sí supera. Los que comparten rivales van
+    juntos."""
+    grupos = {}
+    for diferenciador in paridad:
+        iguala = registro.iguala(diferenciador)
+        pierde = [r for r in registro.rivales() if r not in iguala and (
+            registro.comparacion(diferenciador, r) or {}).get("resultado") == "no"]
+        clave = (tuple(r["id"] for r in iguala), tuple(r["id"] for r in pierde))
+        grupos.setdefault(clave, ([], iguala, pierde))[0].append(diferenciador["id"])
+    partes = []
+    for ids, iguala, pierde in grupos.values():
+        partes.append("%s solo %s %s%s" % (y_lista(ids), "iguala" if len(ids) == 1 else "igualan",
+                                            rivales_con_tienda(registro, iguala), " y no %s %s" % (
+                                                "supera" if len(ids) == 1 else "superan",
+                                                rivales_con_tienda(registro, pierde)) if pierde else ""))
+    return "; ".join(partes)
+
+
+def texto_sin_tienda(cambio):
+    """'sin el rival C-4 (…), el de Google Play, D-1 y D-3 también serían viables'."""
+    nuevos = cambio["nuevos"]
+    return "sin %s, el de %s, %s %s%s" % (
+        los_rivales(cambio["rivales"]) if cambio["rivales"] else "su rival", nombre_tienda(cambio["tienda"]),
+        y_lista(d["id"] for d in nuevos), "también " if cambio["tambien"] else "",
+        "sería viable" if len(nuevos) == 1 else "serían viables")
+
+
 def detalle_rival(registro, rivales, con_estados=True):
     """Por qué ningún diferenciador viable supera a los rivales: quién lo supera sin ser viable (con su estado) y
     quién solo lo iguala."""
@@ -2707,34 +2789,74 @@ def limites_puntaje(producto, registro):
     """Los topes que las reglas y la evidencia de hoy ponen al puntaje (los mismos que aplica `puntaje` al
     registrarlo): {criterio: (mínimo, máximo, motivo)}. El motivo es un texto o, si el del mínimo y el del máximo
     difieren, el par (por debajo, por encima)."""
-    limites = {}
-    viables, bajas = registro.viables(), registro.con_confianza_baja()
-    probar = [] if condiciones_probar(producto, registro) else [d for d in bajas if registro.para_probar(d)]
-    contables = viables + probar
-    if not viables and not bajas:
-        limites["diferenciacion"] = (1, 1, "ningún diferenciador es viable")
-    elif not viables and probar:  # su confianza baja es solo la prueba de elección, que no castiga el puntaje (#47)
-        limites["diferenciacion"] = (2, 5, "%s %s al rival con el dolor triangulado: le falta solo la prueba de "
-                                           "elección, que se mide después del lanzamiento" % (
-                                               y_lista(d["id"] for d in probar),
-                                               "supera" if len(probar) == 1 else "superan"))
-    elif not viables:
-        limites["diferenciacion"] = (1, 2, "solo hay diferenciadores viables con confianza baja: %s" % y_lista(
-            d["id"] for d in bajas))
-    else:
-        limites["diferenciacion"] = (2, 5, "hay %s" % plural(len(viables), "diferenciador viable",
-                                                             "diferenciadores viables"))
-    minimo, maximo, motivo = limites["diferenciacion"]
-    if maximo == 5 and not defendible(contables):  # el 5 mide lo defendible, no la cantidad (feedback #75 a)
-        limites["diferenciacion"] = (minimo, 4, (motivo, falta_para_el_5(contables)))
+    limites = {"diferenciacion": limite_diferenciacion(producto, registro)[0]}
     actuales = [h for h in registro.hallazgos.values() if h["linea"] == "demanda" and h.get("critico")
                 and registro.evaluar(h)["triangulado"]]
+    un_mercado = demanda_de_un_mercado(producto, registro)
     if not actuales:
         limites["demanda"] = (1, 3, "ningún hallazgo clave de demanda está triangulado con señales actuales")
+    elif un_mercado:  # las anclas 4 y 5 piden la señal en los mercados que pesan en el objetivo (feedback #83 c)
+        limites["demanda"] = (1, 3, texto_un_mercado(un_mercado))
     bloqueos = registro.bloqueos(objetivo_de(producto))
     if bloqueos:
         limites["riesgo"] = (1, 1, texto_bloqueos(bloqueos))
     return limites
+
+
+def limite_diferenciacion(producto, registro):
+    """El mínimo y el máximo de la diferenciación con el registro de hoy: ((mínimo, máximo, motivo), [los viables
+    que cuentan]). Los viables con confianza baja que se pueden probar (#47) cuentan como viables."""
+    viables, bajas = registro.viables(), registro.con_confianza_baja()
+    probar = [] if condiciones_probar(producto, registro) else [d for d in bajas if registro.para_probar(d)]
+    contables = viables + probar
+    if not viables and not bajas:
+        limite = (1, 1, "ningún diferenciador es viable")
+    elif not viables and probar:  # su confianza baja es solo la prueba de elección, que no castiga el puntaje (#47)
+        limite = (2, 5, "%s %s al rival con el dolor triangulado: le falta solo la prueba de elección, que se mide "
+                        "después del lanzamiento" % (y_lista(d["id"] for d in probar),
+                                                     "supera" if len(probar) == 1 else "superan"))
+    elif not viables:
+        limite = (1, 2, "solo hay diferenciadores viables con confianza baja: %s" % y_lista(d["id"] for d in bajas))
+    else:
+        limite = (2, 5, "hay %s" % plural(len(viables), "diferenciador viable", "diferenciadores viables"))
+    minimo, maximo, motivo = limite
+    if maximo == 5 and not defendible(contables):  # el 5 mide lo defendible, no la cantidad (feedback #75 a)
+        limite = (minimo, 4, (motivo, falta_para_el_5(contables)))
+    return limite, contables
+
+
+def demanda_de_un_mercado(producto, registro):
+    """La señal actual de demanda que cubre un solo mercado de un objetivo que tiene varios (feedback #83 c): (el
+    mercado, [los hallazgos clave triangulados]) si todas las fuentes que cuentan de esos hallazgos (vigentes y no
+    acumuladas) llevan etiqueta de mercado y nombran ese mismo mercado y ningún otro; si no, None. Una fuente sin
+    etiqueta no se sabe de dónde es (puede ser mundial) y no tapa nada: el texto del ancla sigue valiendo."""
+    objetivo = objetivo_de(producto)
+    mercados = [normal(m) for m in (objetivo or {}).get("mercados") or []]
+    if len(mercados) < 2:
+        return None
+    actuales = [h for h in registro.hallazgos.values() if h["linea"] == "demanda" and h.get("critico")
+                and registro.evaluar(h)["triangulado"]]
+    if not actuales:
+        return None
+    etiquetas_ = set()
+    for hallazgo in actuales:
+        for fuente in registro.fuentes_de(hallazgo["fuentes"]):
+            if not registro.vigente(fuente) or registro.acumulada(hallazgo, fuente):
+                continue
+            if not fuente.get("mercados"):
+                return None
+            etiquetas_ |= {normal(m) for m in fuente["mercados"]}
+    if len(etiquetas_) != 1 or not etiquetas_ <= set(mercados):
+        return None
+    clave = next(iter(etiquetas_))
+    return next(m for m in objetivo["mercados"] if normal(m) == clave), [h["id"] for h in actuales]
+
+
+def texto_un_mercado(un_mercado):
+    """'la señal actual de H-DEM-1 es solo de US y los demás mercados del objetivo siguen sin medir'."""
+    mercado, ids = un_mercado
+    return ("la señal actual de demanda (%s) es solo de %s: las anclas 4 y 5 la piden en los mercados que pesan en "
+            "el objetivo, y los demás siguen sin una señal triangulada" % (y_lista(ids), mercado))
 
 
 def defendible(contables):
@@ -3761,8 +3883,19 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
         if len(modelos) > 1:
             razon += " (con cada modelo de monetización: %s)" % "; ".join(
                 "%s %s" % (m["modelo"], texto_puntaje(m)) for m in modelos)
-        return (True, razon, "Evidencia nueva que suba el puntaje a %d/25 o más%s" % (
-            minimo, " con las reglas de hoy" if base["vigente"]["incoherencias"] else ""), None, [])
+        cambiaria = "Evidencia nueva que suba el puntaje a %d/25 o más%s" % (
+            minimo, " con las reglas de hoy" if base["vigente"]["incoherencias"] else "")
+        # la tienda cuyo rival baja la diferenciación (feedback #83 b): quitarla es un cambio de criterio, con su motivo
+        hoy_, diferenciacion = base["vigente"]["total"], base["vigente"]["valores"]["diferenciacion"]
+        for cambio in sin_cada_tienda(producto, registro):
+            quedaria = hoy_ - diferenciacion + cambio["maximo"]
+            quitar = texto_quitar_tiendas(registro, [cambio["tienda"]])
+            if cambio["maximo"] > diferenciacion and quedaria >= minimo and quitar:
+                cambiaria += "; o %s. Quedaría en %d/25 si se quita %s y la diferenciación se vuelve a puntuar en la " \
+                             "1f con su máximo, %d (hoy %d): %s" % (
+                                 quitar, quedaria, nombre_tienda(cambio["tienda"]), cambio["maximo"], diferenciacion,
+                                 texto_sin_tienda(cambio))
+        return True, razon, cambiaria, None, []
     if clave == "demanda":
         return motivo_demanda(numero_puerta, producto, registro)
     if clave == "problema":
@@ -3826,12 +3959,16 @@ def motivos_criterio(numero_puerta, criterio, producto, registro):
                     y_lista(d["id"] for d in candidatos), y_lista(nombre_fila(r) for r in faltan), faltan[0]["id"],
                     "; o " + quitar if quitar else ""), "1g", [])
         if rivales:  # el rival y el sustituto, cada uno por su nombre (feedback #40)
+            cambiaria = "Un diferenciador con evidencia confirmada de algo que no %s %s" % (
+                "dan ni" if len(partes_rivales(rivales)) > 1 else "da", los_rivales(rivales, "ni"))
+            # la tienda cuyo rival deja a un diferenciador en paridad (feedback #83 b): un cambio de criterio
+            for cambio in sin_cada_tienda(producto, registro):
+                quitar = texto_quitar_tiendas(registro, [cambio["tienda"]])
+                if quitar:
+                    cambiaria += "; o %s (%s)" % (quitar, texto_sin_tienda(cambio))
             return (True, "Ningún diferenciador supera %s con hallazgos triangulados%s" % (
                 a_los_rivales(rivales, "ni"), ": %s" % texto_estados(registro, registro.diferenciadores.values())
-                if registro.diferenciadores else ""),
-                    "Un diferenciador con evidencia confirmada de algo que no %s %s" % (
-                        "dan ni" if len(partes_rivales(rivales)) > 1 else "da", los_rivales(rivales, "ni")),
-                    None, ids)
+                if registro.diferenciadores else ""), cambiaria, None, ids)
         return (True, "No hay ningún diferenciador viable: nada da una razón para elegir esta app",
                 "Un diferenciador con un dolor o un pedido confirmado en 2 competidores o más", None, ids)
     if clave == "principal":
@@ -7144,6 +7281,12 @@ def validar_valores(valores, producto, registro, con):
                     "12 a 18 meses), y ningún hallazgo clave de demanda está triangulado con fuentes vigentes y no "
                     "acumuladas. Las descargas acumuladas son contexto (references/puntaje.md); `triangulacion` dice "
                     "qué falta." % (valores["demanda"], con))
+    un_mercado = demanda_de_un_mercado(producto, registro)
+    if valores["demanda"] >= 4 and actuales and un_mercado:
+        raise Fallo("Demanda = %d%s no corresponde: %s, así que el máximo es 3 (references/puntaje.md). Sube con una "
+                    "señal actual triangulada de otro mercado del objetivo, o con la etiqueta de mercado de la fuente "
+                    "que ya lo cubre (`fuente --linea demanda --url <la misma> --mercados …`)." % (
+                        valores["demanda"], con, texto_un_mercado(un_mercado)))
     bloqueos = registro.bloqueos(objetivo_de(producto))
     if bloqueos and valores["riesgo"] != 1:
         raise Fallo("Riesgo de políticas = %d%s no corresponde: %s, y en esa tienda el riesgo es 1. Pasa 1 y, si hay "
@@ -7631,8 +7774,8 @@ def cmd_cerrar(args):
                 " (%s, con confianza baja: sin triangular)" % ", ".join(d["id"] for d in registro.con_confianza_baja())
                 if registro.con_confianza_baja() else ""))
         if paridad:
-            print("⚠ %s solo %s %s: es paridad (básico en Kano), no cuenta como viable ni puede ser el principal." % (
-                ", ".join(paridad), "iguala" if len(paridad) == 1 else "igualan", a_los_rivales(registro.rivales())))
+            print("⚠ %s: es paridad (básico en Kano), no cuenta como viable ni puede ser el principal." % texto_paridad(
+                registro, [registro.diferenciadores[i] for i in paridad]))
         if tipo_de(producto) != "nueva" and principal and registro.sin_triangular(principal):
             print("⚠ Los hallazgos del diferenciador principal (%s) no están triangulados: la puerta 1 lo marca%s." % (
                 principal["id"], ", pero su dolor sí lo está: lo que falta es la prueba de elección, y puede quedar "

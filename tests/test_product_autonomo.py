@@ -340,7 +340,7 @@ class AutonomoTest(Base):
         self.p("objetivo", "--mercados", "MX,AR", "--motivo", "Sumamos Argentina")
         self.p("vacio", "--linea", "monetizacion", "--mercado", "AR", "--motivo", "herramienta", "--texto",
                "Página dinámica")
-        self.p("puntaje", "--valores", "4,4,4,4,3")
+        self.p("puntaje", "--valores", "3,4,4,4,4")  # la demanda es solo de MX: 3 como máximo (#83 c)
         self.cerrar("1f", "01-sintesis.md")
         automatico = self.json()["pasos"][0]["automatico"]
         self.assertEqual((automatico["sesion"], automatico["detener"]), ("1d", False))  # AR no es de lo que se ajusta
