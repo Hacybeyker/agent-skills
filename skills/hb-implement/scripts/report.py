@@ -37,7 +37,7 @@ archivo con su propia entrada en "files" se muestra aparte. "temporary" deja fue
 son de la tarea, y los archivos de "### Configuración local modificada a propósito" quedan fuera solos.
 Los datos de análisis (why, before, after, risk, pros, cons, layer, severity, root_cause, impact, diagrams, ticket)
 nunca detienen el reporte: lo que falta o viene vacío no se muestra, y un valor con formato inválido se ignora con un
-aviso.
+aviso. La excepción es "cons": [], que se analizó y no tuvo contras: muestra "Sin contras identificados".
 En un worktree enlazado al que le faltan AGENTS.md (fuera de git en el principal) o el enlace simbólico por el que
 pasa la carpeta de reportes, se detiene y dice cómo recrearlos, sin escribir nada.
 
@@ -1394,10 +1394,14 @@ def keep_text(container, key, what, notes, numbers=False):
         container.pop(key)
 
 
-def keep_texts(container, key, what, notes):
+def keep_texts(container, key, what, notes, analyzed_empty=False):
+    """Una lista de textos: sin textos se quita. Con analyzed_empty, una lista vacía ([]) se conserva: se analizó y no
+    hubo ninguno (por ejemplo, "cons": [] es "Sin contras identificados")."""
     value = container.get(key)
     if value is None:
         container.pop(key, None)
+    elif analyzed_empty and value == []:
+        container[key] = []
     elif isinstance(value, list) and all(isinstance(item, str) for item in value):
         items = [item for item in value if item.strip()]
         if items:
@@ -1482,8 +1486,8 @@ def clean_meta(meta, notes):
         for field in ("why", "before", "after", "layer"):
             keep_text(info, field, f'"{field}" de {key}', notes)
         keep_level(info, "risk", f'"risk" de {key}', notes)
-        for field in ("pros", "cons"):
-            keep_texts(info, field, f'"{field}" de {key}', notes)
+        keep_texts(info, "pros", f'"pros" de {key}', notes)
+        keep_texts(info, "cons", f'"cons" de {key}', notes, analyzed_empty=True)
         meta["files"][key] = info
     for item in keep_objects(meta, "impact", notes, ("label",)):
         keep_text(item, "value", '"value" de "impact"', notes, numbers=True)
@@ -1509,13 +1513,18 @@ def explained(info):
     return bool(info) and any(info.get(field) for field in ("why", "before", "after"))
 
 
+def analyzed(info, field):
+    """Si el flujo completó el campo. "cons": [] cuenta: se analizó y no hubo contras."""
+    return field in info if field == "cons" else bool(info.get(field))
+
+
 def missing_analysis(meta, files):
     """Los datos de análisis que el flujo debería completar y no vinieron (solo para avisar: no son obligatorios)."""
     report = [field for field in ("diagrams", "impact") if not meta.get(field)]
     if meta.get("type") == "bugfix":
         report += [field for field in ("severity", "root_cause") if not meta.get(field)]
     per_file = [f["key"] for f in files if f["group"] is None and explained(f["info"])
-                and not all(f["info"].get(field) for field in ("risk", "pros", "cons"))]
+                and not all(analyzed(f["info"], field) for field in ("risk", "pros", "cons"))]
     return report, per_file
 
 
@@ -1577,11 +1586,15 @@ def explain(status, info):
 
 
 def pros_cons(info):
-    """Pros y contras del cambio, solo los que vienen con algo."""
-    cells = "".join(
-        f'<div class="ex {kind}"><div class="k">{label}</div><ul>{"".join(f"<li>{e(item)}</li>" for item in info[key])}'
-        "</ul></div>" for key, kind, label in (("pros", "ex-pros", "👍 Pros"), ("cons", "ex-cons", "👎 Contras"))
-        if info.get(key))
+    """Pros y contras del cambio. Un campo ausente no se muestra; "cons": [] dice "Sin contras identificados" (se
+    analizó y no hubo contras). "pros" vacío no se muestra."""
+    cells = ""
+    for key, kind, label in (("pros", "ex-pros", "👍 Pros"), ("cons", "ex-cons", "👎 Contras")):
+        if info.get(key):
+            items = "".join(f"<li>{e(item)}</li>" for item in info[key])
+            cells += f'<div class="ex {kind}"><div class="k">{label}</div><ul>{items}</ul></div>'
+        elif key == "cons" and info.get(key) == []:
+            cells += f'<div class="ex {kind}"><div class="k">{label}</div><p class="none">Sin contras identificados</p></div>'
     return f'<div class="proscons">{cells}</div>' if cells else ""
 
 

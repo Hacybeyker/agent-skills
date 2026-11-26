@@ -130,12 +130,14 @@ En cada entrada de `repos`, opcionales: `"main_branch"` (arriba), `"pinned_versi
 
 El flujo **los completa siempre que pueda sostenerlos con lo que vio en el código**; el script nunca falla por ellos. Todo campo ausente o vacío (un texto vacío, una lista vacía) simplemente no se muestra, sin sección vacía; un valor con formato inválido se ignora con un aviso en la salida y el reporte sale igual. Al terminar, la salida dice qué datos de análisis faltan.
 
+**Ausente no es lo mismo que vacío en `cons`.** Sin `cons`, no se analizó: no se muestra y la salida lo cuenta entre los datos que faltan. `"cons": []` dice que se analizó y no hubo contras: el reporte muestra "Sin contras identificados" y no lo cuenta como faltante. Escribe `[]` solo si de verdad lo revisaste. `pros` no tiene ese caso: vacío o ausente, no se muestra.
+
 | Campo | Dónde | Qué es |
 | --- | --- | --- |
 | `why`, `before`, `after` | Por archivo | Por qué se crea o se elimina; qué limitación había y qué mejora el cambio. |
 | `risk` | Por archivo | Riesgo del cambio para el review: `critico`, `alto`, `medio` o `bajo`. Sale junto a la ruta. |
 | `pros` | Por archivo | Lista de lo que gana el cambio. |
-| `cons` | Por archivo | Lista de lo que cuesta. |
+| `cons` | Por archivo | Lista de lo que cuesta. `[]` si se analizó y no hay contras ("Sin contras identificados"). |
 | `layer` | Por archivo | La capa según la arquitectura del `AGENTS.md` (`dominio`, `datos`, `presentación`…). Sale junto a la ruta. |
 | `severity` | Reporte | En un `bugfix`, la gravedad del bug, con la misma escala. |
 | `impact` | Reporte | Lista de `{"label", "value"}`: a quién o a qué afecta, con datos (usuarios, pantallas, tiempos). |

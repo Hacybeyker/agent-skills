@@ -1310,6 +1310,40 @@ class AnalysisDataTest(WorkspaceTest):
                         'La entrada 1 de "diagrams" no trae mermaid', '"severity" debe ser critico'):
             self.assertIn(warning, result.stderr)
 
+    def entry(self, body, path):
+        """El bloque del archivo en el HTML, desde su ruta hasta el siguiente archivo."""
+        start = body.index('<code class="file-path">%s</code>' % path)
+        end = body.find('<details class="file"', start)
+        return body[start:end if end != -1 else len(body)]
+
+    def test_cons_ausente_no_se_muestra_y_cuenta_como_faltante(self):
+        files = {"shop-auth:" + LOGIN: {"why": "Rechaza la clave vacía.", "risk": "alto", "pros": ["Un solo lugar"]}}
+        result, body = self.generate(files=files)
+        entry = self.entry(body, LOGIN)
+        self.assertIn("👍 Pros", entry)
+        self.assertNotIn("👎 Contras", entry)
+        self.assertNotIn("Sin contras identificados", body)
+        self.assertIn("risk, pros o cons de shop-auth:" + LOGIN, result.stderr)
+
+    def test_cons_vacio_dice_sin_contras_identificados_y_no_falta(self):
+        files = {"shop-auth:" + LOGIN: {"why": "Rechaza la clave vacía.", "risk": "alto", "pros": ["Un solo lugar"],
+                                        "cons": []}}
+        result, body = self.generate(files=files)
+        entry = self.entry(body, LOGIN)
+        self.assertIn("👎 Contras", entry)
+        self.assertIn("Sin contras identificados", entry)
+        self.assertNotIn("<li>", entry.split("👎 Contras", 1)[1].split("</div></div>", 1)[0])
+        self.assertNotIn("pros o cons de shop-auth:" + LOGIN, result.stderr)
+
+    def test_pros_vacio_sigue_sin_mostrarse(self):
+        """pros no tenía un texto para "se analizó y no hubo": vacío o ausente, no se muestra."""
+        files = {"shop-auth:" + LOGIN: {"why": "Rechaza la clave vacía.", "risk": "bajo", "pros": [], "cons": []}}
+        _, body = self.generate(files=files)
+        entry = self.entry(body, LOGIN)
+        self.assertNotIn("👍 Pros", entry)
+        self.assertNotIn("Sin pros", body)
+        self.assertIn("Sin contras identificados", entry)
+
 
 class ThemeTest(WorkspaceTest):
     """Punto 7: el sistema de tema de hb-performance, copiado: mismos tokens, el del sistema por defecto, un botón y la

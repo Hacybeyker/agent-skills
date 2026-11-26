@@ -186,8 +186,12 @@ class CoverageFlowTest(TextBase):
             self.assertIn(field, report)
         self.assertIn("**los completa siempre que pueda sostenerlos con lo que vio en el código**", self.report)
         for old in ("Todo es opcional", "Úsalo cuando ayude", "**Análisis del cambio**, opcional",
-                    "Sin contras identificados", "termina con un error claro y sin escribir el reporte"):
+                    "termina con un error claro y sin escribir el reporte"):
             self.assertNotIn(old, self.skill + self.report)
+        # ausente no es lo mismo que vacío: "cons": [] dice que se analizó y no hubo contras
+        self.assertIn('`"cons": []`', report)
+        self.assertIn("**Ausente no es lo mismo que vacío en `cons`.**", self.report)
+        self.assertIn('"Sin contras identificados"', self.report)
         for field in ("| `layer` | Por archivo |", "| `ticket` | Reporte |", "se ignora con un aviso en la salida"):
             self.assertIn(field, self.report)
 

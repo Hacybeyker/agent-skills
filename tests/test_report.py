@@ -656,8 +656,8 @@ class AnalysisTest(Base):
         self.assertIn("Impacto", html)
         self.assertIn("Causa raíz", html)
         self.assertIn("Diagramas", html)
-        self.assertEqual(html.count("👎 Contras"), 1)  # b.txt trae "cons": [], que no se muestra
-        self.assertNotIn("Sin contras identificados", html)
+        self.assertEqual(html.count("👎 Contras"), 2)  # b.txt trae "cons": []: se analizó y no hubo contras
+        self.assertEqual(html.count("Sin contras identificados"), 1)
 
     def test_escapa_el_html_de_todos_los_campos_nuevos_incluido_mermaid(self):
         self.with_meta(**self.FULL)
