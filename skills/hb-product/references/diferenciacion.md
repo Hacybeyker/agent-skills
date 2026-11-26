@@ -70,6 +70,8 @@ Los ejemplos son inventados.
 | `segmento` | Un grupo de usuarios mal atendido por los productos generales | La misma idea, pensada para un nicho concreto |
 | `plataforma` | Solo existe en una plataforma | Disponible en Android y en iOS |
 
+**La distribución no es un vector.** Salir arriba en las búsquedas de las tiendas de un país o un idioma donde el rival no aparece (ASO) es una palanca real, pero no diferencia el producto: el rival puede entrar a esas palabras en días. No cuenta en el puntaje de diferenciación ni en la puerta 1, y `diferenciador --vector distribucion` se rechaza. La investiga la 1a como hallazgo ([investigacion.md](investigacion.md)) y la usa la sesión 2 para el canal ([estrategia.md](estrategia.md)).
+
 ## Herramientas estándar
 
 - **Cuadro ERRC** (estrategia del océano azul): qué **eliminar**, **reducir**, **aumentar** y **crear** respecto de la competencia. Obliga a decidir también qué no hacer.
@@ -88,7 +90,7 @@ El script lo registra (`D-1`) y dice si es **viable**, **viable con confianza ba
 
 1. **Evidencia.** Una de dos: un dolor o un pedido **triangulado en 2 competidores o más** (un hallazgo con sus 3 fuentes y `--competidor` con dos filas de la matriz, por su ID), o un **vector medible comprobado en la matriz** en 2 competidores o más (`precio`, `rendimiento` por el tamaño, `anuncios`, `idioma`, `privacidad` por los permisos, `sin-conexion`, `accesibilidad`, `diseno` por la última actualización y `plataforma`). `usabilidad`, `funcionalidades` y `segmento` no se miden en la matriz: necesitan el dolor triangulado. Es el filtro del *diferenciador imaginario*.
 2. **Se percibe** (`--se-ve`). En la **ficha** de la tienda (precio, idioma, sin anuncios, diseño), que es lo que consigue descargas, o en el **uso** (rendimiento, usabilidad), que es lo que consigue retención y buenas notas. Lo ideal es tener uno viable de cada tipo: el script avisa cuál falta.
-3. **Copiabilidad** (`--copiable baja|media|alta`, con `--motivo`). Uno fácil de copiar sirve para entrar, pero no sostiene la posición.
+3. **Copiabilidad** (`--copiable baja|media|alta`, con `--motivo`). Uno fácil de copiar sirve para entrar, pero no sostiene la posición. También decide el 5 del puntaje: pide dos viables que no sean fáciles de copiar o uno que se vea en la ficha y sea difícil de copiar ([puntaje.md](puntaje.md)).
 4. **Cabe en el presupuesto** (`--semanas`): se construye dentro de las semanas de la sesión 0.
 5. **Supera al rival**, si lo hay: `frente … --resultado supera` con al menos un hallazgo triangulado, frente a cada rival (arriba). Igualarlo es paridad y no cumple; un sustituto sin evaluar tampoco da el criterio por cumplido.
 

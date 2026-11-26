@@ -80,6 +80,9 @@ PELDANOS = {1: ("directo", 3), 2: ("variante", 3), 3: ("análogo", 2), 4: ("sust
             5: ("necesidad de fondo", 2), 6: ("hipótesis general", 1)}
 VECTORES = ("usabilidad", "rendimiento", "precio", "anuncios", "funcionalidades", "idioma", "privacidad",
             "sin-conexion", "accesibilidad", "diseno", "segmento", "plataforma")
+# la distribución (ASO: búsquedas por país o idioma donde el rival no sale arriba) no es un vector: el rival entra a
+# esas palabras en días y no cambia el producto. Es un hallazgo de la 1a para el canal de la sesión 2 (feedback #41)
+NO_SON_VECTORES = ("distribucion", "aso")
 # vector medible → columnas de la matriz que lo comprueban
 VECTOR_COLUMNAS = {
     "rendimiento": ("tamano_mb",), "precio": ("precio", "modelo"), "anuncios": ("anuncios",),
@@ -2521,10 +2524,12 @@ SESION_CRITERIO = {"demanda": "1c", "monetizacion": "1d", "riesgo": "1e", "difer
 
 def limites_puntaje(producto, registro):
     """Los topes que las reglas y la evidencia de hoy ponen al puntaje (los mismos que aplica `puntaje` al
-    registrarlo): {criterio: (mínimo, máximo, motivo)}."""
+    registrarlo): {criterio: (mínimo, máximo, motivo)}. El motivo es un texto o, si el del mínimo y el del máximo
+    difieren, el par (por debajo, por encima)."""
     limites = {}
     viables, bajas = registro.viables(), registro.con_confianza_baja()
     probar = [] if condiciones_probar(producto, registro) else [d for d in bajas if registro.para_probar(d)]
+    contables = viables + probar
     if not viables and not bajas:
         limites["diferenciacion"] = (1, 1, "ningún diferenciador es viable")
     elif not viables and probar:  # su confianza baja es solo la prueba de elección, que no castiga el puntaje (#47)
@@ -2538,6 +2543,9 @@ def limites_puntaje(producto, registro):
     else:
         limites["diferenciacion"] = (2, 5, "hay %s" % plural(len(viables), "diferenciador viable",
                                                              "diferenciadores viables"))
+    minimo, maximo, motivo = limites["diferenciacion"]
+    if maximo == 5 and not defendible(contables):  # el 5 mide lo defendible, no la cantidad (feedback #75 a)
+        limites["diferenciacion"] = (minimo, 4, (motivo, falta_para_el_5(contables)))
     actuales = [h for h in registro.hallazgos.values() if h["linea"] == "demanda" and h.get("critico")
                 and registro.evaluar(h)["triangulado"]]
     if not actuales:
@@ -2546,6 +2554,22 @@ def limites_puntaje(producto, registro):
     if bloqueos:
         limites["riesgo"] = (1, 1, texto_bloqueos(bloqueos))
     return limites
+
+
+def defendible(contables):
+    """El ancla 5 de diferenciación (feedback #75 a): mide lo defendible, no la cantidad. Cumple con dos o más
+    viables que no son fáciles de copiar (copiabilidad baja o media) o con uno que se ve en la ficha y es difícil de
+    copiar (baja). `contables` son los viables y los viables con confianza baja que se pueden probar (#47)."""
+    no_faciles = [d for d in contables if d.get("copiable") in ("baja", "media")]
+    return len(no_faciles) >= 2 or any(d.get("se_ve") == "ficha" and d.get("copiable") == "baja" for d in contables)
+
+
+def falta_para_el_5(contables):
+    """Por qué la diferenciación no llega a 5, con la copiabilidad y dónde se ve cada viable que cuenta."""
+    return ("ningún par de viables difíciles de copiar, con copiabilidad baja o media, ni uno viable que se vea en la "
+            "ficha con copiabilidad baja: %s" % "; ".join(
+                "%s %s, se ve en %s" % (d["id"], COPIABLE_LLANO.get(d.get("copiable"), "sin copiabilidad").lower(),
+                                        "la ficha" if d.get("se_ve") == "ficha" else "el uso") for d in contables))
 
 
 def puntaje_vigente(producto, registro, valores=None):
@@ -2561,6 +2585,8 @@ def puntaje_vigente(producto, registro, valores=None):
         valor = valores[criterio]
         if not minimo <= valor <= maximo:
             ajustado = min(max(valor, minimo), maximo)
+            if isinstance(motivo, tuple):
+                motivo = motivo[valor > maximo]
             incoherencias.append("%s %d, pero con las reglas de hoy %s %d (%s)" % (
                 NOMBRES_CRITERIO[criterio], valor, "el máximo es" if valor > maximo else "el mínimo es", ajustado,
                 motivo))
@@ -5971,6 +5997,13 @@ def cmd_diferenciador(args):
     carpeta, producto, registro = abrir(args)
     if args.id:
         return corregir_diferenciador(carpeta, producto, registro, args)
+    if args.vector and normal(args.vector) in NO_SON_VECTORES:
+        raise Fallo("La distribución no es un vector de diferenciación ni cuenta en la puerta 1: el rival puede entrar "
+                    "a esas búsquedas en días y no cambia el producto. Regístrala como hallazgo de la línea "
+                    "competencia (los resultados de búsqueda en las tiendas por país e idioma del objetivo, con su "
+                    "fecha de consulta): la sesión 2 la usa para el canal de adquisición (references/estrategia.md).")
+    if args.vector and args.vector not in VECTORES:
+        raise Fallo("--vector %s no existe: usa uno de %s" % (args.vector, ", ".join(VECTORES)))
     faltan = [opcion for opcion, valor in (("--vector", args.vector), ("--texto", args.texto),
                                            ("--hallazgos", args.hallazgos), ("--se-ve", args.se_ve),
                                            ("--copiable", args.copiable), ("--motivo", args.motivo),
@@ -6657,6 +6690,10 @@ def validar_valores(valores, producto, registro, con):
             valores["diferenciacion"], con, texto_estados(registro, bajas)))
     if (viables or probar) and valores["diferenciacion"] == 1:
         raise Fallo("Diferenciación = 1%s no corresponde: %s." % (con, texto_estados(registro, viables or probar)))
+    if (viables or probar) and valores["diferenciacion"] == 5 and not defendible(viables + probar):
+        raise Fallo("Diferenciación = 5%s no corresponde: %s. El máximo es 4: el 5 mide lo defendible, no la cantidad, "
+                    "y pide dos viables que no sean fáciles de copiar o uno que se vea en la ficha y sea difícil de "
+                    "copiar (references/puntaje.md)." % (con, falta_para_el_5(viables + probar)))
     actuales = [h["id"] for h in registro.hallazgos.values() if h["linea"] == "demanda" and h.get("critico")
                 and registro.evaluar(h)["triangulado"]]
     if valores["demanda"] >= 4 and not actuales:
@@ -9113,7 +9150,8 @@ def parser():
                   "recalcula su estado")
     sub.add_argument("--id", metavar="D-…", help="un diferenciador ya registrado: corrige --motivo, --copiable, "
                                                   "--se-ve o --semanas sin cambiar su ID")
-    sub.add_argument("--vector", choices=VECTORES, help="obligatorio sin --id")
+    sub.add_argument("--vector", help="obligatorio sin --id: %s. La distribución (ASO) no es un vector: va como "
+                                       "hallazgo de la 1a para la estrategia" % ", ".join(VECTORES))
     sub.add_argument("--texto", help="obligatorio sin --id")
     sub.add_argument("--hallazgos",
                      help="obligatorio sin --id. H-…,H-…: el dolor (el pedido, la queja o el vector medible que lo "

@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere un agente con búsqueda y lectura web, y Python 3.8+ (solo librería estándar). Opcional: herramientas de navegador para las páginas dinámicas. No instala ni configura nada en la máquina."
 metadata:
   author: hacybeyker
-  version: "0.1.0"
+  version: "0.2.0"
   category: flow
 ---
 
@@ -146,7 +146,7 @@ Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo,
 | `propuesta` | Deja un cambio a una sesión cerrada como propuesta para la puerta siguiente: `--texto [--ajustar <sesión>] [--hallazgos H-…]`; sin `--ajustar`, `--hallazgos` dice de qué habla y la propuesta queda informativa: la puerta la muestra, pero no cuenta como ajuste (lo que depende de un vacío de herramienta) |
 | `anular` | Anula una fuente, un hallazgo, un competidor o un diferenciador: deja de contar, sin borrarse |
 | `triangulacion` | Lista los hallazgos clave y lo que le falta a cada uno para triangular y para subir de confianza, y qué fuentes contó como un solo autor por su editor |
-| `puntaje` | Total, confianza global y comparación con la puerta 1: `--valores d,m,f,r,x [--mitigacion] [--modelo "<base>" --alternativo "<modelo>=d,m,f,r,x"]` (el puntaje con cada modelo de monetización) |
+| `puntaje` | Total, confianza global y comparación con la puerta 1: `--valores d,m,f,r,x [--mitigacion] [--modelo "<base>" --alternativo "<modelo>=d,m,f,r,x"]` (el puntaje con cada modelo de monetización); rechaza los valores que el registro no admite, como la diferenciación 5 sin dos viables que no sean fáciles de copiar ni uno en la ficha difícil de copiar |
 | `escenarios` | Casos pesimista, base y optimista, y usuarios activos diarios para la meta: `--entrada escenarios.json` (cada compra con `tipo`: el pago único va sobre las instalaciones nuevas del mes y la suscripción, sobre los usuarios del mes; un supuesto cita una fuente o varias, `"fuente": ["S-…", "S-…"]`, o una por caso, `"fuente": {"pesimista": "S-…", "base": "S-…", "optimista": "S-…"}`; `comision`, la tasa de tu programa y mercado con su fuente oficial) |
 | `validacion` · `trazabilidad` | Revisan las tablas de `03-validacion.md` y de `04-prd.md` (esta calcula el RICE) |
 | `cerrar` | Cierra una sesión si su entregable está completo: `--sesion <id>`; en las que buscan (el triaje de la 0, 1a a 1e, 1g, 2 y 3), `--busquedas` y `--lecturas` anotan lo que usó la línea en esta pasada |

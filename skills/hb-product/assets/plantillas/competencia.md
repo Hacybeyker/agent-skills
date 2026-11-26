@@ -32,6 +32,14 @@ La alternativa gratis más fuerte, sea un sustituto o un competidor directo grat
 
 - **Rival:** <por completar: C-… y qué da gratis, o el motivo de `--sin-rival`>
 
+## Distribución en las tiendas
+
+Para la estrategia, no para la diferenciación: en qué países e idiomas del objetivo el rival no sale arriba en las búsquedas de las tiendas con los términos del usuario. Cada consulta es una fuente `--tipo medido` con su fecha y sus etiquetas de mercado, idioma y tienda. No cuenta en el puntaje ni en la puerta 1; la sesión 2 lo usa para el canal de adquisición.
+
+| Tienda | País | Idioma | Términos | ¿El rival sale arriba? | Fuente y fecha de consulta | Hallazgo |
+| --- | --- | --- | --- | --- | --- | --- |
+| <por completar: una fila por tienda, país e idioma del objetivo> | | | | | | |
+
 ## Hallazgos
 
 | ID | Hallazgo | Fuentes | Peldaño | Confianza |
