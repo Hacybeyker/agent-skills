@@ -60,7 +60,7 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 from urllib.parse import urlsplit
 
-VERSION = "0.20.0"
+VERSION = "0.21.0"
 # Versiones que capturan lo mismo que esta (las mismas configuraciones de Perfetto y las mismas definiciones de
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
@@ -27520,11 +27520,12 @@ def substitution_switch(root, module):
 
 
 # 0.20.0 · decisión 2: una unidad publicada se puede pasar a fuente, solo en la sesión 1 y antes de medir, con el mecanismo
-# del modelo (`## Estructura`, columna "Pasar a fuente y volver") y una rama de trabajo en el repo de la unidad desde el
-# tag de la versión fijada en la app: así la línea base mide lo publicado. perf.py no lo edita: lo hace la sesión 1.
+# del modelo (`## Estructura`, columna "Pasar a fuente y volver"). 0.21.0: la rama de su repo no la crea la skill por su
+# cuenta: una sola pregunta (seguir en la rama actual o crear una, desde el tag de la versión fijada, con el nombre que dé
+# el usuario); sin respuesta, la actual. perf.py no lo edita: lo hace la sesión 1.
 PASS_TO_SOURCE = ("perf.py nunca lo edita: lo pasa a fuente la sesión 1, antes de medir, con el mecanismo del modelo "
-                  "(`## Estructura` · Pasar a fuente y volver) y una rama de trabajo en el repo de la unidad desde el tag de "
-                  "la versión fijada; después se sincroniza Gradle y se comprueba de nuevo")
+                  "(`## Estructura` · Pasar a fuente y volver), en la rama que elija el usuario (la actual o una nueva "
+                  "desde el tag de la versión fijada); después se sincroniza Gradle y se comprueba de nuevo")
 
 
 def switch_text(switch, module):
@@ -27576,19 +27577,13 @@ def module_repo(root, item):
     return git_toplevel(path) if path.is_dir() else None
 
 
-def work_branch(folder):
-    """La rama de trabajo de la investigación en el repo de una unidad: `perf/<flujo>` (el tipo `perf` de Conventional
-    Commits, como `feat/` y `fix/` en hb-implement); si `## Git` fija otra convención, manda esa."""
-    if folder is None:
-        return "perf/<flujo>"
-    folder = pathlib.Path(folder)
-    name = folder.parent.name if ISO_DAY.fullmatch(folder.name) else folder.name
-    return "perf/%s" % (slug(name) or "investigacion")
+BRANCH_CHOICE = "<rama que elija el usuario>"  # 0.21.0: el nombre lo da el usuario (suele llevar el código de la tarea)
 
 
 def source_steps(root, folder, item):
-    """Las líneas para pasar a fuente un módulo publicado (decisión 2): la rama de trabajo desde el tag de la versión
-    fijada en su repo, o el aviso si no hay tag o no se sabe dónde está su código. [] si no es binario."""
+    """Las líneas para pasar a fuente un módulo publicado (decisión 2): la pregunta de la rama (la actual o una nueva,
+    con el nombre que dé el usuario, desde el tag de la versión fijada), o el aviso si no hay tag o no se sabe dónde
+    está su código. [] si no es binario."""
     if (item or {}).get("tipo") != "binario":
         return []
     version, repo = pinned_version(item), module_repo(root, item)
@@ -27602,11 +27597,15 @@ def source_steps(root, folder, item):
         return ["%s no tiene un tag de la versión fijada%s: si se pasa a fuente, la línea base mide otro código que el "
                 "publicado. Anótalo en \"Precondiciones\" de estado.md y avísale al usuario" % (
                     where, " (%s)" % version if version else " (el artefacto no dice su versión)")]
-    lines = ["para pasarlo a fuente (sesión 1, antes de medir): `git -C %s switch -c %s %s`%s y el cambio del modelo "
-             "(`## Estructura` · Pasar a fuente y volver); con la línea `Repos vecinos: no clonar ni crear ramas`, ese "
-             "comando se le propone al usuario" % (q(where), work_branch(folder), q(tags[0]),
-                                                   " (otros tags de %s: %s)" % (version, ", ".join(tags[1:4]))
-                                                   if len(tags) > 1 else "")]
+    current = (repo_state(repo) or {}).get("rama") or "HEAD suelto"
+    lines = ["para pasarlo a fuente (sesión 1, antes de medir): pregúntale al usuario, en una sola pregunta para todos "
+             "los repos, si sigue en la rama actual de %s (`%s`) o crea una nueva desde el tag de la versión fijada con "
+             "el nombre que él dé (`git -C %s switch -c %s %s`%s; no lo inventes). Sin respuesta, sigue en la rama "
+             "actual, sin crear ni cambiar ramas, y anótalo en \"Precondiciones\" (la línea base mide el código de esa "
+             "rama, que puede no ser el tag). Después, el cambio del modelo (`## Estructura` · Pasar a fuente y volver). "
+             "Con la línea `Repos vecinos: no clonar ni crear ramas`, no preguntes: se le proponen los comandos al "
+             "usuario" % (where, current, q(where), BRANCH_CHOICE, q(tags[0]),
+                          " (otros tags de %s: %s)" % (version, ", ".join(tags[1:4])) if len(tags) > 1 else "")]
     return lines
 
 
@@ -28281,8 +28280,8 @@ def module_steps(folder, plan):
                          "opciones": [
             ("Pasarlo a código", "cuando quieres la marca o el tramo que pide ese módulo (%s): lo pasa a fuente la "
                                  "sesión 1, antes de medir, con el mecanismo del modelo (o el interruptor que dice "
-                                 "arriba) y una rama de trabajo desde el tag de la versión fijada; después se sincroniza "
-                                 "Gradle%s" % ("; ".join(item.get("para") or item["nombre"] for item in binaries),
+                                 "arriba), en la rama que elija el usuario (la actual o una nueva desde el tag de la "
+                                 "versión fijada); después se sincroniza Gradle%s" % ("; ".join(item.get("para") or item["nombre"] for item in binaries),
                                                "; ya hay fases medidas: el estado de sustitución queda fijo en antes, "
                                                "control y después, así que pasarlo ahora obliga a rehacer antes y control"
                                                if any(name in read_phases(folder) for name in FASES) else ""), recheck),

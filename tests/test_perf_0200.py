@@ -322,16 +322,13 @@ class PassToSourceTest(ModulesBase):
             git(self.sibling, "tag", tag)
         self.assertEqual(perf.version_tags(self.sibling, "1.2.0"), ["v1.2.0", "modulo-pagos-1.2.0"])
         self.assertEqual(perf.version_tags(self.sibling, "9.9.9"), [])
-        self.assertEqual(perf.work_branch(self.folder), "perf/pagos")
-        self.assertEqual(perf.work_branch(self.dir / "inv"), "perf/inv")
 
     def test_el_registro_da_el_comando_desde_el_tag_y_nunca_edita(self):
         git(self.sibling, "tag", "v1.2.0")
         before = {name: (self.root / name).read_bytes() for name in ("settings.gradle.kts", "modulos-locales.json")}
         out = self.register(self.binary, "com.example:modulo-pagos")
         self.assertIn("perf.py nunca lo edita: lo pasa a fuente la sesión 1, antes de medir, con el mecanismo del modelo", out)
-        self.assertIn("para pasarlo a fuente (sesión 1, antes de medir): `git -C ../modulo-pagos switch -c perf/pagos "
-                      "v1.2.0`", out)
+        self.assertIn("`git -C ../modulo-pagos switch -c <rama que elija el usuario> v1.2.0`", out)  # 0.21.0
         self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
         self.assertEqual(git(self.sibling, "branch", "--show-current").strip(), "main")  # perf.py no cambia de rama
 
