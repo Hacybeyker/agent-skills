@@ -339,6 +339,7 @@ class PassToSourceTest(ModulesBase):
         # 0.21.0: sin tag, la pregunta de la rama igual se hace, desde la rama actual y sin inventar el nombre
         self.assertIn("sigue en la rama actual de ../modulo-pagos (`main`) o crea una nueva desde ella con el nombre que "
                       "dé el usuario (`git -C ../modulo-pagos switch -c <rama que elija el usuario>`; no lo inventes)", out)
+        self.assertIn("Después, el cambio del modelo (`## Estructura` · Pasar a fuente y volver)", out)
 
     def test_al_pasar_a_fuente_comprueba_el_tag(self):
         git(self.sibling, "tag", "v1.2.0")

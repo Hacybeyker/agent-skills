@@ -22,8 +22,8 @@ class BranchQuestionTest(ModulesBase):
                       "../modulo-pagos (`fix/PAY-77-pago-lento`) o crea una nueva desde el tag de la versión fijada con "
                       "el nombre que él dé (`git -C ../modulo-pagos switch -c <rama que elija el usuario> v1.2.0`; no lo "
                       "inventes)", out)
-        self.assertIn("Sin respuesta, sigue en la rama actual, sin crear ni cambiar ramas, y anótalo en "
-                      "\"Precondiciones\"", out)
+        self.assertIn("Sin respuesta, sigue en la rama actual, sin crear ni cambiar ramas. Si sigue en la rama actual "
+                      "(elegida o sin respuesta) y no está en el tag, anótalo en \"Precondiciones\"", out)
         self.assertNotRegex(out, r"switch -c perf/")
         self.assertEqual(git(self.sibling, "branch", "--show-current").strip(), "fix/PAY-77-pago-lento")
         self.assertFalse(hasattr(perf, "work_branch"))

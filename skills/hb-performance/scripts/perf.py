@@ -27600,14 +27600,15 @@ def source_steps(root, item):
                     where, " (%s)" % version if version else " (el artefacto no dice su versión)"),
                 "la rama, en la misma pregunta para todos los repos: sigue en la rama actual de %s (`%s`) o crea una "
                 "nueva desde ella con el nombre que dé el usuario (`git -C %s switch -c %s`; no lo inventes). Sin "
-                "respuesta, sigue en la rama actual, sin crear ni cambiar ramas. Con la línea `Repos vecinos: no "
-                "clonar ni crear ramas`, no preguntes: se le proponen los comandos al usuario" % (
+                "respuesta, sigue en la rama actual, sin crear ni cambiar ramas. Después, el cambio del modelo "
+                "(`## Estructura` · Pasar a fuente y volver). Con la línea `Repos vecinos: no clonar ni crear ramas`, "
+                "no preguntes: se le proponen los comandos al usuario" % (
                     where, current, q(where), BRANCH_CHOICE)]
     lines = ["para pasarlo a fuente (sesión 1, antes de medir): pregúntale al usuario, en una sola pregunta para todos "
              "los repos, si sigue en la rama actual de %s (`%s`) o crea una nueva desde el tag de la versión fijada con "
              "el nombre que él dé (`git -C %s switch -c %s %s`%s; no lo inventes). Sin respuesta, sigue en la rama "
-             "actual, sin crear ni cambiar ramas, y anótalo en \"Precondiciones\" (la línea base mide el código de esa "
-             "rama, que puede no ser el tag). Después, el cambio del modelo (`## Estructura` · Pasar a fuente y volver). "
+             "actual, sin crear ni cambiar ramas. Si sigue en la rama actual (elegida o sin respuesta) y no está en el "
+             "tag, anótalo en \"Precondiciones\" (la línea base mide el código de esa rama). Después, el cambio del modelo (`## Estructura` · Pasar a fuente y volver). "
              "Con la línea `Repos vecinos: no clonar ni crear ramas`, no preguntes: se le proponen los comandos al "
              "usuario" % (where, current, q(where), BRANCH_CHOICE, q(tags[0]),
                           " (otros tags de %s: %s)" % (version, ", ".join(tags[1:4])) if len(tags) > 1 else "")]
