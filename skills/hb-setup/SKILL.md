@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requiere git. Para preparar el contexto de IA, Python 3.8+ solo con su librería estándar (en macOS viene con las Command Line Tools)."
 metadata:
   author: hacybeyker
-  version: "1.4.0"
+  version: "1.5.0"
   category: flow
 ---
 
@@ -103,7 +103,7 @@ Imprime dónde escribir `AGENTS.md` (en el modo externo, en la carpeta externa: 
 
 **Proyecto sin `AGENTS.md`:** créalo desde [assets/AGENTS.template.md](assets/AGENTS.template.md). Completa cada sección con lo detectado y las respuestas, quita las que no apliquen (por ejemplo, notas de tienda o `### Configuración local modificada a propósito`) y no dejes ningún `<placeholder>`: el resultado tiene que quedar completo y usable sin otra pasada. `## Stack` y `## Arquitectura` son una foto del proyecto: ni un patrón ni una librería que no estén en el código; las versiones que vienen de fuera del repo, con su fuente. `## Modernización` arranca en "ninguna decidida".
 
-**Proyecto con `AGENTS.md`:** pásalo al estándar sin perder lo propio. **Si tiene la sección de rendimiento de `hb-performance`**, corre antes `contexto.py rendimiento` (solo lee): el bloque entre `<!-- hb-performance:estado -->` y `<!-- /hb-performance:estado -->` se conserva **tal cual** (lo mantiene `perf.py`), y las líneas de esa sección que traen un serial de dispositivo o contradicen el bloque ("Setup listo" con el setup en un parche) las señalas en tu resumen con el cambio propuesto: no reescribes esa sección por tu cuenta.
+**Proyecto con `AGENTS.md`:** pásalo al estándar sin perder lo propio. **Si tiene la sección de rendimiento de `hb-performance`**, corre antes `contexto.py rendimiento` (solo lee): el bloque entre `<!-- hb-performance:estado -->` y `<!-- /hb-performance:estado -->` se conserva **tal cual** (lo mantiene `perf.py`), y las líneas de esa sección que traen un serial de dispositivo o contradicen el bloque ("Setup listo" con el setup en un parche) las señalas en tu resumen con el cambio propuesto: no reescribes esa sección por tu cuenta. **Si tiene `## Producto` de `hb-product`**, corre `contexto.py producto` (solo lee): la sección se conserva **tal cual**, con su título y su contenido (de su línea `Carpeta:` lee `hb-product` su carpeta; sin ella, `product`), y la fila de `<carpeta>/04-prd.md` que imprime va en "Documentos" de `## Estructura`, aunque el PRD todavía no exista. Sin esa sección no hay nada que hacer: no la creas.
 1. Conserva lo específico del proyecto: descripción del producto, excepciones, reglas de negocio, decisiones y sus motivos.
 2. Reorganízalo en las secciones de la plantilla y agrega las que falten (sobre todo `## Stack` y `## DoD`).
 3. Quita lo genérico que ya cubre el perfil (explicaciones de arquitectura, SOLID, testing o seguridad general). Antes de borrar bloques grandes, muestra qué sale y por qué.

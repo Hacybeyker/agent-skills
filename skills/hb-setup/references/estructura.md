@@ -103,7 +103,7 @@ En un proyecto de un solo paquete con features por carpetas (por ejemplo, un esp
 - **Variantes y entornos:** una fila por variante o entorno. "Para probar y medir" dice cuál usan `hb-implement` para verificar y `hb-performance` para medir.
 - **Cliente HTTP:** una línea por cliente, con el archivo (ruta desde la raíz del proyecto), la unidad y qué construye. "Ninguno" si no hay.
 - **Configuración local modificada a propósito:** una línea por archivo, con su motivo. Se quita la subsección si no hay ninguno. Las skills no lo cuentan como cambio ajeno, no lo revisan como hallazgo y nunca lo proponen para commit.
-- **Documentos:** rutas explícitas a archivos, no a carpetas, para que nadie dependa de una búsqueda (con la carpeta de contexto enlazada, `rg` y `find` sin `-L` no entran al enlace).
+- **Documentos:** rutas explícitas a archivos, no a carpetas, para que nadie dependa de una búsqueda (con la carpeta de contexto enlazada, `rg` y `find` sin `-L` no entran al enlace). Si `AGENTS.md` tiene `## Producto` (de `hb-product`), el PRD tiene su fila tal como la imprime `contexto.py producto`: `<carpeta>/04-prd.md`, con la carpeta de su línea `Carpeta:` (o `product`), para leerlo antes de implementar una funcionalidad `F-…` o de cambiar el alcance del producto. La fila va aunque el PRD todavía no exista: solo se usa cuando hay funcionalidades `F-…`.
 - **Mapas del módulo:** la línea que imprime `contexto.py preparar`, con la carpeta real y si van fuera de git o versionados.
 
 ## Mapas del módulo
