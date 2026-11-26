@@ -5,7 +5,7 @@ license: MIT
 allowed-tools: Bash
 metadata:
   author: hacybeyker
-  version: "1.1.1"
+  version: "1.2.0"
   category: flow
   origin: "basada en git-commit (comunidad)"
 ---
@@ -29,9 +29,10 @@ Antes de tocar git, busca en `AGENTS.md` (y en `CLAUDE.md` si existe) lo que dig
 
 Antes de commitear, junta:
 
-- **Los repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios; si la tarea viene de `hb-implement`, los de `repos` en su meta. Sin modelo, el repo actual.
+- **Los repos de la tarea:** el principal y cada repo vecino del modelo (las unidades cuya "Fuente" está fuera del repo, como `../core-lib`) que tenga cambios. Si la tarea viene de `hb-implement`, los que dice su atribución, la misma que usa `hb-review`: `python3 -I <carpeta de hb-implement>/scripts/report.py --meta <carpeta de la tarea>/meta.json --attribution` (con `hb-implement` 1.8.0 o posterior; si no, los de `repos` en su meta). Sin modelo, el repo actual.
 - **Lo que nunca entra en un commit**, aunque `git status` lo muestre modificado:
   - la configuración local modificada a propósito (su subsección de `## Estructura`);
+  - lo que ya estaba sin commit antes de la tarea: en la atribución con foto, lo de `unattributed` con el motivo "sin commit desde antes de la tarea". Es de otra persona o de otro trabajo: si el usuario quiere incluirlo, que lo diga;
   - los cambios temporales de la tarea: `temporary` del meta de `hb-implement` (`<base>/implementation/<fecha>-<slug>/meta.json`, donde `<base>` es la línea `Carpeta de reportes:`, por defecto `reports`; la fila de la tarea en `<base>/INDEX.md` lleva a su carpeta) o la lista "cambios temporales" de su entrega. Sus rutas son relativas al repo principal; las de un repo vecino van como `<nombre>:<ruta>`.
 
   No son cambios ajenos: no preguntes por ellos ni los propongas para commit. Al final, nómbralos en una línea ("quedan fuera a propósito").
