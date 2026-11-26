@@ -5,7 +5,7 @@ Para el usuario, no para el agente. Cada caso dice dónde va (un chat nuevo, con
 - **Después del primer pedido, solo pegas lo que imprime `producto.py siguiente`:** cada sesión termina con el paso que sigue, con el texto de cada chat o el comando completo. También queda en "Siguiente paso" de `estado.md`.
 - **Cada sesión va en un chat nuevo.** Cada paso del agente reenvía todo el chat, y uno que encadena sesiones cuesta varias veces más. La excepción es el modo orquestado (abajo): un solo chat, pero cada sesión corre en un subagente con su propio contexto.
 - **Modelo:** `siguiente` dice el de cada chat, con su esfuerzo: Sonnet 5.5 (medio) para la sesión 0 y las cinco líneas de investigación; Opus 5.5 (alto) para la diferenciación, la síntesis, la estrategia, la validación y el PRD. Con otra herramienta, cámbialos una vez con `producto.py modelos`; con `--herramienta claude` o `copilot`, cada chat trae el comando que lo abre ([modelos.md](modelos.md)).
-- **La carpeta** es `product/` dentro de la carpeta donde abres el chat. Para usar otra, agrégala al pedido ("en la carpeta `docs/producto`") o anótala en `AGENTS.md`: una sección `## Producto` con la línea `Carpeta: docs/producto`.
+- **La carpeta** es `product/` dentro de la carpeta donde abres el chat. Para usar otra, agrégala al pedido ("en la carpeta `docs/producto`") o anótala tú en `AGENTS.md`: una sección `## Producto` con la línea `Carpeta: docs/producto`. `hb-setup` conserva esa sección y lista `04-prd.md` en los documentos de `AGENTS.md`.
 - **Cada texto termina con "No hagas commit ni push."** La skill ya lo dice; la línea explícita evita sorpresas.
 
 ## Empezar

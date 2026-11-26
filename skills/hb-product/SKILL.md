@@ -122,7 +122,7 @@ La meta de ingresos se muestra en la puerta 2 solo como referencia; si el usuari
 └── archivo/                   ideas descartadas o archivadas, con su motivo
 ```
 
-Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo, se mueve a su raíz y `hb-setup` la anota en `AGENTS.md`.
+Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo, se mueve a su raíz. La sección `## Producto` de `AGENTS.md` la escribes tú (con la línea `Carpeta:` si quieres otra carpeta que `product/`). Si `AGENTS.md` la tiene, `hb-setup` la conserva tal cual y lista `<carpeta>/04-prd.md` en sus documentos; si no, no la crea.
 
 ## Herramientas
 
@@ -157,7 +157,7 @@ Si el proyecto todavía no existe, la carpeta vive sola; cuando se crea el repo,
 | `reporte` · `tablero` | Genera `reporte.html` de la idea (`--idea` para una archivada) · genera `index.html` con todas las ideas bajo `--raiz <carpeta>` (también se regenera solo; `--raiz` en `nuevo`, `cerrar`, `decidir`, `archivar` y `reabrir` fija la raíz) |
 | `consumo` | Anota el costo de una sesión o del orquestador (opcional): `--sesion --costo\|--creditos\|--tokens [--incluye] [--pasada <n>] [--chat <id>]`; cada pasada de una sesión (la primera y cada reapertura) va en su fila, por defecto la vigente; `--chat` es la fila del chat orquestador, que el mismo chat actualiza en cada parada; sin costo en USD, el total dice "sin dato", nunca 0 |
 
-Otras skills, por intención y sin depender de sus archivos: `hb-setup` (anota `## Producto` en `AGENTS.md`), `hb-implement` (construye cada `F-…`), `hb-review`, `hb-performance` (si el diferenciador es de rendimiento), `hb-commit`, `hb-release`, `play-policy-insights` y `hb-coach` (para aprender un concepto: RICE, Kano o HEART).
+Otras skills, por intención y sin depender de sus archivos: `hb-setup` (conserva tu `## Producto` y lista `04-prd.md` en los documentos de `AGENTS.md`), `hb-implement` (construye cada `F-…`), `hb-review`, `hb-performance` (si el diferenciador es de rendimiento), `hb-commit`, `hb-release`, `play-policy-insights` y `hb-coach` (para aprender un concepto: RICE, Kano o HEART).
 
 ## Checklist
 
