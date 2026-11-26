@@ -3864,7 +3864,8 @@ def criterio_descarte_vigente(carpeta):
 def texto_subir_puntaje(producto, registro, modelo, minimo):
     """«Qué cambiaría» con el puntaje bajo el mínimo (feedback #84 c): qué criterios podrían subir y cómo, por criterio.
     La facilidad es una estimación, no sube con evidencia: solo recortando el alcance del MVP. La demanda, con el tope
-    de triangulación y el de un solo mercado (#83 c); la diferenciación, con el tope de lo defendible (#75 a)."""
+    de triangulación y el de un solo mercado (#83 c); la diferenciación, con el tope de lo defendible (#75 a). Una línea
+    ya reabierta sin salida (#76) no se ofrece como camino: se dice que ya se reabrió (feedback #85 a)."""
     valores, limites = modelo["vigente"]["valores"], limites_puntaje(producto, registro)
     total = modelo["vigente"]["total"]
     como = {}
@@ -3884,6 +3885,13 @@ def texto_subir_puntaje(producto, registro, modelo, minimo):
         2: "más de 2 pide triangular un viable con confianza baja, 1g",
         4: "4 como máximo con los viables de hoy: 5 pide dos viables que no se copien fácil o uno en la ficha "
            "difícil de copiar"}.get(maximo, "%d como máximo con los viables de hoy" % maximo)
+    sin_salida = reaperturas_sin_salida(producto, registro)
+    for criterio, sesion in SESION_CRITERIO.items():
+        if criterio in como and sesion in sin_salida:
+            pasada = sin_salida[sesion]
+            como[criterio] = "no se vuelve a pedir: la %s ya se reabrió%s%s" % (
+                sesion, " y usó su presupuesto" if sesion == "1g" else "",
+                "" if pasada.startswith("reabierta") else ", " + pasada)
     partes = ["%s, hoy %d (%s)" % (NOMBRES_CRITERIO[c], valores[c], como[c]) for c in CRITERIOS_PUNTAJE
               if c in como and valores[c] < 5]
     return "Subir el puntaje a %d/25 o más%s (%s): %s" % (
@@ -3900,7 +3908,7 @@ def demanda_bajo_el_minimo(producto, registro, fatales, ajustes, motivo_de):
     contradicción. Si lo que el ajuste tiene que resolver depende entero de vacíos de herramienta (la regla de #57), la
     razón dice que reabrirla con las mismas herramientas no lo resuelve y los nombra. Si no, y el puntaje es lo único que
     descarta y con la demanda en su máximo (5) alcanzaría el mínimo, se ajusta la 1c (la regla de #55): el puntaje pasa
-    a ajuste de esa sesión. Si tampoco, la razón dice por qué ajustarla no cambiaría el veredicto. Devuelve
+    a ajuste de esa sesión, en una sola razón con la de la demanda (feedback #85 b). Si tampoco, la razón dice por qué ajustarla no cambiaría el veredicto. Devuelve
     (fatales, ajustes)."""
     puntaje_ = next((m for m in fatales if motivo_de.get(id(m)) == "puntaje"), None)
     demanda = next((m for m in ajustes if motivo_de.get(id(m)) in ("demanda", "problema") and m[3]), None)
@@ -3920,14 +3928,18 @@ def demanda_bajo_el_minimo(producto, registro, fatales, ajustes, motivo_de):
                      "%s: %s %s" % (v["id"], NOMBRE_DIMENSION.get(v["dimension"], v["dimension"]), v["valor"])
                      for v in vacios), sesion), demanda[1], sesion, True, alcance)
     elif len(fatales) == 1 and quedaria >= minimo:
-        motivo = (puntaje_[0] + ", pero la demanda está en confianza baja en la primera pasada de la %s, sin evidencia "
-                  "en contra: confirmada, podría puntuar hasta 5 (hoy %d) y el puntaje llegaría hasta %d/25" % (
-                      sesion, valor, quedaria),
-                  "Con la demanda confirmada, volver a puntuarla en la 1f: con 5 (hoy %d), el puntaje llegaría hasta "
-                  "%d/25 (el mínimo es %d)" % (valor, quedaria, minimo), sesion, True, alcance)
+        # una sola razón (feedback #85 b): la de la demanda ya dice que está en baja en la primera pasada y sin
+        # evidencia en contra; la del puntaje suma solo lo que subiría
+        motivo = ("%s. %s. %s podría puntuar hasta 5 (hoy %d) y el puntaje llegaría hasta %d/25" % (
+                      sin_punto(puntaje_[0]), sin_punto(demanda[0]), "Confirmada, la demanda" if motivo_de.get(
+                          id(demanda)) == "demanda" else "Con el problema documentado, la demanda", valor, quedaria),
+                  "%s. Con la demanda confirmada, volver a puntuarla en la 1f: con 5 (hoy %d), el puntaje llegaría "
+                  "hasta %d/25 (el mínimo es %d)" % (sin_punto(demanda[1]), valor, quedaria, minimo), sesion, True,
+                  alcance)
         motivo_de.pop(id(puntaje_), None)  # el id de una tupla que ya no está podría reusarse
+        motivo_de.pop(id(demanda), None)
         motivo_de[id(motivo)] = "puntaje"
-        return [], [motivo] + ajustes
+        return [], [motivo] + [a for a in ajustes if a is not demanda]
     else:
         nuevo = ("%s. Ajustar la %s no cambiaría el veredicto: %s" % (
             razon, sesion, "ni con la demanda en 5 (hoy %d) el puntaje llegaría al mínimo de %d (quedaría en %d/25)"

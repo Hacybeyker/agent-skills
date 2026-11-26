@@ -6,6 +6,8 @@ depende entero de vacíos de herramienta, la razón dice que reabrirla no lo res
 máximo el puntaje alcanzaría el mínimo, recomienda ajustar la 1c; si tampoco, dice por qué ajustarla no cambia nada.
 (c) «Qué cambiaría» con el puntaje bajo el mínimo dice qué criterios podrían subir y cómo (la facilidad, solo
 recortando el alcance del MVP).
+#85: (a) una línea ya reabierta sin salida no se ofrece como camino para subir el puntaje: dice que ya se reabrió; (b)
+el ajuste de la 1c por el puntaje va en una sola razón con la de la demanda.
 La errata «falta el de el uso» (e) la cubre test_product.py.
 
 Los datos son inventados: la misma app de turnos de riego de test_product.py.
@@ -13,6 +15,7 @@ Los datos son inventados: la misma app de turnos de riego de test_product.py.
 import os
 import re
 import unittest
+from unittest import mock
 
 import test_product as base
 import test_product_demanda as demanda
@@ -83,13 +86,26 @@ class BajoMinimoTest(demanda.Base):
         self.demanda_baja("2,4,3,4,3")  # 16/25; con la demanda en 5, 19/25
         salida = llano(self.cerrar("1f", "01-sintesis.md"))
         self.assertIn("🟡 PUERTA 1 · VIABLE CON RESERVAS → la skill recomienda: AJUSTAR 1c", salida)
-        self.assertIn("El puntaje es 16/25, bajo el mínimo de 17, pero la demanda está en confianza baja en la primera "
-                      "pasada de la 1c, sin evidencia en contra: confirmada, podría puntuar hasta 5 (hoy 2) y el "
-                      "puntaje llegaría hasta 19/25", salida)
-        self.assertIn("Con la demanda confirmada, volver a puntuarla en la 1f: con 5 (hoy 2), el puntaje llegaría "
-                      "hasta 19/25 (el mínimo es 17)", salida)
+        self.assertIn("1. El puntaje es 16/25, bajo el mínimo de 17. La demanda actual tiene confianza baja en la "
+                      "primera pasada de la 1c:", salida)
+        self.assertIn("Confirmada, la demanda podría puntuar hasta 5 (hoy 2) y el puntaje llegaría hasta 19/25. 2.",
+                      salida)
+        self.assertIn("Triangular H-DEM-2 (faltan 2 fuentes independientes y vigentes, tiene 1 de 3) en la 1c con una "
+                      "señal medida y reciente de demanda (tendencias de búsqueda, descargas o búsquedas de los "
+                      "últimos 18 meses). Con la demanda confirmada, volver a puntuarla en la 1f: con 5 (hoy 2), el "
+                      "puntaje llegaría hasta 19/25 (el mínimo es 17)", salida)
         self.assertNotIn("★ Recomendado · Descartar", salida)
         self.assertEqual(self.json()["pasos"][0]["automatico"]["sesion"], "1c")
+
+    def test_la_demanda_baja_va_en_una_sola_razon_con_el_puntaje(self):
+        """Feedback #85 b: la razón del puntaje y la de la demanda decían dos veces «confianza baja en la primera
+        pasada, sin evidencia en contra»."""
+        self.demanda_baja("2,4,3,4,3")
+        salida = llano(self.cerrar("1f", "01-sintesis.md"))
+        por_que = salida.split("Por qué:")[1].split("Qué cambiaría el veredicto:")[0]
+        self.assertEqual(por_que.count("primera pasada de la 1c"), 1)
+        self.assertEqual(por_que.count("evidencia en contra"), 1)
+        self.assertNotIn("pero la demanda está en confianza baja", por_que)
 
     def test_si_ni_con_la_demanda_en_5_alcanza_sigue_en_rojo_sin_contradecirse(self):
         self.demanda_baja("1,3,2,3,3")  # 12/25; con la demanda en 5, 16/25
@@ -153,6 +169,44 @@ class SubirPuntajeTest(base.Base):
         self.assertIn("demanda, hoy 3 (4 o 5 piden un hallazgo clave triangulado con señales actuales, 1c)", texto)
         self.assertIn("diferenciación, hoy 1 (pide un diferenciador viable, 1g)", texto)
         self.assertNotIn("riesgo de políticas", texto)
+
+
+
+# --- #85 a · Una línea ya reabierta no se ofrece como camino para subir el puntaje -----------------------------------
+
+class LineaReabiertaTest(demanda.Base):
+    def test_con_la_1c_reabierta_la_demanda_no_se_ofrece_y_dice_que_ya_se_reabrio(self):
+        self.investigacion()
+        self.hallazgo("demanda", self.fuente("demanda", 1, "medido"), "--critico", "--sin-contra",
+                      "Se buscó y no apareció")
+        self.p("puntaje", "--valores", "2,3,3,4,3")  # 15/25: ni con la demanda en 5 llega al mínimo
+        self.cerrar("1f", "01-sintesis.md")
+        self.p("decidir", "--puerta", 1, "--ajustar", "1c", "--motivo", "Quiero más evidencia de demanda")
+        self.p("cerrar", "--sesion", "1c", "--busquedas", 3, "--lecturas", 2)
+        salida = llano(self.cerrar("1f"))
+        self.assertIn("🔴 PUERTA 1 · NO VIABLE", salida)
+        self.assertIn("demanda, hoy 2 (no se vuelve a pedir: la 1c ya se reabrió, 3 de 8 búsquedas y 2 de 5 lecturas "
+                      "en la reapertura 1)", salida)
+        self.assertNotIn("señales actuales más fuertes, 1c", salida)
+        self.assertNotIn("hallazgo clave triangulado con señales actuales, 1c", salida)
+        self.assertIn("monetización, hoy 3 (con evidencia nueva, 1d)", salida)
+
+    def test_cualquier_linea_sin_salida_dice_que_ya_se_reabrio(self):
+        self.sesion0()
+        self.p("tipo", "--existente", "--motivo", "Hay apps directas")
+        registro_ = base.producto.Registro(self.carpeta, self.datos()["criterios"])
+        datos = self.datos()
+        datos["puntaje"] = {"valores": {"demanda": 3, "monetizacion": 3, "facilidad": 3, "riesgo": 3,
+                                        "diferenciacion": 1}, "total": 13}
+        modelo = base.producto.puntajes_por_modelo(datos, registro_)[0]
+        sin_salida = {"1d": "reabierta una vez", "1g": "8 de 8 búsquedas y 5 de 5 lecturas en la reapertura 1"}
+        with mock.patch.object(base.producto, "reaperturas_sin_salida", return_value=sin_salida):
+            texto = base.producto.texto_subir_puntaje(datos, registro_, modelo, 17)
+        self.assertIn("monetización, hoy 3 (no se vuelve a pedir: la 1d ya se reabrió)", texto)
+        self.assertIn("diferenciación, hoy 1 (no se vuelve a pedir: la 1g ya se reabrió y usó su presupuesto, 8 de 8 "
+                      "búsquedas y 5 de 5 lecturas en la reapertura 1)", texto)
+        self.assertIn("riesgo de políticas, hoy 3 (con evidencia nueva, 1e)", texto)
+        self.assertIn("facilidad, hoy 3 (solo recortando el alcance del MVP", texto)
 
 
 if __name__ == "__main__":
