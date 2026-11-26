@@ -65,7 +65,7 @@ VERSION = "0.21.0"
 # métricas): sus corridas se pueden completar sin repetir la fase. La regla del borde no entra aquí: la anota `reglas`
 # en cada fase y `recalcular` la aplica a las trazas guardadas.
 SAME_CAPTURE = ("0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0", "0.15.1", "0.16.0", "0.17.0",
-                VERSION)
+                "0.20.0", VERSION)  # 0.21.0 solo cambia cómo se elige la rama de una unidad en fuente
 HERE = pathlib.Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 REQUIRED = ["fase", "flujo", "metrica", "corrida", "valor"]
@@ -27580,10 +27580,10 @@ def module_repo(root, item):
 BRANCH_CHOICE = "<rama que elija el usuario>"  # 0.21.0: el nombre lo da el usuario (suele llevar el código de la tarea)
 
 
-def source_steps(root, folder, item):
+def source_steps(root, item):
     """Las líneas para pasar a fuente un módulo publicado (decisión 2): la pregunta de la rama (la actual o una nueva,
-    con el nombre que dé el usuario, desde el tag de la versión fijada), o el aviso si no hay tag o no se sabe dónde
-    está su código. [] si no es binario."""
+    con el nombre que dé el usuario, desde el tag de la versión fijada; sin tag, desde la rama actual, con el aviso), o
+    el aviso si no se sabe dónde está su código. [] si no es binario."""
     if (item or {}).get("tipo") != "binario":
         return []
     version, repo = pinned_version(item), module_repo(root, item)
@@ -27593,11 +27593,16 @@ def source_steps(root, folder, item):
                 % item["nombre"]]
     tags = version_tags(repo, version)
     where = agents_path(repo, root)
+    current = (repo_state(repo) or {}).get("rama") or "HEAD suelto"
     if not tags:
         return ["%s no tiene un tag de la versión fijada%s: si se pasa a fuente, la línea base mide otro código que el "
                 "publicado. Anótalo en \"Precondiciones\" de estado.md y avísale al usuario" % (
-                    where, " (%s)" % version if version else " (el artefacto no dice su versión)")]
-    current = (repo_state(repo) or {}).get("rama") or "HEAD suelto"
+                    where, " (%s)" % version if version else " (el artefacto no dice su versión)"),
+                "la rama, en la misma pregunta para todos los repos: sigue en la rama actual de %s (`%s`) o crea una "
+                "nueva desde ella con el nombre que dé el usuario (`git -C %s switch -c %s`; no lo inventes). Sin "
+                "respuesta, sigue en la rama actual, sin crear ni cambiar ramas. Con la línea `Repos vecinos: no "
+                "clonar ni crear ramas`, no preguntes: se le proponen los comandos al usuario" % (
+                    where, current, q(where), BRANCH_CHOICE)]
     lines = ["para pasarlo a fuente (sesión 1, antes de medir): pregúntale al usuario, en una sola pregunta para todos "
              "los repos, si sigue en la rama actual de %s (`%s`) o crea una nueva desde el tag de la versión fijada con "
              "el nombre que él dé (`git -C %s switch -c %s %s`%s; no lo inventes). Sin respuesta, sigue en la rama "
@@ -28119,11 +28124,14 @@ def modules_report(root, folder, plan, args):
           if deps is not None else "Módulos del alcance: no pude preguntarle a Gradle (%s). Ninguno se da por código:" % why)
     for line in modules_table(modules, root).splitlines():
         print("  " + line)
+    asked = set()
     for item in modules:
         if item["tipo"] == "binario":
             print("  ⚠ %s: %s." % (item["nombre"], switch_text(substitution_switch(root, item), item)))
-            for line in source_steps(root, folder, item):  # 0.20.0 · decisión 2
-                print("    · %s." % line)
+            for line in source_steps(root, item):  # 0.20.0 · decisión 2
+                if line not in asked:  # dos módulos del mismo repo: la pregunta de la rama, una sola vez
+                    asked.add(line)
+                    print("    · %s." % line)
 
         elif item["tipo"] == "sin confirmar":
             print("  ⚠ %s: sin confirmar (%s). Pregúntale al usuario si ese módulo se compila desde código o llega como "
@@ -28247,12 +28255,14 @@ def module_steps(folder, plan):
                  "pone la marca que faltaba en el módulo que ahora es código, actualiza el plan y repite la prueba", plan)]
     if not pending:
         return []
-    lines = []
+    lines, asked = [], set()
     for item in pending:
         if item["tipo"] == "binario":
             lines.append("%s llega como binario (%s): %s" % (item["nombre"], item.get("artefacto") or "sin versión",
                                                            switch_text(substitution_switch(root, item), item)))
-            lines += ["%s: %s" % (item["nombre"], line) for line in source_steps(root, folder, item)]  # 0.20.0
+            steps = [line for line in source_steps(root, item) if line not in asked]  # 0.20.0
+            asked.update(steps)  # dos módulos del mismo repo: la pregunta de la rama, una sola vez
+            lines += ["%s: %s" % (item["nombre"], line) for line in steps]
             if item.get("para") or item.get("pierde"):
                 lines.append("%s: lo pidió %s; si sigue binario, se pierde %s" % (
                     item["nombre"], item.get("para") or "el alcance", item.get("pierde") or "medir dentro del módulo: "

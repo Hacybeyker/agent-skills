@@ -28,6 +28,22 @@ class BranchQuestionTest(ModulesBase):
         self.assertEqual(git(self.sibling, "branch", "--show-current").strip(), "fix/PAY-77-pago-lento")
         self.assertFalse(hasattr(perf, "work_branch"))
 
+    def test_dos_modulos_del_mismo_repo_dan_una_sola_pregunta_de_rama(self):
+        git(self.sibling, "tag", "v1.2.0")
+        (self.sibling / "ui").mkdir()
+        item = {"tipo": "binario", "nombre": ":pagos", "artefacto": "com.example:modulo-pagos:1.2.0",
+                "carpeta": str(self.sibling)}
+        steps = perf.source_steps(self.root, item)
+        self.assertEqual(len(steps), 1)
+        self.assertIn("switch -c <rama que elija el usuario> v1.2.0", steps[0])
+        other = perf.source_steps(self.root, dict(item, nombre=":pagos-ui", carpeta=str(self.sibling / "ui")))
+        self.assertEqual(other, steps)  # la misma pregunta: los llamadores la muestran una sola vez
+
+    def test_las_fases_de_0200_se_completan_sin_repetirlas(self):
+        """0.21.0 solo cambia cómo se elige la rama: mide igual que 0.20.0."""
+        for version in ("0.17.0", "0.20.0", perf.VERSION):
+            self.assertTrue(perf.same_capture(version), version)
+
     def test_la_opcion_de_pasarlo_a_codigo_tampoco_impone_una_rama(self):
         self.assertIn("en la rama que elija el usuario", perf.PASS_TO_SOURCE)
         self.assertNotIn("una rama de trabajo en el repo de la unidad", perf.PASS_TO_SOURCE)
