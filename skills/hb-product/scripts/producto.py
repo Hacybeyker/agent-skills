@@ -33,7 +33,7 @@ from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 FORMATO = 1
 CARPETA_DEFECTO = "product"
 GUION = os.path.abspath(__file__)

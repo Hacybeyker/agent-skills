@@ -15,7 +15,9 @@ Los datos son inventados: la misma app de turnos de riego de test_product.py.
 """
 import json
 import os
+import re
 import unittest
+from pathlib import Path
 
 import test_product as base
 from helpers import write
@@ -166,6 +168,19 @@ class DistribucionTest(Base):
             "diferenciador", "--vector", "magia", "--texto", "x", "--hallazgos", hallazgo, "--se-ve", "uso",
             "--copiable", "baja", "--motivo", "x", "--semanas", 1))
         self.assertEqual(self.datos("01-investigacion/diferenciacion.json")["diferenciadores"], [])
+
+
+class VersionTest(unittest.TestCase):
+    """La versión que muestra el script es la de metadata.version del SKILL.md."""
+
+    def test_version_del_script_igual_a_la_del_skill(self):
+        raiz = Path(__file__).resolve().parent.parent / "skills" / "hb-product"
+        skill = (raiz / "SKILL.md").read_text(encoding="utf-8")
+        guion = (raiz / "scripts" / "producto.py").read_text(encoding="utf-8")
+        en_skill = re.search(r'^\s*version:\s*"([^"]+)"', skill, re.M).group(1)
+        en_guion = re.search(r'^VERSION = "([^"]+)"', guion, re.M).group(1)
+        self.assertEqual(en_skill, en_guion)
+
 
 if __name__ == "__main__":
     unittest.main()
