@@ -86,6 +86,8 @@ class BranchRuleTest(unittest.TestCase):
         self.assertIn("El código de la tarea no lo inventes", self.push)
         self.assertIn("la que eligió el usuario al empezar con `hb-implement`", self.push)
         self.assertNotIn("la que creó `hb-implement`", self.push)
+        self.assertIn("si fija un formato de nombre, manda sobre el de aquí", self.push)
+        self.assertIn("la rama nueva se confirma igual", self.push)
 
 
 if __name__ == "__main__":
