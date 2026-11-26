@@ -70,7 +70,7 @@ cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/dod.py
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py estado
 ```
 
-**Fuentes previas de contexto de IA.** Antes de elegir el camino, busca todo el contexto de IA que el proyecto ya tiene, aunque no exista `AGENTS.md`: sus variantes renombradas (`AGENTS-old.md`, `AGENTS.bak.md`, `AGENTS.md.orig`), `CLAUDE.md`, `.github/copilot-instructions.md`, `.cursorrules` y `.cursor/rules`, y los `.md` de la carpeta de contexto (también si es un enlace, y las carpetas de la raíz enlazadas o en `.git/info/exclude`) que traen instrucciones para agentes. Con alguna, el camino es **migrar**; sin ninguna, **la plantilla**. El script solo lee (si la carpeta de contexto no se llama `contexto`, pásala con `--carpeta`):
+**Fuentes previas de contexto de IA.** Antes de elegir el camino, busca todo el contexto de IA que el proyecto ya tiene, aunque no exista `AGENTS.md`: sus variantes renombradas (`AGENTS-old.md`, `AGENTS.bak.md`, `AGENTS.md.orig`), `CLAUDE.md`, `.github/copilot-instructions.md`, `.cursorrules` y `.cursor/rules`, y los `.md` de la carpeta de contexto (también si es un enlace) que traen instrucciones para agentes; en las otras carpetas de la raíz enlazadas o en `.git/info/exclude` (sin contar repos ni worktrees), las copias de `AGENTS.md`, y nombra el resto para que digas si es contexto. Con alguna, el camino es **migrar**; sin ninguna, **la plantilla**. El script solo lee (si la carpeta de contexto no se llama `contexto`, pásala con `--carpeta`):
 
 ```bash
 cd <raíz-del-proyecto> && python3 -I <carpeta-de-la-skill>/scripts/contexto.py fuentes [--carpeta <carpeta de contexto>]

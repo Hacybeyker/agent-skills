@@ -1041,8 +1041,8 @@ class NothingInventedTest(Base):
         self.assertIn("sin destino en el inventario: `AGENTS.md` › Seguridad", result.stdout)
 
 
-class ReviewFixesTest(Base):
-    """Lo que encontró la revisión independiente de hb-setup 1.6.0."""
+class InventoryBase(Base):
+    """Utilidades para correr contexto.py con la entrada y escribir un inventario fuera del repo."""
 
     HEADER = "| Fuente | Sección | Destino | Motivo |\n| --- | --- | --- | --- |\n"
 
@@ -1059,6 +1059,10 @@ class ReviewFixesTest(Base):
         path = self.base / "inventario.md"
         write(path, self.HEADER + rows)
         return path
+
+
+class ReviewFixesTest(InventoryBase):
+    """Lo que encontró la revisión independiente de hb-setup 1.6.0."""
 
     def test_un_claude_md_versionado_que_se_reescribe_se_compara_con_el_de_head(self):
         write(self.repo / "CLAUDE.md", "# Claude\n\n## Build\n\n- Usa el JDK 17.\n\n## Reglas\n\n- Nunca subas el "
@@ -1095,7 +1099,7 @@ class ReviewFixesTest(Base):
         out = self.run_ok("verificar", "--inventario", rows)
         self.assertIn("✔ Nada se pierde", out)
         self.assertNotIn("borrarlas después de migrar): CLAUDE.md", out)
-        self.assertIn("Deja como puntero a AGENTS.md", out)
+        self.assertNotIn("Deja como puntero a AGENTS.md", out)  # ya importa @AGENTS.md
         write(self.repo / "CLAUDE.md", "@AGENTS.md\n\n## Otra cosa\n\n- x\n")
         copy = self.base / "CLAUDE.previo.md"
         write(copy, "@AGENTS.md\n\n## Claude Code\n\n- Usa el modo plan antes de tocar Gradle.\n")
@@ -1217,6 +1221,129 @@ class ReviewFixesTest(Base):
         contexto = load_script("contexto_fences", SCRIPT)
         text = "## Uso\n\n````markdown\n```bash\n# instala\n```\n# tampoco\n````\n\n## Otra\n"
         self.assertEqual([item["label"] for item in contexto.sections(text)], ["Uso", "Otra"])
+
+
+class SecondReviewTest(InventoryBase):
+    """Lo que encontró la verificación de las correcciones."""
+
+    def test_fuente_pasada_con_fuente_manda_sobre_otros(self):
+        write(self.repo / "contexto" / "notas.md", "# Notas\n\n- El riego empieza a las 6.\n")
+        out = self.run_ok("fuentes", "--fuente", "contexto/notas.md")
+        self.assertIn("  - contexto/notas.md (fuente indicada con --fuente", out)
+        self.assertNotIn("Otros .md", out)
+        write(self.repo / "AGENTS.md", "# P\n\n## Reglas del proyecto\n\n- El riego empieza a las 6.\n")
+        rows = self.inventory("| `contexto/notas.md` | Notas | AGENTS.md | ## Reglas del proyecto |\n")
+        self.assertIn("✔", self.run_ok("verificar", "--inventario", rows, "--fuente", "contexto/notas.md"))
+
+    def test_un_agents_dentro_de_la_carpeta_de_contexto_no_bloquea_verificar(self):
+        write(self.repo / "contexto" / "AGENTS.md", "# Viejo\n\n## Reglas\n\n- Regla vieja.\n")
+        write(self.repo / "AGENTS.md", "# P\n\n## Reglas del proyecto\n\n- Contexto de IA: local, AGENTS.md y "
+                                       "`contexto/` en `.git/info/exclude`.\n- Regla vieja.\n")
+        rows = self.inventory("| `contexto/AGENTS.md` | Reglas | AGENTS.md | ## Reglas del proyecto |\n")
+        self.assertIn("✔ Nada se pierde", self.run_ok("verificar", "--inventario", rows))
+
+    def test_repos_enlazados_y_worktrees_no_son_carpetas_de_contexto(self):
+        (self.base / "core-lib").mkdir()
+        core = init_repo(self.base / "core-lib")
+        write(core / "AGENTS.md", "# Core\n\n## Reglas\n\n- x\n")
+        commit_all(core)
+        os.symlink(str(self.base / "core-lib"), str(self.repo / "core-lib"))
+        git(self.repo, "worktree", "add", "-q", str(self.repo / "worktrees" / "feat-x"), "-b", "feat-x")
+        with open(str(self.repo / ".git" / "info" / "exclude"), "a", encoding="utf-8") as handle:
+            handle.write("/core-lib\n/worktrees/\n")
+        out = self.run_ok("fuentes")
+        self.assertIn("Camino: plantilla", out)
+        self.assertNotIn("core-lib/AGENTS.md", out)
+        self.assertNotIn("worktrees/", out)
+
+    def test_un_claude_md_local_reescrito_sin_copia_no_pasa(self):
+        with open(str(self.repo / ".git" / "info" / "exclude"), "a", encoding="utf-8") as handle:
+            handle.write("/CLAUDE.md\n")
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n\n## Claude Code\n\n- Modo plan.\n")
+        write(self.repo / "AGENTS.md", "# P\n")
+        rows = self.inventory("| `CLAUDE.md` | Memoria | AGENTS.md | ## Reglas |\n"
+                              "| `CLAUDE.md` | Claude Code | `CLAUDE.md` | propio |\n"
+                              "| `CLAUDE.md` | (inicio) | AGENTS.md | el import |\n")
+        out = self.run_ok("verificar", "--inventario", rows, code=1)
+        self.assertIn("el inventario trae «memoria» de `CLAUDE.md`, que ya no la tiene", out)
+
+    def test_una_ruta_conocida_no_se_busca_por_nombre_en_otra_carpeta(self):
+        with open(str(self.repo / ".git" / "info" / "exclude"), "a", encoding="utf-8") as handle:
+            handle.write("/CLAUDE.md\n")
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n")
+        write(self.repo / ".claude" / "CLAUDE.md", "## Otra\n\n- y\n")
+        write(self.repo / "AGENTS.md", "# P\n")
+        rows = self.inventory("| `CLAUDE.md` | Reglas | AGENTS.md | ## Reglas |\n"
+                              "| `.claude/CLAUDE.md` | Otra | descartada | obsoleta |\n")
+        self.assertIn("el inventario trae «`CLAUDE.md`», que no encuentro como fuente",
+                      self.run_ok("verificar", "--inventario", rows, code=1))
+
+    def test_un_doc_versionado_borrado_se_lee_de_head(self):
+        write(self.repo / "contexto" / "reglas-agentes.md", "# Reglas para agentes\n\n## Reglas\n\n- Sin emoji.\n")
+        commit_all(self.repo, "reglas")
+        git(self.repo, "rm", "-q", "contexto/reglas-agentes.md")
+        write(self.repo / "AGENTS.md", "# P\n\n## Reglas del proyecto\n\n- Sin emoji.\n")
+        rows = self.inventory("| `contexto/reglas-agentes.md` | (todo el archivo) | AGENTS.md | ## Reglas |\n")
+        self.assertIn("✔ Nada se pierde", self.run_ok("verificar", "--inventario", rows))
+
+    def test_rendimiento_es_la_seccion_con_el_bloque_como_en_perf_py(self):
+        old = ("# P\n\n## Arquitectura\n\n### Performance\n\n- Nota del equipo.\n\n## Rendimiento\n\n```bash\n"
+               "# medir\n```\n\n" + PERF_BLOCK + "\n")
+        write(self.repo / "AGENTS-old.md", old)
+        out = self.run_ok("fuentes")
+        self.assertIn("AGENTS-old.md: ## Rendimiento (hb-performance", out)
+        self.assertNotIn("## Performance (hb-performance", out)
+        perf = self.run_ok("rendimiento")
+        self.assertIn("Bloque de estado de hb-performance", perf)
+        write(self.repo / "AGENTS.md", "# P\n\n## Arquitectura\n\n- Nota del equipo.\n\n## Rendimiento\n\n```bash\n"
+                                       "# medir\n```\n\n" + PERF_BLOCK + "\n")
+        rows = self.inventory("| `AGENTS-old.md` | (todo el archivo) | AGENTS.md | tal cual |\n")
+        self.assertIn("✔", self.run_ok("verificar", "--inventario", rows))
+
+    def test_una_carpeta_de_reportes_con_marcadores_no_tapa_la_carpeta_de_contexto(self):
+        write(self.repo / "AGENTS-old.md", "# P\n\n## Reglas\n\n- Carpeta de reportes: `contexto/{fecha}-{slug}`\n")
+        write(self.repo / "contexto" / "reglas-agentes.md", "# Reglas para agentes\n\n- x\n")
+        write(self.repo / "contexto" / "2026-01-02-tarea" / "bitacora.md", "# Bitácora\n\nEl agente y la IA.\n")
+        out = self.run_ok("fuentes")
+        self.assertIn("  - contexto/reglas-agentes.md (", out)
+        self.assertNotIn("bitacora.md", out)
+
+    def test_una_palabra_suelta_o_una_sugerencia_no_son_destinos(self):
+        write(self.repo / "AGENTS-old.md", "## Stack\n\n- x\n\n## Historial\n\n- y\n")
+        write(self.repo / "AGENTS.md", "# P\n")
+        rows = self.inventory("| `AGENTS-old.md` | Stack | Stack |  |\n"
+                              "| `AGENTS-old.md` | Historial | descartada si ya la cubre `hb-implement` (bugfix); lo "
+                              "propio del proyecto, a AGENTS.md o a un doc | ya |\n"
+                              "| `otra.md` | x | AGENTS.md |  |\n| `otra.md` | y | AGENTS.md |  |\n")
+        out = self.run_ok("verificar", "--inventario", rows, code=1)
+        self.assertIn("› Stack: decide el destino", out)
+        self.assertIn("› Historial: decide el destino", out)
+        self.assertEqual(out.count("«`otra.md`», que no encuentro"), 1)  # un error por fuente
+
+    def test_un_claude_md_en_latin_1_no_corta_verificar(self):
+        (self.repo / "CLAUDE.md").write_bytes("## Reglas\n\n- Canci\u00f3n\n".encode("latin-1"))
+        commit_all(self.repo, "latin")
+        write(self.repo / "CLAUDE.md", "@AGENTS.md\n")
+        write(self.repo / "AGENTS.md", "# P\n")
+        out = self.run_ok("verificar", "--inventario", self.inventory(""), code=1)
+        self.assertIn("sin destino en el inventario: `CLAUDE.md` › Reglas", out)
+
+    def test_copias_con_numeros_en_docs(self):
+        for name in ("docs/claude-3.md", "docs/agents-v2.md"):
+            write(self.repo / name, "# Doc\n")
+        write(self.repo / "AGENTS (1).md", "# Copia\n\n- x\n")
+        out = self.run_ok("fuentes")
+        self.assertNotIn("claude-3.md", out)
+        self.assertNotIn("agents-v2.md", out)
+        self.assertIn("  - AGENTS (1).md (copia de AGENTS.md", out)
+
+    def test_reglas_que_no_quedaron_tal_cual_cambian_el_mensaje_final(self):
+        write(self.repo / "AGENTS-old.md", "## Reglas\n\n- Sin datos de clientes en los logs.\n")
+        write(self.repo / "AGENTS.md", "# P\n")
+        rows = self.inventory("| `AGENTS-old.md` | Reglas | AGENTS.md | ## Reglas del proyecto |\n")
+        out = self.run_ok("verificar", "--inventario", rows)
+        self.assertIn("revisa las reglas de los avisos", out)
+        self.assertNotIn("✔ Nada se pierde", out)
 
 
 class ReviewStructureTest(Base):

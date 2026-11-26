@@ -44,6 +44,7 @@ Uso:
                                    [--carpeta contexto] [--repo .]
 """
 import argparse
+import fnmatch
 import glob
 import json
 import os
@@ -565,20 +566,32 @@ def exclude_local_ai(repo):
     return [line for line in local_ai_files(repo) if add_exclude(repo, line)]
 
 
-def perf_section(text):
-    """(inicio, fin) de la sección de rendimiento de un AGENTS.md (la primera), o None."""
+def perf_sections(text):
+    """Las secciones de rendimiento de un Markdown, fuera de los bloques de código: [(línea del título, título, inicio del
+    cuerpo, fin)] con posiciones en caracteres."""
     lines = text.splitlines(True)
-    position, start, level = 0, None, None
+    starts, position = [], 0
     for line in lines:
-        heading = ANY_HEADING.match(line)
-        if start is None:
-            own = PERF_HEADING.match(line)
-            if own:
-                start, level = position + len(line), len(own.group(1))
-        elif heading and len(heading.group(1)) <= level:
-            return start, position
+        starts.append(position)
         position += len(line)
-    return (start, len(text)) if start is not None else None
+    marks = headings(text)
+    found = []
+    for number, (index, level, title) in enumerate(marks):
+        if not PERF_HEADING.match(lines[index]):
+            continue
+        end = next((starts[other] for other, other_level, _ in marks[number + 1:] if other_level <= level), len(text))
+        found.append((index, title, starts[index] + len(lines[index]), end))
+    return found
+
+
+def perf_section(text):
+    """(inicio, fin) del cuerpo de la sección de rendimiento de un AGENTS.md, como la elige perf.py: si hay más de una,
+    la que trae el bloque de estado; si no, la primera. None si no hay."""
+    found = perf_sections(text)
+    if not found:
+        return None
+    chosen = next((item for item in found if PERF_BLOCK[0] in text[item[2]:item[3]]), found[0])
+    return chosen[2], chosen[3]
 
 
 def with_section(repo, folder, has, owner):
@@ -700,10 +713,14 @@ def product(args):
 # sección termina en AGENTS.md, en un doc con su fila en "Documentos" o descartada con motivo. Nada se pierde en silencio.
 # Copias de AGENTS.md o CLAUDE.md: AGENTS-old.md, AGENTS.bak.md, AGENTS.v1.md, AGENTS-2024-05-01.md, AGENTS copy.md,
 # AGENTS.md.orig, AGENTS.md~. Un nombre con otra palabra (claude-api.md, AGENTS.override.md) no es una copia.
-COPY_WORD = (r"(?:old|bak|backup|orig|original|prev|previo|previous|viejo|vieja|antiguo|antigua|anterior|copia|copy|"
-             r"save|saved|respaldo|v\d+(?:[._]\d+)*|\d{4}[-_.]?\d{2}[-_.]?\d{2}|\d+)")
+COPY_WORDS = (r"old|bak|backup|orig|original|prev|previo|previous|viejo|vieja|antiguo|antigua|anterior|copia|copy|"
+              r"save|saved|respaldo|\(\d+\)")
+COPY_WORD = r"(?:" + COPY_WORDS + r"|v\d+(?:[._]\d+)*|\d{4}[-_.]?\d{2}[-_.]?\d{2})"
 RENAMED = re.compile(r"^(?:agents|claude)(?:\.md)?(?:[-_. ]+" + COPY_WORD + r")+(?:\.md)?~?$|^(?:agents|claude)\.md~$",
                      re.I)
+# En docs/ hay docs con nombres como claude-3.md o agents-v2.md: ahí solo cuentan las palabras de copia
+RENAMED_STRICT = re.compile(r"^(?:agents|claude)(?:\.md)?(?:[-_. ]+(?:" + COPY_WORDS + r"))+(?:\.md)?~?$|"
+                            r"^(?:agents|claude)\.md~$", re.I)
 # Instrucciones de otros agentes: (ruta desde la raíz, qué es)
 OTHER_AGENTS = ((r"\.github/copilot-instructions\.md", "instrucciones de GitHub Copilot"),
                 (r"\.github/instructions/(?:.+/)?[^/]+\.instructions\.md", "instrucciones de GitHub Copilot por ruta"),
@@ -914,19 +931,25 @@ def hb_blocks(text):
 
 def owned_sections(text, strict=False):
     """Las secciones propias de otras skills: [(skill, título, texto de la sección con su título)]. En AGENTS.md y sus
-    copias, la primera sección de rendimiento (como la busca perf.py) es de hb-performance y `## Producto…` es de
-    hb-product. En las demás fuentes (strict), una sección de rendimiento es de hb-performance solo si trae su bloque, y
+    copias, la sección de rendimiento que elige perf.py (la que trae el bloque; si no, la primera) es de hb-performance y
+    `## Producto…` es de hb-product. En las demás fuentes (strict), una sección de rendimiento es de hb-performance solo si trae su bloque, y
     ninguna es de hb-product: esas skills solo escriben en AGENTS.md."""
-    lines, marks, found = text.splitlines(), headings(text), []
-    for position, (index, level, title) in enumerate(marks):
-        end = next((other for other, other_level, _ in marks[position + 1:] if other_level <= level), len(lines))
-        section = "\n".join(lines[index:end])
-        owners = [skill for skill, _, _ in found]
-        if "hb-performance" not in owners and PERF_HEADING.match(lines[index]) and \
-                (not strict or PERF_BLOCK[0] in section):
-            found.append(("hb-performance", title, section))
-        elif "hb-product" not in owners and not strict and level == 2 and title.startswith("Producto"):
-            found.append(("hb-product", title, section))
+    found = []
+    perf = perf_sections(text)
+    chosen = next((item for item in perf if PERF_BLOCK[0] in text[item[2]:item[3]]), None)
+    if chosen is None and perf and not strict:
+        chosen = perf[0]
+    if chosen is not None:
+        start = sum(len(line) for line in text.splitlines(True)[:chosen[0]])
+        found.append(("hb-performance", chosen[1], text[start:chosen[3]].rstrip("\n")))
+    if not strict:
+        lines, marks = text.splitlines(), headings(text)
+        for position, (index, level, title) in enumerate(marks):
+            if level == 2 and title.startswith("Producto"):
+                end = next((other for other, other_level, _ in marks[position + 1:] if other_level <= level),
+                           len(lines))
+                found.append(("hb-product", title, "\n".join(lines[index:end])))
+                break
     return found
 
 
@@ -991,7 +1014,8 @@ def source_kind(path, folder):
         if re.fullmatch(pattern, path):
             return "agente", what
     inside = path.startswith(folder + "/")
-    if RENAMED.match(name.name) and (str(name.parent) in (".", "docs", ".claude") or inside):
+    copy = RENAMED_STRICT if str(name.parent) == "docs" else RENAMED
+    if copy.match(name.name) and (str(name.parent) in (".", "docs", ".claude") or inside):
         return "renombrada", "copia de %s" % ("AGENTS.md" if name.name.lower().startswith("a") else "CLAUDE.md")
     if inside and name.name.upper() in ("AGENTS.MD", "CLAUDE.MD"):  # el de la carpeta de contexto no es el que se usa
         return "renombrada", "copia de %s en la carpeta de contexto" % name.name
@@ -999,26 +1023,51 @@ def source_kind(path, folder):
 
 
 def output_folders(repo, texts):
-    """Las rutas reales de las carpetas donde escriben otras skills (Carpeta de reportes, Carpeta de investigaciones y la
-    Carpeta de ## Producto), según los textos dados: lo de ahí son salidas, no fuentes."""
-    found = set()
+    """Dónde escriben otras skills (Carpeta de reportes, Carpeta de investigaciones y la Carpeta de ## Producto), según
+    los textos dados: [(ruta real, patrón de las subcarpetas o None, es de producto)]. Lo de ahí son salidas, no fuentes."""
+    found = []
     for text in texts:
         for value in OUTPUT_LINE.findall(text):
-            found.add(fixed_part(value.strip()))
+            value = value.strip()
+            marked = MARKER.search(value)
+            pattern = None
+            if marked:  # contexto/{fecha}-{slug}: las subcarpetas de ese patrón, no toda la carpeta fija
+                parts = pathlib.PurePosixPath(value).parts
+                first = next(i for i, part in enumerate(parts) if MARKER.search(part))
+                pattern = MARKER.sub("*", parts[first])
+            found.append((fixed_part(value), pattern, False))
         product = product_section(text)
         if product:
-            found.add(product[0])
-    real = set()
-    for value in found:
-        if value:
-            path = pathlib.Path(os.path.expanduser(value))
-            real.add(os.path.realpath(str(path if path.is_absolute() else repo / path)))
-    return real
+            found.append((product[0], None, True))
+    out = []
+    for value, pattern, is_product in found:
+        if value or pattern:
+            path = pathlib.Path(os.path.expanduser(value or "."))
+            out.append((os.path.realpath(str(path if path.is_absolute() else repo / path)), pattern, is_product))
+    return out
+
+
+def is_output(path, outputs, roots):
+    """Si un archivo es salida de otra skill. Una carpeta de salida que es una carpeta de contexto no la tapa entera: solo
+    sus subcarpetas con el patrón de la línea ({fecha}-{slug}) o, la de producto, sus archivos NN-*.md y estado.md."""
+    real = os.path.realpath(str(path))
+    for root, pattern, is_product in outputs:
+        if not real.startswith(root + os.sep):
+            continue
+        inner = real[len(root) + 1:].split(os.sep)
+        if pattern:
+            if len(inner) > 1 and fnmatch.fnmatch(inner[0], pattern):
+                return True
+        elif root not in roots:
+            return True
+        elif is_product and len(inner) == 1 and re.match(r"^(?:\d{2}-.*\.md|estado\.md)$", inner[0]):
+            return True
+    return False
 
 
 def context_folders(repo, folder):
     """La carpeta de contexto y las que pueden serlo con otro nombre: las carpetas de la raíz que son enlaces
-    simbólicos o que .git/info/exclude deja fuera de git."""
+    simbólicos o que .git/info/exclude deja fuera de git, sin los repos (vecinos enlazados, worktrees)."""
     names, excluded = [folder], set()
     try:
         for line in read_text(exclude_file(repo)).splitlines():
@@ -1032,8 +1081,8 @@ def context_folders(repo, folder):
     except OSError:
         entries = []
     for entry in entries:
-        if entry.name in names or entry.name.startswith(".") or entry.name in CONTEXT_SKIP:
-            continue
+        if entry.name in names or entry.name.startswith(".") or entry.name in CONTEXT_SKIP or exists(entry / ".git"):
+            continue  # un repo vecino enlazado o un worktree no es una carpeta de contexto
         if is_directory(entry) and (entry.is_symlink() or entry.name in excluded):
             names.append(entry.name)
     return names
@@ -1055,6 +1104,12 @@ def previous_sources(repo, folder, extra=None):
     agents = repo / "AGENTS.md"
     if is_file(agents) and read_text(agents).strip():
         add(agents, "actual", "el AGENTS.md actual", found)
+    for path in extra or []:  # lo que el usuario pasa con --fuente manda sobre la clasificación
+        source = pathlib.Path(os.path.expanduser(path))
+        if not is_file(source):
+            raise ValueError("--fuente %s no es un archivo" % path)
+        add(source if source.is_absolute() else pathlib.Path(os.path.abspath(str(source))), "carpeta",
+            "fuente indicada con --fuente", found)
     for parent in (repo, repo / "docs", repo / ".claude"):
         try:
             children = sorted(parent.iterdir()) if is_directory(parent) else []
@@ -1079,40 +1134,37 @@ def previous_sources(repo, folder, extra=None):
                 kind, what = source_kind(rel(repo, path), folder)
                 if kind == "agente" and not only_pointer(read_text(path)):
                     add(path, kind, what, found)
+    roots = []
     for name in context_folders(repo, folder):
         base = repo / name
         if not is_directory(base):
             continue
+        roots.append(os.path.realpath(str(base)))
         for top, dirs, files in os.walk(str(base), followlinks=True):
             depth = len(pathlib.Path(top).relative_to(base).parts)
-            dirs[:] = [] if depth >= 4 else sorted(d for d in dirs if d not in CONTEXT_SKIP and not d.startswith("."))
+            dirs[:] = [] if depth >= 4 else sorted(d for d in dirs if d not in CONTEXT_SKIP and not d.startswith(".")
+                                                   and not exists(pathlib.Path(top) / d / ".git"))
             for file in sorted(files):
                 path = pathlib.Path(top) / file
-                kind, what = source_kind(rel(repo, path), name)
-                if kind == "renombrada":
-                    add(path, kind, what, found)
+                kind, what = source_kind(rel(repo, path), folder)
+                if kind == "renombrada" or (name != folder and RENAMED.match(file)):  # en una autodetectada, solo copias
+                    add(path, "renombrada", what or "copia de %s" % (
+                        "AGENTS.md" if file.lower().startswith("a") else "CLAUDE.md"), found)
                 elif file.lower().endswith(".md"):
-                    candidates.append(path)
+                    candidates.append((path, name == folder))
     texts = [source["text"] for source in found if source["kind"] in LOOSE]
-    skipped = output_folders(repo, texts)
+    outputs = output_folders(repo, texts)
     listed = {norm(doc_path(row[0])) for row in documented(read_text(agents)) if row} if is_file(agents) else set()
-    for path in candidates:
-        real = os.path.realpath(str(path))
-        if any(real == out or real.startswith(out + os.sep) for out in skipped) or norm(rel(repo, path)) in listed:
+    for path, own in candidates:
+        if is_output(path, outputs, roots) or norm(rel(repo, path)) in listed:
             continue
         text = read_text(path)
         instructions = (INSTRUCTION_NAME.search(path.name) or frontmatter(text)[0].get("description")
                         or len(AGENT_WORDS.findall(text)) >= 2)
-        if instructions:
+        if instructions and own:
             add(path, "carpeta", "de la carpeta de contexto, con instrucciones para agentes", found)
-        else:
+        else:  # en una carpeta que solo puede ser de contexto, se nombra: el usuario dice si es una fuente
             add(path, "otro", "de la carpeta de contexto", others)
-    for path in extra or []:
-        source = pathlib.Path(os.path.expanduser(path))
-        if not is_file(source):
-            raise ValueError("--fuente %s no es un archivo" % path)
-        add(source if source.is_absolute() else pathlib.Path(os.path.abspath(str(source))), "carpeta",
-            "fuente indicada con --fuente", found)
     for pattern in LOCAL_SKILLS:
         for match in sorted(glob.glob(str(repo / pattern), recursive=True)):
             path = pathlib.Path(match)
@@ -1170,6 +1222,9 @@ def sources_command(args):
     repo = toplevel(args.repo)
     folder = args.carpeta.strip("/")
     found, others, local = previous_sources(repo, folder, args.fuente)
+    for name in (".claude", ".github", ".cursor", folder):
+        if is_directory(repo / name) and not os.access(str(repo / name), os.R_OK | os.X_OK):
+            print("⚠ No puedo leer %s/: si tiene contexto de IA, dale permiso de lectura y vuelve a correr" % name)
     if not found:
         print("Fuentes previas de contexto de IA: ninguna")
         print("Camino: plantilla (crea AGENTS.md desde assets/AGENTS.template.md)")
@@ -1251,6 +1306,12 @@ def explicit_previous(values):
     return out
 
 
+def head_text(repo, path):
+    """El texto de un archivo en HEAD, o None si no está. Sin cortar por la codificación (Latin-1, binario)."""
+    shown = subprocess.run(["git", "-C", str(repo), "show", "HEAD:" + path], capture_output=True)
+    return shown.stdout.decode("utf-8", "replace") if shown.returncode == 0 else None
+
+
 def head_versions(repo, folder):
     """Las fuentes previas versionadas que cambiaron o se borraron desde HEAD: {ruta: texto en HEAD}. AGENTS.md, si
     está en HEAD, siempre: es la fuente del inventario aunque todavía no se haya reescrito."""
@@ -1262,9 +1323,9 @@ def head_versions(repo, folder):
         if not path or source_kind(path, folder)[0] is None:
             continue
         if path == "AGENTS.md" or git(repo, "diff", "--quiet", "HEAD", "--", path).returncode == 1:
-            shown = git(repo, "show", "HEAD:" + path)
-            if shown.returncode == 0:
-                out[path] = shown.stdout
+            text = head_text(repo, path)
+            if text is not None:
+                out[path] = text
     return out
 
 
@@ -1303,7 +1364,7 @@ def destination(value):
     """("agents" | "doc" | "descartada" | None, ruta del doc). Una sugerencia sin decidir ("decide" o un `<docs>` sin
     reemplazar) no es un destino."""
     text = plain(value)
-    if not text or "decide" in text or PLACEHOLDER.search(value):
+    if not text or "decide" in text or PLACEHOLDER.search(value) or text.startswith("descartada si"):
         return None, None
     if text.startswith("agents.md"):
         return "agents", None
@@ -1312,7 +1373,7 @@ def destination(value):
     quoted = re.search(r"`([^`]+)`", value)
     rest = re.sub(r"(?i)^doc:\s*", "", value.strip())
     path = quoted.group(1) if quoted else (rest.split()[0] if rest.split() else "")
-    if "/" in path or path.endswith(".md") or re.fullmatch(r"\.?[\w.-]+", path):
+    if "/" in path or path.endswith((".md", ".mdc")) or re.fullmatch(r"\.[\w.-]+", path):
         return "doc", norm(path)
     return None, None
 
@@ -1341,7 +1402,7 @@ def verify(args):
     found, _, local = previous_sources(repo, folder, args.fuente)
     before = head_versions(repo, folder)
     before.update(explicit_previous(args.previo))
-    sources = []
+    sources, previous = [], set(before)  # previous: las fuentes cuyo texto es el de antes (HEAD o --previo)
     for source in found:
         if source["kind"] == "actual":
             continue  # el AGENTS.md de ahora es el resultado: su versión de antes viene de --previo o de HEAD
@@ -1355,6 +1416,29 @@ def verify(args):
                             "text": text})
     errors, warnings = [], []
     new_plain = plain(new)
+    rows = []
+    if args.inventario:
+        text = sys.stdin.read() if args.inventario == "-" else read_text(pathlib.Path(os.path.expanduser(args.inventario)))
+        rows = inventory_rows(text)
+        if not rows:
+            errors.append("el inventario no tiene la tabla con las columnas Fuente, Sección y Destino")
+
+    def matching(cell, pool):
+        name = norm(bare(cell)) if cell else ""
+        exact = [s for s in pool if norm(s["path"]) == name]
+        if exact or "/" in name or source_kind(name, folder)[0] is not None:
+            return exact  # una ruta conocida (CLAUDE.md, AGENTS.md) no se busca por nombre en otra carpeta
+        return [s for s in pool if pathlib.PurePosixPath(s["path"]).name == name]
+
+    for row in rows:  # una fuente del inventario borrada o reescrita que está en git: la de HEAD
+        name = norm(bare(row["fuente"])) if row["fuente"] else ""
+        if name and not matching(row["fuente"], sources + local):
+            text = head_text(repo, name)
+            if text is not None and text.strip() and not only_pointer(text):
+                kind, what = source_kind(name, folder)
+                sources.append({"path": name, "kind": kind or "carpeta", "what": (what or "fuente") + ", la de HEAD",
+                                "text": text})
+                previous.add(name)
 
     # Bloques y secciones de otras skills: tal cual. Si el AGENTS.md de antes los tenía, mandan los suyos.
     blocks = {}
@@ -1397,6 +1481,8 @@ def verify(args):
             errors.append("la fila de `%s` en \"Documentos\" no dice cuándo leerlo" % path)
     for source in sources:
         name = pathlib.PurePosixPath(source["path"]).name
+        if name.upper() in ("AGENTS.MD", "CLAUDE.MD"):
+            name = source["path"]  # contexto/AGENTS.md: AGENTS.md por sí solo nombra al de la raíz
         if source["kind"] == "renombrada" and name in new:
             errors.append("AGENTS.md nombra `%s`, una fuente que se reemplaza: lo que sirva de ella va en AGENTS.md o en "
                           "un doc" % name)
@@ -1404,24 +1490,19 @@ def verify(args):
     # El inventario: cada sección de cada fuente con su destino
     inventoried = [source for source in sources if source["kind"] in INVENTORIED]
     known_sources = sources + local
-    destinations, rows = {}, []
-    if args.inventario:
-        text = sys.stdin.read() if args.inventario == "-" else read_text(pathlib.Path(os.path.expanduser(args.inventario)))
-        rows = inventory_rows(text)
-        if not rows:
-            errors.append("el inventario no tiene la tabla con las columnas Fuente, Sección y Destino")
-    elif inventoried:
+    destinations = {}
+    if not args.inventario and inventoried:
         errors.append("falta el inventario de traspaso: pásalo con --inventario <archivo> (la tabla de "
                       "`contexto.py fuentes`, con Destino completo)")
-    by_source = {}
+    by_source, lost = {}, []
     for row in rows:
-        name = norm(bare(row["fuente"])) if row["fuente"] else ""
-        match = [s for s in known_sources if norm(s["path"]) == name] or \
-            [s for s in known_sources if pathlib.PurePosixPath(s["path"]).name == name]
+        match = matching(row["fuente"], known_sources)
         if len(match) != 1:
-            errors.append("el inventario trae «%s», que no encuentro como fuente: si la reescribiste, pasa la copia de "
-                          "antes con --previo %s=<copia> (si está en git, uso la de HEAD); si no la detecté, pásala con "
-                          "--fuente" % (row["fuente"], bare(row["fuente"]) or "<ruta>"))
+            if row["fuente"] not in lost:  # un error por fuente, no por fila
+                lost.append(row["fuente"])
+                errors.append("el inventario trae «%s», que no encuentro como fuente: si la reescribiste, pasa la copia "
+                              "de antes con --previo %s=<copia> (si está en git, uso la de HEAD); si no la detecté, "
+                              "pásala con --fuente" % (row["fuente"], bare(row["fuente"]) or "<ruta>"))
             continue
         by_source.setdefault(match[0]["path"], []).append(row)
     for source in known_sources if args.inventario else []:  # sin inventario ya hay un error que lo dice
@@ -1449,8 +1530,14 @@ def verify(args):
                 pieces = ", ".join(part["label"] for part in missing) if item["parts"] else item["label"]
                 errors.append("sin destino en el inventario: `%s` › %s (líneas %d-%d)" % (source["path"], pieces,
                                                                                          item["start"], item["end"]))
+        rewritable = source["kind"] in ("actual",) + POINTERS and norm(source["path"]) not in previous
         for label in labels:
-            if label not in known:
+            if label in known:
+                continue
+            if rewritable:  # se reescribe en su lugar y no hay copia: esa sección pudo perderse
+                errors.append("el inventario trae «%s» de `%s`, que ya no la tiene: si la reescribiste, pasa la copia "
+                              "de antes con --previo %s=<copia>" % (label, source["path"], source["path"]))
+            else:
                 warnings.append("fila del inventario con una sección que `%s` no tiene: «%s»" % (source["path"], label))
         for row in mine_rows:
             kind, path = destination(row["destino"])
@@ -1526,14 +1613,18 @@ def verify(args):
     if errors:
         print("✖ El traspaso no está completo: corrige lo marcado y vuelve a correr `contexto.py verificar`.")
         return 1
-    print("✔ Nada se pierde: cada sección de las fuentes tiene destino, lo de otras skills quedó tal cual y "
-          "\"Documentos\" no referencia ninguna fuente que se reemplaza.")
+    if any(message.startswith("regla de ") for message in warnings):
+        print("✔ Cada sección de las fuentes tiene destino, lo de otras skills quedó tal cual y \"Documentos\" no "
+              "referencia ninguna fuente que se reemplaza; revisa las reglas de los avisos: no quedaron tal cual.")
+    else:
+        print("✔ Nada se pierde: cada sección de las fuentes tiene destino, lo de otras skills quedó tal cual y "
+              "\"Documentos\" no referencia ninguna fuente que se reemplaza.")
     gone = [source["path"] for source in sources if source["kind"] in DELETED_BY_DEFAULT and exists(repo /
                                                                                                     source["path"])]
     if gone:
         print("Pregunta si se conservan (por defecto, borrarlas después de migrar): " + ", ".join(gone) + ".")
     pointers = [source["path"] for source in sources if source["kind"] in POINTERS
-                and not only_pointer(read_text(repo / source["path"]))]
+                and "AGENTS.md" not in read_text(repo / source["path"])]  # los que ya remiten a AGENTS.md, no
     if pointers:
         print("Deja como puntero a AGENTS.md (`@AGENTS.md` donde la herramienta importa archivos; si no, una línea que "
               "remita a él), con lo propio de esa herramienta que quedó en su archivo: " + ", ".join(pointers) + ".")
