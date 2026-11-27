@@ -51,6 +51,9 @@ Uso:
   python3 -I report.py --unit <ruta> --folder <slug> [--out <carpeta>] [--repo .]
       (registra una unidad: la ruta de su fuente, relativa a la raíz del repo principal, o su identificador)
   python3 -I report.py --meta <meta.json> [--base <ref> | --main-branch <rama>] [--out <carpeta>] [--repo .]
+  python3 -I report.py --meta <meta.json> --attribution [--base <ref> | --main-branch <rama>] [--repo .]
+      (qué es de la tarea, repo por repo, en JSON y sin escribir nada: lo usa hb-review. El meta puede no existir
+      todavía si su carpeta ya tiene la foto)
 """
 import argparse
 import base64
@@ -67,6 +70,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -1359,7 +1363,7 @@ def changed_files(repo, base, layout):
     untracked = git(repo["root"], "ls-files", "-z", "--others", "--exclude-standard").decode("utf-8", "surrogateescape")
     for path in untracked.split("\0"):
         if path:
-            files.append({"status": "A", "path": path.rstrip("/"), "old": None})
+            files.append({"status": "A", "path": path.rstrip("/"), "old": None, "untracked": True})
     return [f for f in files if not layout.is_output(repo["root"] / f["path"])]
 
 
@@ -1428,6 +1432,62 @@ def blobs_at(root, head, paths):
     return found
 
 
+def merge_base(root, one, other):
+    """El merge-base de dos refs, o None si falta alguna o git no lo encuentra."""
+    if not one or not other:
+        return None
+    try:
+        return git(root, "merge-base", one, other).decode().strip() or None
+    except RuntimeError:
+        return None
+
+
+def is_ancestor(root, older, newer):
+    return subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", older, newer],
+                          capture_output=True).returncode == 0
+
+
+def isolated_since(root, head):
+    """Si el diff desde `head` es solo de la rama: `head` es ancestro de HEAD (sin rebase) y cada merge en medio une
+    ramas que salieron de `head` (el de un subagente sí; el de la rama principal, no)."""
+    if not head or not is_ancestor(root, head, "HEAD"):
+        return False
+    merges = subprocess.run(["git", "-C", str(root), "rev-list", "--merges", "--parents", head + "..HEAD"],
+                            capture_output=True, text=True)
+    if merges.returncode != 0:
+        return False
+    return all(is_ancestor(root, head, parent) for line in merges.stdout.splitlines() for parent in line.split()[1:])
+
+
+def without_task(root, photo_blob, photo_base_blob, base_blob):
+    """El hash que tendría un archivo sin la tarea después de un rebase o un merge de la rama principal: lo de la foto
+    llevado a la base de ahora con un merge de tres vías. None si falta un lado o hay conflicto: no se sabe."""
+    if base_blob == photo_base_blob:
+        return photo_blob
+    if photo_blob == photo_base_blob:
+        return base_blob  # la rama no lo tocaba: sin la tarea, es lo de la base
+    if not (photo_blob and photo_base_blob and base_blob) or "dir" in (photo_blob, photo_base_blob, base_blob):
+        return None
+    folder = tempfile.mkdtemp(prefix="hb-implement-")
+    try:
+        sides = []
+        for name, blob in (("foto", photo_blob), ("base-foto", photo_base_blob), ("base", base_blob)):
+            side = os.path.join(folder, name)
+            with open(side, "wb") as handle:
+                handle.write(git(root, "cat-file", "blob", blob))
+            sides.append(side)
+        merged = subprocess.run(["git", "merge-file", "-p"] + sides, capture_output=True, cwd=folder)
+        if merged.returncode != 0:  # conflicto o error
+            return None
+        hashed = subprocess.run(["git", "-C", str(root), "hash-object", "--no-filters", "--stdin"], input=merged.stdout,
+                                capture_output=True)
+        return hashed.stdout.decode().strip() or None if hashed.returncode == 0 else None
+    except (OSError, RuntimeError):
+        return None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def attribute(repo, files):
     """Para cada archivo cambiado contra la base: "task" (cambió después de la foto), "mixed" (ya estaba sucio y además
     cambió), "mixed-committed" (ya tenía cambios commiteados en la rama antes de la foto y además cambió) o "previous"
@@ -1443,7 +1503,11 @@ def attribute(repo, files):
     names = sorted({name for f in files for name in (f["path"], f["old"]) if name and name not in dirty})
     at_photo = blobs_at(repo["root"], photo.get("head"), names)
     at_now = blobs_at(repo["root"], state.get("head"), names) if state is not None else {}
-    at_base = blobs_at(repo["root"], repo.get("base"), names)
+    # Lo que la rama ya tenía commiteado en la foto se mide contra la base de entonces, no la de ahora: tras un rebase o
+    # un merge de la rama principal, la base actual trae cambios ajenos. Sin commits en la foto, no había nada previo.
+    photo_base = merge_base(repo["root"], photo.get("head"), repo.get("base"))
+    at_photo_base = blobs_at(repo["root"], photo_base, names) if photo_base else at_photo
+    at_base = blobs_at(repo["root"], repo.get("base"), names) if photo_base else {}
     verdicts = {}
     for f in files:
         paths = [f["path"]] + ([f["old"]] if f["old"] and f["old"] != f["path"] else [])
@@ -1455,12 +1519,19 @@ def attribute(repo, files):
         clean_now = dirty_now is not None and not any(path in dirty_now for path in paths)
         before = {path: at_photo.get(path) for path in paths}
         if clean_now:
-            changed = before != {path: at_now.get(path) for path in paths}
+            now = {path: at_now.get(path) for path in paths}
         else:
-            changed = before != {path: content_hash(repo["root"] / path) for path in paths}
+            now = {path: content_hash(repo["root"] / path) for path in paths}
+        changed = before != now
+        if changed and photo_base and any(at_base.get(path) != at_photo_base.get(path) for path in paths):
+            # la base se movió (rebase o merge de la rama principal): lo de la foto llevado a la base de ahora es lo
+            # que habría sin la tarea; si coincide con lo de ahora, la tarea no lo tocó
+            expected = {path: without_task(repo["root"], at_photo.get(path), at_photo_base.get(path),
+                                           at_base.get(path)) for path in paths}
+            changed = expected != now
         if not changed:
             verdicts[id(f)] = ("previous", "commiteado en la rama antes de la tarea")
-        elif any(at_base.get(path) != at_photo.get(path) for path in paths):
+        elif any(at_photo_base.get(path) != at_photo.get(path) for path in paths):
             verdicts[id(f)] = ("mixed-committed", None)
         else:
             verdicts[id(f)] = ("task", None)
@@ -1522,8 +1593,9 @@ def coverage(main, layout, args, meta, snapshot, units):
             if detail:
                 cov.others.append({"path": display_path(path, main), "detail": detail})
     else:
-        cov.notes.append("ℹ️  La tarea no tiene foto inicial (empezó antes de hb-implement 1.7.0, o sin report.py "
-                         "--folder al empezar): entran el repo principal y \"repos\" del meta.")
+        if not args.ignore_snapshot:  # con --ignore-snapshot ya lo dice su propio aviso
+            cov.notes.append("ℹ️  La tarea no tiene foto inicial (empezó antes de hb-implement 1.7.0, o sin report.py "
+                             "--folder al empezar): entran el repo principal y \"repos\" del meta.")
         cov.repos = list(ordered.values())
         rest = {key: info["root"] for key, info in found.items() if key not in ordered}
         now = states(rest, layout, {key for key in rest if found[key]["role"] == "sibling"})
@@ -2424,20 +2496,29 @@ def empty_message(cov, temporary_count, previous_count, repo, args, task_slug):
     return "\n".join(lines)
 
 
-def generate(repo, layout, args):
-    meta_path = lexical(args.meta)
-    notes = []
-    meta = clean_meta(json.loads(meta_path.read_text(encoding="utf-8")), notes)
+class Collected:
+    """Qué es de la tarea, repo por repo, sin escribir nada: lo que usan el reporte y --attribution."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+def task_and_snapshot(repo, layout, args, meta, meta_path, notes, verb="Genero"):
+    """La tarea del meta y su foto inicial (None sin foto o con --ignore-snapshot)."""
     date = meta.get("date") or datetime.date.today().isoformat()
     task_slug = safe_slug(meta["slug"]) if meta.get("slug") else slug(meta.get("title", "reporte"))
     task = layout.task(task_slug, date, meta_path)
-    out = task.file("report")
     snapshot = None if args.ignore_snapshot else load_snapshot(task, notes)
     if args.ignore_snapshot:
-        notes.append("ℹ️  Genero sin la foto inicial (--ignore-snapshot): entran el repo principal y \"repos\" del meta.")
-    cov = coverage(repo, layout, args, meta, snapshot, structure_units(repo))
-    early, style, script = template_parts()
+        notes.append("ℹ️  %s sin la foto inicial (--ignore-snapshot): entran el repo principal y \"repos\" del meta."
+                     % verb)
+    return task, snapshot
 
+
+def collect(repo, layout, args, meta, snapshot):
+    """Los archivos de la tarea, los no atribuidos y lo excluido (temporales y configuración local), como los decide el
+    reporte. Solo lee: ni el contenido de los archivos ni nada en disco."""
+    cov = coverage(repo, layout, args, meta, snapshot, structure_units(repo))
     infos, group_defs = meta["files"], meta["groups"]
     temporary = list(meta.get("temporary", []))
     temporary_keys = {str(item["path"]) for item in temporary}
@@ -2499,14 +2580,12 @@ def generate(repo, layout, args):
             verdict, reason = verdicts[id(f)]
             if verdict == "previous":
                 previous_count += 1
-                cov.unattributed.append({"repo": r["name"], "path": f["path"], "reason": reason})
+                cov.unattributed.append({"repo": r["name"], "path": f["path"], "reason": reason, "key": f["key"]})
                 if any(explained(infos.get(alias)) for alias in keys_for(r, f["path"])):
                     cov.claimed.append(f["key"])
                 continue
             f["warnings"] = {"mixed": [MIXED_WARNING], "mixed-committed": [MIXED_COMMITTED_WARNING]}.get(verdict, [])
             f["info"] = next((infos[alias] for alias in keys_for(r, f["path"]) if alias in infos), None)
-            f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None
-            f["after"] = decode(read_after(r["root"], f["path"])) if f["status"] != "D" else None
             # Un archivo con su propia entrada en "files" se muestra aparte, aunque un grupo lo cubra.
             f["group"] = None if f["info"] is not None else group_for(f["key"], group_defs)
             files.append(f)
@@ -2526,13 +2605,34 @@ def generate(repo, layout, args):
             key = path if r["main"] else f'{r["name"]}:{path}'
             if not temporary_or_local(r, path, key, keys_for(r, path)):
                 previous_count += 1
-                cov.unattributed.append({"repo": r["name"], "path": path,
+                cov.unattributed.append({"repo": r["name"], "path": path, "key": key,
                                          "reason": "sin commit desde antes de la tarea; el repo no cambió después"})
                 if any(explained(infos.get(alias)) for alias in keys_for(r, path)):
                     cov.claimed.append(key)
 
+    return Collected(cov=cov, files=files, temporary=temporary, temporary_keys=temporary_keys,
+                     temporary_found=temporary_found, temporary_count=temporary_count, previous_count=previous_count,
+                     infos=infos, group_defs=group_defs)
+
+
+def generate(repo, layout, args):
+    meta_path = lexical(args.meta)
+    notes = []
+    meta = clean_meta(json.loads(meta_path.read_text(encoding="utf-8")), notes)
+    date = meta.get("date") or datetime.date.today().isoformat()
+    task, snapshot = task_and_snapshot(repo, layout, args, meta, meta_path, notes)
+    out = task.file("report")
+    found = collect(repo, layout, args, meta, snapshot)
+    cov, files, temporary = found.cov, found.files, found.temporary
+    temporary_keys, temporary_found, group_defs = found.temporary_keys, found.temporary_found, found.group_defs
+    early, style, script = template_parts()
+    for f in files:
+        r = f["repo"]
+        f["before"] = decode(read_before(r["root"], r["base"], f["old"])) if f["status"] != "A" else None
+        f["after"] = decode(read_after(r["root"], f["path"])) if f["status"] != "D" else None
+
     if not files:
-        raise EmptyReport(empty_message(cov, temporary_count, previous_count, repo, args, task.slug))
+        raise EmptyReport(empty_message(cov, found.temporary_count, found.previous_count, repo, args, task.slug))
 
     migrations = language_migrations(files)
     for f, other, how in migrations:
@@ -2620,6 +2720,106 @@ def generate(repo, layout, args):
                  migrations, repo, args, task, meta_path, layout)
 
 
+ATTRIBUTION_NOTE = {
+    "mixed": "ya tenía cambios sin commit al empezar la tarea: el diff contra la base mezcla esos cambios con los de la "
+             "tarea, y la foto no guarda el contenido previo (solo su hash)",
+    "mixed-committed": "ya tenía cambios commiteados en la rama antes de la tarea: lo de la tarea es el diff desde "
+                       "task_diff_from (el HEAD de la foto)",
+}
+ATTRIBUTION_NOT_ISOLATED = ("ya tenía cambios commiteados en la rama antes de la tarea, y después de la foto la rama se "
+                            "rebasó o recibió un merge de una rama que no salió de la foto (como la principal): no se "
+                            "puede aislar el diff de la tarea (trátalo como mixed)")
+
+
+def attribution(repo, layout, args):
+    """--attribution: qué es de la tarea, repo por repo, en JSON, con la misma lógica del reporte. No escribe archivos
+    (git solo refresca la caché de stat de .git/index, como cualquier git status). El meta puede no existir todavía si
+    su carpeta ya tiene la foto. La salida es ASCII: un nombre que no es UTF-8 sale con escapes \\udcXX."""
+    meta_path = lexical(args.meta)
+    notes = []
+    own = meta_path.parent
+    if real(meta_path).is_file():
+        meta = clean_meta(json.loads(real(meta_path).read_text(encoding="utf-8")), notes)
+    elif real(own / SNAPSHOT).is_file():
+        meta = clean_meta({}, notes)  # la tarea empezó (tiene foto) y todavía no escribió su meta
+    else:
+        raise RuntimeError(f"no encuentro {shown(meta_path, repo)} ni la foto inicial en su carpeta: pasa el meta.json "
+                           "de la tarea (report.py --folder <slug> dice su ruta)")
+    first = []
+    task, snapshot = task_and_snapshot(repo, layout, args, meta, meta_path, first, verb="Atribuyo")
+    if real(own / SNAPSHOT).is_file() and real(task.folder) != real(own) and not args.ignore_snapshot:
+        # la carpeta del meta tiene su foto (por ejemplo, con otra carpeta de reportes): manda esa, sin los avisos de
+        # la otra
+        named = re.match(r"^(\d{4}-\d{2}-\d{2})-(.+)$", own.name)
+        task = Task(own, named.group(1) if named else task.date, named.group(2) if named else task.slug)
+        snapshot = load_snapshot(task, notes)
+    else:
+        notes.extend(first)
+    found = collect(repo, layout, args, meta, snapshot)
+    cov = found.cov
+    paths = {r["name"]: display_path(r["root"], repo) for r in cov.repos + cov.unchanged}
+    repos = []
+    for r in cov.repos:
+        raw = r.get("photo") if isinstance(r.get("photo"), dict) else None
+        photo = raw if raw is not None and "error" not in raw else {}
+        in_photo = bool(photo)
+        isolated = isolated_since(r["root"], photo.get("head"))
+        if cov.photo and raw is not None and "error" in raw:
+            notes.append(f'⚠️  La foto inicial no pudo leer {r["name"]} ({raw["error"]}): todo su diff cuenta como de '
+                         "la tarea.")
+        elif cov.photo and not in_photo:
+            notes.append(f'⚠️  {r["name"]} no estaba en la foto inicial: todo su diff cuenta como de la tarea.')
+        files = []
+        for f in sorted((f for f in found.files if f["repo"] is r), key=lambda item: item["path"]):
+            verdict = "mixed" if MIXED_WARNING in f["warnings"] else (
+                "mixed-committed" if MIXED_COMMITTED_WARNING in f["warnings"] else "task")
+            entry = {"path": f["path"], "status": f["status"], "old": f["old"] if f["old"] != f["path"] else None,
+                     "untracked": bool(f.get("untracked")), "attribution": verdict}
+            if verdict == "mixed":
+                entry["note"] = ATTRIBUTION_NOTE["mixed"]
+            elif verdict == "mixed-committed":
+                entry["task_diff_from"] = photo.get("head") if isolated else None
+                entry["note"] = ATTRIBUTION_NOTE["mixed-committed"] if isolated else ATTRIBUTION_NOT_ISOLATED
+            files.append(entry)
+        repos.append({"name": r["name"], "path": display_path(r["root"], repo), "main": bool(r["main"]),
+                      "units": list(r["units"]), "branch": r.get("branch"), "branch_before": r.get("branch_before"),
+                      "base": r["base"], "base_text": base_text(r), "in_photo": in_photo,
+                      "photo_head": photo.get("head"), "files": files})
+    claimed = set(cov.claimed)
+    if claimed:
+        notes.append("⚠️  El meta explica archivos que ya estaban así en la foto inicial (van a «Cambios no "
+                     "atribuidos»): " + ", ".join(cov.claimed) + ". Si la foto se tomó después de empezar a cambiar, "
+                     "vuelve a correr con --ignore-snapshot.")
+    unattributed = []
+    for item in cov.unattributed:
+        repo_path = paths.get(item["repo"], item["repo"])
+        unattributed.append({"repo": item["repo"], "repo_path": repo_path, "path": item["path"],
+                             "reason": item["reason"], "claimed_by_meta": item.get("key") in claimed})
+    others = list(cov.others) + [{"path": where, "detail": "cambios sin commit (sin foto: no se sabe si son de la "
+                                                           "tarea)"} for where in cov.dirty_siblings_without_photo]
+    empty = None
+    if not found.files:
+        empty = empty_message(cov, found.temporary_count, found.previous_count, repo, args, task.slug).replace(
+            "No genero el reporte: no encontré ningún archivo de la tarea, así que no escribí nada.",
+            "No hay ningún archivo de la tarea.")
+    data = {
+        "task": {"slug": task.slug, "folder": shown(task.folder, repo), "meta": shown(meta_path, repo)},
+        "photo": cov.photo,
+        "repos": repos,
+        "unattributed": unattributed,
+        "claimed": list(cov.claimed),
+        "excluded": [{"path": str(item.get("path")), "why": item.get("why") or "cambio temporal de la tarea"}
+                     for item in found.temporary],
+        "unchanged": [r["name"] for r in cov.unchanged],
+        "skipped": list(cov.skipped),
+        "others": others,
+        "notes": [text for text in notes + cov.notes + [w for r in cov.repos + cov.unchanged
+                                                         for w in r.get("warnings", [])] if text],
+        "empty": empty,
+    }
+    print(json.dumps(data, ensure_ascii=True, indent=2))
+
+
 def report_notes(cov, files, meta, notes, warnings, missing_previews, group_defs, temporary_keys, temporary_found,
                  migrations, repo, args, task, meta_path, layout):
     """Los avisos de la salida, después del reporte: primero lo que cambia qué entra, después lo que falta completar."""
@@ -2701,6 +2901,9 @@ def main():
     ap.add_argument("--date", help="con --folder: la fecha AAAA-MM-DD (por defecto, hoy)")
     ap.add_argument("--ignore-snapshot", action="store_true",
                     help="con --meta: genera sin la foto inicial (solo si se tomó después de empezar a cambiar)")
+    ap.add_argument("--attribution", action="store_true",
+                    help="con --meta: imprime en JSON qué es de la tarea, repo por repo (la misma lógica del reporte), "
+                         "sin escribir nada; lo usa hb-review")
     args = ap.parse_args()
     if args.unit and not args.folder:
         ap.error("--unit va con --folder <slug>: la tarea en la que se registra la unidad")
@@ -2708,6 +2911,8 @@ def main():
         ap.error("falta --meta <meta.json> (generar el reporte) o --folder <slug> (la carpeta de la tarea)")
     if args.ignore_snapshot and not args.meta:
         ap.error("--ignore-snapshot va con --meta: es para generar el reporte")
+    if args.attribution and not args.meta:
+        ap.error("--attribution va con --meta <meta.json>: el de la tarea que se revisa")
 
     repo = toplevel(args.repo)
     layout = Layout(repo, args.out or agents_out(repo) or DEFAULT_OUT)
@@ -2716,6 +2921,8 @@ def main():
         register_unit(repo, layout, args)
     elif args.folder:
         print_folder(repo, layout, args)
+    elif args.attribution:
+        attribution(repo, layout, args)
     else:
         generate(repo, layout, args)
 

@@ -78,7 +78,7 @@ class BranchRuleTest(unittest.TestCase):
         self.push = section(self.text, "## 5. Push y pull request", "## 6. Limpiar ramas")
 
     def test_version(self):
-        self.assertRegex(self.text, r'(?m)^  version: "1\.1\.1"$')
+        self.assertRegex(self.text, r'(?m)^  version: "1\.2\.0"$')
 
     def test_propone_la_rama_y_la_crea_solo_con_confirmacion(self):
         self.assertIn("en la misma confirmación del push, y créala solo cuando el usuario la confirme o te dé el nombre",
@@ -88,6 +88,36 @@ class BranchRuleTest(unittest.TestCase):
         self.assertNotIn("la que creó `hb-implement`", self.push)
         self.assertIn("si fija un formato de nombre, manda sobre el de aquí", self.push)
         self.assertIn("la rama nueva se confirma igual", self.push)
+
+
+class AttributionTest(unittest.TestCase):
+    """1.2.0: los repos y los archivos de la tarea salen de la misma atribución que usa hb-review."""
+
+    def setUp(self):
+        self.rules = section(SKILL.read_text(encoding="utf-8"), "## 1. Lee las reglas del proyecto",
+                             "## 2. Formato del mensaje")
+
+    def test_usa_la_atribucion_de_hb_implement(self):
+        self.assertIn("report.py --meta <carpeta de la tarea>/meta.json --attribution", self.rules)
+        self.assertIn("la misma que usa `hb-review`", self.rules)
+        self.assertIn("los de `repos` en su meta y cada unidad del modelo con cambios", self.rules)
+
+    def test_lo_que_ya_estaba_sin_commit_no_entra_con_la_tarea(self):
+        self.assertIn('lo de `unattributed` con el motivo "sin commit desde antes de la tarea"', self.rules)
+        self.assertIn("no lo commitees con ella salvo que el usuario lo pida; pregúntale", self.rules)
+        self.assertIn("en un archivo `mixed`", self.rules)
+        self.assertIn("no lo agregues entero", self.rules)
+        self.assertIn("los repos de `others`", self.rules)
+
+    def test_la_atribucion_con_su_base_y_la_ubicacion_del_script(self):
+        self.assertIn("cd <raíz-del-proyecto> && python3 -I <carpeta de hb-implement>/scripts/report.py", self.rules)
+        self.assertIn("[--base <ref> | --main-branch <rama>]", self.rules)
+        self.assertIn("`<carpeta-de-esta-skill>/../hb-implement`", self.rules)
+        self.assertIn("sin foto (`photo: false`)", self.rules)
+
+    def test_lo_que_nunca_entra_no_mezcla_lo_ajeno(self):
+        never = self.rules.split("- **Lo que nunca entra en un commit**", 1)[1]
+        self.assertNotIn("unattributed", never)  # lo ajeno se pregunta; esto otro no es ajeno
 
 
 if __name__ == "__main__":

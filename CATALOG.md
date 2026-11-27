@@ -9,11 +9,11 @@ Se instalan con `install.sh` o con la CLI `skills`, como explica el [README](REA
 | Skill | Tipo | Versión |
 | --- | --- | --- |
 | `hb-setup` | Flujo | 1.6.0 |
-| `hb-implement` | Flujo | 1.7.0 |
-| `hb-review` | Flujo | 1.2.0 |
+| `hb-implement` | Flujo | 1.8.0 |
+| `hb-review` | Flujo | 1.3.0 |
 | `hb-performance` | Flujo | 0.21.0 |
 | `hb-product` | Flujo | 0.2.0 |
-| `hb-commit` | Flujo | 1.1.1 |
+| `hb-commit` | Flujo | 1.2.0 |
 | `hb-release` | Flujo | 1.1.0 |
 | `hb-stack-mobile-kotlin` | Perfil | 1.5.0 |
 | `hb-coach` | Herramienta | 3.1.0 |

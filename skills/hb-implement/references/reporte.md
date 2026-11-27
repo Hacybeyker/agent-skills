@@ -74,6 +74,14 @@ Dentro de un repo que entra, cada archivo cambiado contra la base se compara con
 
 **Foto tomada tarde.** Si la carpeta se pidió después de empezar a cambiar, los cambios de la tarea quedan como previos. El script lo nota cuando el meta explica un archivo que ya estaba así en la foto, o cuando no queda ningún archivo de la tarea, y sugiere volver a generar con `--ignore-snapshot` (y registrar con `--unit` cada repo vecino que cambió).
 
+## Qué es de la tarea, en JSON: `--attribution`
+
+```bash
+python3 -I <carpeta-de-la-skill>/scripts/report.py --meta <carpeta de la tarea>/meta.json --attribution
+```
+
+Lo mismo que decide el reporte (qué repos entran, la base de cada uno, qué archivos son de la tarea, cuáles ya estaban y qué queda fuera), en JSON y **sin escribir nada**: ni el reporte, ni el índice, ni el meta (git solo refresca la caché de `.git/index`, como cualquier `git status`). El JSON va en ASCII, válido con cualquier configuración regional: los acentos van escapados. Si el meta todavía no existe pero la carpeta tiene la foto, igual responde. Lo usa `hb-review` para revisar solo lo de la tarea; los campos y cómo se usan están en su referencia `atribucion.md`. Por archivo, `attribution` es `task`, `mixed` (ya tenía cambios sin commit al empezar) o `mixed-committed` (ya tenía commits de la rama de antes de la tarea, con `task_diff_from`: el `HEAD` de la foto, desde donde se ve solo el diff de la tarea; `null` si después la rama se rebasó o recibió un merge de una rama que no salió de la foto, como la principal; el merge de un subagente no cuenta). Lo commiteado en la rama antes de la tarea se mide contra la base que la rama tenía en la foto, y lo que la rama tendría sin la tarea tras un rebase o un merge de la rama principal sale de un merge de tres vías: esos cambios ajenos no se vuelven de la tarea.
+
 ## Sin reportes vacíos
 
 Si no queda ningún archivo de la tarea, el script **no escribe el reporte** (ni toca el índice: la fila sigue "en curso") y termina con un error sin traceback que dice la causa probable y el siguiente paso: los cambios están en un repo que no es unidad (registrarlo con `--unit`), ya estaban antes de la foto (`--ignore-snapshot` si la foto se tomó tarde), son todos temporales, ningún repo cambió después de la foto, o ningún repo tiene cambios contra su base (pasar `--base`).

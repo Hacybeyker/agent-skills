@@ -5,7 +5,7 @@
 - SKILL.md de 500 líneas como máximo.
 - Enlaces relativos entre archivos .md que existan (fuera de assets/, que tiene plantillas).
 - Scripts ejecutables y con sintaxis válida (Python, Bash, JavaScript), incluidos install.sh y scripts/.
-- README.md y CATALOG.md listan cada skill, y el catálogo con su versión actual.
+- README.md y CATALOG.md listan cada skill con su versión actual.
 
 Uso: python3 scripts/check_conventions.py   (necesita el CLI `agentskills` de skills-ref en el PATH)
 """
@@ -103,17 +103,61 @@ def check_repo_scripts():
             error(script, "no es ejecutable (chmod +x)")
 
 
+def skill_rows(text):
+    """Las filas de las tablas con columnas "Skill" y "Versión": [(skill, versión)]. La skill es lo primero entre
+    acentos graves de su celda ([`hb-x`](skills/hb-x) o `hb-x`); las columnas se ubican por la cabecera, en cualquier
+    orden. No cuentan las demás tablas ni lo que está en un bloque de código (con cercas o indentado) o en un
+    comentario HTML. Un `\\|` dentro de una celda no la corta."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    rows, columns, fence = [], None, None
+    for line in text.splitlines():
+        opened = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is None and opened and not (opened.group(1)[0] == "`" and "`" in opened.group(2)):
+            fence, columns = opened.group(1), None
+            continue
+        if fence is not None:
+            closed = re.match(r"^ {0,3}(`{3,}|~{3,})\s*$", line)
+            if closed and closed.group(1)[0] == fence[0] and len(closed.group(1)) >= len(fence):
+                fence = None
+            continue
+        if re.match(r"^(?: {4}|\t)", line) or not line.strip().startswith("|"):  # código indentado o fuera de tabla
+            columns = None
+            continue
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if columns is None:
+            names = [cell.lower().replace("ó", "o") for cell in cells]
+            columns = (names.index("skill"), names.index("version")) if "skill" in names and "version" in names \
+                else False
+            continue
+        if columns is False or all(re.match(r"^:?-+:?$", cell) for cell in cells if cell):
+            continue
+        name = re.search(r"`([^`]+)`", cells[columns[0]]) if columns[0] < len(cells) else None
+        if name:
+            rows.append((name.group(1), cells[columns[1]] if columns[1] < len(cells) else ""))
+    return rows
+
+
+def docs_errors(found, readme, catalog):
+    """[(archivo, mensaje)]: cada skill con una sola fila y su versión actual en la tabla de README.md y en CATALOG.md."""
+    out = []
+    for file, text in (("README.md", readme), ("CATALOG.md", catalog)):
+        rows = skill_rows(text)
+        for name, version in found.items():
+            listed = [value for skill, value in rows if skill == name]
+            if not listed:
+                out.append((file, f"no lista la skill {name} con su versión"))
+            elif len(listed) > 1:
+                out.append((file, f"lista la skill {name} {len(listed)} veces"))
+            elif listed[0] != version:
+                out.append((file, f"{name} figura con la versión {listed[0]}, pero la skill está en {version}"))
+    return out
+
+
 def check_docs(found):
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     catalog = (ROOT / "CATALOG.md").read_text(encoding="utf-8")
-    for name, version in found.items():
-        if f"`{name}`" not in readme:
-            error(ROOT / "README.md", f"no lista la skill {name}")
-        row = re.search(rf"^\|\s*`{re.escape(name)}`\s*\|[^|]*\|\s*([^|\s]+)\s*\|", catalog, re.M)
-        if not row:
-            error(ROOT / "CATALOG.md", f"no lista la skill {name} con su versión")
-        elif row.group(1) != version:
-            error(ROOT / "CATALOG.md", f"{name} figura con la versión {row.group(1)}, pero la skill está en {version}")
+    for file, message in docs_errors(found, readme, catalog):
+        error(ROOT / file, message)
 
 
 def main():

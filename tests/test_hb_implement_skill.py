@@ -48,7 +48,14 @@ class TextBase(unittest.TestCase):
 
 class SkillTextTest(TextBase):
     def test_version(self):
-        self.assertRegex(self.skill, r'(?m)^  version: "1\.7\.0"$')
+        self.assertRegex(self.skill, r'(?m)^  version: "1\.8\.0"$')
+
+    def test_la_atribucion_para_hb_review_esta_documentada(self):
+        """1.8.0: --attribution, en el SKILL.md y en reporte.md."""
+        self.assertIn("`report.py --meta <meta.json> --attribution`", self.skill)
+        report = (SKILL_DIR / "references" / "reporte.md").read_text(encoding="utf-8")
+        self.assertIn("## Qué es de la tarea, en JSON: `--attribution`", report)
+        self.assertIn("**sin escribir nada**", report)
 
     def test_la_seccion_0_trae_los_parrafos_comunes_tal_cual(self):
         context = self.section("## 0. Contexto")
